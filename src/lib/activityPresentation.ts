@@ -2,6 +2,7 @@ import type { SessionActivity } from "$lib/domain";
 import type { Language } from "$lib/i18n";
 
 export type ActivityCategory = "edit" | "read" | "search" | "test" | "command" | "tool" | "plan";
+export type ActivityThinkingState = "working" | "searching" | "solving" | "listening" | "connecting" | "weaving" | "composing" | "breathing" | "shaping";
 
 function firstLine(value?: string): string {
   return String(value ?? "").split(/\n/, 1)[0].trim();
@@ -35,6 +36,37 @@ export function activityCategory(activity: SessionActivity): ActivityCategory {
   return "tool";
 }
 
+export function activityThinkingState(activity: SessionActivity): ActivityThinkingState {
+  if (["prompt", "queued_prompt"].includes(activity.kind)) return "listening";
+  if (activity.kind === "message") return "composing";
+  if (activity.kind === "analysis") return "breathing";
+  switch (activityCategory(activity)) {
+    case "edit": return "shaping";
+    case "read": return "listening";
+    case "search": return "searching";
+    case "test": return "solving";
+    case "command": return "working";
+    case "plan": return "weaving";
+    default: return "connecting";
+  }
+}
+
+export function activityThinkingLabel(state: ActivityThinkingState, language: Language): string {
+  const portuguese = language === "pt-BR";
+  const labels: Record<ActivityThinkingState, [string, string]> = {
+    working: ["Running…", "Executando…"],
+    searching: ["Searching…", "Procurando…"],
+    solving: ["Solving…", "Resolvendo…"],
+    listening: ["Listening…", "Ouvindo…"],
+    connecting: ["Connecting…", "Conectando…"],
+    weaving: ["Planning…", "Planejando…"],
+    composing: ["Composing…", "Escrevendo…"],
+    breathing: ["Thinking…", "Pensando…"],
+    shaping: ["Shaping…", "Editando…"],
+  };
+  return labels[state][portuguese ? 1 : 0];
+}
+
 export function isPresentableTraceActivity(activity: SessionActivity): boolean {
   if (["prompt", "message", "analysis", "queued_prompt", "plan", "plan_document"].includes(activity.kind)) return false;
   const title = normalizedToolTitle(activity.title).toLowerCase();
@@ -45,6 +77,15 @@ export function isHiddenAgentActivity(activity: SessionActivity): boolean {
   if (["plan", "plan_document", "queued_prompt"].includes(activity.kind)) return true;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return /^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
+}
+
+export function isGenericAnalysisPlaceholder(activity: SessionActivity): boolean {
+  if (activity.kind !== "analysis") return false;
+  const title = normalizedToolTitle(activity.title)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  return title === "analisando a solicitacao" || title === "analyzing request";
 }
 
 export function needsUserAuthorization(text?: string): boolean {
@@ -100,6 +141,43 @@ export function activityDisplayTitle(activity: SessionActivity, language: Langua
   return title || (pt ? "Ferramenta utilizada" : "Used a tool");
 }
 
+export type ActivityRun = { id: string; category: ActivityCategory | "analysis"; activities: SessionActivity[] };
+
+export function groupConsecutiveTraceActivities(activities: SessionActivity[]): ActivityRun[] {
+  const runs: ActivityRun[] = [];
+  for (const activity of activities) {
+    const category = activity.kind === "analysis" ? "analysis" : activityCategory(activity);
+    const groupable = !["analysis", "plan"].includes(category)
+      && !["permission", "question", "subagent"].includes(activity.kind)
+      && activity.status !== "failed";
+    const previous = runs.at(-1);
+    if (groupable && previous?.category === category
+      && previous.activities.every((item) => item.status !== "failed")
+      && previous.activities.every((item) => !["permission", "question", "subagent"].includes(item.kind))) {
+      previous.activities.push(activity);
+    } else {
+      runs.push({ id: activity.id, category, activities: [activity] });
+    }
+  }
+  return runs;
+}
+
+export function activityRunTitle(run: ActivityRun, language: Language): string {
+  const count = run.activities.length;
+  if (count === 1) return activityDisplayTitle(run.activities[0], language);
+  const pt = language === "pt-BR";
+  if (run.category === "command") return pt ? `${count} comandos executados` : `${count} commands run`;
+  if (run.category === "test") return pt ? `${count} validações executadas` : `${count} checks run`;
+  if (run.category === "edit") {
+    const files = new Set(run.activities.flatMap((activity) => activity.files));
+    const total = files.size || count;
+    return pt ? `${total} arquivo${total === 1 ? " alterado" : "s alterados"}` : `${total} file${total === 1 ? " edited" : "s edited"}`;
+  }
+  if (run.category === "read") return pt ? `${count} leituras de contexto` : `${count} context reads`;
+  if (run.category === "search") return pt ? `${count} buscas no projeto` : `${count} project searches`;
+  return pt ? `${count} ferramentas utilizadas` : `${count} tools used`;
+}
+
 function phrase(language: Language, category: ActivityCategory, count: number, fileCount: number): string {
   const pt = language === "pt-BR";
   if (category === "edit") {
@@ -130,4 +208,17 @@ export function activityGroupSummary(activities: SessionActivity[], language: La
   if (parts.length === 0) return language === "pt-BR" ? "Atividade do agente" : "Agent activity";
   const text = parts.join(", ");
   return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+export function formatAgentDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1_000));
+  if (totalSeconds < 1) return "< 1s";
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
 }

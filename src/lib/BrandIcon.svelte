@@ -20,6 +20,7 @@
     | "edge"
     | "brave"
     | "browsers"
+    | "lume"
     | "terminal"
     | "unknown";
 
@@ -77,6 +78,8 @@
     <i class="browser-icon chrome"><OfflineIcon icon={chrome} /></i>
     <i class="browser-icon edge"><OfflineIcon icon={edge} /></i>
     <i class="browser-icon brave"><OfflineIcon icon={brave} /></i>
+  {:else if name === "lume"}
+    <img class="lume" src="/lume.svg" alt="" />
   {:else if name === "terminal"}
     <svg class="terminal" viewBox="0 0 24 24" aria-hidden="true">
       <path d="m5 7 5 5-5 5M16 7v10" />
@@ -96,6 +99,13 @@
     display: inline-grid;
     flex: 0 0 auto;
     place-items: center;
+  }
+
+  .lume {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: contain;
   }
 
   .brand-icon :global(svg) {

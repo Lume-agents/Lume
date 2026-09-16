@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "landing:build": "node landing/build.mjs",
     "landing:dev": "npm run landing:build && vite landing-dist --host 127.0.0.1 --port 4174",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && npm run test:session-identity && npm run test:web-companion && npm run test:handoff && npm run test:workflow-order && npm run test:chat-attachments && npm run test:activity-presentation && npm run test:markdown && npm run test:bounded-render-cache",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && npm run test:session-identity && npm run test:web-companion && npm run test:handoff && npm run test:workflow-order && npm run test:chat-attachments && npm run test:activity-presentation && npm run test:markdown && npm run test:bounded-render-cache && npm run test:review-diffs && npm run test:theme-tokens && npm run test:workspace-agents",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "check:mobile": "node scripts/validate-mobile-assets.mjs && node tests/response-dedup.test.mjs",
     "test:session-identity": "node --experimental-strip-types tests/session-identity.test.mjs",
@@ -20,6 +20,9 @@
     "test:activity-presentation": "node --experimental-strip-types tests/activity-presentation.test.mjs",
     "test:markdown": "node tests/markdown.test.mjs",
     "test:bounded-render-cache": "node --experimental-strip-types tests/bounded-render-cache.test.mjs",
+    "test:review-diffs": "node --experimental-strip-types tests/review-diffs.test.mjs",
+    "test:theme-tokens": "node tests/theme-tokens.test.mjs",
+    "test:workspace-agents": "node --experimental-strip-types tests/workspace-agents.test.mjs",
     "build:vscode": "node scripts/package-vscode.mjs",
     "mobile:sync": "npm run check:mobile && cap sync",
     "mobile:android": "cap open android",
@@ -43,7 +46,8 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "qrcode": "^1.5.4",
-    "simple-icons": "^16.27.0"
+    "simple-icons": "^16.27.0",
+    "thinking-orbs": "^0.3.1"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.4.2",

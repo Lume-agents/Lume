@@ -3,9 +3,11 @@
   import { emit, listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import BrandIcon from "$lib/BrandIcon.svelte";
+  import SystemBanner from "$lib/SystemBanner.svelte";
+  import { appearanceAttributes } from "$lib/appearance";
   import type { Preferences, TerminalWindowState, WorkflowConnectionDefinition, WorkflowContextPackage, WorkflowContextPolicy, WorkflowContextSelection, WorkflowGroupDefinition, WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowStepDefinition, WorkflowStepRunStatus } from "$lib/domain";
   import { localize } from "$lib/i18n";
-  import { advanceWorkflowRun, approveWorkflowHandoff, cancelWorkflowRun, loadPreferences, loadTerminalWindows, loadWorkflowBridgeContext, loadWorkflowRoleContract, loadWorkflowRun, pauseWorkflowRun, previewWorkflowContext, resumeWorkflowRun, retryWorkflowStep, savePreferences, setWorkflowBridgeExpanded, skipWorkflowStep, startWorkflowRun, type WorkflowBridgeContext } from "$lib/lume";
+  import { advanceWorkflowRun, approveWorkflowHandoff, cancelWorkflowRun, defaultPreferences, loadPreferences, loadTerminalWindows, loadWorkflowBridgeContext, loadWorkflowRoleContract, loadWorkflowRun, pauseWorkflowRun, previewWorkflowContext, resumeWorkflowRun, retryWorkflowStep, savePreferences, setWorkflowBridgeExpanded, skipWorkflowStep, startWorkflowRun, type WorkflowBridgeContext } from "$lib/lume";
   import { orderTerminalsByPosition, orderWorkflowSteps } from "$lib/workflowOrder";
 
   const currentWindow = getCurrentWindow();
@@ -39,6 +41,7 @@
   let bridgeHeightSyncQueue = Promise.resolve();
 
   const dark = $derived(preferences?.darkMode ?? systemDark);
+  const appearance = $derived(appearanceAttributes(preferences ?? defaultPreferences));
   const usesNativeConnectors = $derived(context?.nativeConnectors ?? nativeConnectorHost);
   const connection = $derived(draft?.connections.find((item) => item.id === connectionId));
   const sourceStep = $derived(draft?.steps.find((step) => step.id === connection?.fromStepId));
@@ -531,7 +534,10 @@
   });
 </script>
 
-<main bind:this={bridgeWindowElement} class:dark class:entering class:run-locked={workflowLocked} class:vertical={context?.side === "bottom"} class:native-connectors={usesNativeConnectors} class="bridge-window" onpointerdown={() => void currentWindow.setFocus().catch(() => undefined)}>
+<main bind:this={bridgeWindowElement} class:dark class:entering class:run-locked={workflowLocked} class:vertical={context?.side === "bottom"} class:native-connectors={usesNativeConnectors} class="bridge-window" data-appearance={appearance.theme} style:--lume-accent={appearance.accentCss} style:--lume-accent-strong={appearance.accentCss} onpointerdown={() => void currentWindow.setFocus().catch(() => undefined)}>
+  {#if draft && message}
+    <SystemBanner message={message} tone="error" dismissLabel={tr("Dismiss", "Fechar")} onDismiss={() => (message = null)} />
+  {/if}
   <canvas bind:this={cableStart} class="energy-cable cable-start" aria-hidden="true"></canvas>
   <canvas bind:this={cableEnd} class="energy-cable cable-end" aria-hidden="true"></canvas>
   <section bind:this={bridgeShell} class="bridge-shell">
@@ -700,7 +706,6 @@
         </section>
       {/if}
 
-      {#if message}<p class="error">{message}</p>{/if}
       <footer>
         <button class="remove" disabled={saving} type="button" onclick={() => void remove()}>{tr("Remove", "Remover")}</button>
         <span class="connection-help">
@@ -766,24 +771,34 @@
   .context-preview { position: absolute; z-index: 40; inset: 47px 10px 47px; padding: 11px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; border: 1px solid rgba(55,145,99,.22); border-radius: 11px; background: #f6faf8; box-shadow: 0 14px 34px rgba(24,53,37,.2); }.context-preview > header { min-height: 28px; padding: 0; display: grid; grid-template-columns: minmax(0,1fr) auto 25px; align-items: center; gap: 6px; border: 0; }.context-preview > header strong { color: #426552; font-size: 10px; }.context-preview > header span { color: #75877d; font-size: 8px; }.context-preview > header button { width: 25px; height: 25px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: #71837a; background: transparent; cursor: pointer; }.context-preview > header button:hover { color: #2f835b; background: rgba(55,145,98,.08); }.context-preview pre { min-height: 0; margin: 0; padding: 9px; flex: 1; overflow: auto; border-radius: 8px; color: #52665b; background: rgba(255,255,255,.62); font: 9px/1.55 "SFMono-Regular",Consolas,monospace; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }.redaction-summary { display: flex; flex-wrap: wrap; gap: 4px; }.redaction-summary span { padding: 3px 5px; border-radius: 5px; color: #856f35; background: rgba(207,168,68,.1); font-size: 7.5px; }.preview-loading, .preview-empty { min-height: 0; display: flex; flex: 1; align-items: center; justify-content: center; gap: 7px; color: #73847b; font-size: 9px; text-align: center; }.preview-loading i { width: 14px; height: 14px; border: 1.5px solid rgba(72,104,89,.14); border-top-color: #398d64; border-radius: 50%; animation: spin .7s linear infinite; }
   footer { position: relative; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 4px; } footer button, .error-state button { min-width: 54px; height: 27px; padding: 0 7px; border: 1px solid rgba(72,104,89,.14); border-radius: 7px; color: #66776e; background: transparent; font-size: 8px; font-weight: 750; cursor: pointer; } footer .remove { justify-self: start; color: #a35855; border-color: transparent; } footer .save { justify-self: end; color: #fff; border-color: #317e59; background: #317e59; } footer button:disabled { opacity: .45; }
   .connection-help { position: relative; display: grid; place-items: center; }.connection-help .help-trigger { width: 23px; min-width: 23px; height: 23px; padding: 0; border-radius: 50%; color: #5d7569; background: rgba(73,112,92,.055); font-size: 9px; }.connection-help:hover .help-trigger, .connection-help:focus-within .help-trigger { color: #287a52; border-color: rgba(53,145,96,.28); background: rgba(54,151,101,.09); }.help-tooltip { position: fixed; z-index: 50; top: 7px; right: 7px; left: 7px; padding: 9px; display: grid; gap: 6px; border: 1px solid rgba(65,105,85,.18); border-radius: 11px; color: #60736a; background: #f8fbf9; box-shadow: 0 14px 32px rgba(20,43,31,.2); opacity: 0; pointer-events: none; transform: translateY(4px) scale(.97); transform-origin: center bottom; transition: opacity 130ms ease, transform 150ms cubic-bezier(.2,.8,.2,1); }.connection-help:hover .help-tooltip, .connection-help:focus-within .help-tooltip { opacity: 1; transform: translateY(0) scale(1); }.help-tooltip > strong { color: #354d41; font-size: 9px; }.help-item { display: grid; grid-template-columns: 17px minmax(0,1fr); align-items: start; gap: 5px; font-size: 7px; line-height: 1.35; }.help-item > svg { width: 13px; height: 13px; margin-top: 1px; justify-self: center; color: #438763; }.help-item > span { display: grid; gap: 1px; }.help-tooltip b { color: #3f6954; font-size: 7px; }
-  .error { margin: 0; color: #aa5752; font-size: 8px; line-height: 1.35; }.loading { height: 100%; display: grid; place-content: center; justify-items: center; gap: 8px; color: #718078; font-size: 9px; }.loading > i { width: 20px; height: 20px; border: 2px solid rgba(72,104,89,.14); border-top-color: #398d64; border-radius: 50%; animation: spin .7s linear infinite; }.error-state button { margin-top: 5px; }
+  .loading { height: 100%; display: grid; place-content: center; justify-items: center; gap: 8px; color: #718078; font-size: 9px; }.loading > i { width: 20px; height: 20px; border: 2px solid rgba(72,104,89,.14); border-top-color: #398d64; border-radius: 50%; animation: spin .7s linear infinite; }.error-state button { margin-top: 5px; }
   .dark .share-options button, .dark .transition-toggle, .dark .approval, .dark .context-policy > div { color: #9cafa5; border-color: rgba(205,222,213,.1); background: rgba(222,235,228,.035); }.dark .share-options button.active, .dark .approval.active { color: #8fd1af; border-color: rgba(101,201,150,.22); background: rgba(74,164,116,.09); }.dark .transition-toggle button, .dark .context-policy button { color: #91a39a; }.dark .transition-toggle button.active, .dark .context-policy button.active { color: #9bd8b8; background: rgba(220,235,227,.065); }.dark .context-policy strong { color: #c9d9d0; }.dark .context-preview { border-color: rgba(101,201,150,.17); background: #16211b; }.dark .context-preview > header strong { color: #91cdae; }.dark .context-preview > header span, .dark .preview-loading, .dark .preview-empty { color: #97a99f; }.dark .context-preview pre { color: #bdcdc4; background: rgba(2,8,5,.2); }
   .dark .preview-actions textarea { border-color: rgba(205,222,213,.11); background: rgba(222,235,228,.035); }.dark .preview-actions textarea.expanded { background: #1b2821; box-shadow: 0 14px 30px rgba(0,0,0,.38); }
   .dark .workflow-runtime { border-color: rgba(101,201,150,.15); background: rgba(74,164,116,.055); }.dark .run-state strong { color: #a9d7bd; }.dark .workflow-runtime > header small { color: #93a59b; }.dark .run-actions button { color: #a5b6ad; border-color: rgba(205,222,213,.11); }.dark .run-actions button.primary { color: #fff; border-color: #398d64; background: #398d64; }.dark .run-actions button.stop { color: #d58e88; border-color: rgba(213,142,136,.16); }
   .vertical.bridge-window { padding: 22px 4px; }.vertical.native-connectors { padding: 0; }.vertical .energy-cable { top: auto; left: 50%; transform: translateX(-50%) rotate(90deg); }.vertical .cable-start { top: 2px; }.vertical .cable-end { right: auto; bottom: 2px; }.vertical .bridge-shell { height: max-content; padding-right: 12px; padding-left: 12px; gap: 6px; }.vertical.native-connectors .bridge-shell { height: max-content; gap: 9px; }.vertical .route-heading { grid-template-columns: minmax(0,1fr) 28px minmax(0,1fr) 25px; }.vertical .share-options button { height: 46px; }.vertical .behavior-row { grid-template-columns: 1fr 1fr; }.vertical .instruction-toggle { height: 32px; }
   .dark .help-tooltip { color: #9eb0a7; border-color: rgba(205,222,213,.12); background: #1b2821; box-shadow: 0 16px 34px rgba(0,0,0,.38); }.dark .help-tooltip > strong { color: #d8e5de; }.dark .help-tooltip b { color: #91cdae; }
-  .bridge-window:not(.dark) .bridge-shell { background: #dce6d8; box-shadow: inset 0 0 0 1px rgba(244,239,218,.5), 0 8px 24px rgba(30,58,44,.14); }
-  .bridge-window:not(.dark) .context-policy > div { background: #cbdacc; }
+  .bridge-window:not(.dark) .bridge-shell { background: var(--lume-sidebar-light); box-shadow: inset 0 0 0 1px var(--lume-line-light), 0 8px 24px rgba(30,58,44,.14); }
+  .bridge-window:not(.dark) .context-policy > div { background: var(--lume-user-light); }
   .bridge-window:not(.dark) .context-policy button.active,
-  .bridge-window:not(.dark) .transition-toggle button.active { color: #246b47; background: #ebe7d4; }
+  .bridge-window:not(.dark) .transition-toggle button.active { color: var(--lume-accent-strong); background: var(--lume-raised-light); }
   .bridge-window:not(.dark) textarea,
   .bridge-window:not(.dark) .share-options button,
   .bridge-window:not(.dark) .transition-toggle,
   .bridge-window:not(.dark) .approval { background: rgba(73,103,87,.055); }
   .bridge-window:not(.dark) .preview-actions textarea.expanded,
   .bridge-window:not(.dark) .context-preview,
-  .bridge-window:not(.dark) .help-tooltip { background: #e9e6d4; }
-  .bridge-window:not(.dark) .context-preview pre { background: #dfe6d5; }
+  .bridge-window:not(.dark) .help-tooltip { background: var(--lume-raised-light); }
+  .bridge-window:not(.dark) .context-preview pre { background: var(--lume-code-light); }
+  .bridge-window.dark[data-appearance] .bridge-shell { background: var(--lume-sidebar-dark); }
+  .bridge-window.dark[data-appearance] .context-preview,
+  .bridge-window.dark[data-appearance] .help-tooltip { background: var(--lume-raised-dark); }
+  .bridge-window.dark[data-appearance] .context-preview pre { background: var(--lume-code-dark); }
+  .bridge-window[data-appearance] .context-policy button.active,
+  .bridge-window[data-appearance] .share-options button.active,
+  .bridge-window[data-appearance] .approval.active,
+  .bridge-window[data-appearance] .instruction-toggle:hover { color: var(--lume-accent); }
+  .bridge-window[data-appearance] .workflow-start,
+  .bridge-window[data-appearance] footer .save { border-color: var(--lume-accent); background: var(--lume-accent); }
   @keyframes bridge-fade-in { from { opacity: 0; } to { opacity: 1; } }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes run-pulse { 50% { opacity: .45; transform: scale(.78); } }

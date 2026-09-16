@@ -1,0 +1,85 @@
+/* Base palette for every Lume surface. Presets only set pigments; components consume roles. */
+:root {
+  --lume-accent: #43b47d;
+  --lume-accent-strong: #267a57;
+  --lume-canvas-light: #e9eee8;
+  --lume-surface-light: #f7f8f3;
+  --lume-sidebar-light: #e2e8df;
+  --lume-canvas-dark: #0a1310;
+  --lume-surface-dark: #121e19;
+  --lume-sidebar-dark: #0e1915;
+}
+
+:root, [data-appearance] {
+  --lume-accent-soft: color-mix(in srgb, var(--lume-accent) 16%, transparent);
+  --lume-accent-soft-light: color-mix(in srgb, var(--lume-accent) 17%, transparent);
+  --lume-accent-soft-dark: color-mix(in srgb, var(--lume-accent) 15%, transparent);
+  --lume-subtle-light: color-mix(in srgb, var(--lume-accent) 7%, transparent);
+  --lume-subtle-dark: color-mix(in srgb, var(--lume-accent) 6%, transparent);
+  --lume-raised-light: color-mix(in srgb, var(--lume-surface-light) 92%, white);
+  --lume-raised-dark: color-mix(in srgb, var(--lume-surface-dark) 88%, white);
+  --lume-ink-strong-light: color-mix(in srgb, var(--lume-canvas-dark) 88%, black);
+  --lume-ink-light: color-mix(in srgb, var(--lume-canvas-dark) 74%, #6b766f);
+  --lume-ink-muted-light: color-mix(in srgb, var(--lume-canvas-dark) 48%, #a0aba3);
+  --lume-ink-faint-light: color-mix(in srgb, var(--lume-canvas-dark) 35%, #aab6ad);
+  --lume-ink-strong-dark: color-mix(in srgb, var(--lume-surface-light) 92%, white);
+  --lume-ink-dark: color-mix(in srgb, var(--lume-surface-light) 78%, #8e9c94);
+  --lume-ink-muted-dark: color-mix(in srgb, var(--lume-surface-light) 53%, #6d7f73);
+  --lume-ink-faint-dark: color-mix(in srgb, var(--lume-surface-light) 30%, #51665a);
+  --lume-line-light: color-mix(in srgb, var(--lume-canvas-dark) 13%, transparent);
+  --lume-line-dark: color-mix(in srgb, var(--lume-surface-light) 11%, transparent);
+  --lume-message-light: color-mix(in srgb, var(--lume-surface-light) 96%, white);
+  --lume-message-dark: color-mix(in srgb, var(--lume-surface-dark) 92%, var(--lume-sidebar-dark));
+  --lume-code-light: color-mix(in srgb, var(--lume-sidebar-light) 70%, var(--lume-surface-light));
+  --lume-code-dark: color-mix(in srgb, var(--lume-canvas-dark) 80%, var(--lume-surface-dark));
+  --lume-user-light: color-mix(in srgb, var(--lume-accent) 16%, var(--lume-surface-light));
+  --lume-user-dark: color-mix(in srgb, var(--lume-accent) 17%, var(--lume-surface-dark));
+  --lume-user-line-light: color-mix(in srgb, var(--lume-accent-strong) 23%, transparent);
+  --lume-user-line-dark: color-mix(in srgb, var(--lume-accent) 27%, transparent);
+  --lume-scroll-light: color-mix(in srgb, var(--lume-canvas-dark) 30%, var(--lume-sidebar-light));
+  --lume-scroll-dark: color-mix(in srgb, var(--lume-surface-light) 25%, var(--lume-sidebar-dark));
+}
+
+[data-appearance="forest"] {
+  --lume-accent: #8cbf54;
+  --lume-accent-strong: #567e2f;
+  --lume-canvas-light: #ebefe4;
+  --lume-surface-light: #f7f8f1;
+  --lume-sidebar-light: #e3e9db;
+  --lume-canvas-dark: #10170d;
+  --lume-surface-dark: #182116;
+  --lume-sidebar-dark: #131c11;
+}
+
+[data-appearance="ocean"] {
+  --lume-accent: #4ea6d8;
+  --lume-accent-strong: #2f759d;
+  --lume-canvas-light: #e6edf0;
+  --lume-surface-light: #f4f8f9;
+  --lume-sidebar-light: #dce7eb;
+  --lume-canvas-dark: #09151b;
+  --lume-surface-dark: #101f28;
+  --lume-sidebar-dark: #0c1920;
+}
+
+[data-appearance="violet"] {
+  --lume-accent: #9b82df;
+  --lume-accent-strong: #6951ab;
+  --lume-canvas-light: #ece9f1;
+  --lume-surface-light: #f8f6fa;
+  --lume-sidebar-light: #e5e0eb;
+  --lume-canvas-dark: #100d18;
+  --lume-surface-dark: #1b1726;
+  --lume-sidebar-dark: #15111e;
+}
+
+[data-appearance="ember"] {
+  --lume-accent: #d58a4b;
+  --lume-accent-strong: #965a2d;
+  --lume-canvas-light: #f0e9e2;
+  --lume-surface-light: #faf7f2;
+  --lume-sidebar-light: #eae0d6;
+  --lume-canvas-dark: #17100c;
+  --lume-surface-dark: #261a13;
+  --lume-sidebar-dark: #1d140f;
+}

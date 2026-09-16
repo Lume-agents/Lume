@@ -4,7 +4,11 @@
   import { openPath } from "@tauri-apps/plugin-opener";
   import type { PromptAttachment } from "$lib/domain";
   import type { Language } from "$lib/i18n";
-  import { extractResponseFiles, type ResponseFileReference } from "$lib/chatAttachments";
+  import {
+    extractResponseFileCards,
+    extractResponseFiles,
+    type ResponseFileCard,
+  } from "$lib/chatAttachments";
   import { exportLocalFile, readLocalImageDataUrl, setTerminalFileDialogActive } from "$lib/lume";
 
   let {
@@ -12,17 +16,21 @@
     attachments = [],
     workingDirectory,
     language = "en",
+    includeCitations = false,
     onError = () => undefined,
   } = $props<{
     text?: string;
     attachments?: PromptAttachment[];
     workingDirectory?: string;
     language?: Language;
+    includeCitations?: boolean;
     onError?: (message: string) => void;
   }>();
 
   const resources = $derived(
-    extractResponseFiles(text, attachments, workingDirectory),
+    includeCitations
+      ? extractResponseFileCards(text, attachments, workingDirectory)
+      : extractResponseFiles(text, attachments, workingDirectory).map((file) => ({ ...file, downloadable: true })),
   );
   let previews = $state<Record<string, string>>({});
   let attemptedPreviews = $state<Record<string, boolean>>({});
@@ -45,7 +53,7 @@
     return language === "pt-BR" ? portuguese : english;
   }
 
-  async function openResource(resource: ResponseFileReference) {
+  async function openResource(resource: ResponseFileCard) {
     try {
       await openPath(resource.path);
     } catch (error) {
@@ -53,7 +61,7 @@
     }
   }
 
-  async function downloadResource(resource: ResponseFileReference) {
+  async function downloadResource(resource: ResponseFileCard) {
     if (savingPath) return;
     savingPath = resource.path;
     let dialogLowered = false;
@@ -103,18 +111,22 @@
         </button>
         <button class="resource-name" type="button" onclick={() => void openResource(resource)}>
           <strong title={resource.name}>{resource.name}</strong>
-          <small>{resource.mimeType}</small>
+          <small>{resource.downloadable ? tr("Ready to download", "Pronto para baixar") : tr("Referenced file", "Arquivo citado")}</small>
         </button>
-        <button
-          class="resource-download"
-          type="button"
-          disabled={savingPath === resource.path}
-          title={tr("Save a copy", "Salvar uma cópia")}
-          aria-label={tr(`Save ${resource.name}`, `Salvar ${resource.name}`)}
-          onclick={() => void downloadResource(resource)}
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9M6.5 9 10 12.5 13.5 9M4 16h12" /></svg>
-        </button>
+        {#if resource.downloadable}
+          <button
+            class="resource-download"
+            type="button"
+            disabled={savingPath === resource.path}
+            title={tr("Save a copy", "Salvar uma cópia")}
+            aria-label={tr(`Save ${resource.name}`, `Salvar ${resource.name}`)}
+            onclick={() => void downloadResource(resource)}
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9M6.5 9 10 12.5 13.5 9M4 16h12" /></svg>
+          </button>
+        {:else}
+          <span class="resource-open" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="m7 4 6 6-6 6" /></svg></span>
+        {/if}
       </article>
     {/each}
   </div>
@@ -122,23 +134,25 @@
 
 <style>
   .response-attachments { width: min(360px, 100%); margin-top: 7px; display: grid; gap: 5px; }
-  article { min-width: 0; min-height: 42px; padding: 5px; display: grid; grid-template-columns: 34px minmax(0, 1fr) 28px; align-items: center; gap: 7px; overflow: hidden; border: 1px solid rgba(75, 105, 91, 0.13); border-radius: 8px; background: rgba(53, 130, 91, 0.045); }
+  article { min-width: 0; min-height: 42px; padding: 5px; display: grid; grid-template-columns: 34px minmax(0, 1fr) 28px; align-items: center; gap: 7px; overflow: hidden; border: 1px solid var(--workspace-line, rgba(75, 105, 91, 0.13)); border-radius: 9px; background: var(--workspace-subtle, rgba(53, 130, 91, 0.045)); }
   article.image:has(img) { grid-template-columns: 74px minmax(0, 1fr) 28px; }
   button { border: 0; color: inherit; background: transparent; cursor: pointer; }
-  .resource-preview { width: 34px; height: 32px; padding: 0; display: grid; place-items: center; overflow: hidden; border-radius: 6px; color: #668174; background: rgba(57, 126, 91, 0.075); }
+  .resource-preview { width: 34px; height: 32px; padding: 0; display: grid; place-items: center; overflow: hidden; border-radius: 6px; color: var(--workspace-accent, var(--lume-accent-strong)); background: var(--workspace-accent-soft, var(--lume-accent-soft-light)); }
   article.image:has(img) .resource-preview { width: 74px; height: 52px; }
   .resource-preview img { width: 100%; height: 100%; display: block; object-fit: cover; }
   .resource-preview svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .resource-name { min-width: 0; padding: 2px 0; display: grid; gap: 2px; text-align: left; }
-  .resource-name strong { min-width: 0; overflow: hidden; color: #4c6358; font: 700 var(--chat-small-font-size, 9px)/1.25 Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-  .resource-name small { overflow: hidden; color: #84958c; font: 600 var(--chat-tiny-font-size, 7px)/1.2 Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-  .resource-download { width: 28px; height: 28px; padding: 6px; display: grid; place-items: center; border-radius: 7px; color: #608174; }
-  .resource-download:hover:not(:disabled) { color: #31865f; background: rgba(49, 134, 95, 0.09); }
+  .resource-name strong { min-width: 0; overflow: hidden; color: var(--workspace-strong, #4c6358); font: 700 var(--chat-small-font-size, 9px)/1.25 Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+  .resource-name small { overflow: hidden; color: var(--workspace-faint, #84958c); font: 600 var(--chat-tiny-font-size, 7px)/1.2 Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+  .resource-download { width: 28px; height: 28px; padding: 6px; display: grid; place-items: center; border-radius: 7px; color: var(--workspace-accent, var(--lume-accent-strong)); }
+  .resource-download:hover:not(:disabled) { color: var(--workspace-accent, var(--lume-accent-strong)); background: var(--workspace-accent-soft, var(--lume-accent-soft-light)); }
   .resource-download:disabled { opacity: 0.45; cursor: wait; }
   .resource-download svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-  :global(.terminal-window.dark) article { border-color: rgba(202, 222, 212, 0.09); background: rgba(104, 178, 140, 0.045); }
-  :global(.terminal-window.dark) .resource-preview { color: #94b5a5; background: rgba(109, 178, 143, 0.08); }
-  :global(.terminal-window.dark) .resource-name strong { color: #bfd0c7; }
-  :global(.terminal-window.dark) .resource-name small { color: #7f958a; }
-  :global(.terminal-window.dark) .resource-download { color: #8eaa9c; }
+  .resource-open { width: 28px; height: 28px; display: grid; place-items: center; color: var(--workspace-faint, #84958c); }
+  .resource-open svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  :global(.terminal-window.dark) article { border-color: var(--workspace-line, var(--lume-line-dark)); background: var(--workspace-subtle, var(--lume-subtle-dark)); }
+  :global(.terminal-window.dark) .resource-preview { color: var(--workspace-accent, var(--lume-accent)); background: var(--workspace-accent-soft, var(--lume-accent-soft-dark)); }
+  :global(.terminal-window.dark) .resource-name strong { color: var(--workspace-strong, var(--lume-ink-strong-dark)); }
+  :global(.terminal-window.dark) .resource-name small { color: var(--workspace-faint, var(--lume-ink-faint-dark)); }
+  :global(.terminal-window.dark) .resource-download { color: var(--workspace-accent, var(--lume-accent)); }
 </style>

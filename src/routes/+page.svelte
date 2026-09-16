@@ -18,9 +18,15 @@
   } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import BrandIcon from "$lib/BrandIcon.svelte";
+  import AccentColorPicker from "$lib/AccentColorPicker.svelte";
+  import { appearanceAttributes, appearanceThemes } from "$lib/appearance";
   import LumeLogo from "$lib/LumeLogo.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
+  import StartupModeChooser from "$lib/StartupModeChooser.svelte";
+  import ThreadAvatar from "$lib/ThreadAvatar.svelte";
+  import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import { displayText, localize } from "$lib/i18n";
   import {
     clipboardHasImage,
@@ -83,6 +89,7 @@
     loadExternalPlugins,
     openSessionSource,
     openTerminalWindow,
+    openWorkspaceWindow,
     loadVscodeStatus,
     moveOverlay,
     resizeOverlaySurface,
@@ -112,13 +119,14 @@
 
   type View = "sessions" | "board" | "history" | "settings";
   type ShellStatus = SessionStatus | "idle";
-  type ShortcutAction = "open" | "palette" | "new-session" | "whiteboard";
+  type ShortcutAction = "open" | "palette" | "new-session" | "whiteboard" | "workspace";
   type CompanionUpdateEvent = { mobileVersion: string };
   type ShortcutPreferenceKey =
     | "openShortcut"
     | "globalShortcut"
     | "newSessionShortcut"
-    | "whiteboardShortcut";
+    | "whiteboardShortcut"
+    | "workspaceShortcut";
   type MonitorOption = { id: string; label: string };
   type UpdateState =
     | "idle"
@@ -155,6 +163,7 @@
   let morphHeight = $state(compactSize.height);
   let measuringPanel = $state(false);
   let expandedHeight = $state(expandedMaxHeight);
+  let startupChooserOpen = $state(false);
   let view = $state<View>("sessions");
   let sessions = $state<AgentSession[]>(isTauri ? [] : structuredClone(demoSessions));
   let history = $state<HistoryEntry[]>([]);
@@ -264,10 +273,61 @@
   let mobileMessage = $state<string | null>(null);
   let mobileMessageIsError = $state(false);
   const mobileApkUrl = "https://github.com/tulerws/Lume/releases/latest/download/Lume-Mobile.apk";
+  const startupRouteKey = "lume:startup-mode-routed:v1";
 
   function tr(english: string, portuguese: string) {
     return localize(preferences.language, english, portuguese);
   }
+
+  async function routeStartupMode() {
+    if (!isTauri || sessionStorage.getItem(startupRouteKey)) return;
+    sessionStorage.setItem(startupRouteKey, "true");
+    if (preferences.startupMode === "workspace") {
+      await openWorkspaceWindow();
+      return;
+    }
+    if (preferences.startupMode === "ask") {
+      startupChooserOpen = true;
+      if (!expanded) await toggleExpanded();
+    }
+  }
+
+  async function chooseStartupMode(mode: "orb" | "workspace", remember: boolean) {
+    try {
+      if (remember && !(await updatePreference("startupMode", mode))) return;
+      if (mode === "workspace") {
+        await openWorkspaceWindow();
+        startupChooserOpen = false;
+        return;
+      }
+      if (expanded) await toggleExpanded();
+      startupChooserOpen = false;
+    } catch (error) {
+      settingsMessageIsError = true;
+      settingsMessage = String(error).replace(/^Error:\s*/, "");
+    }
+  }
+
+  const systemBanners = $derived.by<SystemBannerItem[]>(() => {
+    if (!expanded) return [];
+    const items: Array<SystemBannerItem | null> = view === "sessions"
+      ? [
+          permissionError ? { id: "permission-error", message: permissionError, tone: "error", onDismiss: () => (permissionError = null) } : null,
+          launchError ? { id: "launch-error", message: launchError, tone: "error", onDismiss: () => (launchError = null) } : null,
+          composerMessage ? { id: "composer-error", message: composerMessage, tone: "error", onDismiss: () => (composerMessage = null) } : null,
+          sessionActionMessage ? { id: "session-message", message: sessionActionMessage, onDismiss: () => (sessionActionMessage = null) } : null,
+        ]
+      : view === "board"
+        ? [terminalMessage ? { id: "terminal-message", message: terminalMessage, onDismiss: () => (terminalMessage = null) } : null]
+        : view === "history"
+          ? [noteMessage ? { id: "note-message", message: noteMessage, tone: "success", onDismiss: () => (noteMessage = null) } : null]
+          : [
+              settingsMessage ? { id: "settings-message", message: settingsMessage, tone: settingsMessageIsError ? "error" : "success", onDismiss: () => (settingsMessage = null) } : null,
+              pluginMessage ? { id: "plugin-message", message: pluginMessage, onDismiss: () => (pluginMessage = null) } : null,
+              mobileMessage ? { id: "mobile-message", message: mobileMessage, tone: mobileMessageIsError ? "error" : "success", onDismiss: () => (mobileMessage = null) } : null,
+            ];
+    return items.filter((item): item is SystemBannerItem => item !== null);
+  });
 
   function withDevMobileDevice(devices: PairedDevice[]) {
     return dev && !devices.some((device) => device.id === devMobileDeviceId)
@@ -369,8 +429,18 @@
   });
 
   const effectiveDark = $derived(preferences.darkMode ?? systemDark);
+  const appearance = $derived(appearanceAttributes(preferences));
   $effect(() => {
-    document.documentElement.dataset.theme = effectiveDark ? "dark" : "light";
+    const root = document.documentElement;
+    root.dataset.theme = effectiveDark ? "dark" : "light";
+    root.dataset.appearance = appearance.theme;
+    if (appearance.accentCss) {
+      root.style.setProperty("--lume-accent", appearance.accentCss);
+      root.style.setProperty("--lume-accent-strong", appearance.accentCss);
+    } else {
+      root.style.removeProperty("--lume-accent");
+      root.style.removeProperty("--lume-accent-strong");
+    }
   });
   const activeCount = $derived(
     sessions.filter((session) =>
@@ -434,6 +504,7 @@
     let stopListening: (() => void) | undefined;
     let stopTerminalListening: (() => void) | undefined;
     let stopShortcutListening: (() => void) | undefined;
+    let stopPreferencesListening: (() => void) | undefined;
     let stopCompanionUpdateListening: (() => void) | undefined;
     let stopMobileDeviceListening: (() => void) | undefined;
     let pollTimer: ReturnType<typeof setInterval> | undefined;
@@ -475,6 +546,7 @@
       await loadMonitorOptions();
       await positionWindow();
       overlayReady = true;
+      await routeStartupMode();
 
       const [nextSessions, nextIntegrations, nextVscodeStatus, nextPlugins] = await Promise.all([
         loadSessions(),
@@ -525,6 +597,9 @@
         stopShortcutListening = await listen<ShortcutAction>("lume://shortcut", ({ payload }) => {
           void runShortcutAction(payload);
         });
+        stopPreferencesListening = await listen<Preferences>("lume://preferences-changed", ({ payload }) => {
+          preferences = payload;
+        });
         stopCompanionUpdateListening = await listen<CompanionUpdateEvent>(
           "lume://companion-update-check",
           ({ payload }) => {
@@ -542,6 +617,7 @@
       stopListening?.();
       stopTerminalListening?.();
       stopShortcutListening?.();
+      stopPreferencesListening?.();
       stopCompanionUpdateListening?.();
       stopMobileDeviceListening?.();
       colorScheme.removeEventListener("change", syncSystemTheme);
@@ -1878,6 +1954,7 @@
 
   function paletteCommands(): PaletteCommand[] {
     const commands: PaletteCommand[] = [
+      { id: "workspace", label: "Workspace", detail: tr("Open the multi-agent workbench", "Abrir a bancada de múltiplos agentes"), run: openWorkspaceWindow },
       { id: "sessions", label: tr("Sessions", "Sessões"), detail: tr("Show active agents", "Mostrar agentes ativos"), run: () => openView("sessions") },
       { id: "whiteboard", label: tr("Terminals", "Terminais"), detail: tr("Open floating terminals", "Abrir terminais flutuantes"), run: () => openView("board") },
       { id: "history", label: tr("History and notes", "Histórico e notas"), detail: tr("Open completed results", "Abrir resultados finalizados"), run: () => openView("history") },
@@ -1927,6 +2004,10 @@
   }
 
   async function runShortcutAction(action: ShortcutAction) {
+    if (action === "workspace") {
+      await openWorkspaceWindow();
+      return;
+    }
     if (action === "palette") {
       await showCommandPalette();
       return;
@@ -1969,6 +2050,7 @@
       ["palette", preferences.globalShortcut],
       ["new-session", preferences.newSessionShortcut],
       ["whiteboard", preferences.whiteboardShortcut],
+      ["workspace", preferences.workspaceShortcut],
     ];
     let action = configured.find(([, shortcut]) => shortcutMatches(event, shortcut))?.[0];
     if (
@@ -2289,6 +2371,38 @@
     }
   }
 
+  async function selectAppearanceTheme(theme: Preferences["appearanceTheme"]) {
+    const previous = preferences;
+    preferences = { ...preferences, appearanceTheme: theme, accentColor: undefined, accentOpacity: 100 };
+    savingSettings = true;
+    try {
+      await savePreferences(preferences);
+      if (isTauri) void emit("lume://preferences-changed", preferences);
+    } catch (error) {
+      preferences = previous;
+      settingsMessageIsError = true;
+      settingsMessage = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      savingSettings = false;
+    }
+  }
+
+  async function updateAppearancePatch(patch: Partial<Preferences>) {
+    const previous = preferences;
+    preferences = { ...preferences, ...patch };
+    savingSettings = true;
+    try {
+      await savePreferences(preferences);
+      if (isTauri) void emit("lume://preferences-changed", preferences);
+    } catch (error) {
+      preferences = previous;
+      settingsMessageIsError = true;
+      settingsMessage = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      savingSettings = false;
+    }
+  }
+
   async function resetSettings() {
     if (!resetConfirming) {
       resetConfirming = true;
@@ -2463,14 +2577,14 @@
       if (session.sourceApp === "brave") return "Brave";
       return "Web";
     }
-    return { cli: "CLI", vscode: "VS Code", desktop: "Desktop" }[session.source];
+    return { cli: "CLI", vscode: "VS Code", desktop: "Lume" }[session.source];
   }
 
   function sourceIcon(session: AgentSession) {
     if (session.source === "cli") return "terminal" as const;
     if (session.source === "vscode") return "vscode" as const;
     if (session.source === "web") return session.sourceApp ?? ("browsers" as const);
-    return "unknown" as const;
+    return session.source === "desktop" ? ("lume" as const) : ("unknown" as const);
   }
 
   function relativeTime(timestamp: number) {
@@ -2525,14 +2639,16 @@
 </svelte:head>
 
 <main
+  data-appearance={appearance.theme}
   class:expanded
   class:dark={effectiveDark}
   class:morphing={morphing !== null}
   class="overlay-shell"
-  style={`--panel-radius: ${Math.round(23 - 2 * morphProgress)}px; --morph-width: ${morphWidth}px; --morph-height: ${morphHeight}px;`}
+  style={`--panel-radius: ${Math.round(23 - 2 * morphProgress)}px; --morph-width: ${morphWidth}px; --morph-height: ${morphHeight}px;${appearance.accentCss ? ` --lume-accent: ${appearance.accentCss}; --lume-accent-strong: ${appearance.accentCss};` : ""}`}
   onpointermove={wakeMascot}
   aria-label={tr("Lume, agent monitor", "Lume, monitor de agentes")}
 >
+  <SystemBannerStack items={systemBanners} dismissLabel={tr("Dismiss", "Fechar")} />
   {#if !expanded}
     <button
       class="lume-orb status-{shellStatus}"
@@ -2549,7 +2665,12 @@
       <span class="agent-count">{activeCount}</span>
     </button>
   {:else}
-    <section use:observePanelSize class:content-visible={contentVisible} class:morphing class:measuring={measuringPanel} class:palette-open={paletteOpen} class:launcher-open={launcherOpen} class:workflow-settings-open={workflowSettingsOpen} class="panel">
+    <section use:observePanelSize class:content-visible={contentVisible} class:morphing class:measuring={measuringPanel} class:palette-open={paletteOpen} class:launcher-open={launcherOpen} class:workflow-settings-open={workflowSettingsOpen} class:onboarding={startupChooserOpen} class="panel">
+      {#if startupChooserOpen}
+        <div class="startup-chooser-layer">
+          <StartupModeChooser language={preferences.language} onChoose={chooseStartupMode} />
+        </div>
+      {/if}
       <header
         role="banner"
         class:dragging
@@ -2567,6 +2688,9 @@
           </div>
         </div>
         <div class="header-actions">
+          <button class="workspace-button" type="button" title={tr("Open Workspace", "Abrir Workspace")} onclick={() => void openWorkspaceWindow()} aria-label={tr("Open Workspace", "Abrir Workspace")}>
+            <WorkspaceHeaderIcon name="orb" size={19} />
+          </button>
           <button class="palette-button" type="button" title={preferences.globalShortcut} onclick={showCommandPalette} aria-label={tr("Open command palette", "Abrir paleta de comandos")}>
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="4.5" /><path d="m12 12 4 4" /></svg>
           </button>
@@ -2642,7 +2766,6 @@
             {:else}
               <p>{tr("No compatible CLI was found.", "Nenhuma CLI compatível foi encontrada.")}</p>
             {/each}
-            {#if launchError}<p class="launcher-error">{launchError}</p>{/if}
           </div>
         </div>
       {/if}
@@ -2783,14 +2906,18 @@
                 class="session-row"
               >
                 <button class="session-summary" type="button" onclick={() => openSession(session)}>
-                  <span class="agent-avatar agent-{session.agent}"><BrandIcon name={session.agent} size={20} /></span>
+                  <span class="thread-avatar-shell">
+                    <ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionDisplayName(session)} size={32} />
+                  </span>
                   <span class="session-copy">
                     <span class="session-title-row">
                       <strong>{sessionDisplayName(session)}</strong>
-                      <span class="source-label">
-                        <BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />
-                        {sourceLabel(session)}
-                      </span>
+                      {#if session.controlOrigin === "external"}
+                        <span class="source-label">
+                          <BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />
+                          {sourceLabel(session)}
+                        </span>
+                      {/if}
                       {#if session.permissionProfile.approvalsReviewer === "auto_review" && session.permissionProfile.mode !== "full_access"}
                         <span class="access-badge auto-review">
                           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6.8.8 2.9 6.3h2.5L4.9 11l4.2-5.7H6.5Z" /></svg>
@@ -2805,7 +2932,8 @@
                       {/if}
                     </span>
                     <span class="project-name" title={session.workingDirectory}>
-                      {sessionDirectoryName(session)}
+                      <BrandIcon name={session.agent} size={10} />
+                      <span>{sessionDirectoryName(session)}</span>
                     </span>
                     <span class="status-line status-{session.status}">
                       {#if session.status === "running"}
@@ -2955,9 +3083,6 @@
                             </button>
                           {/each}
                         </div>
-                        {#if permissionError}
-                          <p class="inline-error" transition:fade>{permissionError}</p>
-                        {/if}
                       </div>
                     {/if}
                     {#if session.pendingQuestion}
@@ -2982,9 +3107,6 @@
                             <small>{tr("Choose an option or type its number below.", "Escolha uma opção ou digite o número abaixo.")}</small>
                           </section>
                         {/each}
-                        {#if permissionError}
-                          <p class="inline-error" transition:fade>{permissionError}</p>
-                        {/if}
                       </div>
                     {/if}
 
@@ -3048,12 +3170,8 @@
                             </button>
                           </div>
                         </form>
-                      {#if composerMessage}<p class="inline-error">{composerMessage}</p>{/if}
                     {/if}
 
-                    {#if sessionActionMessage && selectedId === session.id}
-                      <p class="inline-error">{sessionActionMessage}</p>
-                    {/if}
                   </div>
                 {/if}
               </article>
@@ -3165,19 +3283,20 @@
             <div class="terminal-picker">
               {#each sessions as session (session.id)}
                 <div class="terminal-picker-row">
-                  <span class="agent-avatar agent-{session.agent}"><BrandIcon name={session.agent} size={18} /></span>
+                  <span class="terminal-picker-avatar">
+                    <ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionDisplayName(session)} size={30} />
+                  </span>
                   <span class="terminal-picker-copy">
                     <strong>{sessionDisplayName(session)}</strong>
-                    <small>{session.agentLabel} · {session.project}</small>
-                  </span>
-                  <span class="source-label">
-                    <BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />
-                    {sourceLabel(session)}
+                    <small title={session.workingDirectory}>
+                      <BrandIcon name={session.agent} size={9} />
+                      <span>{sessionDirectoryName(session)}</span>
+                    </small>
                   </span>
                   {#if session.controlOrigin === "external"}
-                    <span class="access-badge external-session" title={tr("External session", "Sessão externa")}>
-                      <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.2 2.5H2.3v7.2h7.2V7.8M6.3 2.3h3.4v3.4M9.7 2.3 5.4 6.6" /></svg>
-                      {tr("External", "Externa")}
+                    <span class="source-label">
+                      <BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />
+                      {sourceLabel(session)}
                     </span>
                   {/if}
                   <button
@@ -3193,7 +3312,6 @@
                 <p class="board-empty">{tr("Sessions will appear here when detected.", "As sessões aparecerão aqui quando forem detectadas.")}</p>
               {/each}
             </div>
-            {#if terminalMessage}<p class="board-message" transition:fade>{terminalMessage}</p>{/if}
           </div>
         {:else if view === "history"}
           <div class="history-list" in:fade={{ duration: 150 }}>
@@ -3337,7 +3455,6 @@
                 </article>
               {/each}
             </div>
-            {#if noteMessage}<p class="board-message">{noteMessage}</p>{/if}
             <div class="settings-section-label history-label">{tr("Activity", "Atividade")}</div>
             {#each history as entry (entry.id)}
               <div class="history-row">
@@ -3426,14 +3543,8 @@
                   <button disabled={installingPlugin} type="button" onclick={addExternalPlugin}>{installingPlugin ? "…" : tr("Install manifest", "Instalar manifesto")}</button>
                   <button type="button" onclick={openPluginFolder}>{tr("Open folder", "Abrir pasta")}</button>
                 </div>
-                {#if pluginMessage}<p class="browser-path">{pluginMessage}</p>{/if}
               </div>
             </details>
-            {#if settingsMessage}
-              <p class:error={settingsMessageIsError} class="settings-feedback" transition:fade>
-                {settingsMessage}
-              </p>
-            {/if}
             <details class="settings-section">
               <summary class="settings-section-label">Interface</summary>
               <div class="settings-section-content">
@@ -3486,6 +3597,38 @@
                 />
                 <span></span>
               </label>
+            </div>
+            <div class="appearance-theme-setting">
+              <span><strong>{tr("Base theme", "Tema base")}</strong><small>{tr("Shared by Orb, Workspace, and terminals.", "Compartilhado pelo Orb, Workspace e terminais.")}</small></span>
+              <div class="appearance-theme-list">
+                {#each appearanceThemes as theme (theme.value)}
+                  <button class:active={appearance.theme === theme.value && !appearance.accent} type="button" title={theme.label} aria-label={theme.label} onclick={() => void selectAppearanceTheme(theme.value)}>
+                    <i style:--theme-accent={theme.accent} style:--theme-surface={theme.surface}></i>
+                  </button>
+                {/each}
+              </div>
+            </div>
+            <div class="field-row appearance-accent-row">
+              <span><strong>{tr("Accent color", "Cor de destaque")}</strong><small>{appearance.accent ?? tr("Base theme color", "Cor do tema base")}</small></span>
+              <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} language={preferences.language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void updateAppearancePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void updateAppearancePatch({ accentColor: undefined, accentOpacity: 100 })} />
+            </div>
+            <div class="field-row appearance-accent-row">
+              <span><strong>{tr("Workspace background", "Fundo do Workspace")}</strong><small>{preferences.workspaceBackgroundColor ?? tr("Base theme color", "Cor do tema base")} · {preferences.workspaceBackgroundOpacity}%</small></span>
+              <AccentColorPicker value={preferences.workspaceBackgroundColor} opacity={preferences.workspaceBackgroundOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.surface ?? "#14231c"} readyColors={["#0f1915", "#14231c", "#16251e", "#101f28", "#1b1726", "#261a13", "#e8ede7", "#ede9df"]} minimumOpacity={35} language={preferences.language} label={tr("Workspace background", "Fundo do Workspace")} onValueChange={(color, opacity) => void updateAppearancePatch({ workspaceBackgroundColor: color, workspaceBackgroundOpacity: opacity })} onReset={() => void updateAppearancePatch({ workspaceBackgroundColor: undefined, workspaceBackgroundOpacity: 96 })} />
+            </div>
+            <div class="field-row">
+              <span><strong>{tr("Open Lume as", "Abrir o Lume como")}</strong><small>{tr("Choose the default view for the next launch.", "Escolha a visualização padrão da próxima abertura.")}</small></span>
+              <LumeSelect
+                ariaLabel={tr("Default startup view", "Visualização inicial padrão")}
+                value={preferences.startupMode}
+                options={[
+                  { value: "ask", label: tr("Always ask", "Perguntar sempre") },
+                  { value: "orb", label: "Orb" },
+                  { value: "workspace", label: "Workspace" },
+                ]}
+                minWidth={122}
+                onValueChange={(value) => void updatePreference("startupMode", value as Preferences["startupMode"])}
+              />
             </div>
             <div class="setting-row">
               <div><strong>{tr("Start with the system", "Iniciar com o sistema")}</strong><span>{tr("Lume stays available in the system tray.", "Lume fica disponível na bandeja.")}</span></div>
@@ -3600,6 +3743,7 @@
                   ["globalShortcut", tr("Command palette", "Paleta de comandos"), tr("Search actions and active agents.", "Busca ações e agentes ativos.")],
                   ["newSessionShortcut", tr("New session", "Nova sessão"), tr("Opens the agent launcher.", "Abre o iniciador de agentes.")],
                   ["whiteboardShortcut", "Whiteboard", tr("Opens the floating terminal hub.", "Abre o hub de terminais flutuantes.")],
+                  ["workspaceShortcut", "Workspace", tr("Opens the full multi-agent workspace.", "Abre o workspace completo de múltiplos agentes.")],
                 ] as shortcut}
                   <div class="field-row shortcut-row">
                     <span><strong>{shortcut[1]}</strong><small>{shortcut[2]}</small></span>
@@ -3781,9 +3925,6 @@
                   </span>
                   <button type="button" onclick={() => void copyMobileValue(mobileApkUrl)}>{tr("Copy link", "Copiar link")}</button>
                 </div>
-              {/if}
-              {#if mobileMessage}
-                <p class:error={mobileMessageIsError} class="mobile-message">{mobileMessage}</p>
               {/if}
                 </div>
                 {#if pairedDevices.length}
@@ -4052,6 +4193,10 @@
     background: #f9fbfa;
   }
 
+  .panel.onboarding { min-height: 320px; }
+  .panel.onboarding > :not(.startup-chooser-layer) { display: none; }
+  .startup-chooser-layer { position: absolute; z-index: 45; inset: 0; }
+
   .panel.palette-open {
     min-height: 390px;
   }
@@ -4151,6 +4296,7 @@
   .brand-lockup div span { color: #75817c; font-size: 10px; }
 
   .add-button,
+  .workspace-button,
   .palette-button,
   .collapse-button {
     border: 0;
@@ -4168,11 +4314,12 @@
   }
 
   .header-actions { display: flex; align-items: center; gap: 2px; }
-  .add-button, .palette-button { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; }
+  .add-button, .workspace-button, .palette-button { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; }
   .add-button:hover,
   .add-button.active { color: #486d5e; background: rgba(80, 103, 94, 0.07); }
 
   .add-button:hover,
+  .workspace-button:hover,
   .palette-button:hover,
   .collapse-button:hover { background: rgba(80, 103, 94, 0.07); }
 
@@ -4208,7 +4355,6 @@
   .resume-session small { color: #89958f; font-size: 7px; }
   .resume-session svg { width: 12px; height: 12px; flex: 0 0 auto; }
   .launcher-popover-scroll > p { margin: 8px 3px; color: #89938f; font-size: 10px; }
-  .launcher-popover .launcher-error { color: #a54c4c; }
   .command-palette-layer { position: absolute; z-index: 12; inset: 0 0 16px; display: grid; place-items: start center; padding-top: 66px; }
   .command-palette-backdrop { position: absolute; inset: 0; width: 100%; border: 0; background: rgba(21, 31, 27, 0.2); backdrop-filter: blur(3px); cursor: default; }
   .command-palette { position: relative; width: calc(100% - 30px); overflow: hidden; border: 1px solid rgba(89, 111, 101, 0.16); border-radius: 15px; background: rgba(250, 252, 251, 0.98); box-shadow: 0 18px 45px rgba(24, 38, 32, 0.24); }
@@ -4295,6 +4441,8 @@
   }
 
   .session-summary:hover .agent-avatar { transform: scale(1.04); }
+  .thread-avatar-shell { width: 32px; height: 32px; flex: 0 0 auto; transition: transform 160ms ease; }
+  .session-summary:hover .thread-avatar-shell { transform: scale(1.04); }
   .agent-codex,
   .agent-chatgpt { color: #202523; background: #edf0ee; }
   .agent-claude,
@@ -4315,8 +4463,8 @@
   .access-badge.auto-review { color: #315f86; background: #cbdff0; }
   .access-badge.auto-review svg { fill: currentColor; stroke: none; }
   .access-badge.full-access { color: #764c2e; background: #e8ceb1; }
-  .access-badge.external-session { color: #405d50; background: #c7d6ca; }
-  .project-name { overflow: hidden; color: #56645e; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .project-name { min-width: 0; display: flex; align-items: center; gap: 4px; overflow: hidden; color: #56645e; font-size: 11px; white-space: nowrap; }
+  .project-name span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
   .status-line { display: flex; align-items: center; gap: 5px; color: #7a8580; font-size: 10px; }
   .status-line > i { width: 5px; height: 5px; border-radius: 50%; background: #82908a; }
@@ -4392,7 +4540,6 @@
   .permission-actions button:active { transform: scale(0.97); }
   .permission-actions button.primary { border-color: #456d5d; color: white; background: #456d5d; }
   .permission-actions button.danger { color: #a54c4c; }
-  .inline-error { margin: 1px 0 0; color: #a54c4c; font-size: 9px; }
   .integration-note { margin: 0; color: #7c8983; font-size: 10px; line-height: 1.45; }
 
   .final-response { position: relative; margin: 0 0 10px; padding: 9px 36px 9px 10px; border: 1px solid rgba(78, 105, 93, 0.1); border-radius: 10px; background: rgba(73, 102, 89, 0.035); }
@@ -4451,33 +4598,33 @@
   .layout-spinner { width: 12px; height: 12px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: layout-spin 650ms linear infinite; }
   @keyframes layout-spin { to { transform: rotate(360deg); } }
   .layout-toolbar .layout-delete { color: #a45a58; }
-  .workflow-group-row { min-width: 0; padding: 7px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(82, 105, 95, 0.11); border-radius: 10px; background: rgba(255, 255, 255, 0.25); transition: border-color 160ms ease, background 160ms ease; }
+  .workflow-group-row { min-width: 0; padding: 7px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--lume-line-light); border-radius: 10px; background: var(--lume-raised-light); transition: border-color 160ms ease, background 160ms ease; }
   .workflow-global-mode { position: relative; margin: 5px 0 1px; }
-  .workflow-group-row.enabled { border-color: rgba(55, 151, 103, 0.22); background: rgba(62, 153, 106, 0.055); }
+  .workflow-group-row.enabled { border-color: color-mix(in srgb, var(--lume-accent-strong) 34%, transparent); background: var(--lume-accent-soft-light); }
   .workflow-group-symbol { width: 27px; height: 22px; flex: 0 0 27px; display: grid; place-items: center; overflow: visible; }
   .workflow-group-symbol svg { width: 24px; height: 20px; overflow: visible; }
   .workflow-group-symbol path { fill: none; stroke-linejoin: round; }
-  .workflow-group-symbol .normal-link { stroke: #8b9d94; opacity: 1; transition: opacity 150ms ease; }
-  .workflow-group-symbol .workflow-link { stroke: #4aaa79; stroke-dasharray: 48; stroke-dashoffset: 48; opacity: 0; transition: opacity 130ms ease, stroke-dashoffset 420ms cubic-bezier(.2,.8,.2,1); }
-  .workflow-group-symbol circle { fill: #edf2ef; stroke: #7e968a; transform-box: fill-box; transform-origin: center; transition: transform 380ms cubic-bezier(.2,.85,.2,1), fill 180ms ease, stroke 180ms ease, filter 180ms ease; }
+  .workflow-group-symbol .normal-link { stroke: var(--lume-ink-muted-light); opacity: 1; transition: opacity 150ms ease; }
+  .workflow-group-symbol .workflow-link { stroke: var(--lume-accent-strong); stroke-dasharray: 48; stroke-dashoffset: 48; opacity: 0; transition: opacity 130ms ease, stroke-dashoffset 420ms cubic-bezier(.2,.8,.2,1); }
+  .workflow-group-symbol circle { fill: var(--lume-surface-light); stroke: var(--lume-ink-muted-light); transform-box: fill-box; transform-origin: center; transition: transform 380ms cubic-bezier(.2,.85,.2,1), fill 180ms ease, stroke 180ms ease, filter 180ms ease; }
   .workflow-group-symbol .node-start,
   .workflow-group-symbol .node-end { transform: translateY(-7px); }
   .workflow-group-symbol .node-center { transform: translateY(7.5px); }
   .workflow-group-row.enabled .workflow-group-symbol .normal-link { opacity: 0; }
   .workflow-group-row.enabled .workflow-group-symbol .workflow-link { stroke-dashoffset: 0; opacity: 1; }
-  .workflow-group-row.enabled .workflow-group-symbol circle { fill: #dff4e9; stroke: #43a572; filter: drop-shadow(0 0 3px rgba(64, 167, 111, 0.42)); transform: translateY(0); }
+  .workflow-group-row.enabled .workflow-group-symbol circle { fill: color-mix(in srgb, var(--lume-accent) 20%, var(--lume-surface-light)); stroke: var(--lume-accent-strong); filter: drop-shadow(0 0 3px color-mix(in srgb, var(--lume-accent) 42%, transparent)); transform: translateY(0); }
   .workflow-group-copy { min-width: 0; flex: 1; }
-  .workflow-group-copy strong { color: #43574d; font-size: 9.5px; }
-  .workflow-mode-switch { position: relative; width: 101px; height: 28px; padding: 2px; flex: 0 0 101px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-radius: 8px; background: rgba(83, 108, 96, 0.09); isolation: isolate; }
-  .workflow-mode-switch::before { position: absolute; z-index: 0; top: 2px; bottom: 2px; left: 2px; width: calc((100% - 4px) / 2); border-radius: 5px; content: ""; background: rgba(255, 255, 255, 0.82); box-shadow: 0 1px 4px rgba(44, 72, 58, 0.13); transform: translateX(0); transition: transform 240ms cubic-bezier(.2,.85,.2,1), background 180ms ease, box-shadow 180ms ease; }
+  .workflow-group-copy strong { color: var(--lume-ink-strong-light); font-size: 9.5px; }
+  .workflow-mode-switch { position: relative; width: 101px; height: 28px; padding: 2px; flex: 0 0 101px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-radius: 8px; background: var(--lume-subtle-light); isolation: isolate; }
+  .workflow-mode-switch::before { position: absolute; z-index: 0; top: 2px; bottom: 2px; left: 2px; width: calc((100% - 4px) / 2); border-radius: 5px; content: ""; background: var(--lume-surface-light); box-shadow: 0 1px 4px color-mix(in srgb, var(--lume-canvas-dark) 13%, transparent); transform: translateX(0); transition: transform 240ms cubic-bezier(.2,.85,.2,1), background 180ms ease, box-shadow 180ms ease; }
   .workflow-mode-switch.workflow-active::before { transform: translateX(100%); }
-  .workflow-mode-switch button { position: relative; z-index: 1; min-width: 0; height: 24px; padding: 0 4px; border: 0; border-radius: 6px; color: #87948e; background: transparent; font: 720 8px Inter, sans-serif; cursor: pointer; transition: color 160ms ease, transform 160ms cubic-bezier(.2,.8,.2,1); }
+  .workflow-mode-switch button { position: relative; z-index: 1; min-width: 0; height: 24px; padding: 0 4px; border: 0; border-radius: 6px; color: var(--lume-ink-muted-light); background: transparent; font: 720 8px Inter, sans-serif; cursor: pointer; transition: color 160ms ease, transform 160ms cubic-bezier(.2,.8,.2,1); }
   .workflow-mode-switch button:active:not(:disabled) { transform: scale(.94); }
-  .workflow-mode-switch button.active { color: #397258; }
+  .workflow-mode-switch button.active { color: var(--lume-accent-strong); }
   .workflow-mode-switch button:disabled { opacity: 0.5; cursor: default; }
-  .workflow-settings-trigger { width: 28px; height: 28px; padding: 5px; flex: 0 0 28px; display: grid; place-items: center; border: 0; border-radius: 7px; color: #708078; background: transparent; cursor: pointer; }
+  .workflow-settings-trigger { width: 28px; height: 28px; padding: 5px; flex: 0 0 28px; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--lume-ink-muted-light); background: transparent; cursor: pointer; }
   .workflow-settings-trigger:hover,
-  .workflow-settings-trigger.active { color: #377e59; background: rgba(55, 142, 98, 0.09); }
+  .workflow-settings-trigger.active { color: var(--lume-accent-strong); background: var(--lume-accent-soft-light); }
   .workflow-settings-trigger svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
   .workflow-settings-dismiss { position: fixed; z-index: 238; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: default; }
   .workflow-settings-popover { position: absolute; z-index: 240; top: 84px; right: 16px; width: min(310px, calc(100% - 32px)); max-height: calc(100vh - 96px); overflow: hidden; isolation: isolate; border: 1px solid rgba(67, 105, 86, 0.18); border-radius: 12px; color: #485b51; background: #f7faf8; background-clip: padding-box; }
@@ -4509,14 +4656,15 @@
   .terminal-picker { min-height: 0; padding: 9px 0 6px; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #cad2ce transparent; }
   .terminal-picker-row { min-height: 59px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid rgba(105, 123, 115, 0.09); }
   .terminal-picker-row:last-child { border-bottom: 0; }
+  .terminal-picker-avatar { width: 32px; height: 32px; display: grid; flex: 0 0 auto; place-items: center; }
   .terminal-picker-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
   .terminal-picker-copy strong { color: #35423d; font-size: 10px; }
-  .terminal-picker-copy small { overflow: hidden; color: #89938f; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+  .terminal-picker-copy small { min-width: 0; display: flex; align-items: center; gap: 4px; overflow: hidden; color: #89938f; font-size: 9px; white-space: nowrap; }
+  .terminal-picker-copy small span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .terminal-picker-row > button { min-width: 52px; height: 28px; padding: 0 9px; border: 1px solid rgba(82, 105, 95, 0.16); border-radius: 9px; color: #4d6f61; background: rgba(255, 255, 255, 0.38); font-size: 9px; font-weight: 720; cursor: pointer; transition: transform 140ms ease, background 140ms ease; }
   .terminal-picker-row > button:hover:not(:disabled) { transform: translateY(-1px); background: white; }
   .terminal-picker-row > button:disabled { opacity: 0.5; cursor: default; }
   .board-empty { margin: 22px 0; color: #89938f; font-size: 9px; line-height: 1.45; }
-  .board-message { margin: 1px 0 4px; color: #5f756b; font-size: 9px; }
 
   .empty-state { height: 100%; min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #73807a; text-align: center; }
   .empty-state strong { margin-top: 10px; color: #44524c; font-size: 11px; }
@@ -4643,8 +4791,6 @@
   .integration-row strong { color: #35423d; font-size: 10px; }
   .integration-row div span { overflow: hidden; color: #89938f; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
   .integration-row button { min-width: 63px; height: 27px; padding: 0 8px; border: 1px solid rgba(82, 105, 95, 0.14); border-radius: 8px; color: #577064; background: transparent; font-size: 9px; font-weight: 680; cursor: pointer; transition: background 150ms ease, color 150ms ease, transform 150ms ease; }
-  .settings-feedback { margin: -2px 16px 9px; color: #65736c; font-size: 9px; line-height: 1.45; }
-  .settings-feedback.error { color: #a34f4f; }
   .integration-row button:hover:not(:disabled) { transform: translateY(-1px); background: rgba(82, 112, 99, 0.06); }
   .integration-row button.connected { border-color: transparent; color: #6d7e76; }
   .integration-row button:disabled { cursor: default; opacity: 0.5; }
@@ -4687,6 +4833,13 @@
   .volume-control input { width: 82px; height: 16px; accent-color: #527c6c; cursor: pointer; }
   .volume-control input:disabled { cursor: default; }
   .volume-control output { width: 27px; color: #718078; font-size: 8px; font-variant-numeric: tabular-nums; text-align: right; }
+  .appearance-theme-setting { min-height: 72px; padding: 10px 0; display: grid; gap: 9px; border-bottom: 1px solid rgba(105, 123, 115, 0.1); }
+  .appearance-theme-setting > span { display: grid; gap: 3px; }
+  .appearance-theme-setting strong { color: #35423d; font-size: 10px; }.appearance-theme-setting small { color: #89938f; font-size: 9px; }
+  .appearance-theme-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; }
+  .appearance-theme-list button { height: 32px; padding: 3px; border: 1px solid transparent; border-radius: 8px; background: transparent; cursor: pointer; }
+  .appearance-theme-list button:hover, .appearance-theme-list button.active { border-color: color-mix(in srgb, var(--theme-accent) 48%, transparent); background: color-mix(in srgb, var(--theme-accent) 10%, transparent); }
+  .appearance-theme-list i { width: 100%; height: 100%; display: block; border: 6px solid var(--theme-surface); border-radius: 6px; background: var(--theme-accent); }
 
   .field-row :global(.lume-select) { max-width: 145px; }
   .launch-setting { padding: 14px 0 10px; display: grid; gap: 11px; }
@@ -4745,7 +4898,6 @@
   .mobile-pairing > span { width: 100%; min-width: 0; display: grid; gap: 5px; text-align: center; }
   .mobile-pairing code { color: #31483e; font-size: 9px; overflow-wrap: anywhere; }
   .mobile-message { margin: 0; color: #61756b; font-size: 8px; line-height: 1.4; }
-  .mobile-message.error { color: #a34f4f; }
   .paired-devices { margin-top: 9px; display: grid; gap: 8px; }
   .paired-devices-intro { padding: 1px 2px 3px; }
   .paired-devices-intro strong { color: #35423d; font-size: 9px; }
@@ -4844,12 +4996,12 @@
     box-shadow: 0 1px 3px rgba(42, 67, 55, 0.045);
   }
   .overlay-shell:not(.dark) .workflow-group-row {
-    border-color: rgba(65, 94, 80, 0.2);
-    background: #e8e6d2;
+    border-color: var(--lume-line-light);
+    background: var(--lume-raised-light);
   }
   .overlay-shell:not(.dark) .workflow-group-row.enabled {
-    border-color: rgba(45, 139, 92, 0.34);
-    background: #cce2d1;
+    border-color: color-mix(in srgb, var(--lume-accent-strong) 34%, transparent);
+    background: color-mix(in srgb, var(--lume-accent) 18%, var(--lume-surface-light));
   }
   .overlay-shell:not(.dark) .layout-toolbar input,
   .overlay-shell:not(.dark) .layout-toolbar button,
@@ -4920,12 +5072,10 @@
   .overlay-shell.dark .session-name-editor input,
   .overlay-shell.dark .session-name-editor button { color: #c5d0cb; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
   .overlay-shell.dark .session-name-editor button.primary { color: #f4faf7; background: #397b5c; }
-  .overlay-shell.dark .project-name,
-  .overlay-shell.dark .terminal-picker-copy small,
   .overlay-shell.dark .history-row span,
-  .overlay-shell.dark .settings-feedback { color: #adbab4; }
-  .overlay-shell.dark .settings-feedback.error { color: #d68d8d; }
   .overlay-shell.dark .update-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
+  .overlay-shell.dark .terminal-picker-copy small { color: #9aaba3; }
+  .overlay-shell.dark .project-name { color: #9aaba3; }
   .overlay-shell.dark .mobile-access-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .mobile-access-card strong { color: #dce7e1; }
   .overlay-shell.dark .mobile-access-card span,
@@ -4998,20 +5148,23 @@
   .overlay-shell.dark .source-label { color: #9daca5; background: rgba(205, 222, 213, 0.08); }
   .overlay-shell.dark .access-badge.auto-review { color: #b4d3ee; background: #29445d; }
   .overlay-shell.dark .access-badge.full-access { color: #e4b88f; background: #543b29; }
-  .overlay-shell.dark .access-badge.external-session { color: #c3d1c9; background: #35473e; }
   .overlay-shell.dark .terminal-picker-row,
   .overlay-shell.dark .workflow-missing-sessions { border-color: rgba(190, 209, 200, 0.09); }
   .overlay-shell.dark .terminal-picker-row > button { color: #b7c4be; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
   .overlay-shell.dark .terminal-picker-row > button:hover:not(:disabled) { background: rgba(222, 233, 228, 0.09); }
-  .overlay-shell.dark .workflow-group-row { border-color: rgba(207, 223, 215, 0.09); background: rgba(222, 233, 228, 0.025); }
-  .overlay-shell.dark .workflow-group-row.enabled { border-color: rgba(87, 186, 137, 0.2); background: rgba(74, 164, 116, 0.055); }
-  .overlay-shell.dark .workflow-group-copy strong { color: #c0d0c8; }
-  .overlay-shell.dark .workflow-mode-switch { background: rgba(220, 235, 227, 0.055); }
-  .overlay-shell.dark .workflow-mode-switch::before { background: rgba(103, 183, 143, 0.12); box-shadow: none; }
-  .overlay-shell.dark .workflow-mode-switch button.active { color: #91d2b1; }
-  .overlay-shell.dark .workflow-settings-trigger { color: #98aaa1; }
+  .overlay-shell.dark .workflow-group-row { border-color: var(--lume-line-dark); background: var(--lume-raised-dark); }
+  .overlay-shell.dark .workflow-group-row.enabled { border-color: color-mix(in srgb, var(--lume-accent) 28%, transparent); background: var(--lume-accent-soft-dark); }
+  .overlay-shell.dark .workflow-group-copy strong { color: var(--lume-ink-strong-dark); }
+  .overlay-shell.dark .workflow-group-symbol .normal-link { stroke: var(--lume-ink-muted-dark); }
+  .overlay-shell.dark .workflow-group-symbol circle { fill: var(--lume-surface-dark); stroke: var(--lume-ink-muted-dark); }
+  .overlay-shell.dark .workflow-group-row.enabled .workflow-group-symbol circle { fill: color-mix(in srgb, var(--lume-accent) 18%, var(--lume-surface-dark)); stroke: var(--lume-accent); }
+  .overlay-shell.dark .workflow-mode-switch { background: var(--lume-subtle-dark); }
+  .overlay-shell.dark .workflow-mode-switch::before { background: color-mix(in srgb, var(--lume-accent) 13%, var(--lume-surface-dark)); box-shadow: none; }
+  .overlay-shell.dark .workflow-mode-switch button { color: var(--lume-ink-muted-dark); }
+  .overlay-shell.dark .workflow-mode-switch button.active { color: var(--lume-accent); }
+  .overlay-shell.dark .workflow-settings-trigger { color: var(--lume-ink-muted-dark); }
   .overlay-shell.dark .workflow-settings-trigger:hover,
-  .overlay-shell.dark .workflow-settings-trigger.active { color: #91d2b1; background: rgba(91, 177, 137, 0.08); }
+  .overlay-shell.dark .workflow-settings-trigger.active { color: var(--lume-accent); background: var(--lume-accent-soft-dark); }
   .overlay-shell.dark .workflow-settings-popover { color: #bdcbc4; border-color: rgba(202, 220, 211, 0.12); background: #18221d; box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38); }
   .overlay-shell.dark .workflow-settings-scroll > header strong { color: #d9e5df; }
   .overlay-shell.dark .workflow-settings-scroll > header small,
@@ -5043,4 +5196,21 @@
   .overlay-shell.dark .saved-note strong { color: #d7e2dc; }
   .overlay-shell.dark .saved-note p,
   .overlay-shell.dark .result-artifacts span { color: #aab8b1; }
+  .overlay-shell .switch input:checked + span,
+  .overlay-shell .volume-control input,
+  .overlay-shell .workflow-setting-toggle.active i { background: var(--lume-accent); accent-color: var(--lume-accent); }
+  .overlay-shell .session-action-button:hover:not(:disabled),
+  .overlay-shell .session-action-button.active { color: var(--lume-accent-strong); }
+  .overlay-shell:not(.dark)[data-appearance] .panel-content,
+  .overlay-shell:not(.dark)[data-appearance] .session-list,
+  .overlay-shell:not(.dark)[data-appearance] .history-list,
+  .overlay-shell:not(.dark)[data-appearance] .settings,
+  .overlay-shell:not(.dark)[data-appearance] .whiteboard { background: color-mix(in srgb, var(--lume-sidebar-light) 78%, var(--lume-surface-light)); }
+  .overlay-shell:not(.dark)[data-appearance] .lume-orb { color: var(--lume-accent-strong); border-color: color-mix(in srgb, var(--lume-accent-strong) 30%, transparent); background: var(--lume-raised-light); }
+  .overlay-shell.dark[data-appearance] .lume-orb { color: var(--lume-accent); border-color: color-mix(in srgb, var(--lume-accent) 27%, transparent); background: var(--lume-raised-dark); }
+  .overlay-shell[data-appearance] .lume-orb:hover { border-color: color-mix(in srgb, var(--lume-accent) 52%, transparent); }
+  .overlay-shell[data-appearance] .agent-count { background: var(--lume-accent-strong); }
+  .overlay-shell.dark[data-appearance] .panel { background: var(--lume-raised-dark); }
+  .overlay-shell.dark .appearance-theme-setting strong { color: #e3ebe7; }
+  .overlay-shell.dark .appearance-theme-setting small { color: #91a198; }
 </style>

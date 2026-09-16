@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   cleanPromptTransport,
+  extractResponseFileCards,
   extractResponseFiles,
   promptTextKey,
 } from "../src/lib/chatAttachments.ts";
@@ -43,6 +44,30 @@ assert.deepEqual(files, [
 assert.deepEqual(
   extractResponseFiles("[secret](/work/mural/.env)", [], "/work/mural"),
   [],
+);
+
+assert.deepEqual(
+  extractResponseFileCards(
+    "Updated [configuration](src/config.ts). Final file: [report](outputs/report.pdf)",
+    [],
+    "/work/lume",
+  ),
+  [
+    {
+      path: "/work/lume/src/config.ts",
+      name: "config.ts",
+      mimeType: "application/octet-stream",
+      isImage: false,
+      downloadable: false,
+    },
+    {
+      path: "/work/lume/outputs/report.pdf",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      isImage: false,
+      downloadable: true,
+    },
+  ],
 );
 
 assert.deepEqual(

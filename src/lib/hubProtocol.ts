@@ -1,6 +1,7 @@
 import type {
   AgentKind,
   AgentSession,
+  InternalService,
   PermissionAction,
   PromptAttachmentInput,
   PromptDelivery,
@@ -50,6 +51,7 @@ export interface HubSnapshot {
   generatedAt: number;
   features: string[];
   sessions: HubSession[];
+  internalServices?: InternalService[];
   workflowGroups: WorkflowGroupDefinition[];
   workflowHistory: WorkflowHistoryRecord[];
 }

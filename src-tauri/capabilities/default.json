@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main", "terminal-*", "workflow-bridge-*"],
+  "windows": ["main", "workspace", "terminal-*", "workflow-bridge-*"],
   "permissions": [
     "core:default",
     "core:window:allow-outer-size",

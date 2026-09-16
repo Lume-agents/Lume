@@ -100,6 +100,13 @@ export interface AgentSession {
   rateLimits?: AgentRateLimit[];
 }
 
+export interface InternalService {
+  id: string;
+  agent: AgentKind;
+  label: string;
+  processId: number;
+}
+
 export interface PromptAttachment {
   id: string;
   name: string;
@@ -126,7 +133,7 @@ export interface AgentRateLimit {
 
 export interface SessionActivity {
   id: string;
-  kind: "prompt" | "queued_prompt" | "message" | "activity" | "analysis" | "plan" | "plan_document" | "command" | "file" | "test" | "tool" | "permission" | "question";
+  kind: "prompt" | "queued_prompt" | "message" | "activity" | "analysis" | "plan" | "plan_document" | "command" | "file" | "test" | "tool" | "subagent" | "permission" | "question";
   title: string;
   detail?: string;
   status: "running" | "completed" | "failed" | "waiting" | "interrupted";
@@ -154,6 +161,15 @@ export interface ResultNote {
   createdAt: number;
 }
 
+export interface ReviewNote {
+  id: string;
+  nativeSessionId: string;
+  resultId: string;
+  body: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface SessionNote {
   id: string;
   nativeSessionId: string;
@@ -177,7 +193,13 @@ export interface HistoryEntry {
 
 export interface Preferences {
   language: "en" | "pt-BR";
+  startupMode: "ask" | "orb" | "workspace";
   darkMode?: boolean;
+  appearanceTheme: "lume" | "forest" | "ocean" | "violet" | "ember";
+  accentColor?: string;
+  accentOpacity: number;
+  workspaceBackgroundColor?: string;
+  workspaceBackgroundOpacity: number;
   soundEnabled: boolean;
   soundVolume: number;
   popupNotificationsEnabled: boolean;
@@ -199,6 +221,7 @@ export interface Preferences {
   openShortcut: string;
   newSessionShortcut: string;
   whiteboardShortcut: string;
+  workspaceShortcut: string;
 }
 
 export interface ProjectProfile {

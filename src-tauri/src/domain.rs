@@ -247,6 +247,17 @@ pub struct ResultNote {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReviewNote {
+    pub id: String,
+    pub native_session_id: String,
+    pub result_id: String,
+    pub body: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionNote {
     pub id: String,
     pub native_session_id: String,
@@ -291,6 +302,16 @@ pub struct AgentSession {
     pub activities: Vec<SessionActivity>,
     #[serde(default)]
     pub rate_limits: Vec<AgentRateLimit>,
+}
+
+/// Process-owned helpers are reported separately from user-facing chats.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalService {
+    pub id: String,
+    pub agent: AgentKind,
+    pub label: String,
+    pub process_id: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -644,7 +665,13 @@ pub struct WorkflowHistoryRecord {
 #[serde(default, rename_all = "camelCase")]
 pub struct Preferences {
     pub language: String,
+    pub startup_mode: String,
     pub dark_mode: Option<bool>,
+    pub appearance_theme: String,
+    pub accent_color: Option<String>,
+    pub accent_opacity: u8,
+    pub workspace_background_color: Option<String>,
+    pub workspace_background_opacity: u8,
     pub sound_enabled: bool,
     pub sound_volume: u8,
     pub popup_notifications_enabled: bool,
@@ -666,13 +693,20 @@ pub struct Preferences {
     pub open_shortcut: String,
     pub new_session_shortcut: String,
     pub whiteboard_shortcut: String,
+    pub workspace_shortcut: String,
 }
 
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             language: "en".into(),
+            startup_mode: "ask".into(),
             dark_mode: None,
+            appearance_theme: "lume".into(),
+            accent_color: None,
+            accent_opacity: 100,
+            workspace_background_color: None,
+            workspace_background_opacity: 96,
             sound_enabled: true,
             sound_volume: 55,
             popup_notifications_enabled: true,
@@ -694,6 +728,7 @@ impl Default for Preferences {
             open_shortcut: "Ctrl+Alt+Shift+L".into(),
             new_session_shortcut: "Ctrl+Alt+Shift+N".into(),
             whiteboard_shortcut: "Ctrl+Alt+Shift+B".into(),
+            workspace_shortcut: "Ctrl+Alt+Shift+W".into(),
         }
     }
 }

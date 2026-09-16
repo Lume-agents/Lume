@@ -23,7 +23,7 @@ pub fn configure(preferences: &Preferences) -> Result<bool, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn shortcut_entries(preferences: &Preferences) -> [(&str, &str, &str); 4] {
+fn shortcut_entries(preferences: &Preferences) -> [(&str, &str, &str); 5] {
     [
         (&preferences.open_shortcut, "open", "Open Lume"),
         (
@@ -40,6 +40,11 @@ fn shortcut_entries(preferences: &Preferences) -> [(&str, &str, &str); 4] {
             &preferences.whiteboard_shortcut,
             "whiteboard",
             "Lume whiteboard",
+        ),
+        (
+            &preferences.workspace_shortcut,
+            "workspace",
+            "Lume Workspace",
         ),
     ]
 }

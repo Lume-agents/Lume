@@ -824,6 +824,7 @@ fn read_session_metadata(path: &Path) -> Option<SessionMetadata> {
 
 fn session_metadata(record: &CodexRecord) -> Option<SessionMetadata> {
     if record.kind != "session_meta"
+        || record.payload.originator.as_deref() == Some("lume-diagnostic")
         || record.payload.parent_thread_id.is_some()
         || record.payload.thread_source.as_deref() == Some("subagent")
         || record
@@ -974,6 +975,9 @@ mod tests {
         let memories = record(
             r#"{"type":"session_meta","payload":{"id":"chat-4","originator":"codex-tui","source":"cli","cwd":"/home/user/.codex/memories"}}"#,
         );
+        let diagnostic = record(
+            r#"{"type":"session_meta","payload":{"id":"chat-5","originator":"lume-diagnostic","source":"vscode","cwd":"/tmp"}}"#,
+        );
 
         assert_eq!(
             session_metadata(&vscode).expect("VS Code").source,
@@ -985,6 +989,7 @@ mod tests {
         );
         assert!(session_metadata(&subagent).is_none());
         assert!(session_metadata(&memories).is_none());
+        assert!(session_metadata(&diagnostic).is_none());
     }
 
     #[test]

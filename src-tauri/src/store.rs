@@ -3,7 +3,7 @@ use std::path::Path;
 use rusqlite::{params, Connection};
 
 use crate::domain::{
-    AgentSession, HistoryEntry, MobileScope, PairedDevice, Preferences, ResultNote,
+    AgentSession, HistoryEntry, MobileScope, PairedDevice, Preferences, ResultNote, ReviewNote,
     SessionActivity, SessionNote, WorkflowHistoryRecord,
 };
 
@@ -52,6 +52,17 @@ impl Store {
                     tests TEXT NOT NULL,
                     created_at INTEGER NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS review_notes (
+                    id TEXT PRIMARY KEY,
+                    native_session_id TEXT NOT NULL,
+                    result_id TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    UNIQUE(native_session_id, result_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_review_notes_session
+                    ON review_notes(native_session_id, updated_at DESC);
                  CREATE TABLE IF NOT EXISTS mobile_devices (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -248,6 +259,52 @@ impl Store {
             }
         }
         Ok(activities)
+    }
+
+    pub fn conversation_activities_before(
+        &self,
+        session: &AgentSession,
+        before_created_at: i64,
+        before_activity_id: &str,
+        limit: usize,
+    ) -> Result<(Vec<SessionActivity>, bool), String> {
+        let Some(thread_key) = Self::conversation_key(session) else {
+            return Ok((Vec::new(), false));
+        };
+        let limit = limit.clamp(1, 60);
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT payload FROM conversation_activities
+                 WHERE thread_key = ?1
+                   AND (created_at < ?2 OR (created_at = ?2 AND activity_id < ?3))
+                 ORDER BY created_at DESC, activity_id DESC LIMIT ?4",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(
+                params![
+                    thread_key,
+                    before_created_at,
+                    before_activity_id,
+                    (limit + 1) as i64
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut activities = Vec::new();
+        for payload in rows {
+            let payload = payload.map_err(|error| error.to_string())?;
+            if let Ok(activity) = serde_json::from_str::<SessionActivity>(&payload) {
+                if Self::is_archivable_conversation_activity(&activity) {
+                    activities.push(activity);
+                }
+            }
+        }
+        let has_more = activities.len() > limit;
+        activities.truncate(limit);
+        activities.reverse();
+        Ok((activities, has_more))
     }
 
     pub fn save_session_plan(
@@ -495,6 +552,68 @@ impl Store {
     pub fn delete_result_note(&self, id: &str) -> Result<(), String> {
         self.connection
             .execute("DELETE FROM result_notes WHERE id = ?1", [id])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn review_notes(&self, native_session_id: &str) -> Result<Vec<ReviewNote>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, native_session_id, result_id, body, created_at, updated_at
+                 FROM review_notes
+                 WHERE native_session_id = ?1
+                 ORDER BY updated_at DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([native_session_id], |row| {
+                Ok(ReviewNote {
+                    id: row.get(0)?,
+                    native_session_id: row.get(1)?,
+                    result_id: row.get(2)?,
+                    body: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn save_review_note(&self, note: &ReviewNote) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT INTO review_notes
+                 (id, native_session_id, result_id, body, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(native_session_id, result_id) DO UPDATE SET
+                    body = excluded.body,
+                    updated_at = excluded.updated_at",
+                params![
+                    note.id,
+                    note.native_session_id,
+                    note.result_id,
+                    note.body,
+                    note.created_at,
+                    note.updated_at,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_review_note(
+        &self,
+        native_session_id: &str,
+        result_id: &str,
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM review_notes WHERE native_session_id = ?1 AND result_id = ?2",
+                params![native_session_id, result_id],
+            )
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -922,6 +1041,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["message-3", "message-4"]
         );
+        let (earlier, has_more) = store
+            .conversation_activities_before(&threaded, 4, "message-4", 2)
+            .expect("pagina anterior");
+        assert!(has_more);
+        assert_eq!(
+            earlier
+                .iter()
+                .map(|activity| activity.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message-2", "message-3"]
+        );
+        let (first, has_more) = store
+            .conversation_activities_before(&threaded, 2, "message-2", 2)
+            .expect("primeira pagina");
+        assert!(!has_more);
+        assert_eq!(first[0].id, "message-1");
     }
 
     #[test]
@@ -1051,13 +1186,20 @@ mod tests {
         assert!(preferences.overlay_x.is_none());
         assert!(preferences.overlay_y.is_none());
         assert!(preferences.dark_mode.is_none());
+        assert_eq!(preferences.appearance_theme, "lume");
+        assert!(preferences.accent_color.is_none());
+        assert_eq!(preferences.accent_opacity, 100);
+        assert!(preferences.workspace_background_color.is_none());
+        assert_eq!(preferences.workspace_background_opacity, 96);
         assert_eq!(preferences.language, "en");
+        assert_eq!(preferences.startup_mode, "ask");
         assert_eq!(preferences.sound_volume, 55);
         assert!(preferences.project_profiles.is_empty());
         assert!(preferences.session_aliases.is_empty());
         assert!(preferences.whiteboard_layouts.is_empty());
         assert!(!preferences.mobile_gateway_enabled);
         assert_eq!(preferences.global_shortcut, "Ctrl+Shift+Space");
+        assert_eq!(preferences.workspace_shortcut, "Ctrl+Alt+Shift+W");
     }
 
     #[test]
@@ -1082,6 +1224,41 @@ mod tests {
 
         store.delete_result_note(&note.id).expect("remove nota");
         assert!(store.result_notes(10).expect("notas vazias").is_empty());
+    }
+
+    #[test]
+    fn review_notes_are_scoped_to_the_session_and_result() {
+        let store = Store::open(Path::new(":memory:")).expect("in-memory store");
+        let mut note = ReviewNote {
+            id: "review-note:thread-1:result-1".into(),
+            native_session_id: "thread-1".into(),
+            result_id: "result-1".into(),
+            body: "Check the error path".into(),
+            created_at: 42,
+            updated_at: 42,
+        };
+        store.save_review_note(&note).expect("save review note");
+
+        note.body = "Error path reviewed".into();
+        note.updated_at = 84;
+        store.save_review_note(&note).expect("update review note");
+
+        let notes = store.review_notes("thread-1").expect("load review notes");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].result_id, "result-1");
+        assert_eq!(notes[0].body, "Error path reviewed");
+        assert!(store
+            .review_notes("thread-2")
+            .expect("other session")
+            .is_empty());
+
+        store
+            .delete_review_note("thread-1", "result-1")
+            .expect("delete review note");
+        assert!(store
+            .review_notes("thread-1")
+            .expect("empty notes")
+            .is_empty());
     }
 
     #[test]

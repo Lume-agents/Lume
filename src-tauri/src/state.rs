@@ -12,7 +12,7 @@ use crate::{
     domain::{
         AccessMode, AgentKind, AgentRateLimit, AgentSession, HistoryEntry, HookEvent,
         HookEventKind, PairedDevice, PermissionAction, PermissionProfile, PermissionRequest,
-        Preferences, PromptAttachment, QuestionAnswer, ResultNote, SessionActivity,
+        Preferences, PromptAttachment, QuestionAnswer, ResultNote, ReviewNote, SessionActivity,
         SessionControlOrigin, SessionModelOverride, SessionNote, SessionResult, SessionSource,
         SessionStatus, WorkflowHistoryRecord,
     },
@@ -36,10 +36,12 @@ struct WorkspaceSnapshot {
 #[derive(Clone)]
 pub struct AppState {
     sessions: Arc<Mutex<Vec<AgentSession>>>,
+    internal_services: Arc<Mutex<Vec<crate::domain::InternalService>>>,
     store: Arc<Mutex<Store>>,
     decisions: Arc<(Mutex<HashMap<String, PermissionAction>>, Condvar)>,
     question_answers: Arc<(Mutex<HashMap<String, Vec<QuestionAnswer>>>, Condvar)>,
     missing_process_scans: Arc<Mutex<HashMap<String, u8>>>,
+    sessions_in_takeover: Arc<Mutex<HashSet<String>>>,
     workspace_snapshots: Arc<Mutex<HashMap<String, WorkspaceSnapshot>>>,
     agent_rate_limits: Arc<Mutex<HashMap<AgentKind, Vec<AgentRateLimit>>>>,
     session_aliases: Arc<Mutex<HashMap<String, String>>>,
@@ -60,10 +62,12 @@ impl AppState {
         store.purge_history(cutoff)?;
         Ok(Self {
             sessions: Arc::new(Mutex::new(sessions)),
+            internal_services: Arc::new(Mutex::new(Vec::new())),
             store: Arc::new(Mutex::new(store)),
             decisions: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
             question_answers: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
             missing_process_scans: Arc::new(Mutex::new(HashMap::new())),
+            sessions_in_takeover: Arc::new(Mutex::new(HashSet::new())),
             workspace_snapshots: Arc::new(Mutex::new(HashMap::new())),
             agent_rate_limits: Arc::new(Mutex::new(HashMap::new())),
             session_aliases: Arc::new(Mutex::new(preferences.session_aliases)),
@@ -112,6 +116,7 @@ impl AppState {
                 recent.extend(session.activities.drain(..).filter(|activity| {
                     activity.kind == "plan_document"
                         || (activity.kind == "queued_prompt" && activity.status == "waiting")
+                        || (activity.kind == "subagent" && activity.status == "running")
                 }));
                 recent.sort_by_key(|activity| activity.created_at);
                 session.activities = recent;
@@ -126,6 +131,29 @@ impl AppState {
 
     pub fn bounded_sessions(&self, activity_limit: usize) -> Result<Vec<AgentSession>, String> {
         self.terminal_sessions(activity_limit, |_| true)
+    }
+
+    pub fn internal_services(&self) -> Result<Vec<crate::domain::InternalService>, String> {
+        self.internal_services
+            .lock()
+            .map(|services| services.clone())
+            .map_err(|_| "Could not read internal services".to_string())
+    }
+
+    pub fn replace_internal_services(
+        &self,
+        mut services: Vec<crate::domain::InternalService>,
+    ) -> Result<bool, String> {
+        services.sort_by_key(|service| service.process_id);
+        let mut current = self
+            .internal_services
+            .lock()
+            .map_err(|_| "Could not update internal services".to_string())?;
+        if *current == services {
+            return Ok(false);
+        }
+        *current = services;
+        Ok(true)
     }
 
     pub fn connected_sessions(&self) -> Result<Vec<AgentSession>, String> {
@@ -153,6 +181,20 @@ impl AppState {
             .into_iter()
             .find(|session| session.id == session_id)
             .ok_or_else(|| "Session not found".to_string())
+    }
+
+    pub fn conversation_activities_before(
+        &self,
+        session_id: &str,
+        before_created_at: i64,
+        before_activity_id: &str,
+        limit: usize,
+    ) -> Result<(Vec<SessionActivity>, bool), String> {
+        let session = self.connected_session(session_id)?;
+        self.store
+            .lock()
+            .map_err(|_| "Could not read the conversation history".to_string())?
+            .conversation_activities_before(&session, before_created_at, before_activity_id, limit)
     }
 
     pub fn session_status(
@@ -530,23 +572,40 @@ impl AppState {
         session_id: &str,
         native_session_id: String,
     ) -> Result<(), String> {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| "Could not reconnect the Codex session".to_string())?;
-        let session = sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-            .ok_or_else(|| "Session not found".to_string())?;
-        if session.agent != AgentKind::Codex {
-            return Err("Only Codex sessions can be rebound to a thread".into());
+        let old_native_session_id = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "Could not reconnect the Codex session".to_string())?;
+            let session = sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| "Session not found".to_string())?;
+            if session.agent != AgentKind::Codex {
+                return Err("Only Codex sessions can be rebound to a thread".into());
+            }
+            let old_native_session_id =
+                session.native_session_id.replace(native_session_id.clone());
+            session.updated_at = now_millis();
+            old_native_session_id
+        };
+        if let Some(old_native_session_id) = old_native_session_id {
+            let mut settings = self
+                .session_model_overrides
+                .lock()
+                .map_err(|_| "Could not reconnect the Codex model settings".to_string())?;
+            if let Some(value) = settings.remove(&(AgentKind::Codex, old_native_session_id)) {
+                settings.insert((AgentKind::Codex, native_session_id), value);
+            }
         }
-        session.native_session_id = Some(native_session_id);
-        session.updated_at = now_millis();
         Ok(())
     }
 
-    pub fn mark_session_lume_controlled(&self, session_id: &str) -> Result<(), String> {
+    pub fn mark_session_lume_controlled(
+        &self,
+        session_id: &str,
+        source: SessionSource,
+    ) -> Result<(), String> {
         let snapshots = {
             let mut sessions = self
                 .sessions
@@ -574,7 +633,7 @@ impl AppState {
                 .filter(|session| matching_ids.contains(&session.id))
             {
                 session.control_origin = SessionControlOrigin::Lume;
-                session.source = SessionSource::Cli;
+                session.source = source.clone();
                 session.source_app = None;
                 session.process_id = None;
                 session.status = SessionStatus::WaitingForInput;
@@ -598,6 +657,55 @@ impl AppState {
             .map_err(|_| "Could not save the transferred session".to_string())?;
         for snapshot in snapshots {
             store.save_session(&snapshot)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_session_takeover_active(
+        &self,
+        session_id: &str,
+        active: bool,
+    ) -> Result<(), String> {
+        let matching_ids = {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "Could not reserve this session for transfer".to_string())?;
+            let target = sessions
+                .iter()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| "Session not found".to_string())?;
+            sessions
+                .iter()
+                .filter(|session| {
+                    session.id == session_id
+                        || target.native_session_id.as_ref().is_some_and(|native_id| {
+                            session.agent == target.agent
+                                && session.native_session_id.as_ref() == Some(native_id)
+                        })
+                })
+                .map(|session| session.id.clone())
+                .collect::<Vec<_>>()
+        };
+        if active {
+            let mut missing = self
+                .missing_process_scans
+                .lock()
+                .map_err(|_| "Could not reserve this session for transfer".to_string())?;
+            for id in &matching_ids {
+                missing.remove(id);
+            }
+        }
+        let mut takeovers = self
+            .sessions_in_takeover
+            .lock()
+            .map_err(|_| "Could not reserve this session for transfer".to_string())?;
+        for id in matching_ids {
+            if active {
+                takeovers.insert(id);
+            } else {
+                takeovers.remove(&id);
+            }
         }
         Ok(())
     }
@@ -696,26 +804,7 @@ impl AppState {
         Ok(())
     }
 
-    pub fn remove_queued_prompt_activity(
-        &self,
-        session_id: &str,
-        activity_id: &str,
-    ) -> Result<(), String> {
-        let mut sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| "Could not update the Codex prompt queue".to_string())?;
-        let session = sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-            .ok_or_else(|| "Session not found".to_string())?;
-        session
-            .activities
-            .retain(|activity| activity.id != activity_id);
-        session.updated_at = now_millis();
-        Ok(())
-    }
-
+    #[cfg(test)]
     pub fn mark_queued_prompt_needs_attention(
         &self,
         session_id: &str,
@@ -848,6 +937,65 @@ impl AppState {
             .lock()
             .map_err(|_| "Não foi possível acessar as notas".to_string())?
             .result_notes(limit.min(200))
+    }
+
+    pub fn review_notes(&self, session_id: &str) -> Result<Vec<ReviewNote>, String> {
+        let native_session_id = self.session_native_id(session_id)?;
+        self.store
+            .lock()
+            .map_err(|_| "Could not access review notes".to_string())?
+            .review_notes(&native_session_id)
+    }
+
+    pub fn save_review_note(
+        &self,
+        session_id: &str,
+        result_id: &str,
+        body: &str,
+    ) -> Result<ReviewNote, String> {
+        let session = self.session_with_history(session_id)?;
+        if !session.results.iter().any(|result| result.id == result_id) {
+            return Err("This result does not belong to the selected session".into());
+        }
+        let native_session_id = session
+            .native_session_id
+            .ok_or_else(|| "This session does not have a persistent conversation id".to_string())?;
+        let body = body.trim();
+        if body.is_empty() {
+            return Err("A review note cannot be empty".into());
+        }
+        let now = now_millis();
+        let existing = self
+            .store
+            .lock()
+            .map_err(|_| "Could not access review notes".to_string())?
+            .review_notes(&native_session_id)?
+            .into_iter()
+            .find(|note| note.result_id == result_id);
+        let note = ReviewNote {
+            id: existing
+                .as_ref()
+                .map(|note| note.id.clone())
+                .unwrap_or_else(|| format!("review-note:{native_session_id}:{result_id}")),
+            native_session_id,
+            result_id: result_id.to_string(),
+            body: body.chars().take(64 * 1024).collect(),
+            created_at: existing.as_ref().map(|note| note.created_at).unwrap_or(now),
+            updated_at: now,
+        };
+        self.store
+            .lock()
+            .map_err(|_| "Could not save the review note".to_string())?
+            .save_review_note(&note)?;
+        Ok(note)
+    }
+
+    pub fn delete_review_note(&self, session_id: &str, result_id: &str) -> Result<(), String> {
+        let native_session_id = self.session_native_id(session_id)?;
+        self.store
+            .lock()
+            .map_err(|_| "Could not delete the review note".to_string())?
+            .delete_review_note(&native_session_id, result_id)
     }
 
     pub fn session_notes(&self, session_id: &str) -> Result<Vec<SessionNote>, String> {
@@ -1062,6 +1210,31 @@ impl AppState {
     }
 
     pub fn mark_process_terminated(&self, process_id: u32) -> Result<bool, String> {
+        self.remove_terminated_sessions(|session| session.process_id == Some(process_id))
+    }
+
+    pub fn mark_session_terminated(&self, session_id: &str) -> Result<bool, String> {
+        let identity = self
+            .sessions
+            .lock()
+            .map_err(|_| "Não foi possível encerrar a sessão".to_string())?
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| (session.agent.clone(), session.native_session_id.clone()))
+            .ok_or_else(|| "Sessão não encontrada".to_string())?;
+        self.remove_terminated_sessions(|session| {
+            session.id == session_id
+                || identity.1.as_ref().is_some_and(|native_id| {
+                    session.agent == identity.0
+                        && session.native_session_id.as_ref() == Some(native_id)
+                })
+        })
+    }
+
+    fn remove_terminated_sessions<F>(&self, matches: F) -> Result<bool, String>
+    where
+        F: Fn(&AgentSession) -> bool,
+    {
         let now = now_millis();
         let mut sessions = self
             .sessions
@@ -1069,7 +1242,7 @@ impl AppState {
             .map_err(|_| "Não foi possível encerrar as sessões".to_string())?;
         let removed = sessions
             .iter()
-            .filter(|session| session.process_id == Some(process_id))
+            .filter(|session| matches(session))
             .cloned()
             .collect::<Vec<_>>();
         if removed.is_empty() {
@@ -2219,12 +2392,21 @@ impl AppState {
         }
         missing_process_scans
             .retain(|session_id, _| sessions.iter().any(|session| &session.id == session_id));
+        let sessions_in_takeover = self
+            .sessions_in_takeover
+            .lock()
+            .map_err(|_| "Não foi possível atualizar as transferências".to_string())?
+            .clone();
+        for session_id in &sessions_in_takeover {
+            missing_process_scans.remove(session_id);
+        }
 
         let mut closed_session_ids = Vec::new();
-        for session in sessions
-            .iter()
-            .filter(|session| session.process_id.is_some() && !process_is_present(session))
-        {
+        for session in sessions.iter().filter(|session| {
+            session.process_id.is_some()
+                && !process_is_present(session)
+                && !sessions_in_takeover.contains(&session.id)
+        }) {
             let missing_scans = missing_process_scans
                 .entry(session.id.clone())
                 .and_modify(|count| *count = count.saturating_add(1))
@@ -3753,6 +3935,38 @@ mod tests {
     }
 
     #[test]
+    fn codex_session_keeps_pending_model_settings_when_rebound() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        let mut event = started_event("codex:ephemeral-model", 4242);
+        event.agent = AgentKind::Codex;
+        event.native_session_id = Some("old-model-thread".into());
+        state.ingest(event).expect("sessão");
+        state
+            .set_session_model_override(
+                "codex:ephemeral-model",
+                SessionModelOverride {
+                    model: Some("gpt-test".into()),
+                    reasoning_effort: Some("high".into()),
+                },
+            )
+            .expect("configuração");
+
+        state
+            .rebind_codex_thread("codex:ephemeral-model", "new-model-thread".into())
+            .expect("reatar thread");
+
+        assert_eq!(
+            state
+                .session_model_override("codex:ephemeral-model")
+                .expect("configuração após reatar"),
+            SessionModelOverride {
+                model: Some("gpt-test".into()),
+                reasoning_effort: Some("high".into()),
+            }
+        );
+    }
+
+    #[test]
     fn transferred_session_becomes_promptable_without_losing_its_thread() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");
         let mut event = started_event("codex:external", 4242);
@@ -3762,12 +3976,12 @@ mod tests {
         state.ingest(event).expect("sessão externa");
 
         state
-            .mark_session_lume_controlled("codex:external")
+            .mark_session_lume_controlled("codex:external", SessionSource::Desktop)
             .expect("transferência");
 
         let session = state.sessions().expect("sessões").remove(0);
         assert_eq!(session.control_origin, SessionControlOrigin::Lume);
-        assert_eq!(session.source, SessionSource::Cli);
+        assert_eq!(session.source, SessionSource::Desktop);
         assert_eq!(
             session.native_session_id.as_deref(),
             Some("thread-external")
@@ -3791,16 +4005,45 @@ mod tests {
         state.sessions.lock().expect("sessões").push(alias);
 
         state
-            .mark_session_lume_controlled("codex:external")
+            .mark_session_lume_controlled("codex:external", SessionSource::Desktop)
             .expect("transferência");
 
         let sessions = state.connected_sessions().expect("sessões");
         assert_eq!(sessions.len(), 2);
         assert!(sessions.iter().all(|session| {
             session.control_origin == SessionControlOrigin::Lume
+                && session.source == SessionSource::Desktop
                 && session.process_id.is_none()
                 && session.permission_profile.can_respond_from_lume
         }));
+    }
+
+    #[test]
+    fn takeover_reservation_prevents_process_reconciliation_from_removing_the_session() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        let mut event = started_event("codex:takeover", 4242);
+        event.agent = AgentKind::Codex;
+        state.ingest(event).expect("sessão externa");
+        state
+            .set_session_takeover_active("codex:takeover", true)
+            .expect("reserva");
+
+        for _ in 0..=PROCESS_MISSING_SCAN_LIMIT {
+            state
+                .reconcile_process_snapshot(Vec::new(), HashSet::new())
+                .expect("reconciliação protegida");
+        }
+        assert_eq!(state.sessions().expect("sessões").len(), 1);
+
+        state
+            .set_session_takeover_active("codex:takeover", false)
+            .expect("liberação");
+        for _ in 0..PROCESS_MISSING_SCAN_LIMIT {
+            state
+                .reconcile_process_snapshot(Vec::new(), HashSet::new())
+                .expect("reconciliação final");
+        }
+        assert!(state.sessions().expect("sessões").is_empty());
     }
 
     #[test]
@@ -5046,6 +5289,25 @@ mod tests {
 
         assert!(state.sessions().expect("sessões").is_empty());
         assert_eq!(state.history(10).expect("histórico").len(), 2);
+    }
+
+    #[test]
+    fn terminating_a_managed_session_without_a_process_removes_its_thread() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        let mut event = started_event("codex-app-server:thread-1", 4242);
+        event.agent = AgentKind::Codex;
+        event.source = Some(SessionSource::Desktop);
+        event.control_origin = SessionControlOrigin::Lume;
+        event.process_id = None;
+        event.native_session_id = Some("thread-1".into());
+        state.ingest(event).expect("sessão gerenciada");
+
+        assert!(state
+            .mark_session_terminated("codex-app-server:thread-1")
+            .expect("encerramento"));
+
+        assert!(state.sessions().expect("sessões").is_empty());
+        assert_eq!(state.history(10).expect("histórico").len(), 1);
     }
 
     #[test]

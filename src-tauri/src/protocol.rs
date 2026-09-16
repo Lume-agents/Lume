@@ -12,9 +12,9 @@ use tauri::{AppHandle, Emitter};
 
 use crate::{
     domain::{
-        AgentKind, AgentSession, PermissionAction, PromptAttachmentInput, PromptDelivery,
-        QuestionAnswer, SessionActivity, SessionControlOrigin, SessionSource, SessionStatus,
-        WorkflowGroupDefinition, WorkflowHistoryRecord,
+        AgentKind, AgentSession, InternalService, PermissionAction, PromptAttachmentInput,
+        PromptDelivery, QuestionAnswer, SessionActivity, SessionControlOrigin, SessionSource,
+        SessionStatus, WorkflowGroupDefinition, WorkflowHistoryRecord,
     },
     state::now_millis,
 };
@@ -99,7 +99,11 @@ impl SessionCapabilities {
             can_approve: session.pending_permission.is_some()
                 && session.permission_profile.can_respond_from_lume,
             can_answer_question: session.pending_question.is_some(),
-            can_terminate: session.source == SessionSource::Cli && session.process_id.is_some(),
+            can_terminate: (session.source == SessionSource::Cli && session.process_id.is_some())
+                || (session.agent == AgentKind::Codex
+                    && session.source == SessionSource::Desktop
+                    && session.control_origin == SessionControlOrigin::Lume
+                    && session.native_session_id.is_some()),
             can_open_source: matches!(session.source, SessionSource::Web | SessionSource::Vscode),
             can_read_results: !session.results.is_empty() || session.last_response.is_some(),
             can_attach_images: session.source != SessionSource::Web
@@ -638,6 +642,7 @@ pub struct HubSnapshot {
     pub generated_at: i64,
     pub features: Vec<String>,
     pub sessions: Vec<HubSession>,
+    pub internal_services: Vec<InternalService>,
     pub workflow_groups: Vec<WorkflowGroupDefinition>,
     pub workflow_history: Vec<WorkflowHistoryRecord>,
 }
@@ -653,6 +658,7 @@ impl HubSnapshot {
                 .map(|feature| (*feature).to_string())
                 .collect(),
             sessions: sessions.into_iter().map(HubSession::from).collect(),
+            internal_services: Vec::new(),
             workflow_groups: Vec::new(),
             workflow_history: Vec::new(),
         }
@@ -664,7 +670,14 @@ impl HubSnapshot {
         for session in &mut snapshot.sessions {
             let activity_start = session.session.activities.len().saturating_sub(limit);
             if activity_start > 0 {
+                let active_subagents = session.session.activities[..activity_start]
+                    .iter()
+                    .filter(|activity| activity.kind == "subagent" && activity.status == "running")
+                    .take(8)
+                    .cloned()
+                    .collect::<Vec<_>>();
                 session.session.activities.drain(..activity_start);
+                session.session.activities.splice(0..0, active_subagents);
             }
             let result_start = session.session.results.len().saturating_sub(limit);
             if result_start > 0 {
@@ -681,6 +694,11 @@ impl HubSnapshot {
     ) -> Self {
         self.workflow_groups = groups;
         self.workflow_history = history;
+        self
+    }
+
+    pub fn with_internal_services(mut self, services: Vec<InternalService>) -> Self {
+        self.internal_services = services;
         self
     }
 }
@@ -1199,6 +1217,50 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_keeps_internal_services_separate_from_user_sessions() {
+        let snapshot =
+            HubSnapshot::new(vec![session()]).with_internal_services(vec![InternalService {
+                id: "codex:internal:7".into(),
+                agent: AgentKind::Codex,
+                label: "Memories".into(),
+                process_id: 7,
+            }]);
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.internal_services.len(), 1);
+        let serialized = serde_json::to_value(snapshot).expect("snapshot JSON");
+        assert_eq!(serialized["internalServices"][0]["label"], "Memories");
+    }
+
+    #[test]
+    fn snapshot_keeps_a_running_subagent_when_activity_is_bounded() {
+        let mut parent = session();
+        parent.activities.push(SessionActivity {
+            id: "child-1".into(),
+            kind: "subagent".into(),
+            title: "Reviewer".into(),
+            detail: None,
+            status: "running".into(),
+            created_at: 1,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        });
+        for index in 0..70 {
+            let mut activity = parent.activities[0].clone();
+            activity.id = format!("tool-{index}");
+            activity.kind = "tool".into();
+            activity.created_at = index + 2;
+            parent.activities.push(activity);
+        }
+        let snapshot = HubSnapshot::with_activity_limit(vec![parent], 60);
+        assert!(snapshot.sessions[0]
+            .session
+            .activities
+            .iter()
+            .any(|activity| activity.id == "child-1"));
+    }
+
+    #[test]
     fn snapshot_is_versioned_and_contains_capabilities() {
         let snapshot = HubSnapshot::new(vec![session()]);
         assert_eq!(snapshot.protocol_version, PROTOCOL_VERSION);
@@ -1295,6 +1357,15 @@ mod tests {
                 PromptDelivery::Queue,
             ]
         );
+    }
+
+    #[test]
+    fn managed_headless_codex_can_be_terminated_without_a_process() {
+        let mut managed = session();
+        managed.source = SessionSource::Desktop;
+        managed.process_id = None;
+
+        assert!(SessionCapabilities::for_session(&managed).can_terminate);
     }
 
     #[test]

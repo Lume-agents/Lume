@@ -1,0 +1,2663 @@
+<script lang="ts">
+  import { onMount, tick } from "svelte";
+  import { fade, fly } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
+  import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { open as openDialog } from "@tauri-apps/plugin-dialog";
+  import { relaunch } from "@tauri-apps/plugin-process";
+  import { check, type Update } from "@tauri-apps/plugin-updater";
+  import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
+  import QRCode from "qrcode";
+  import BrandIcon from "$lib/BrandIcon.svelte";
+  import AccentColorPicker from "$lib/AccentColorPicker.svelte";
+  import LumeIcon from "$lib/LumeIcon.svelte";
+  import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
+  import { copyResolvedColorTokens } from "$lib/floatingTheme";
+  import { appearanceAttributes, appearanceThemes, type AppearanceTheme } from "$lib/appearance";
+  import LumeSelect from "$lib/LumeSelect.svelte";
+  import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
+  import WorkspaceInspector from "$lib/WorkspaceInspector.svelte";
+  import WorkspaceReviewCenter from "$lib/WorkspaceReviewCenter.svelte";
+  import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
+  import ThreadAvatar from "$lib/ThreadAvatar.svelte";
+  import { resolveLiveResumableSession } from "$lib/sessionIdentity";
+  import { subagentsForSession } from "$lib/workspaceAgents";
+  import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, Preferences, ResumableSession } from "$lib/domain";
+  import type { HubSession } from "$lib/hubProtocol";
+  import type { Language } from "$lib/i18n";
+  import { displayText } from "$lib/i18n";
+  import {
+    beginMobilePairing,
+    configureIntegration,
+    configureVscode,
+    defaultPreferences,
+    diagnoseIntegration,
+    disableMobileGateway,
+    enableMobileGateway,
+    installExternalPlugin,
+    loadExternalPlugins,
+    loadHubSnapshot,
+    loadIntegrationStatuses,
+    loadResumableSessions,
+    loadMobileGatewayStatus,
+    loadOverlayPosition,
+    loadPairedDevices,
+    loadPreferences,
+    loadVscodeStatus,
+    launchAgentSession,
+    removeExternalPlugin,
+    renameSession,
+    revealBrowserCompanion,
+    revealPluginDirectory,
+    revokePairedDevice,
+    savePreferences,
+    setPairedDeviceScopes,
+    takeControlSession,
+    terminateSession,
+  } from "$lib/lume";
+
+  type WorkspaceNamedLayout = {
+    id: string;
+    name: string;
+    paneKeys: string[];
+    splitRatio: number;
+    tertiaryRatio: number;
+    projectFilter: string;
+    inspectorOpen: boolean;
+    updatedAt: number;
+  };
+
+  type WorkspaceDropIntent = {
+    kind: "insert" | "replace" | "move";
+    index: number;
+    left: number;
+    width: number;
+  };
+
+  type WorkspaceDropGeometry = {
+    bounds: DOMRect;
+    panes: Array<{ node: HTMLElement; bounds: DOMRect }>;
+  };
+
+  let sessions = $state<HubSession[]>([]);
+  let preferences = $state<Preferences>(structuredClone(defaultPreferences));
+  let language = $state<Language>("en");
+  let systemDark = $state(false);
+  let settingsOpen = $state(false);
+  let settingsLoading = $state(false);
+  let settingsSaving = $state(false);
+  let settingsError = $state("");
+  let settingsMessage = $state("");
+  let integrations = $state<IntegrationStatus[]>([]);
+  let integrationDiagnostics = $state<Partial<Record<IntegrationStatus["kind"], IntegrationDiagnostic>>>({});
+  let configuringIntegration = $state<IntegrationStatus["kind"] | null>(null);
+  let diagnosingIntegration = $state<IntegrationStatus["kind"] | null>(null);
+  let vscodeStatus = $state<CompanionStatus>({ installed: false, configured: false, detail: "" });
+  let configuringVscode = $state(false);
+  let externalPlugins = $state<ExternalAgentPlugin[]>([]);
+  let installingPlugin = $state(false);
+  let monitors = $state<Array<{ id: string; label: string }>>([]);
+  let selectedProfileKey = $state<string | null>(null);
+  let shortcutEditorKey = $state<"openShortcut" | "globalShortcut" | "newSessionShortcut" | "whiteboardShortcut" | "workspaceShortcut" | null>(null);
+  let shortcutDraft = $state("");
+  let mobileStatus = $state<MobileGatewayStatus | null>(null);
+  let pairedDevices = $state<PairedDevice[]>([]);
+  let pairingOffer = $state<MobilePairingOffer | null>(null);
+  let pairingQr = $state<string | null>(null);
+  let mobileBusy = $state(false);
+  let appVersion = $state("0.14.5");
+  let updateState = $state<"idle" | "checking" | "available" | "up_to_date" | "downloading" | "ready" | "error">("idle");
+  let availableVersion = $state<string | null>(null);
+  let updateDetail = $state("");
+  let pendingUpdate: Update | null = null;
+  let resetConfirming = $state(false);
+  let loading = $state(true);
+  let internalServices = $state<InternalService[]>([]);
+  let expandedSubagentSessions = $state<Set<string>>(new Set());
+  let error = $state("");
+  let query = $state("");
+  let searchOpen = $state(false);
+  let searchInput = $state<HTMLInputElement | null>(null);
+  let headerControl = $state<"project" | "layout" | null>(null);
+  let sessionContextMenu = $state<{ sessionId: string; x: number; y: number; confirming: boolean; renaming: boolean } | null>(null);
+  let sessionContextBusy = $state(false);
+  let sessionContextError = $state("");
+  let sessionContextNode = $state<HTMLDivElement | null>(null);
+  let sessionRenameDraft = $state("");
+  let streamMessages = $state(true);
+  let workspaceBackgroundImage = $state("");
+  let workspaceBackgroundImageOpacity = $state(100);
+  let workspaceBackgroundInput = $state<HTMLInputElement | null>(null);
+  let filter = $state<"all" | "active" | "attention">("all");
+  let projectFilter = $state("all");
+  let primaryId = $state<string | null>(null);
+  let secondaryId = $state<string | null>(null);
+  let tertiaryId = $state<string | null>(null);
+  let focusedPaneId = $state<string | null>(null);
+  let maximizedPaneId = $state<string | null>(null);
+  let inspectorOpen = $state(true);
+  let reviewOpen = $state(false);
+  let reviewInitialPath = $state<string | undefined>();
+  let inspectorBeforeReview = $state(false);
+  let splitRatio = $state(0.5);
+  let tertiaryRatio = $state(0.34);
+  let resizingDivider = $state<0 | 1 | null>(null);
+  let draggingSessionId = $state<string | null>(null);
+  let workspaceDropIntent = $state<WorkspaceDropIntent | null>(null);
+  let namedLayouts = $state<WorkspaceNamedLayout[]>([]);
+  let selectedNamedLayoutId = $state("");
+  let namingLayout = $state(false);
+  let layoutName = $state("");
+  let layoutNameInput = $state<HTMLInputElement | null>(null);
+  let layoutMessage = $state("");
+  let launcherOpen = $state(false);
+  let launcherRoot = $state<HTMLDivElement | null>(null);
+  let launcherPopoverNode: HTMLDivElement | null = null;
+  let launching = $state<IntegrationStatus["kind"] | null>(null);
+  let resumeAgent = $state<IntegrationStatus["kind"] | null>(null);
+  let resumableSessions = $state<ResumableSession[]>([]);
+  let loadingResumeAgent = $state<IntegrationStatus["kind"] | null>(null);
+
+  async function openAgentSearch() {
+    launcherOpen = false;
+    searchOpen = true;
+    await tick();
+    searchInput?.focus();
+  }
+
+  function closeAgentSearch() {
+    searchOpen = false;
+    query = "";
+  }
+  let launchError = $state("");
+  let pendingOpenedSession: { nativeId?: string; agent: string; knownIds: Set<string>; startedAt: number } | null = null;
+  let namedLayoutRestored = false;
+  let workbenchElement = $state<HTMLElement | null>(null);
+  let workspaceDropGeometry: WorkspaceDropGeometry | null = null;
+
+  const workspaceLayoutKey = "lume:workspace-layout:v1";
+  const workspaceNamedLayoutsKey = "lume:workspace-named-layouts:v1";
+  const workspaceStreamMessagesKey = "lume:workspace-stream-messages:v1";
+  const workspaceBackgroundImageKey = "lume:workspace-background-image:v1";
+  const workspaceBackgroundImageOpacityKey = "lume:workspace-background-image-opacity:v1";
+
+  function setStreamMessages(enabled: boolean) {
+    streamMessages = enabled;
+    try { localStorage.setItem(workspaceStreamMessagesKey, String(enabled)); }
+    catch { /* The preference remains active for this window. */ }
+  }
+
+  function loadBackgroundImage(file: File) {
+    if (!file.type.startsWith("image/") || file.size > 24 * 1024 * 1024) {
+      settingsError = tr("Choose an image smaller than 24 MB.", "Escolha uma imagem menor que 24 MB.");
+      return;
+    }
+    settingsError = "";
+    const source = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      try {
+        const maximum = 2200;
+        const scale = Math.min(1, maximum / Math.max(image.naturalWidth, image.naturalHeight));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("canvas");
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        let dataUrl = canvas.toDataURL("image/webp", .84);
+        if (dataUrl.length > 3_600_000) {
+          const compactScale = Math.min(1, 1600 / Math.max(canvas.width, canvas.height));
+          const compact = document.createElement("canvas");
+          compact.width = Math.max(1, Math.round(canvas.width * compactScale));
+          compact.height = Math.max(1, Math.round(canvas.height * compactScale));
+          compact.getContext("2d")?.drawImage(canvas, 0, 0, compact.width, compact.height);
+          dataUrl = compact.toDataURL("image/webp", .76);
+        }
+        if (dataUrl.length > 3_600_000) throw new Error("size");
+        localStorage.setItem(workspaceBackgroundImageKey, dataUrl);
+        workspaceBackgroundImage = dataUrl;
+        settingsMessage = tr("Workspace background updated.", "Fundo do Workspace atualizado.");
+      } catch {
+        settingsError = tr("This image could not be saved as a background.", "Não foi possível salvar esta imagem como fundo.");
+      } finally {
+        URL.revokeObjectURL(source);
+        if (workspaceBackgroundInput) workspaceBackgroundInput.value = "";
+      }
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(source);
+      settingsError = tr("This image could not be read.", "Não foi possível ler esta imagem.");
+      if (workspaceBackgroundInput) workspaceBackgroundInput.value = "";
+    };
+    image.src = source;
+  }
+
+  function removeBackgroundImage() {
+    workspaceBackgroundImage = "";
+    try { localStorage.removeItem(workspaceBackgroundImageKey); }
+    catch { /* The background still resets for this window. */ }
+    settingsMessage = tr("Custom background removed.", "Fundo personalizado removido.");
+  }
+
+  function setBackgroundImageOpacity(value: number) {
+    workspaceBackgroundImageOpacity = Math.max(0, Math.min(100, Math.round(value)));
+    try { localStorage.setItem(workspaceBackgroundImageOpacityKey, String(workspaceBackgroundImageOpacity)); }
+    catch { /* Keep the selected opacity for this window. */ }
+  }
+
+  function floatLauncher(node: HTMLDivElement) {
+    const anchorElement = node.parentElement as HTMLElement;
+    launcherPopoverNode = node;
+    document.body.appendChild(node);
+    const position = () => {
+      const anchor = anchorElement.getBoundingClientRect();
+      const width = Math.min(248, window.innerWidth - 16);
+      const availableBelow = window.innerHeight - anchor.bottom - 12;
+      const availableAbove = anchor.top - 12;
+      const above = availableBelow < 220 && availableAbove > availableBelow;
+      const maxHeight = Math.max(100, Math.min(420, above ? availableAbove : availableBelow));
+      node.style.width = `${width}px`;
+      node.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, anchor.right - width))}px`;
+      node.style.maxHeight = `${maxHeight}px`;
+      node.style.top = above ? "auto" : `${anchor.bottom + 5}px`;
+      node.style.bottom = above ? `${window.innerHeight - anchor.top + 5}px` : "auto";
+      const root = anchorElement.closest<HTMLElement>(".workspace");
+      if (root) {
+        const styles = getComputedStyle(root);
+        copyResolvedColorTokens(root, node, ["raised", "text", "strong", "muted", "line", "subtle", "accent", "accent-soft"].map((token) => ({ source: `--workspace-${token}` })));
+        node.style.fontFamily = styles.fontFamily;
+      }
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return {
+      destroy() {
+        window.removeEventListener("resize", position);
+        window.removeEventListener("scroll", position, true);
+        if (launcherPopoverNode === node) launcherPopoverNode = null;
+        node.remove();
+      },
+    };
+  }
+  const workspaceResizeEdges = [
+    "North",
+    "NorthEast",
+    "East",
+    "SouthEast",
+    "South",
+    "SouthWest",
+    "West",
+    "NorthWest",
+  ] as const;
+
+  const orderedSessions = $derived.by(() => {
+    const priority: Record<HubSession["status"], number> = {
+      permission_required: 0,
+      running: 1,
+      completed: 2,
+      failed: 3,
+      waiting_for_input: 4,
+    };
+    return [...sessions].sort((left, right) =>
+      priority[left.status] - priority[right.status] || right.updatedAt - left.updatedAt
+    );
+  });
+  const workspaceProjects = $derived.by(() => {
+    const projects = new Map<string, string>();
+    for (const session of orderedSessions) {
+      const key = projectKey(session.workingDirectory ?? session.project);
+      if (key) projects.set(key, session.project || sessionName(session));
+    }
+    return Array.from(projects, ([value, label]) => ({ value, label })).sort((left, right) => left.label.localeCompare(right.label));
+  });
+  const projectSessions = $derived(projectFilter === "all" ? orderedSessions : orderedSessions.filter((session) => projectKey(session.workingDirectory ?? session.project) === projectFilter));
+  const filteredSessions = $derived.by(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return projectSessions.filter((session) => {
+      const matchesFilter = filter === "all"
+        || (filter === "active" && session.status === "running")
+        || (filter === "attention" && ["permission_required", "failed"].includes(session.status));
+      if (!matchesFilter) return false;
+      if (!needle) return true;
+      return [
+        sessionName(session),
+        session.project,
+        session.agentLabel,
+        session.workingDirectory ?? "",
+        ...subagentsForSession(session).map((agent) => agent.label),
+      ].some((value) => value.toLocaleLowerCase().includes(needle));
+    });
+  });
+  const filteredInternalServices = $derived(
+    projectFilter === "all" && filter !== "attention"
+      ? internalServices.filter((service) =>
+          !query.trim() || `${service.label} ${service.agent}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+        )
+      : []
+  );
+  const primary = $derived(sessions.find((session) => session.id === primaryId) ?? null);
+  const secondary = $derived(sessions.find((session) => session.id === secondaryId) ?? null);
+  const tertiary = $derived(sessions.find((session) => session.id === tertiaryId) ?? null);
+  const focusedSession = $derived(
+    sessions.find((session) => session.id === focusedPaneId)
+      ?? primary
+  );
+  const contextSession = $derived.by(() => {
+    const sessionId = sessionContextMenu?.sessionId;
+    return sessionId ? sessions.find((session) => session.id === sessionId) ?? null : null;
+  });
+  const maximizedSession = $derived(
+    sessions.find((session) => session.id === maximizedPaneId)
+      ?? null
+  );
+  const darkMode = $derived(preferences.darkMode ?? systemDark);
+  const appearanceMode = $derived<"system" | "light" | "dark">(
+    preferences.darkMode === undefined ? "system" : preferences.darkMode ? "dark" : "light"
+  );
+  const appearance = $derived(appearanceAttributes(preferences));
+  const detectedProjects = $derived.by(() => {
+    const projects = new Map<string, string>();
+    for (const [key, profile] of Object.entries(preferences.projectProfiles)) {
+      if (profile.label) projects.set(key, profile.label);
+    }
+    for (const session of sessions) {
+      const raw = session.workingDirectory ?? session.project;
+      const key = raw.trim().replaceAll("\\", "/").replace(/\/+$/, "").toLocaleLowerCase();
+      if (key) projects.set(key, session.project || sessionName(session));
+    }
+    return Array.from(projects, ([key, label]) => ({ key, label })).sort((left, right) => left.label.localeCompare(right.label));
+  });
+  const selectedProjectProfile = $derived(selectedProfileKey ? preferences.projectProfiles[selectedProfileKey] : undefined);
+  const selectedNamedLayout = $derived(namedLayouts.find((layout) => layout.id === selectedNamedLayoutId) ?? null);
+  const selectedLayoutDirty = $derived.by(() => selectedNamedLayout ? !layoutMatchesCurrent(selectedNamedLayout) : false);
+
+  $effect(() => {
+    if (typeof document !== "undefined") {
+      const root = document.documentElement;
+      root.dataset.theme = darkMode ? "dark" : "light";
+      root.dataset.appearance = appearance.theme;
+      if (appearance.accentCss) {
+        root.style.setProperty("--lume-accent", appearance.accentCss);
+        root.style.setProperty("--lume-accent-strong", appearance.accentCss);
+      } else {
+        root.style.removeProperty("--lume-accent");
+        root.style.removeProperty("--lume-accent-strong");
+      }
+    }
+  });
+
+  function tr(english: string, portuguese: string) {
+    return language === "pt-BR" ? portuguese : english;
+  }
+
+  const systemBanners = $derived.by<SystemBannerItem[]>(() => {
+    const items: SystemBannerItem[] = [];
+    if (settingsError) items.push({ id: "settings-error", message: settingsError, tone: "error", onDismiss: () => { settingsError = ""; } });
+    if (launchError) items.push({ id: "launch-error", message: launchError, tone: "error", onDismiss: () => { launchError = ""; } });
+    if (sessionContextError) items.push({ id: "session-error", message: sessionContextError, tone: "error", onDismiss: () => { sessionContextError = ""; } });
+    if (settingsMessage) items.push({ id: "settings-message", message: settingsMessage, tone: "success", onDismiss: () => { settingsMessage = ""; } });
+    if (layoutMessage) items.push({ id: "layout-message", message: layoutMessage, onDismiss: () => { layoutMessage = ""; } });
+    return items;
+  });
+
+  function sessionName(session: HubSession) {
+    return session.sessionName?.trim() || session.project?.trim() || session.agentLabel;
+  }
+
+  function projectKey(value: string) {
+    return value.trim().replaceAll("\\", "/").replace(/\/+$/, "").toLocaleLowerCase();
+  }
+
+  function sessionSubtitle(session: HubSession) {
+    const directory = session.workingDirectory?.trim().replace(/[\\/]+$/, "");
+    return directory?.split(/[\\/]/).pop() || session.project || session.agentLabel;
+  }
+
+  function sessionLayoutKey(session: HubSession) {
+    return session.nativeSessionId
+      ? `native:${session.agent}:${session.nativeSessionId}`
+      : `session:${session.id}`;
+  }
+
+  function currentPaneKeys() {
+    return [primary, secondary, tertiary]
+      .filter((session): session is HubSession => Boolean(session))
+      .map(sessionLayoutKey);
+  }
+
+  function layoutMatchesCurrent(layout: WorkspaceNamedLayout) {
+    const currentKeys = currentPaneKeys();
+    return currentKeys.length === layout.paneKeys.length
+      && currentKeys.every((key, index) => key === layout.paneKeys[index])
+      && (currentKeys.length < 2 || Math.abs(splitRatio - layout.splitRatio) < 0.002)
+      && (currentKeys.length < 3 || Math.abs(tertiaryRatio - layout.tertiaryRatio) < 0.002)
+      && projectFilter === layout.projectFilter
+      && inspectorOpen === layout.inspectorOpen;
+  }
+
+  function layoutSnapshot(id: string, name: string): WorkspaceNamedLayout {
+    return {
+      id,
+      name,
+      paneKeys: currentPaneKeys(),
+      splitRatio,
+      tertiaryRatio,
+      projectFilter,
+      inspectorOpen,
+      updatedAt: Date.now(),
+    };
+  }
+
+  function persistNamedLayouts() {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(workspaceNamedLayoutsKey, JSON.stringify(namedLayouts));
+  }
+
+  function restoreNamedLayouts() {
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(workspaceNamedLayoutsKey) ?? "[]");
+      if (!Array.isArray(parsed)) return;
+      namedLayouts = parsed.filter((candidate): candidate is WorkspaceNamedLayout => {
+        if (!candidate || typeof candidate !== "object") return false;
+        const value = candidate as Partial<WorkspaceNamedLayout>;
+        return typeof value.id === "string"
+          && typeof value.name === "string"
+          && Array.isArray(value.paneKeys)
+          && value.paneKeys.length > 0
+          && value.paneKeys.length <= 3
+          && value.paneKeys.every((key) => typeof key === "string")
+          && typeof value.splitRatio === "number"
+          && typeof value.tertiaryRatio === "number"
+          && typeof value.projectFilter === "string"
+          && typeof value.inspectorOpen === "boolean"
+          && typeof value.updatedAt === "number";
+      }).slice(0, 20);
+    } catch {
+      namedLayouts = [];
+    }
+  }
+
+  async function beginNamingLayout() {
+    if (!primary) return;
+    namingLayout = true;
+    layoutName = `${tr("Layout", "Layout")} ${namedLayouts.length + 1}`;
+    layoutMessage = "";
+    await tick();
+    layoutNameInput?.focus();
+    layoutNameInput?.select();
+  }
+
+  function saveNamedLayout() {
+    const name = layoutName.trim();
+    if (!primary || !name) return;
+    if (namedLayouts.some((layout) => layout.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      layoutMessage = tr("A layout with this name already exists.", "Já existe um layout com este nome.");
+      return;
+    }
+    const id = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `layout-${Date.now()}`;
+    const layout = layoutSnapshot(id, name);
+    namedLayouts = [layout, ...namedLayouts].slice(0, 20);
+    selectedNamedLayoutId = id;
+    namingLayout = false;
+    layoutName = "";
+    layoutMessage = tr("Layout saved.", "Layout salvo.");
+    persistNamedLayouts();
+    persistWorkspaceLayout();
+  }
+
+  function updateNamedLayout() {
+    if (!selectedNamedLayout) return;
+    const updated = layoutSnapshot(selectedNamedLayout.id, selectedNamedLayout.name);
+    namedLayouts = namedLayouts.map((layout) => layout.id === updated.id ? updated : layout);
+    layoutMessage = tr("Layout updated.", "Layout atualizado.");
+    persistNamedLayouts();
+  }
+
+  function deleteNamedLayout() {
+    if (!selectedNamedLayout) return;
+    namedLayouts = namedLayouts.filter((layout) => layout.id !== selectedNamedLayout.id);
+    selectedNamedLayoutId = "";
+    layoutMessage = tr("Layout removed.", "Layout removido.");
+    persistNamedLayouts();
+    persistWorkspaceLayout();
+  }
+
+  function applyNamedLayout(layoutId: string) {
+    selectedNamedLayoutId = layoutId;
+    layoutMessage = "";
+    if (!layoutId) {
+      persistWorkspaceLayout();
+      return;
+    }
+    const layout = namedLayouts.find((candidate) => candidate.id === layoutId);
+    if (!layout) return;
+    const resolved: HubSession[] = [];
+    for (const key of layout.paneKeys) {
+      const session = sessions.find((candidate) => sessionLayoutKey(candidate) === key);
+      if (session && !resolved.some((candidate) => candidate.id === session.id)) resolved.push(session);
+    }
+    if (!resolved.length) {
+      selectedNamedLayoutId = "";
+      layoutMessage = tr("None of this layout's sessions are currently open.", "Nenhuma sessão deste layout está aberta.");
+      return;
+    }
+    const availableProject = layout.projectFilter === "all"
+      || workspaceProjects.some((project) => project.value === layout.projectFilter);
+    projectFilter = availableProject ? layout.projectFilter : "all";
+    [primaryId, secondaryId, tertiaryId] = [
+      resolved[0]?.id ?? null,
+      resolved[1]?.id ?? null,
+      resolved[2]?.id ?? null,
+    ];
+    focusedPaneId = primaryId;
+    maximizedPaneId = null;
+    splitRatio = Math.min(0.75, Math.max(0.25, layout.splitRatio));
+    tertiaryRatio = Math.min(0.5, Math.max(0.22, layout.tertiaryRatio));
+    inspectorOpen = layout.inspectorOpen;
+    if (resolved.length !== layout.paneKeys.length) {
+      layoutMessage = tr(
+        `${layout.paneKeys.length - resolved.length} unavailable session omitted.`,
+        `${layout.paneKeys.length - resolved.length} sessão indisponível foi omitida.`,
+      );
+    }
+    persistWorkspaceLayout();
+  }
+
+  function statusLabel(session: HubSession) {
+    return displayText(language, session.statusLabel);
+  }
+
+  function toggleSubagents(sessionId: string) {
+    const next = new Set(expandedSubagentSessions);
+    if (next.has(sessionId)) next.delete(sessionId);
+    else next.add(sessionId);
+    expandedSubagentSessions = next;
+  }
+
+  function selectPrimary(session: HubSession) {
+    if (secondaryId === session.id) secondaryId = primaryId;
+    if (tertiaryId === session.id) tertiaryId = primaryId;
+    primaryId = session.id;
+    focusedPaneId = session.id;
+    if (maximizedPaneId) maximizedPaneId = session.id;
+    persistWorkspaceLayout();
+  }
+
+  async function toggleLauncher() {
+    launcherOpen = !launcherOpen;
+    launchError = "";
+    if (!launcherOpen) {
+      resumeAgent = null;
+      resumableSessions = [];
+    } else if (!integrations.length) {
+      try { integrations = await loadIntegrationStatuses(); }
+      catch (reason) { launchError = String(reason).replace(/^Error:\s*/, ""); }
+    }
+  }
+
+  async function startSession(agent: IntegrationStatus["kind"]) {
+    const selected = await openDialog({ directory: true, multiple: false, title: tr("Project for the new session", "Projeto da nova sessão") });
+    if (!selected || Array.isArray(selected)) return;
+    launching = agent;
+    launchError = "";
+    try {
+      const profile = preferences.projectProfiles[projectKey(selected)];
+      pendingOpenedSession = { agent: agent === "claude" ? "claude_code" : agent, knownIds: new Set(sessions.map((session) => session.id)), startedAt: Date.now() };
+      await launchAgentSession(agent, selected, false, undefined, profile?.launchTarget ?? preferences.launchTarget, profile?.permissionMode, profile?.approvalPolicy);
+      launcherOpen = false;
+    } catch (reason) {
+      pendingOpenedSession = null;
+      launchError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      launching = null;
+    }
+  }
+
+  async function toggleResumeSessions(agent: IntegrationStatus["kind"]) {
+    if (resumeAgent === agent) {
+      resumeAgent = null;
+      resumableSessions = [];
+      return;
+    }
+    resumeAgent = agent;
+    resumableSessions = [];
+    loadingResumeAgent = agent;
+    launchError = "";
+    try { resumableSessions = await loadResumableSessions(agent); }
+    catch (reason) { launchError = String(reason).replace(/^Error:\s*/, ""); }
+    finally { loadingResumeAgent = null; }
+  }
+
+  async function resumeStoredSession(stored: ResumableSession) {
+    const liveSession = resolveLiveResumableSession(stored, sessions);
+    if (liveSession) {
+      projectFilter = "all";
+      maximizedPaneId = null;
+      selectPrimary(liveSession);
+      launcherOpen = false;
+      return;
+    }
+    launching = stored.agent;
+    launchError = "";
+    try {
+      const profile = preferences.projectProfiles[projectKey(stored.workingDirectory)];
+      pendingOpenedSession = { nativeId: stored.id, agent: stored.agent === "claude" ? "claude_code" : stored.agent, knownIds: new Set(sessions.map((session) => session.id)), startedAt: Date.now() };
+      await launchAgentSession(stored.agent, stored.workingDirectory, true, stored.id, profile?.launchTarget ?? preferences.launchTarget);
+      launcherOpen = false;
+      resumeAgent = null;
+      resumableSessions = [];
+    } catch (reason) {
+      pendingOpenedSession = null;
+      launchError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      launching = null;
+    }
+  }
+
+  async function openForkedCodexSession(threadId: string, source: HubSession) {
+    const workingDirectory = source.workingDirectory?.trim() || ".";
+    const profile = preferences.projectProfiles[projectKey(workingDirectory)];
+    pendingOpenedSession = {
+      nativeId: threadId,
+      agent: "codex",
+      knownIds: new Set(sessions.map((session) => session.id)),
+      startedAt: Date.now(),
+    };
+    try {
+      await launchAgentSession(
+        "codex",
+        workingDirectory,
+        true,
+        threadId,
+        profile?.launchTarget ?? preferences.launchTarget,
+        profile?.permissionMode,
+        profile?.approvalPolicy,
+      );
+    } catch (error) {
+      pendingOpenedSession = null;
+      throw error;
+    }
+  }
+
+  function closeSidePane(sessionId: string) {
+    if (secondaryId === sessionId) {
+      secondaryId = tertiaryId;
+      tertiaryId = null;
+    } else if (tertiaryId === sessionId) {
+      tertiaryId = null;
+    }
+    if (focusedPaneId === sessionId) focusedPaneId = primaryId;
+    if (maximizedPaneId === sessionId) maximizedPaneId = null;
+    persistWorkspaceLayout();
+  }
+
+  function focusPane(sessionId: string) {
+    if (focusedPaneId === sessionId) return;
+    focusedPaneId = sessionId;
+    persistWorkspaceLayout();
+  }
+
+  function currentPaneIds() {
+    return [primaryId, secondaryId, tertiaryId].filter((id): id is string => Boolean(id));
+  }
+
+  function beginSidebarSessionDrag(event: DragEvent, sessionId: string) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest(".subagent-toggle")) {
+      event.preventDefault();
+      return;
+    }
+    draggingSessionId = sessionId;
+    workspaceDropIntent = null;
+    workspaceDropGeometry = null;
+    maximizedPaneId = null;
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/x-lume-session", sessionId);
+      event.dataTransfer.setData("text/plain", sessionId);
+    }
+  }
+
+  function finishSidebarSessionDrag() {
+    draggingSessionId = null;
+    workspaceDropIntent = null;
+    workspaceDropGeometry = null;
+  }
+
+  function setWorkspaceDropIntent(next: WorkspaceDropIntent) {
+    const current = workspaceDropIntent;
+    if (
+      current?.kind === next.kind
+      && current.index === next.index
+      && Math.abs(current.left - next.left) < .01
+      && Math.abs(current.width - next.width) < .01
+    ) return;
+    workspaceDropIntent = next;
+  }
+
+  function workspaceDropBounds() {
+    if (workspaceDropGeometry || !workbenchElement) return workspaceDropGeometry;
+    workspaceDropGeometry = {
+      bounds: workbenchElement.getBoundingClientRect(),
+      panes: Array.from(workbenchElement.querySelectorAll<HTMLElement>("[data-workspace-pane]"))
+        .map((node) => ({ node, bounds: node.getBoundingClientRect() }))
+        .sort((left, right) => left.bounds.left - right.bounds.left),
+    };
+    return workspaceDropGeometry;
+  }
+
+  function paneAtCursor(clientX: number, panes: WorkspaceDropGeometry["panes"]) {
+    const directIndex = panes.findIndex(({ bounds }) => clientX >= bounds.left && clientX <= bounds.right);
+    if (directIndex >= 0) return directIndex;
+    return panes.reduce((closest, pane, index) => {
+      const distance = clientX < pane.bounds.left
+        ? pane.bounds.left - clientX
+        : clientX - pane.bounds.right;
+      return distance < closest.distance ? { index, distance } : closest;
+    }, { index: 0, distance: Number.POSITIVE_INFINITY }).index;
+  }
+
+  function trackWorkspaceDrop(event: DragEvent) {
+    const sourceId = draggingSessionId ?? event.dataTransfer?.getData("text/x-lume-session");
+    if (!sourceId || !workbenchElement) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    const paneIds = currentPaneIds();
+    const geometry = workspaceDropBounds();
+    if (!geometry) return;
+    const { bounds, panes: paneNodes } = geometry;
+    if (!paneNodes.length) {
+      setWorkspaceDropIntent({ kind: "insert", index: 0, left: 0, width: 100 });
+      return;
+    }
+    const cursorPaneIndex = paneAtCursor(event.clientX, paneNodes);
+    const existingIndex = paneIds.indexOf(sourceId);
+    if (existingIndex >= 0) {
+      const target = paneNodes[cursorPaneIndex]?.bounds ?? bounds;
+      setWorkspaceDropIntent({
+        kind: "move",
+        index: cursorPaneIndex,
+        left: (target.left - bounds.left) / bounds.width * 100,
+        width: target.width / bounds.width * 100,
+      });
+      return;
+    }
+    if (paneIds.length < 3) {
+      const cursorPane = paneNodes[cursorPaneIndex]?.bounds ?? bounds;
+      const replaceInset = Math.min(110, Math.max(54, cursorPane.width * .28));
+      const replaceHysteresis = workspaceDropIntent?.kind === "replace"
+        && workspaceDropIntent.index === cursorPaneIndex ? 12 : 0;
+      const insideReplaceZone = event.clientX >= cursorPane.left + replaceInset - replaceHysteresis
+        && event.clientX <= cursorPane.right - replaceInset + replaceHysteresis;
+      if (insideReplaceZone) {
+        setWorkspaceDropIntent({
+          kind: "replace",
+          index: cursorPaneIndex,
+          left: (cursorPane.left - bounds.left) / bounds.width * 100,
+          width: cursorPane.width / bounds.width * 100,
+        });
+        return;
+      }
+      const paneCenter = cursorPane.left + cursorPane.width / 2;
+      let insertIndex = event.clientX < paneCenter ? cursorPaneIndex : cursorPaneIndex + 1;
+      const currentInsertIndex = workspaceDropIntent?.kind === "insert" ? workspaceDropIntent.index : null;
+      const currentBelongsToPane = currentInsertIndex === cursorPaneIndex || currentInsertIndex === cursorPaneIndex + 1;
+      if (currentBelongsToPane && Math.abs(event.clientX - paneCenter) <= 18) {
+        insertIndex = currentInsertIndex;
+      }
+      const nextCount = paneIds.length + 1;
+      setWorkspaceDropIntent({
+        kind: "insert",
+        index: insertIndex,
+        left: insertIndex / nextCount * 100,
+        width: 100 / nextCount,
+      });
+      return;
+    }
+    const target = paneNodes[cursorPaneIndex]?.bounds ?? bounds;
+    setWorkspaceDropIntent({
+      kind: "replace",
+      index: cursorPaneIndex,
+      left: (target.left - bounds.left) / bounds.width * 100,
+      width: target.width / bounds.width * 100,
+    });
+  }
+
+  function leaveWorkspaceDrop(event: DragEvent) {
+    const geometry = workspaceDropBounds();
+    if (
+      geometry
+      && event.clientX >= geometry.bounds.left
+      && event.clientX <= geometry.bounds.right
+      && event.clientY >= geometry.bounds.top
+      && event.clientY <= geometry.bounds.bottom
+    ) return;
+    const next = event.relatedTarget;
+    if (next instanceof Node && workbenchElement?.contains(next)) return;
+    workspaceDropIntent = null;
+  }
+
+  function dropSessionInWorkspace(event: DragEvent) {
+    event.preventDefault();
+    const sourceId = draggingSessionId
+      ?? event.dataTransfer?.getData("text/x-lume-session")
+      ?? event.dataTransfer?.getData("text/plain");
+    const intent = workspaceDropIntent;
+    if (!sourceId || !intent || !sessions.some((session) => session.id === sourceId)) {
+      finishSidebarSessionDrag();
+      return;
+    }
+    const paneIds = currentPaneIds();
+    const previousCount = paneIds.length;
+    const sourceIndex = paneIds.indexOf(sourceId);
+    if (intent.kind === "insert" && sourceIndex < 0 && paneIds.length < 3) {
+      paneIds.splice(Math.min(intent.index, paneIds.length), 0, sourceId);
+    } else if (intent.kind === "move" && sourceIndex >= 0 && intent.index !== sourceIndex) {
+      [paneIds[sourceIndex], paneIds[intent.index]] = [paneIds[intent.index], paneIds[sourceIndex]];
+    } else if (intent.kind === "replace") {
+      paneIds[Math.min(intent.index, paneIds.length - 1)] = sourceId;
+    }
+    const normalized = paneIds.filter((id, index) => paneIds.indexOf(id) === index).slice(0, 3);
+    [primaryId, secondaryId, tertiaryId] = [normalized[0] ?? null, normalized[1] ?? null, normalized[2] ?? null];
+    if (previousCount < 2 && normalized.length === 2) splitRatio = .5;
+    if (previousCount < 3 && normalized.length === 3) {
+      splitRatio = .5;
+      tertiaryRatio = .34;
+    }
+    focusedPaneId = sourceId;
+    maximizedPaneId = null;
+    persistWorkspaceLayout();
+    finishSidebarSessionDrag();
+  }
+
+  function togglePaneMaximize(sessionId: string) {
+    maximizedPaneId = maximizedPaneId === sessionId ? null : sessionId;
+    focusedPaneId = sessionId;
+    persistWorkspaceLayout();
+  }
+
+  function selectProject(value: string) {
+    projectFilter = value;
+    const available = value === "all"
+      ? orderedSessions
+      : orderedSessions.filter((session) => projectKey(session.workingDirectory ?? session.project) === value);
+    if (!available.some((session) => session.id === primaryId)) primaryId = available[0]?.id ?? null;
+    if (!available.some((session) => session.id === secondaryId)) secondaryId = null;
+    if (!available.some((session) => session.id === tertiaryId)) tertiaryId = null;
+    if (!secondaryId && tertiaryId) {
+      secondaryId = tertiaryId;
+      tertiaryId = null;
+    }
+    focusedPaneId = [primaryId, secondaryId, tertiaryId].includes(focusedPaneId) ? focusedPaneId : primaryId;
+    if (![primaryId, secondaryId, tertiaryId].includes(maximizedPaneId)) maximizedPaneId = null;
+    persistWorkspaceLayout();
+  }
+
+  function toggleInspector() {
+    if (reviewOpen) {
+      reviewOpen = false;
+      reviewInitialPath = undefined;
+      inspectorBeforeReview = false;
+      inspectorOpen = true;
+      persistWorkspaceLayout();
+      return;
+    }
+    inspectorOpen = !inspectorOpen;
+    persistWorkspaceLayout();
+  }
+
+  function motionDuration(duration: number) {
+    return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration;
+  }
+
+  function openSessionContextMenu(session: HubSession, x: number, y: number) {
+    sessionContextError = "";
+    sessionContextMenu = {
+      sessionId: session.id,
+      x: Math.max(8, Math.min(x, window.innerWidth - 230)),
+      y: Math.max(8, Math.min(y, window.innerHeight - 170)),
+      confirming: false,
+      renaming: false,
+    };
+    void tick().then(() => (sessionContextNode?.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? sessionContextNode)?.focus());
+  }
+
+  function beginSidebarSessionRename(session: HubSession) {
+    sessionRenameDraft = sessionName(session);
+    sessionContextError = "";
+    if (sessionContextMenu) {
+      sessionContextMenu = { ...sessionContextMenu, confirming: false, renaming: true };
+    }
+    void tick().then(() => {
+      const input = sessionContextNode?.querySelector<HTMLInputElement>(".session-context-rename input");
+      input?.focus();
+      input?.select();
+    });
+  }
+
+  async function saveSidebarSessionRename(session: HubSession) {
+    if (sessionContextBusy) return;
+    const requested = sessionRenameDraft.trim();
+    if (!requested) {
+      sessionContextError = tr("Enter a name for this session.", "Digite um nome para esta sessão.");
+      return;
+    }
+    sessionContextBusy = true;
+    sessionContextError = "";
+    try {
+      const finalName = await renameSession(session.id, requested);
+      sessions = sessions.map((item) => item.id === session.id ? { ...item, sessionName: finalName } : item);
+      sessionContextMenu = null;
+      sessionRenameDraft = "";
+    } catch (reason) {
+      sessionContextError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      sessionContextBusy = false;
+    }
+  }
+
+  async function closeSidebarAgent(session: HubSession) {
+    if (sessionContextBusy || !session.capabilities.canTerminate) return;
+    sessionContextBusy = true;
+    sessionContextError = "";
+    try {
+      await terminateSession(session.id);
+      sessionContextMenu = null;
+      await refreshSessionsAfterContextAction();
+    } catch (reason) {
+      sessionContextError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      sessionContextBusy = false;
+    }
+  }
+
+  async function takeControlFromSidebar(session: HubSession) {
+    if (sessionContextBusy || !session.capabilities.canTakeControl) return;
+    sessionContextBusy = true;
+    sessionContextError = "";
+    try {
+      await takeControlSession(session.id);
+      sessionContextMenu = null;
+      await refreshSessionsAfterContextAction();
+    } catch (reason) {
+      sessionContextError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      sessionContextBusy = false;
+    }
+  }
+
+  async function refreshSessionsAfterContextAction() {
+    try {
+      const snapshot = await loadHubSnapshot();
+      sessions = snapshot.sessions;
+      internalServices = snapshot.internalServices ?? [];
+      reconcileSelection();
+    } catch {
+      // The backend also emits a sessions-changed event; keep the successful action.
+    }
+  }
+
+  function openReview(path?: string, sessionId = focusedSession?.id) {
+    if (!sessionId) return;
+    focusedPaneId = sessionId;
+    reviewInitialPath = path;
+    if (!reviewOpen) inspectorBeforeReview = inspectorOpen;
+    inspectorOpen = false;
+    reviewOpen = true;
+  }
+
+  function closeReview() {
+    reviewOpen = false;
+    reviewInitialPath = undefined;
+    if (inspectorBeforeReview) inspectorOpen = true;
+    inspectorBeforeReview = false;
+  }
+
+  function persistWorkspaceLayout() {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(workspaceLayoutKey, JSON.stringify({ primaryId, secondaryId, tertiaryId, focusedPaneId, maximizedPaneId, splitRatio, tertiaryRatio, projectFilter, inspectorOpen, selectedNamedLayoutId }));
+  }
+
+  function restoreWorkspaceLayout() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(workspaceLayoutKey) ?? "null") as {
+        primaryId?: string;
+        secondaryId?: string;
+        tertiaryId?: string;
+        focusedPaneId?: string;
+        maximizedPaneId?: string;
+        splitRatio?: number;
+        tertiaryRatio?: number;
+        projectFilter?: string;
+        inspectorOpen?: boolean;
+        selectedNamedLayoutId?: string;
+      } | null;
+      primaryId = saved?.primaryId ?? null;
+      secondaryId = saved?.secondaryId ?? null;
+      tertiaryId = saved?.tertiaryId ?? null;
+      focusedPaneId = saved?.focusedPaneId ?? primaryId;
+      maximizedPaneId = saved?.maximizedPaneId ?? null;
+      if (Number.isFinite(saved?.splitRatio)) {
+        splitRatio = Math.min(0.75, Math.max(0.25, saved?.splitRatio ?? 0.5));
+      }
+      if (Number.isFinite(saved?.tertiaryRatio)) {
+        tertiaryRatio = Math.min(0.5, Math.max(0.22, saved?.tertiaryRatio ?? 0.34));
+      }
+      projectFilter = saved?.projectFilter ?? "all";
+      inspectorOpen = saved?.inspectorOpen ?? true;
+      selectedNamedLayoutId = namedLayouts.some((layout) => layout.id === saved?.selectedNamedLayoutId)
+        ? saved?.selectedNamedLayoutId ?? ""
+        : "";
+    } catch {
+      localStorage.removeItem(workspaceLayoutKey);
+    }
+  }
+
+  function resizeSplit(clientX: number, divider: 0 | 1) {
+    if (!workbenchElement) return;
+    const bounds = workbenchElement.getBoundingClientRect();
+    if (!bounds.width) return;
+    const pointerRatio = Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width));
+    if (divider === 1 && tertiary) {
+      tertiaryRatio = Math.min(0.5, Math.max(0.22, 1 - pointerRatio));
+      return;
+    }
+    const availableRatio = tertiary ? 1 - tertiaryRatio : 1;
+    splitRatio = Math.min(0.75, Math.max(0.25, pointerRatio / availableRatio));
+  }
+
+  function beginSplitResize(event: PointerEvent, divider: 0 | 1) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    resizingDivider = divider;
+    event.currentTarget instanceof HTMLElement && event.currentTarget.setPointerCapture(event.pointerId);
+    resizeSplit(event.clientX, divider);
+  }
+
+  function moveSplitResize(event: PointerEvent) {
+    if (resizingDivider === null) return;
+    resizeSplit(event.clientX, resizingDivider);
+  }
+
+  function endSplitResize(event: PointerEvent) {
+    if (resizingDivider === null) return;
+    resizingDivider = null;
+    if (event.currentTarget instanceof HTMLElement && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    persistWorkspaceLayout();
+  }
+
+  function handleSplitKeydown(event: KeyboardEvent, divider: 0 | 1) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    if (divider === 1 && tertiary) {
+      if (event.key === "Home") tertiaryRatio = 0.5;
+      else if (event.key === "End") tertiaryRatio = 0.22;
+      else tertiaryRatio = Math.min(0.5, Math.max(0.22, tertiaryRatio + (event.key === "ArrowLeft" ? 0.04 : -0.04)));
+    } else if (event.key === "Home") splitRatio = 0.25;
+    else if (event.key === "End") splitRatio = 0.75;
+    else splitRatio = Math.min(0.75, Math.max(0.25, splitRatio + (event.key === "ArrowLeft" ? -0.04 : 0.04)));
+    persistWorkspaceLayout();
+  }
+
+  function workbenchColumns() {
+    if (maximizedSession || !secondary) return undefined;
+    if (!tertiary) return `minmax(0, ${splitRatio}fr) 7px minmax(0, ${1 - splitRatio}fr)`;
+    const shared = 1 - tertiaryRatio;
+    return `minmax(0, ${splitRatio * shared}fr) 7px minmax(0, ${(1 - splitRatio) * shared}fr) 7px minmax(0, ${tertiaryRatio}fr)`;
+  }
+
+  function beginWorkspaceDrag(event: PointerEvent) {
+    if (event.button !== 0) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("button, input, textarea, select, a, summary, .header-selectors, [role='button']")) return;
+    event.preventDefault();
+    void getCurrentWindow().startDragging();
+  }
+
+  function beginWorkspaceResize(event: PointerEvent, direction: typeof workspaceResizeEdges[number]) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void getCurrentWindow().startResizeDragging(direction);
+  }
+
+  async function returnToOrb() {
+    await getCurrentWindow().close();
+  }
+
+  async function updatePreference<K extends keyof Preferences>(key: K, value: Preferences[K]) {
+    return savePreferencePatch({ [key]: value } as Pick<Preferences, K>);
+  }
+
+  function selectAppearance(mode: "system" | "light" | "dark") {
+    void updatePreference("darkMode", mode === "system" ? undefined : mode === "dark");
+  }
+
+  function selectTheme(theme: AppearanceTheme) {
+    void savePreferencePatch({ appearanceTheme: theme, accentColor: undefined, accentOpacity: 100 });
+  }
+
+  async function savePreferencePatch(patch: Partial<Preferences>) {
+    if (settingsSaving) return false;
+    const previous = preferences;
+    const next = { ...preferences, ...patch };
+    preferences = next;
+    language = next.language;
+    settingsSaving = true;
+    settingsError = "";
+    try {
+      await savePreferences(next);
+      await emit("lume://preferences-changed", next);
+      return true;
+    } catch (reason) {
+      preferences = previous;
+      language = previous.language;
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+      return false;
+    } finally {
+      settingsSaving = false;
+    }
+  }
+
+  async function loadSettingsData() {
+    const results = await Promise.allSettled([
+      loadIntegrationStatuses(),
+      loadVscodeStatus(),
+      loadExternalPlugins(),
+      loadMobileGatewayStatus(),
+      loadPairedDevices(),
+      availableMonitors(),
+      getVersion(),
+    ]);
+    if (results[0].status === "fulfilled") integrations = results[0].value;
+    if (results[1].status === "fulfilled") vscodeStatus = results[1].value;
+    if (results[2].status === "fulfilled") externalPlugins = results[2].value;
+    if (results[3].status === "fulfilled") mobileStatus = results[3].value;
+    if (results[4].status === "fulfilled") pairedDevices = results[4].value;
+    if (results[5].status === "fulfilled") monitors = results[5].value.map((monitor, index) => ({
+      id: monitor.name ?? `monitor-${index}`,
+      label: monitor.name || `${tr("Monitor", "Monitor")} ${index + 1}`,
+    }));
+    if (results[6].status === "fulfilled") appVersion = results[6].value;
+    if (!selectedProfileKey) selectedProfileKey = detectedProjects[0]?.key ?? null;
+  }
+
+  async function openSettings() {
+    settingsOpen = true;
+    if (settingsLoading) return;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    if (!settingsOpen || settingsLoading) return;
+    settingsLoading = true;
+    try {
+      await loadSettingsData();
+    } finally {
+      settingsLoading = false;
+    }
+  }
+
+  async function toggleIntegration(integration: IntegrationStatus) {
+    if (!integration.installed || !integration.canConfigure) return;
+    configuringIntegration = integration.kind;
+    settingsMessage = "";
+    try {
+      await configureIntegration(integration.kind, !integration.configured);
+      integrations = await loadIntegrationStatuses();
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      configuringIntegration = null;
+    }
+  }
+
+  async function runIntegrationDiagnostic(integration: IntegrationStatus) {
+    diagnosingIntegration = integration.kind;
+    try {
+      integrationDiagnostics = { ...integrationDiagnostics, [integration.kind]: await diagnoseIntegration(integration.kind) };
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      diagnosingIntegration = null;
+    }
+  }
+
+  async function toggleVscode() {
+    if (!vscodeStatus.installed) return;
+    configuringVscode = true;
+    try {
+      await configureVscode(!vscodeStatus.configured);
+      vscodeStatus = await loadVscodeStatus();
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      configuringVscode = false;
+    }
+  }
+
+  async function addExternalPlugin() {
+    const selected = await openDialog({ multiple: false, directory: false, filters: [{ name: "Lume plugin", extensions: ["json"] }] });
+    if (!selected || Array.isArray(selected)) return;
+    installingPlugin = true;
+    try {
+      await installExternalPlugin(selected);
+      externalPlugins = await loadExternalPlugins();
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      installingPlugin = false;
+    }
+  }
+
+  async function uninstallExternalPlugin(id: string) {
+    try {
+      await removeExternalPlugin(id);
+      externalPlugins = await loadExternalPlugins();
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    }
+  }
+
+  function shortcutFromEvent(event: KeyboardEvent) {
+    if (["Control", "Shift", "Alt", "Meta"].includes(event.key)) return null;
+    const modifiers = [event.ctrlKey ? "Ctrl" : "", event.altKey ? "Alt" : "", event.shiftKey ? "Shift" : "", event.metaKey ? "Super" : ""].filter(Boolean);
+    if (!modifiers.length) return null;
+    const key = event.code.startsWith("Key") ? event.code.slice(3) : event.code.startsWith("Digit") ? event.code.slice(5) : event.code;
+    return key && key !== "Unidentified" ? [...modifiers, key].join("+") : null;
+  }
+
+  function captureShortcut(event: KeyboardEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      shortcutEditorKey = null;
+      return;
+    }
+    const shortcut = shortcutFromEvent(event);
+    if (shortcut) shortcutDraft = shortcut;
+  }
+
+  async function openShortcutEditor(key: Exclude<typeof shortcutEditorKey, null>) {
+    shortcutEditorKey = key;
+    shortcutDraft = preferences[key];
+    await tick();
+    document.querySelector<HTMLElement>("[data-shortcut-capture]")?.focus();
+  }
+
+  async function saveShortcut() {
+    if (!shortcutEditorKey || !shortcutDraft) return;
+    if (await updatePreference(shortcutEditorKey, shortcutDraft)) shortcutEditorKey = null;
+  }
+
+  async function updateProjectProfile(patch: Partial<Preferences["projectProfiles"][string]>) {
+    if (!selectedProfileKey) return;
+    const label = detectedProjects.find((project) => project.key === selectedProfileKey)?.label ?? selectedProfileKey;
+    const current = selectedProjectProfile ?? { label, soundEnabled: true, preferredAgents: [] };
+    await updatePreference("projectProfiles", {
+      ...preferences.projectProfiles,
+      [selectedProfileKey]: { ...current, ...patch },
+    });
+  }
+
+  function integrationAgentKind(kind: IntegrationStatus["kind"]): AgentKind {
+    return kind === "claude" ? "claude_code" : kind;
+  }
+
+  async function togglePreferredAgent(agent: AgentKind) {
+    const current = selectedProjectProfile?.preferredAgents ?? [];
+    await updateProjectProfile({ preferredAgents: current.includes(agent) ? current.filter((item) => item !== agent) : [...current, agent] });
+  }
+
+  async function captureProfilePosition() {
+    try {
+      const position = await loadOverlayPosition();
+      await updateProjectProfile({ overlayX: Math.round(position.x), overlayY: Math.round(position.y) });
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    }
+  }
+
+  async function applyProjectProfile() {
+    if (!selectedProjectProfile) return;
+    await savePreferencePatch({
+      monitorId: selectedProjectProfile.monitorId ?? preferences.monitorId,
+      overlayX: selectedProjectProfile.overlayX ?? preferences.overlayX,
+      overlayY: selectedProjectProfile.overlayY ?? preferences.overlayY,
+    });
+    settingsMessage = tr("Project profile applied.", "Perfil de projeto aplicado.");
+  }
+
+  async function toggleMobileAccess() {
+    if (mobileBusy) return;
+    mobileBusy = true;
+    pairingOffer = null;
+    pairingQr = null;
+    try {
+      mobileStatus = mobileStatus?.networkReachable ? await disableMobileGateway() : await enableMobileGateway();
+      if (mobileStatus.networkReachable) await createMobilePairing();
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      mobileBusy = false;
+    }
+  }
+
+  async function createMobilePairing() {
+    try {
+      pairingOffer = await beginMobilePairing();
+      pairingQr = await QRCode.toDataURL(pairingOffer.payload, { width: 184, margin: 3, errorCorrectionLevel: "M" });
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    }
+  }
+
+  async function removePairedDevice(id: string) {
+    if (mobileBusy) return;
+    mobileBusy = true;
+    try {
+      await revokePairedDevice(id);
+      pairedDevices = await loadPairedDevices();
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      mobileBusy = false;
+    }
+  }
+
+  async function toggleDeviceScope(device: PairedDevice, scope: MobileScope) {
+    const scopes = device.scopes.includes(scope) ? device.scopes.filter((item) => item !== scope) : [...device.scopes, scope];
+    try {
+      await setPairedDeviceScopes(device.id, scopes);
+      pairedDevices = await loadPairedDevices();
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    }
+  }
+
+  async function checkForUpdates() {
+    if (["checking", "downloading", "ready"].includes(updateState)) return;
+    updateState = "checking";
+    updateDetail = tr("Checking for updates…", "Procurando atualizações…");
+    try {
+      pendingUpdate = await check({ timeout: 15_000, headers: { "Cache-Control": "no-cache" } });
+      availableVersion = pendingUpdate?.version ?? null;
+      updateState = pendingUpdate ? "available" : "up_to_date";
+      updateDetail = pendingUpdate
+        ? tr(`Version ${pendingUpdate.version} is available.`, `A versão ${pendingUpdate.version} está disponível.`)
+        : tr("You are up to date.", "Você está atualizado.");
+    } catch {
+      updateState = "error";
+      updateDetail = tr("Could not check for updates.", "Não foi possível verificar atualizações.");
+    }
+  }
+
+  async function installUpdate() {
+    if (!pendingUpdate) return;
+    updateState = "downloading";
+    try {
+      await pendingUpdate.downloadAndInstall();
+      updateState = "ready";
+      await relaunch();
+    } catch {
+      updateState = "error";
+      updateDetail = tr("The update could not be installed.", "A atualização não pôde ser instalada.");
+    }
+  }
+
+  async function resetSettings() {
+    if (!resetConfirming) {
+      resetConfirming = true;
+      return;
+    }
+    if (await savePreferencePatch(structuredClone(defaultPreferences))) {
+      removeBackgroundImage();
+      workspaceBackgroundImageOpacity = 100;
+      try { localStorage.removeItem(workspaceBackgroundImageOpacityKey); }
+      catch { /* The image opacity still resets for this window. */ }
+      resetConfirming = false;
+      settingsMessage = tr("Settings restored.", "Ajustes restaurados.");
+    }
+  }
+
+  function reconcileSelection() {
+    if (projectFilter !== "all" && !workspaceProjects.some((project) => project.value === projectFilter)) projectFilter = "all";
+    const ids = new Set(projectSessions.map((session) => session.id));
+    if (!primaryId || !ids.has(primaryId)) {
+      primaryId = projectSessions[0]?.id ?? null;
+    }
+    if (secondaryId && (!ids.has(secondaryId) || secondaryId === primaryId)) {
+      secondaryId = null;
+    }
+    if (tertiaryId && (!ids.has(tertiaryId) || tertiaryId === primaryId || tertiaryId === secondaryId)) {
+      tertiaryId = null;
+    }
+    if (!secondaryId && tertiaryId) {
+      secondaryId = tertiaryId;
+      tertiaryId = null;
+    }
+    if (!focusedPaneId || ![primaryId, secondaryId, tertiaryId].includes(focusedPaneId)) {
+      focusedPaneId = primaryId;
+    }
+    if (maximizedPaneId && ![primaryId, secondaryId, tertiaryId].includes(maximizedPaneId)) {
+      maximizedPaneId = null;
+    }
+  }
+
+  onMount(() => {
+    restoreNamedLayouts();
+    restoreWorkspaceLayout();
+    try { streamMessages = localStorage.getItem(workspaceStreamMessagesKey) !== "false"; }
+    catch { /* Use the default when local storage is unavailable. */ }
+    try { workspaceBackgroundImage = localStorage.getItem(workspaceBackgroundImageKey) ?? ""; }
+    catch { /* Keep the theme background when local storage is unavailable. */ }
+    try {
+      const savedOpacity = Number(localStorage.getItem(workspaceBackgroundImageOpacityKey) ?? "100");
+      workspaceBackgroundImageOpacity = Number.isFinite(savedOpacity) ? Math.max(0, Math.min(100, savedOpacity)) : 100;
+    } catch { /* Keep the default image opacity when local storage is unavailable. */ }
+    const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const syncSystemTheme = (event: MediaQueryListEvent | MediaQueryList) => {
+      systemDark = event.matches;
+    };
+    const handleWorkspaceKeydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && sessionContextMenu) {
+        sessionContextMenu = null;
+        return;
+      }
+      if (event.key === "Escape" && headerControl) {
+        headerControl = null;
+        namingLayout = false;
+        return;
+      }
+      if (event.key === "Escape" && searchOpen) {
+        closeAgentSearch();
+        return;
+      }
+      if (event.key === "Escape" && launcherOpen) {
+        launcherOpen = false;
+        return;
+      }
+      if (event.key === "Escape" && reviewOpen) {
+        closeReview();
+        return;
+      }
+      if (event.key === "Escape" && settingsOpen) {
+        settingsOpen = false;
+        return;
+      }
+      if (event.key === "Escape" && maximizedPaneId) {
+        maximizedPaneId = null;
+        persistWorkspaceLayout();
+        return;
+      }
+      const target = event.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof HTMLElement && target.isContentEditable)) return;
+      if (event.key === "/" && !event.altKey && !event.ctrlKey && !event.metaKey) {
+        event.preventDefault();
+        void openAgentSearch();
+        return;
+      }
+      if (!event.altKey || !/^Digit[1-3]$/.test(event.code)) return;
+      const sessionId = [primaryId, secondaryId, tertiaryId][Number(event.code.at(-1)) - 1];
+      if (!sessionId) return;
+      event.preventDefault();
+      focusedPaneId = sessionId;
+      void tick().then(() => document.querySelector<HTMLElement>(`[data-workspace-pane="${CSS.escape(sessionId)}"]`)?.focus());
+      persistWorkspaceLayout();
+    };
+    syncSystemTheme(colorScheme);
+    colorScheme.addEventListener("change", syncSystemTheme);
+    window.addEventListener("keydown", handleWorkspaceKeydown);
+    const closeLauncher = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (launcherOpen && launcherRoot && !launcherRoot.contains(target) && !launcherPopoverNode?.contains(target)) launcherOpen = false;
+      if (sessionContextMenu && !(target instanceof Element && target.closest(".session-context-menu"))) sessionContextMenu = null;
+    };
+    document.addEventListener("pointerdown", closeLauncher);
+    let disposed = false;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let refreshRunning = false;
+    let refreshAgain = false;
+    let stopSessions: UnlistenFn | undefined;
+    let stopPreferences: UnlistenFn | undefined;
+
+    const refresh = async () => {
+      if (refreshRunning) {
+        refreshAgain = true;
+        return;
+      }
+      refreshRunning = true;
+      try {
+        const snapshot = await loadHubSnapshot();
+        if (!disposed) {
+          sessions = snapshot.sessions;
+          internalServices = snapshot.internalServices ?? [];
+          error = "";
+          reconcileSelection();
+          if (pendingOpenedSession) {
+            const pending = pendingOpenedSession;
+            const opened = sessions.find((session) => session.agent === pending.agent && (
+              pending.nativeId ? session.nativeSessionId === pending.nativeId && !pending.knownIds.has(session.id) : !pending.knownIds.has(session.id)
+            ));
+            if (opened) {
+              projectFilter = "all";
+              maximizedPaneId = null;
+              selectPrimary(opened);
+              pendingOpenedSession = null;
+            } else if (Date.now() - pending.startedAt > 30_000) {
+              pendingOpenedSession = null;
+            }
+          }
+          if (!namedLayoutRestored && sessions.length) {
+            namedLayoutRestored = true;
+            if (selectedNamedLayoutId) applyNamedLayout(selectedNamedLayoutId);
+          }
+        }
+      } catch (reason) {
+        if (!disposed) error = String(reason);
+      } finally {
+        refreshRunning = false;
+        if (refreshAgain && !disposed) {
+          refreshAgain = false;
+          void refresh();
+        }
+      }
+    };
+
+    const queueRefresh = () => {
+      if (refreshTimer) return;
+      if (refreshRunning) {
+        refreshAgain = true;
+        return;
+      }
+      refreshTimer = setTimeout(() => {
+        refreshTimer = undefined;
+        void refresh();
+      }, 160);
+    };
+
+    void (async () => {
+      const loadedPreferences = await loadPreferences();
+      if (disposed) return;
+      preferences = loadedPreferences;
+      language = loadedPreferences.language;
+      stopSessions = await listen("lume://sessions-changed", queueRefresh);
+      stopPreferences = await listen<Preferences>("lume://preferences-changed", ({ payload }) => {
+        preferences = payload;
+        language = payload.language;
+      });
+      await refresh();
+      if (disposed) return;
+      loading = false;
+    })();
+
+    return () => {
+      disposed = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      stopSessions?.();
+      stopPreferences?.();
+      colorScheme.removeEventListener("change", syncSystemTheme);
+      window.removeEventListener("keydown", handleWorkspaceKeydown);
+      document.removeEventListener("pointerdown", closeLauncher);
+    };
+  });
+</script>
+
+<main
+  class:dark={darkMode}
+  class:searching={searchOpen}
+  class:selecting={headerControl !== null}
+  class="workspace terminal-window"
+  data-appearance={appearance.theme}
+  style:--lume-accent={appearance.accentCss}
+  style:--lume-accent-strong={appearance.accentCss}
+  style:--workspace-background-color={preferences.workspaceBackgroundColor}
+  style:--workspace-background-opacity={`${preferences.workspaceBackgroundOpacity}%`}
+>
+  <SystemBannerStack items={systemBanners} dismissLabel={tr("Dismiss", "Fechar")} />
+  {#each workspaceResizeEdges as direction}
+    <button
+      class="window-resize-edge edge-{direction.toLocaleLowerCase()}"
+      type="button"
+      tabindex="-1"
+      aria-label={tr(`Resize ${direction}`, `Redimensionar ${direction}`)}
+      onpointerdown={(event) => beginWorkspaceResize(event, direction)}
+    ></button>
+  {/each}
+  <aside class="sidebar">
+    <header class="brand-header" role="group" aria-label={tr("Workspace controls", "Controles do Workspace")} onpointerdown={beginWorkspaceDrag}>
+      <div class="brand-top">
+        <span class="brand-mark"><BrandIcon name="lume" size={25} /></span>
+        <span><strong>Lume</strong><small>Workspace</small></span>
+      </div>
+    <div class:expanded={headerControl !== null} class="header-selectors">
+      {#if headerControl === "project"}
+        <div class="project-picker">
+          <LumeSelect
+            ariaLabel={tr("Workspace project", "Projeto do Workspace")}
+            value={projectFilter}
+            options={[{ value: "all", label: tr("All projects", "Todos os projetos") }, ...workspaceProjects]}
+            minWidth={0}
+            onValueChange={selectProject}
+          />
+        </div>
+        <button class="header-control-close" type="button" aria-label={tr("Close project selector", "Fechar seletor de projetos")} onclick={() => (headerControl = null)}><LumeIcon name="close" size={14} /></button>
+      {:else if headerControl === "layout"}
+        <div class="layout-picker">
+          <LumeSelect
+            ariaLabel={tr("Saved layouts", "Layouts salvos")}
+            value={selectedNamedLayoutId}
+            options={[
+              { value: "", label: tr("Current layout", "Layout atual") },
+              ...namedLayouts.map((layout) => ({
+                value: layout.id,
+                label: layout.id === selectedNamedLayoutId && selectedLayoutDirty
+                  ? `${layout.name} · ${tr("Modified", "Modificado")}`
+                  : layout.name,
+              })),
+            ]}
+            minWidth={0}
+            onValueChange={applyNamedLayout}
+          />
+        </div>
+        <button class="header-control-close" type="button" aria-label={tr("Close layout selector", "Fechar seletor de layouts")} onclick={() => { headerControl = null; namingLayout = false; }}><LumeIcon name="close" size={14} /></button>
+      {:else}
+        <button class="header-control-icon" type="button" aria-label={tr("Select project", "Selecionar projeto")} title={tr("Select project", "Selecionar projeto")} onclick={() => (headerControl = "project")}><WorkspaceHeaderIcon name="project" /></button>
+        <button class="header-control-icon" type="button" aria-label={tr("Saved layouts", "Layouts salvos")} title={tr("Saved layouts", "Layouts salvos")} onclick={() => (headerControl = "layout")}><WorkspaceHeaderIcon name="layout" /></button>
+      {/if}
+      {#if headerControl === null}
+      <div class="header-utilities">
+        <button class:active={inspectorOpen} class="inspector-button" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen} onclick={toggleInspector}><WorkspaceHeaderIcon name="inspector" /></button>
+        <button class:active={settingsOpen} class="settings-button" type="button" title={tr("Workspace settings", "Ajustes do Workspace")} aria-label={tr("Workspace settings", "Ajustes do Workspace")} aria-expanded={settingsOpen} onclick={() => settingsOpen ? (settingsOpen = false) : void openSettings()}><WorkspaceHeaderIcon name="settings" /></button>
+        <button class="compact-mode" type="button" title={tr("Return to Orb", "Voltar ao Orb")} aria-label={tr("Return to Orb", "Voltar ao Orb")} onclick={() => void returnToOrb()}><WorkspaceHeaderIcon name="orb" /></button>
+      </div>
+      {/if}
+    </div>
+    {#if headerControl === "layout"}
+      <div class="layout-actions" role="group" aria-label={tr("Layout actions", "Ações do layout")}>
+        <button type="button" disabled={!primary} title={tr("Save as new layout", "Salvar como novo layout")} aria-label={tr("Save as new layout", "Salvar como novo layout")} onclick={() => void beginNamingLayout()}><LumeIcon name="plus" size={15} /></button>
+        {#if selectedNamedLayout}
+          <button type="button" disabled={!selectedLayoutDirty} title={tr("Update this layout", "Atualizar este layout")} aria-label={tr("Update this layout", "Atualizar este layout")} onclick={updateNamedLayout}><LumeIcon name="save" size={14} /></button>
+          <button class="delete-layout" type="button" title={tr("Remove this layout", "Remover este layout")} aria-label={tr("Remove this layout", "Remover este layout")} onclick={deleteNamedLayout}><LumeIcon name="trash" size={14} /></button>
+        {/if}
+      </div>
+      {#if namingLayout}
+        <form class="layout-name-editor" onsubmit={(event) => { event.preventDefault(); saveNamedLayout(); }}>
+          <LumeIcon name="layout" size={14} />
+          <input bind:this={layoutNameInput} bind:value={layoutName} maxlength="36" aria-label={tr("Layout name", "Nome do layout")} onkeydown={(event) => { if (event.key === "Escape") { namingLayout = false; layoutName = ""; } }} />
+          <button type="submit" disabled={!layoutName.trim()} title={tr("Save layout", "Salvar layout")} aria-label={tr("Save layout", "Salvar layout")}><LumeIcon name="check" size={13} /></button>
+          <button type="button" title={tr("Cancel", "Cancelar")} aria-label={tr("Cancel", "Cancelar")} onclick={() => { namingLayout = false; layoutName = ""; }}><LumeIcon name="close" size={13} /></button>
+        </form>
+      {/if}
+    {/if}
+    </header>
+
+    <div class:searching={searchOpen} class="session-heading">
+      {#if searchOpen}
+        <div class="search-inline">
+          <input bind:this={searchInput} bind:value={query} placeholder={tr("Search agents", "Buscar agentes")} aria-label={tr("Search agents", "Buscar agentes")} />
+          <button type="button" aria-label={tr("Close agent search", "Fechar busca de agentes")} onclick={closeAgentSearch}><LumeIcon name="close" size={14} /></button>
+        </div>
+      {:else}
+        <button class="search-toggle" type="button" aria-label={tr("Search agents", "Buscar agentes")} title={tr("Search agents · /", "Buscar agentes · /")} onclick={() => void openAgentSearch()}><LumeIcon name="search" size={16} /></button>
+        <strong>{tr("Agents", "Agentes")}</strong>
+        <span>{sessions.length}</span>
+      {/if}
+      <div class="session-launcher" bind:this={launcherRoot}>
+        <button class:active={launcherOpen} type="button" aria-label={tr("New or resume chat", "Novo chat ou retomar")} title={tr("New or resume chat", "Novo chat ou retomar")} aria-expanded={launcherOpen} onclick={() => void toggleLauncher()}><LumeIcon name="plus" size={16} /></button>
+        {#if launcherOpen}
+          <div class="session-launcher-popover" use:floatLauncher role="group" aria-label={tr("Open session", "Abrir sessão")}>
+            <strong>{tr("Open session", "Abrir sessão")}</strong>
+            {#each integrations.filter((item) => item.installed && item.canLaunch) as integration (integration.kind)}
+              <div class="launcher-agent">
+                <div class="launcher-agent-row">
+                  <BrandIcon name={integration.kind} size={17} />
+                  <span>{integration.label}</span>
+                  <button type="button" disabled={launching !== null} onclick={() => void startSession(integration.kind)}>{tr("New", "Novo")}</button>
+                  {#if integration.kind !== "gemini"}
+                    <button type="button" class:active={resumeAgent === integration.kind} disabled={launching !== null || loadingResumeAgent !== null} onclick={() => void toggleResumeSessions(integration.kind)}>{loadingResumeAgent === integration.kind ? "…" : tr("Resume", "Retomar")}</button>
+                  {/if}
+                </div>
+                {#if resumeAgent === integration.kind}
+                  <div class="launcher-resume-list">
+                    {#each resumableSessions as stored (stored.id)}
+                      <button type="button" disabled={launching !== null} title={stored.workingDirectory} onclick={() => void resumeStoredSession(stored)}><strong>{stored.name}</strong><small>{stored.project}</small></button>
+                    {:else}
+                      {#if loadingResumeAgent !== integration.kind}<p>{tr("No saved chats found.", "Nenhum chat salvo encontrado.")}</p>{/if}
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              <p>{tr("No compatible CLI was found.", "Nenhuma CLI compatível foi encontrada.")}</p>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
+
+    <div class="session-filters" aria-label={tr("Filter agents", "Filtrar agentes")}>
+      <button class:active={filter === "all"} type="button" onclick={() => filter = "all"}>{tr("All", "Todos")}</button>
+      <button class:active={filter === "active"} type="button" onclick={() => filter = "active"}>{tr("Active", "Ativos")}</button>
+      <button class:active={filter === "attention"} type="button" onclick={() => filter = "attention"}>{tr("Attention", "Atenção")}</button>
+    </div>
+
+    <nav class="session-list" aria-label={tr("Agent sessions", "Sessões de agentes")}>
+      {#if loading}
+        {#each [1, 2, 3] as item}
+          <div class="session-skeleton" aria-hidden="true"><i></i><span></span></div>
+        {/each}
+      {:else if filteredSessions.length}
+        {#each filteredSessions as session (session.id)}
+          {@const childAgents = subagentsForSession(session)}
+          <div class="session-tree-item">
+          <div
+            class:primary-selected={session.id === primaryId}
+            class:secondary-selected={session.id === secondaryId}
+            class:tertiary-selected={session.id === tertiaryId}
+            class:dragging={draggingSessionId === session.id}
+            class="session-row"
+            role="group"
+            aria-label={sessionName(session)}
+            title={tr("Drag to arrange this agent", "Arraste para organizar este agente")}
+            draggable={true}
+            ondragstart={(event) => beginSidebarSessionDrag(event, session.id)}
+            ondragend={finishSidebarSessionDrag}
+            oncontextmenu={(event) => { event.preventDefault(); openSessionContextMenu(session, event.clientX, event.clientY); }}
+          >
+            <button class="session-select" type="button" aria-current={session.id === primaryId ? "page" : undefined} onclick={() => selectPrimary(session)} onkeydown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openSessionContextMenu(session, rect.left + rect.width / 2, rect.bottom); } }}>
+              <span class="session-icon"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName(session)} size={34} /></span>
+              <span class="session-copy">
+                <strong>{sessionName(session)}</strong>
+                <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{session.agentLabel} · {sessionSubtitle(session)}</span></small>
+                <em class="status-{session.status}"><i></i>{statusLabel(session)}</em>
+              </span>
+            </button>
+            {#if childAgents.length}
+              <button class:open={expandedSubagentSessions.has(session.id)} class="subagent-toggle" type="button" aria-expanded={expandedSubagentSessions.has(session.id)} aria-label={tr(`${childAgents.length} subagents of ${sessionName(session)}`, `${childAgents.length} subagentes de ${sessionName(session)}`)} title={tr("Show subagents", "Mostrar subagentes")} onclick={() => toggleSubagents(session.id)}>
+                <span>{childAgents.length}</span><LumeIcon name="chevron-down" size={12} />
+              </button>
+            {/if}
+          </div>
+          {#if childAgents.length}
+            <div class:open={expandedSubagentSessions.has(session.id)} class="subagent-list-shell" aria-hidden={!expandedSubagentSessions.has(session.id)}>
+            <div class="subagent-list" aria-label={tr(`Subagents of ${sessionName(session)}`, `Subagentes de ${sessionName(session)}`)}>
+              {#each childAgents as child (child.id)}
+                <div class="subagent-row">
+                  <span class="subagent-branch" aria-hidden="true"></span>
+                  <span class="subagent-copy"><strong>{child.label}</strong><small class="subagent-status status-{child.status}">{child.status === "running" ? tr("Working", "Executando") : child.status === "failed" ? tr("Failed", "Falhou") : child.status === "waiting" ? tr("Waiting", "Aguardando") : child.status === "interrupted" ? tr("Interrupted", "Interrompido") : tr("Finished", "Concluído")}</small></span>
+                </div>
+              {/each}
+            </div>
+            </div>
+          {/if}
+          </div>
+        {/each}
+      {:else if !filteredInternalServices.length}
+        <p class="no-results">{query ? tr("No matching agents", "Nenhum agente encontrado") : tr("No agents detected", "Nenhum agente detectado")}</p>
+      {/if}
+      {#if filteredInternalServices.length}
+        <div class="internal-heading"><span>{tr("Internal services", "Serviços internos")}</span><small>{filteredInternalServices.length}</small></div>
+        {#each filteredInternalServices as service (service.id)}
+          <div class="internal-row" title={`${service.label} · PID ${service.processId}`}>
+            <span class="session-icon"><BrandIcon name={service.agent} size={16} /></span>
+            <span class="session-copy"><strong>{service.label}</strong><small>{tr("Codex service · active", "Serviço Codex · ativo")}</small></span>
+            <i class="internal-live" aria-hidden="true"></i>
+          </div>
+        {/each}
+      {/if}
+    </nav>
+
+  </aside>
+
+  {#if sessionContextMenu && contextSession}
+    <div
+      class="session-context-menu"
+      role="menu"
+      aria-label={tr(`Actions for ${sessionName(contextSession)}`, `Ações para ${sessionName(contextSession)}`)}
+      tabindex="-1"
+      bind:this={sessionContextNode}
+      style:left={`${sessionContextMenu.x}px`}
+      style:top={`${sessionContextMenu.y}px`}
+    >
+      <strong>{sessionName(contextSession)}</strong>
+      {#if sessionContextMenu.renaming}
+        <form class="session-context-rename" onsubmit={(event) => { event.preventDefault(); void saveSidebarSessionRename(contextSession); }}>
+          <label for={`workspace-session-name-${contextSession.id}`}>{tr("Session name", "Nome da sessão")}</label>
+          <input id={`workspace-session-name-${contextSession.id}`} bind:value={sessionRenameDraft} maxlength="80" autocomplete="off" />
+          <div class="session-context-actions">
+            <button type="button" disabled={sessionContextBusy} onclick={() => (sessionContextMenu = null)}>{tr("Cancel", "Cancelar")}</button>
+            <button class="primary" type="submit" disabled={sessionContextBusy}>{sessionContextBusy ? tr("Saving…", "Salvando…") : tr("Save", "Salvar")}</button>
+          </div>
+        </form>
+      {:else if sessionContextMenu.confirming && contextSession.capabilities.canTerminate}
+          <p>{tr("This closes the original CLI and stops its current task.", "Isso fecha a CLI original e interrompe a tarefa atual.")}</p>
+          <div class="session-context-actions">
+            <button type="button" role="menuitem" onclick={() => (sessionContextMenu = null)}>{tr("Cancel", "Cancelar")}</button>
+            <button class="danger" type="button" role="menuitem" disabled={sessionContextBusy} onclick={() => void closeSidebarAgent(contextSession)}>{sessionContextBusy ? tr("Closing…", "Encerrando…") : tr("Close agent", "Encerrar agente")}</button>
+          </div>
+      {:else}
+        <button class="session-context-command" type="button" role="menuitem" disabled={sessionContextBusy} onclick={() => beginSidebarSessionRename(contextSession)}>
+          <LumeIcon name="rename" size={15} />
+          <span>{tr("Rename session", "Renomear sessão")}</span>
+        </button>
+        {#if contextSession.capabilities.canTakeControl}
+          <button class="session-context-command" type="button" role="menuitem" disabled={sessionContextBusy} onclick={() => void takeControlFromSidebar(contextSession)}>
+            <LumeIcon name="take-control" size={15} />
+            <span>{sessionContextBusy ? tr("Taking control…", "Assumindo controle…") : tr("Take control", "Assumir controle")}</span>
+          </button>
+        {/if}
+        {#if contextSession.capabilities.canTerminate}
+          <button class="session-context-command danger-command" type="button" role="menuitem" disabled={sessionContextBusy} onclick={() => { if (sessionContextMenu) sessionContextMenu = { ...sessionContextMenu, confirming: true }; }}>
+            <LumeIcon name="stop" size={14} />
+            <span>{tr("Close agent", "Encerrar agente")}</span>
+          </button>
+        {/if}
+      {/if}
+    </div>
+  {/if}
+
+  {#if settingsOpen}
+    <div
+      class="settings-scrim"
+      role="presentation"
+      in:fade={{ duration: motionDuration(150) }}
+      out:fade={{ duration: motionDuration(110) }}
+      onclick={(event) => {
+        if (event.target === event.currentTarget) settingsOpen = false;
+      }}
+    >
+      <aside class="workspace-settings" aria-label={tr("Lume settings", "Ajustes do Lume")} aria-busy={settingsLoading} in:fly={{ x: 24, duration: motionDuration(220), easing: cubicOut }} out:fly={{ x: 18, duration: motionDuration(150), easing: cubicOut }}>
+        <header>
+          <span>
+            <strong>{tr("Settings", "Ajustes")}</strong>
+            <small>{tr("Workspace and Lume preferences", "Preferências do Workspace e do Lume")}</small>
+          </span>
+          <button type="button" aria-label={tr("Close settings", "Fechar ajustes")} onclick={() => (settingsOpen = false)}>
+            <LumeIcon name="close" size={16} />
+          </button>
+        </header>
+
+        <div class="settings-content">
+          <details class="settings-group" open>
+            <summary>{tr("Appearance", "Aparência")}</summary>
+            <div class="appearance-options" aria-label={tr("Color mode", "Modo de cores")}>
+              {#each [
+                { id: "system", label: tr("System", "Sistema") },
+                { id: "light", label: tr("Light", "Claro") },
+                { id: "dark", label: tr("Dark", "Escuro") },
+              ] as option (option.id)}
+                <button
+                  class:active={appearanceMode === option.id}
+                  class="appearance-option mode-{option.id}"
+                  type="button"
+                  aria-pressed={appearanceMode === option.id}
+                  disabled={settingsSaving}
+                  onclick={() => selectAppearance(option.id as "system" | "light" | "dark")}
+                >
+                  <span class="appearance-preview" aria-hidden="true"><i></i><b></b><em></em></span>
+                  <strong>{option.label}</strong>
+                </button>
+              {/each}
+            </div>
+            <div class="theme-options" aria-label={tr("Base theme", "Tema base")}>
+              {#each appearanceThemes as theme (theme.value)}
+                <button
+                  class:active={appearance.theme === theme.value && !appearance.accent}
+                  type="button"
+                  aria-pressed={appearance.theme === theme.value && !appearance.accent}
+                  onclick={() => selectTheme(theme.value)}
+                >
+                  <span style:--theme-accent={theme.accent} style:--theme-surface={theme.surface}></span>
+                  {theme.label}
+                </button>
+              {/each}
+            </div>
+            <div class="workspace-setting-row accent-setting">
+              <span><strong>{tr("Accent color", "Cor de destaque")}</strong><small>{appearance.accent ?? tr("Using the base theme", "Usando o tema base")}</small></span>
+              <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} {language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void savePreferencePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void savePreferencePatch({ accentColor: undefined, accentOpacity: 100 })} />
+            </div>
+            <div class="workspace-setting-row accent-setting">
+              <span><strong>{tr("Workspace background", "Fundo do Workspace")}</strong><small>{preferences.workspaceBackgroundColor ?? tr("Using the base theme", "Usando o tema base")} · {preferences.workspaceBackgroundOpacity}%</small></span>
+              <AccentColorPicker value={preferences.workspaceBackgroundColor} opacity={preferences.workspaceBackgroundOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.surface ?? "#14231c"} readyColors={["#0f1915", "#14231c", "#16251e", "#101f28", "#1b1726", "#261a13", "#e8ede7", "#ede9df"]} minimumOpacity={35} {language} label={tr("Workspace background", "Fundo do Workspace")} onValueChange={(color, opacity) => void savePreferencePatch({ workspaceBackgroundColor: color, workspaceBackgroundOpacity: opacity })} onReset={() => void savePreferencePatch({ workspaceBackgroundColor: undefined, workspaceBackgroundOpacity: 96 })} />
+            </div>
+            <div class="workspace-setting-row wallpaper-setting">
+              <span><strong>{tr("Background image", "Imagem de fundo")}</strong><small>{workspaceBackgroundImage ? tr("Stored locally on this device", "Salva localmente neste dispositivo") : tr("Add your own workspace backdrop", "Adicione um plano de fundo ao Workspace")}</small></span>
+              {#if workspaceBackgroundImage}<i class="wallpaper-preview" style:background-image={`url("${workspaceBackgroundImage}")`} aria-hidden="true"></i>{/if}
+              <div class="wallpaper-actions">
+                <button type="button" onclick={() => workspaceBackgroundInput?.click()}>{workspaceBackgroundImage ? tr("Change", "Trocar") : tr("Choose", "Escolher")}</button>
+                {#if workspaceBackgroundImage}<button type="button" aria-label={tr("Remove background image", "Remover imagem de fundo")} onclick={removeBackgroundImage}><LumeIcon name="close" size={12} /></button>{/if}
+              </div>
+              <input bind:this={workspaceBackgroundInput} class="wallpaper-input" type="file" accept="image/png,image/jpeg,image/webp" onchange={(event) => { const file = event.currentTarget.files?.[0]; if (file) loadBackgroundImage(file); }} />
+            </div>
+            {#if workspaceBackgroundImage}
+              <label class="workspace-setting-row wallpaper-opacity-setting">
+                <span><strong>{tr("Image opacity", "Transparência da imagem")}</strong><small>{workspaceBackgroundImageOpacity}%</small></span>
+                <input
+                  class="settings-range"
+                  aria-label={tr("Background image opacity", "Transparência da imagem de fundo")}
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="5"
+                  value={workspaceBackgroundImageOpacity}
+                  oninput={(event) => setBackgroundImageOpacity(Number(event.currentTarget.value))}
+                />
+              </label>
+            {/if}
+          </details>
+
+          <details class="settings-group compact-settings">
+            <summary>{tr("Preferences", "Preferências")}</summary>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Language", "Idioma")}</strong><small>{tr("Used across Lume", "Usado em todo o Lume")}</small></span>
+              <LumeSelect
+                ariaLabel={tr("Language", "Idioma")}
+                value={preferences.language}
+                options={[{ value: "en", label: "English" }, { value: "pt-BR", label: "Português" }]}
+                minWidth={118}
+                onValueChange={(value) => void updatePreference("language", value as Preferences["language"])}
+              />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Open Lume as", "Abrir o Lume como")}</strong><small>{tr("Default view for the next launch", "Visualização padrão da próxima abertura")}</small></span>
+              <LumeSelect
+                ariaLabel={tr("Default startup view", "Visualização inicial padrão")}
+                value={preferences.startupMode}
+                options={[
+                  { value: "ask", label: tr("Always ask", "Perguntar sempre") },
+                  { value: "orb", label: "Orb" },
+                  { value: "workspace", label: "Workspace" },
+                ]}
+                minWidth={126}
+                onValueChange={(value) => void updatePreference("startupMode", value as Preferences["startupMode"])}
+              />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Desktop notifications", "Notificações no desktop")}</strong><small>{tr("Alerts outside Lume", "Alertas fora do Lume")}</small></span>
+              <input class="workspace-switch" type="checkbox" checked={preferences.popupNotificationsEnabled} disabled={settingsSaving} onchange={(event) => void updatePreference("popupNotificationsEnabled", event.currentTarget.checked)} />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Stream agent messages", "Mensagens em Stream")}</strong><small>{tr("Reveal new replies as they arrive", "Mostra novas respostas à medida que chegam")}</small></span>
+              <input class="workspace-switch" type="checkbox" checked={streamMessages} onchange={(event) => setStreamMessages(event.currentTarget.checked)} />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Start with the system", "Iniciar com o sistema")}</strong><small>{tr("Keep Lume available", "Mantenha o Lume disponível")}</small></span>
+              <input class="workspace-switch" type="checkbox" checked={preferences.autostart} disabled={settingsSaving} onchange={(event) => void updatePreference("autostart", event.currentTarget.checked)} />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Subtle sounds", "Sons sutis")}</strong><small>{tr("Task and permission feedback", "Retorno de tarefas e permissões")}</small></span>
+              <input class="workspace-switch" type="checkbox" checked={preferences.soundEnabled} disabled={settingsSaving} onchange={(event) => void updatePreference("soundEnabled", event.currentTarget.checked)} />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Sound volume", "Volume dos sons")}</strong><small>{preferences.soundVolume}%</small></span>
+              <input class="settings-range" aria-label={tr("Sound volume", "Volume dos sons")} type="range" min="0" max="100" step="5" disabled={!preferences.soundEnabled} value={preferences.soundVolume} onchange={(event) => void updatePreference("soundVolume", Number(event.currentTarget.value))} />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Show over fullscreen", "Sobre tela cheia")}</strong><small>{tr("Keep Lume above fullscreen apps", "Mantém o Lume sobre apps em tela cheia")}</small></span>
+              <input class="workspace-switch" type="checkbox" checked={preferences.showOverFullscreen} disabled={settingsSaving} onchange={(event) => void updatePreference("showOverFullscreen", event.currentTarget.checked)} />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Monitor", "Monitor")}</strong><small>{tr("Primary display by default", "Tela principal por padrão")}</small></span>
+              <LumeSelect ariaLabel={tr("Monitor", "Monitor")} value={preferences.monitorId ?? ""} options={[{ value: "", label: tr("Primary", "Principal") }, ...monitors.map((monitor) => ({ value: monitor.id, label: monitor.label }))]} minWidth={128} onValueChange={(value) => void updatePreference("monitorId", value || undefined)} />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("History", "Histórico")}</strong><small>{tr("Local retention", "Retenção local")}</small></span>
+              <LumeSelect ariaLabel={tr("History retention", "Retenção do histórico")} value={String(preferences.historyRetentionDays)} options={[{ value: "7", label: tr("7 days", "7 dias") }, { value: "30", label: tr("30 days", "30 dias") }, { value: "90", label: tr("90 days", "90 dias") }]} minWidth={112} onValueChange={(value) => void updatePreference("historyRetentionDays", Number(value))} />
+            </label>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Open sessions in", "Abrir sessões em")}</strong><small>{tr("Default launch target", "Destino padrão")}</small></span>
+              <LumeSelect ariaLabel={tr("Session destination", "Destino das sessões")} value={preferences.launchTarget} options={[{ value: "auto", label: "Auto" }, { value: "terminal", label: "Terminal" }, { value: "vscode", label: "VS Code" }]} minWidth={112} onValueChange={(value) => void updatePreference("launchTarget", value as Preferences["launchTarget"])} />
+            </label>
+          </details>
+
+          <details class="settings-group">
+            <summary>{tr("Agents", "Agentes")}</summary>
+            {#each [
+              { label: "", items: integrations.filter((integration) => integration.canLaunch) },
+              { label: tr("Monitoring only", "Somente monitoramento"), items: integrations.filter((integration) => !integration.canLaunch) },
+            ] as group}
+              {#if group.label}<small class="group-label">{group.label}</small>{/if}
+              {#each group.items as integration (integration.kind)}
+                <div class="integration-row">
+                  <span class="integration-icon"><BrandIcon name={integrationAgentKind(integration.kind)} size={18} /></span>
+                  <span><strong>{integration.label}</strong><small>{integration.detail}</small></span>
+                  <button type="button" disabled={diagnosingIntegration !== null} onclick={() => void runIntegrationDiagnostic(integration)}>{diagnosingIntegration === integration.kind ? "…" : tr("Test", "Testar")}</button>
+                  {#if integration.canConfigure}
+                    <button class:active={integration.configured} type="button" disabled={!integration.installed || configuringIntegration !== null} onclick={() => void toggleIntegration(integration)}>{configuringIntegration === integration.kind ? "…" : integration.configured ? tr("Connected", "Conectado") : tr("Connect", "Conectar")}</button>
+                  {/if}
+                </div>
+                {#if integrationDiagnostics[integration.kind]}
+                  <div class="diagnostic-list">
+                    {#each integrationDiagnostics[integration.kind]?.checks ?? [] as item (item.id)}
+                      <span class="diagnostic-{item.status}"><i></i><b>{item.label}</b><small>{item.detail}</small></span>
+                    {/each}
+                  </div>
+                {/if}
+              {/each}
+            {/each}
+          </details>
+
+          <details class="settings-group">
+            <summary>{tr("Companions and detectors", "Companions e detectores")}</summary>
+            <div class="integration-row">
+              <span class="integration-icon"><BrandIcon name="vscode" size={18} /></span>
+              <span><strong>VS Code Companion</strong><small>{vscodeStatus.detail}</small></span>
+              <button class:active={vscodeStatus.configured} type="button" disabled={!vscodeStatus.installed || configuringVscode} onclick={() => void toggleVscode()}>{configuringVscode ? "…" : vscodeStatus.configured ? tr("Connected", "Conectado") : tr("Connect", "Conectar")}</button>
+            </div>
+            <div class="integration-row">
+              <span class="integration-icon"><BrandIcon name="browsers" size={18} /></span>
+              <span><strong>Chrome, Edge & Brave</strong><small>{tr("Browser companion extension", "Extensão companion do navegador")}</small></span>
+              <button type="button" onclick={() => void revealBrowserCompanion()}>{tr("Open", "Abrir")}</button>
+            </div>
+            {#each externalPlugins as plugin (plugin.id)}
+              <div class="integration-row">
+                <span class="integration-icon"><BrandIcon name="unknown" size={17} /></span>
+                <span><strong>{plugin.name}</strong><small>{plugin.executable}</small></span>
+                <button type="button" onclick={() => void uninstallExternalPlugin(plugin.id)}>{tr("Remove", "Remover")}</button>
+              </div>
+            {/each}
+            <div class="inline-actions">
+              <button type="button" disabled={installingPlugin} onclick={() => void addExternalPlugin()}>{installingPlugin ? "…" : tr("Install manifest", "Instalar manifesto")}</button>
+              <button type="button" onclick={() => void revealPluginDirectory()}>{tr("Open detector folder", "Abrir pasta dos detectores")}</button>
+            </div>
+          </details>
+
+          <details class="settings-group compact-settings">
+            <summary>{tr("Keyboard shortcuts", "Atalhos de teclado")}</summary>
+            {#each [
+              ["openShortcut", tr("Open Lume", "Abrir o Lume")],
+              ["globalShortcut", tr("Command palette", "Paleta de comandos")],
+              ["newSessionShortcut", tr("New session", "Nova sessão")],
+              ["whiteboardShortcut", tr("Terminals", "Terminais")],
+              ["workspaceShortcut", "Workspace"],
+            ] as shortcut}
+              <div class="workspace-setting-row">
+                <span><strong>{shortcut[1]}</strong></span>
+                <button class="shortcut-button" type="button" onclick={() => void openShortcutEditor(shortcut[0] as Exclude<typeof shortcutEditorKey, null>)}>{preferences[shortcut[0] as Exclude<typeof shortcutEditorKey, null>]}</button>
+              </div>
+            {/each}
+          </details>
+
+          <details class="settings-group compact-settings">
+            <summary>{tr("Project profiles", "Perfis por projeto")}</summary>
+            {#if detectedProjects.length}
+              <label class="workspace-setting-row">
+                <span><strong>{tr("Project", "Projeto")}</strong></span>
+                <LumeSelect ariaLabel={tr("Project", "Projeto")} value={selectedProfileKey ?? ""} options={detectedProjects.map((project) => ({ value: project.key, label: project.label }))} minWidth={150} onValueChange={(value) => selectedProfileKey = value} />
+              </label>
+              <label class="workspace-setting-row">
+                <span><strong>{tr("Project sounds", "Sons do projeto")}</strong></span>
+                <input class="workspace-switch" type="checkbox" checked={selectedProjectProfile?.soundEnabled ?? true} onchange={(event) => void updateProjectProfile({ soundEnabled: event.currentTarget.checked })} />
+              </label>
+              <label class="workspace-setting-row">
+                <span><strong>{tr("Session destination", "Destino das sessões")}</strong></span>
+                <LumeSelect ariaLabel={tr("Session destination", "Destino das sessões")} value={selectedProjectProfile?.launchTarget ?? ""} options={[{ value: "", label: tr("Global", "Global") }, { value: "auto", label: "Auto" }, { value: "terminal", label: "Terminal" }, { value: "vscode", label: "VS Code" }]} minWidth={112} onValueChange={(value) => void updateProjectProfile({ launchTarget: (value || undefined) as Preferences["launchTarget"] | undefined })} />
+              </label>
+              <label class="workspace-setting-row">
+                <span><strong>{tr("Profile monitor", "Monitor do perfil")}</strong></span>
+                <LumeSelect ariaLabel={tr("Profile monitor", "Monitor do perfil")} value={selectedProjectProfile?.monitorId ?? ""} options={[{ value: "", label: tr("Global", "Global") }, ...monitors.map((monitor) => ({ value: monitor.id, label: monitor.label }))]} minWidth={128} onValueChange={(value) => void updateProjectProfile({ monitorId: value || undefined })} />
+              </label>
+              <label class="workspace-setting-row">
+                <span><strong>{tr("Permission preset", "Preset de permissão")}</strong></span>
+                <LumeSelect ariaLabel={tr("Permission preset", "Preset de permissão")} value={selectedProjectProfile?.permissionMode ?? ""} options={[{ value: "", label: tr("Agent default", "Padrão do agente") }, { value: "plan", label: "Plan" }, { value: "read_only", label: tr("Read only", "Somente leitura") }, { value: "workspace_write", label: "Workspace write" }, { value: "full_access", label: tr("Full access", "Acesso total") }]} minWidth={135} onValueChange={(value) => void updateProjectProfile({ permissionMode: (value || undefined) as Preferences["projectProfiles"][string]["permissionMode"] })} />
+              </label>
+              <label class="workspace-setting-row">
+                <span><strong>{tr("Approval policy", "Política de aprovação")}</strong></span>
+                <LumeSelect ariaLabel={tr("Approval policy", "Política de aprovação")} value={selectedProjectProfile?.approvalPolicy ?? ""} options={[{ value: "", label: tr("Agent default", "Padrão do agente") }, { value: "untrusted", label: "Untrusted" }, { value: "on-request", label: "On request" }, { value: "never", label: "Never" }]} minWidth={130} onValueChange={(value) => void updateProjectProfile({ approvalPolicy: (value || undefined) as Preferences["projectProfiles"][string]["approvalPolicy"] })} />
+              </label>
+              <label class="workspace-setting-row">
+                <span><strong>Whiteboard</strong></span>
+                <LumeSelect ariaLabel="Whiteboard" value={selectedProjectProfile?.whiteboardLayoutId ?? ""} options={[{ value: "", label: tr("No layout", "Sem layout") }, ...preferences.whiteboardLayouts.map((layout) => ({ value: layout.id, label: layout.name }))]} minWidth={130} onValueChange={(value) => void updateProjectProfile({ whiteboardLayoutId: value || undefined })} />
+              </label>
+              <div class="preferred-agents">
+                <strong>{tr("Preferred agents", "Agentes preferidos")}</strong>
+                <span>{#each integrations.filter((integration) => integration.canLaunch) as integration (integration.kind)}<button class:active={(selectedProjectProfile?.preferredAgents ?? []).includes(integrationAgentKind(integration.kind))} type="button" onclick={() => void togglePreferredAgent(integrationAgentKind(integration.kind))}><BrandIcon name={integrationAgentKind(integration.kind)} size={13} />{integration.label}</button>{/each}</span>
+              </div>
+              <div class="inline-actions"><button type="button" onclick={() => void captureProfilePosition()}>{tr("Use current position", "Usar posição atual")}</button><button class="primary" type="button" onclick={() => void applyProjectProfile()}>{tr("Apply profile", "Aplicar perfil")}</button></div>
+            {:else}
+              <p class="settings-empty">{tr("Profiles appear after a project is detected.", "Os perfis aparecem quando um projeto é detectado.")}</p>
+            {/if}
+          </details>
+
+          <details class="settings-group compact-settings">
+            <summary>{tr("Mobile access", "Acesso mobile")}</summary>
+            <label class="workspace-setting-row">
+              <span><strong>{tr("Local network access", "Acesso na rede local")}</strong><small>{mobileStatus?.address || tr("Paired devices only", "Apenas dispositivos pareados")}</small></span>
+              <input class="workspace-switch" type="checkbox" checked={mobileStatus?.networkReachable ?? false} disabled={mobileBusy} onchange={() => void toggleMobileAccess()} />
+            </label>
+            {#if mobileStatus?.networkReachable}
+              <div class="mobile-pairing-action"><button type="button" onclick={() => void createMobilePairing()}>{pairingOffer ? tr("New QR code", "Novo QR Code") : tr("Pair device", "Parear dispositivo")}</button></div>
+              {#if pairingQr && pairingOffer}<div class="pairing-qr"><img src={pairingQr} alt={tr("Pairing QR code", "QR Code de pareamento")} /><span><strong>{pairingOffer.code}</strong><small>{tr("Same local network", "Mesma rede local")}</small></span></div>{/if}
+            {/if}
+            {#each pairedDevices as device (device.id)}
+              <div class="device-card">
+                <header><span><strong>{device.name}</strong><small>{device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : tr("Not used yet", "Ainda não utilizado")}</small></span><button type="button" onclick={() => void removePairedDevice(device.id)}>{tr("Revoke", "Revogar")}</button></header>
+                {#each [["prompt", tr("Send prompts", "Enviar prompts")], ["approve", tr("Manage approvals", "Gerenciar aprovações")], ["terminate", tr("Stop agents", "Encerrar agentes")]] as permission}
+                  <label class="workspace-setting-row"><span><strong>{permission[1]}</strong></span><input class="workspace-switch" type="checkbox" checked={device.scopes.includes(permission[0] as MobileScope)} onchange={() => void toggleDeviceScope(device, permission[0] as MobileScope)} /></label>
+                {/each}
+              </div>
+            {/each}
+          </details>
+
+          <section class="settings-group about-settings">
+            <span><strong>Lume</strong><small>{tr("Version", "Versão")} {appVersion}</small></span>
+            {#if updateState === "available"}<button class="primary" type="button" onclick={() => void installUpdate()}>{tr("Update to", "Atualizar para")} {availableVersion}</button>{:else}<button type="button" disabled={["checking", "downloading", "ready"].includes(updateState)} onclick={() => void checkForUpdates()}>{updateState === "checking" ? "…" : tr("Check updates", "Verificar atualizações")}</button>{/if}
+            {#if updateDetail}<p>{updateDetail}</p>{/if}
+          </section>
+
+          <details class="settings-group reset-group">
+            <summary>{tr("Reset", "Redefinir")}</summary>
+            <div class="reset-control">
+              {#if resetConfirming}<span>{tr("Restore every Lume setting?", "Restaurar todos os ajustes do Lume?")}</span><button type="button" onclick={() => resetConfirming = false}>{tr("Cancel", "Cancelar")}</button>{/if}
+              <button class:danger={resetConfirming} type="button" onclick={() => void resetSettings()}>{resetConfirming ? tr("Confirm reset", "Confirmar redefinição") : tr("Reset settings", "Redefinir ajustes")}</button>
+            </div>
+          </details>
+
+        </div>
+      </aside>
+    </div>
+  {/if}
+
+  {#if shortcutEditorKey}
+    <div class="shortcut-scrim" role="presentation">
+      <div class="shortcut-dialog" data-shortcut-capture role="dialog" aria-modal="true" aria-label={tr("Shortcut editor", "Editor de atalho")} tabindex="0" onkeydown={captureShortcut}>
+        <strong>{tr("Press a new shortcut", "Pressione um novo atalho")}</strong>
+        <kbd>{shortcutDraft || "…"}</kbd>
+        <span><button type="button" onclick={() => shortcutEditorKey = null}>{tr("Cancel", "Cancelar")}</button><button class="primary" type="button" onclick={() => void saveShortcut()}>{tr("Save", "Salvar")}</button></span>
+      </div>
+    </div>
+  {/if}
+
+  <section class:inspector-open={inspectorOpen} class:review-open={reviewOpen} class="workspace-stage">
+    <section
+      bind:this={workbenchElement}
+      class:split={Boolean(secondary)}
+      class:three-pane={Boolean(tertiary)}
+      class:resizing={resizingDivider !== null}
+      class:drag-active={draggingSessionId !== null}
+      class="workbench"
+      aria-label={tr("Workspace layout", "Layout do Workspace")}
+      style:grid-template-columns={workbenchColumns()}
+      ondragover={trackWorkspaceDrop}
+      ondragleave={leaveWorkspaceDrop}
+      ondrop={dropSessionInWorkspace}
+    >
+    {#if workspaceBackgroundImage}
+      <div
+        class="workspace-wallpaper"
+        style:background-image={`url("${workspaceBackgroundImage}")`}
+        style:opacity={`${workspaceBackgroundImageOpacity / 100}`}
+        aria-hidden="true"
+      ></div>
+    {/if}
+    {#if maximizedSession}
+      {#key maximizedSession.id}
+        <WorkspaceSessionPane
+          session={maximizedSession}
+          {language}
+          {streamMessages}
+          focused
+          maximized
+          onFocus={() => focusPane(maximizedSession.id)}
+          onFork={(threadId) => openForkedCodexSession(threadId, maximizedSession)}
+          onOpenReview={(path) => openReview(path, maximizedSession.id)}
+          onToggleMaximize={() => togglePaneMaximize(maximizedSession.id)}
+        />
+      {/key}
+    {:else if primary}
+      {#key primary.id}
+        <WorkspaceSessionPane
+          session={primary}
+          {language}
+          {streamMessages}
+          focused={focusedPaneId === primary.id}
+          onFocus={() => focusPane(primary.id)}
+          onFork={(threadId) => openForkedCodexSession(threadId, primary)}
+          onOpenReview={(path) => openReview(path, primary.id)}
+          onToggleMaximize={() => togglePaneMaximize(primary.id)}
+        />
+      {/key}
+      {#if secondary}
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex (ARIA separator becomes interactive when focusable and exposes aria-valuenow) -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions (pointer and keyboard input resize the separator) -->
+        <div
+          class="pane-divider"
+          role="separator"
+          tabindex="0"
+          aria-label={tr("Resize chat panes", "Redimensionar painéis de chat")}
+          aria-orientation="vertical"
+          aria-valuemin="25"
+          aria-valuemax="75"
+          aria-valuenow={Math.round(splitRatio * 100)}
+          title={tr("Drag to resize", "Arraste para redimensionar")}
+          onpointerdown={(event) => beginSplitResize(event, 0)}
+          onpointermove={moveSplitResize}
+          onpointerup={endSplitResize}
+          onpointercancel={endSplitResize}
+          onkeydown={(event) => handleSplitKeydown(event, 0)}
+        ></div>
+        {#key secondary.id}
+        <WorkspaceSessionPane
+          session={secondary}
+            {language}
+            {streamMessages}
+            closable
+            focused={focusedPaneId === secondary.id}
+            onClose={() => closeSidePane(secondary.id)}
+            onFocus={() => focusPane(secondary.id)}
+            onFork={(threadId) => openForkedCodexSession(threadId, secondary)}
+            onOpenReview={(path) => openReview(path, secondary.id)}
+            onToggleMaximize={() => togglePaneMaximize(secondary.id)}
+          />
+        {/key}
+        {#if tertiary}
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex (ARIA separator becomes interactive when focusable and exposes aria-valuenow) -->
+          <!-- svelte-ignore a11y_no_noninteractive_element_interactions (pointer and keyboard input resize the separator) -->
+          <div
+            class="pane-divider"
+            role="separator"
+            tabindex="0"
+            aria-label={tr("Resize third chat pane", "Redimensionar terceiro painel de chat")}
+            aria-orientation="vertical"
+            aria-valuemin="22"
+            aria-valuemax="50"
+            aria-valuenow={Math.round(tertiaryRatio * 100)}
+            title={tr("Drag to resize", "Arraste para redimensionar")}
+            onpointerdown={(event) => beginSplitResize(event, 1)}
+            onpointermove={moveSplitResize}
+            onpointerup={endSplitResize}
+            onpointercancel={endSplitResize}
+            onkeydown={(event) => handleSplitKeydown(event, 1)}
+          ></div>
+          {#key tertiary.id}
+            <WorkspaceSessionPane
+              session={tertiary}
+              {language}
+              {streamMessages}
+              closable
+              focused={focusedPaneId === tertiary.id}
+              onClose={() => closeSidePane(tertiary.id)}
+              onFocus={() => focusPane(tertiary.id)}
+              onFork={(threadId) => openForkedCodexSession(threadId, tertiary)}
+              onOpenReview={(path) => openReview(path, tertiary.id)}
+              onToggleMaximize={() => togglePaneMaximize(tertiary.id)}
+            />
+          {/key}
+        {/if}
+      {/if}
+    {:else}
+      <div class="workspace-empty">
+        <span class="empty-mark"><BrandIcon name="lume" size={34} /></span>
+        <strong>{tr("Your agents, in one workspace", "Seus agentes, em um workspace")}</strong>
+        <p>{tr("Open an agent to follow its conversation and work side by side.", "Abra um agente para acompanhar a conversa e trabalhar lado a lado.")}</p>
+      </div>
+    {/if}
+      {#if error && !sessions.length}<p class="workspace-error">{error}</p>{/if}
+      {#if draggingSessionId && workspaceDropIntent}
+        <div
+          class="layout-drop-preview {workspaceDropIntent.kind}"
+          style:left={`${workspaceDropIntent.left}%`}
+          style:width={`${workspaceDropIntent.width}%`}
+          aria-hidden="true"
+        >
+          <span>
+            <LumeIcon name={workspaceDropIntent.kind === "insert" ? "plus" : workspaceDropIntent.kind === "move" ? "layout" : "split"} size={15} />
+            {workspaceDropIntent.kind === "insert"
+              ? tr("Add pane", "Adicionar painel")
+              : workspaceDropIntent.kind === "move"
+                ? tr("Move here", "Mover para cá")
+                : tr("Replace pane", "Substituir painel")}
+          </span>
+        </div>
+      {/if}
+    </section>
+    <div class:open={inspectorOpen} class="inspector-shell" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
+      {#if inspectorOpen}
+        <div class="inspector-content" in:fly={{ x: 18, duration: motionDuration(210), easing: cubicOut }} out:fly={{ x: 14, duration: motionDuration(145), easing: cubicOut }}>
+          <WorkspaceInspector session={focusedSession} {language} onClose={toggleInspector} onOpenReview={openReview} />
+        </div>
+      {/if}
+    </div>
+    <div class:open={reviewOpen} class="review-shell" aria-hidden={!reviewOpen} inert={!reviewOpen}>
+      {#if reviewOpen && focusedSession}
+        <div class="review-content" in:fly={{ x: 22, duration: motionDuration(220), easing: cubicOut }} out:fly={{ x: 16, duration: motionDuration(145), easing: cubicOut }}>
+          <WorkspaceReviewCenter session={focusedSession} {language} initialPath={reviewInitialPath} onClose={closeReview} />
+        </div>
+      {/if}
+    </div>
+  </section>
+</main>
+
+<style>
+  .workspace {
+    --workspace-background-color: var(--lume-canvas-light);
+    --workspace-background-opacity: 96%;
+    --workspace-bg: var(--lume-canvas-light);
+    --workspace-sidebar: color-mix(in srgb, var(--lume-sidebar-light) 96%, transparent);
+    --workspace-pane: color-mix(in srgb, var(--lume-surface-light) 96%, transparent);
+    --workspace-chat-background: color-mix(in srgb, var(--workspace-background-color) var(--workspace-background-opacity), transparent);
+    --workspace-raised: var(--lume-raised-light);
+    --workspace-line: var(--lume-line-light);
+    --workspace-strong: var(--lume-ink-strong-light);
+    --workspace-text: var(--lume-ink-light);
+    --workspace-muted: var(--lume-ink-muted-light);
+    --workspace-faint: var(--lume-ink-faint-light);
+    --workspace-accent: var(--lume-accent-strong);
+    --workspace-accent-soft: var(--lume-accent-soft-light);
+    --workspace-subtle: var(--lume-subtle-light);
+    --workspace-message: var(--lume-message-light);
+    --workspace-user: var(--lume-user-light);
+    --workspace-user-line: var(--lume-user-line-light);
+    --workspace-code: var(--lume-code-light);
+    --workspace-scroll-thumb: var(--lume-scroll-light);
+    --chat-small-font-size: 10px;
+    --chat-tiny-font-size: 8px;
+    width: 100%;
+    max-width: 100vw;
+    min-width: 0;
+    height: 100vh;
+    display: grid;
+    grid-template-columns: 256px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    color: var(--workspace-text);
+    background: var(--workspace-bg);
+    font-family: "Segoe UI Variable", "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
+    accent-color: var(--workspace-accent);
+  }
+  .workspace.dark {
+    --workspace-background-color: var(--lume-canvas-dark);
+    --workspace-bg: var(--lume-canvas-dark);
+    --workspace-sidebar: color-mix(in srgb, var(--lume-sidebar-dark) 96%, transparent);
+    --workspace-pane: color-mix(in srgb, var(--lume-surface-dark) 96%, transparent);
+    --workspace-raised: var(--lume-raised-dark);
+    --workspace-line: var(--lume-line-dark);
+    --workspace-strong: var(--lume-ink-strong-dark);
+    --workspace-text: var(--lume-ink-dark);
+    --workspace-muted: var(--lume-ink-muted-dark);
+    --workspace-faint: var(--lume-ink-faint-dark);
+    --workspace-accent: var(--lume-accent);
+    --workspace-accent-soft: var(--lume-accent-soft-dark);
+    --workspace-subtle: var(--lume-subtle-dark);
+    --workspace-message: var(--lume-message-dark);
+    --workspace-user: var(--lume-user-dark);
+    --workspace-user-line: var(--lume-user-line-dark);
+    --workspace-code: var(--lume-code-dark);
+    --workspace-scroll-thumb: var(--lume-scroll-dark);
+  }
+  ::selection { color: var(--workspace-strong); background: var(--workspace-accent-soft); }
+  button, input { font: inherit; }
+  button:focus-visible, input:focus-visible { outline: 2px solid color-mix(in srgb, var(--workspace-accent) 70%, white); outline-offset: 2px; }
+  .window-resize-edge { position: fixed; z-index: 60; margin: 0; padding: 0; border: 0; outline: 0; background: transparent; }
+  .edge-north, .edge-south { right: 6px; left: 6px; height: 5px; cursor: ns-resize; }.edge-north { top: 0; }.edge-south { bottom: 0; }
+  .edge-east, .edge-west { top: 6px; bottom: 6px; width: 5px; cursor: ew-resize; }.edge-east { right: 0; }.edge-west { left: 0; }
+  .edge-northeast, .edge-northwest, .edge-southeast, .edge-southwest { width: 9px; height: 9px; }
+  .edge-northeast { top: 0; right: 0; cursor: nesw-resize; }.edge-northwest { top: 0; left: 0; cursor: nwse-resize; }
+  .edge-southeast { right: 0; bottom: 0; cursor: nwse-resize; }.edge-southwest { bottom: 0; left: 0; cursor: nesw-resize; }
+  .sidebar { min-width: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); overflow: hidden; border-right: 1px solid var(--workspace-line); background: var(--workspace-sidebar); }
+  .brand-header { position: relative; z-index: 24; min-width: 0; padding: 0 13px 11px; display: grid; gap: 1px; border-bottom: 1px solid var(--workspace-line); user-select: none; }
+  .brand-top { min-width: 0; height: 52px; display: flex; align-items: center; gap: 10px; cursor: grab; }
+  .brand-top:active { cursor: grabbing; }
+  .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
+  .brand-top > span:nth-child(2) { min-width: 0; flex: 1; display: grid; }
+  .brand-header strong { color: var(--workspace-strong); font-size: 14px; letter-spacing: -.02em; }
+  .brand-header small { color: var(--workspace-muted); font-size: 9px; font-weight: 650; letter-spacing: .01em; }
+  .compact-mode, .settings-button, .inspector-button { width: 29px; height: 29px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
+  .compact-mode:hover, .settings-button:hover, .settings-button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .inspector-button:hover, .inspector-button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .settings-scrim { position: fixed; z-index: 30; inset: 0; display: flex; justify-content: flex-end; background: rgba(8, 17, 13, .22); }
+  .workspace-settings { width: min(430px, calc(100vw - 72px)); height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); color: var(--workspace-text); background: var(--workspace-raised); box-shadow: -18px 0 52px rgba(9, 23, 16, .16); }
+  .workspace-settings > header { min-height: 72px; padding: 14px 16px 13px 19px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--workspace-line); }
+  .workspace-settings > header > span { min-width: 0; flex: 1; display: grid; gap: 3px; }
+  .workspace-settings > header strong { color: var(--workspace-strong); font-size: 14px; letter-spacing: -.02em; }
+  .workspace-settings > header small { color: var(--workspace-muted); font-size: 9px; }
+  .workspace-settings > header button { width: 31px; height: 31px; display: grid; place-items: center; border: 0; border-radius: 9px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .workspace-settings > header button:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
+  .settings-content { min-height: 0; padding: 4px 19px 20px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .settings-content::-webkit-scrollbar { width: 7px; }.settings-content::-webkit-scrollbar-track { background: transparent; }.settings-content::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 7px; background: var(--workspace-scroll-thumb); background-clip: content-box; }
+  .settings-group { padding: 16px 0; border-bottom: 1px solid var(--workspace-line); }
+  details.settings-group { padding: 0; }
+  .settings-group > summary { min-height: 48px; display: flex; align-items: center; gap: 8px; color: var(--workspace-strong); font-size: 10px; font-weight: 780; letter-spacing: -.01em; list-style: none; cursor: pointer; }
+  .settings-group > summary::-webkit-details-marker { display: none; }
+  .settings-group > summary::after { width: 7px; height: 7px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .55; transform: rotate(45deg) translate(-2px, 2px); transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .settings-group[open] > summary::after { transform: rotate(225deg) translate(-1px, 0); }
+  .settings-group[open] { padding-bottom: 18px; }
+  .appearance-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+  .appearance-option { min-width: 0; padding: 7px; display: grid; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: transparent; cursor: pointer; text-align: left; transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .appearance-option:hover { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 32%, var(--workspace-line)); transform: translateY(-1px); }
+  .appearance-option.active { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 48%, transparent); background: var(--workspace-accent-soft); }
+  .appearance-option > strong { overflow: hidden; font-size: 8px; font-weight: 760; text-overflow: ellipsis; white-space: nowrap; }
+  .appearance-preview { height: 43px; padding: 6px; display: grid; grid-template-columns: 13px 1fr; grid-template-rows: 7px 1fr; gap: 4px; overflow: hidden; border: 1px solid rgba(46, 67, 56, .13); border-radius: 7px; background: #f6f5ef; }
+  .appearance-preview i { grid-row: 1 / -1; border-radius: 3px; background: #dfe5db; }.appearance-preview b { border-radius: 2px; background: #d6dfd8; }.appearance-preview em { border-radius: 3px; background: #fffefa; }
+  .mode-dark .appearance-preview { border-color: rgba(208, 229, 218, .11); background: #101815; }.mode-dark .appearance-preview i { background: #1d2923; }.mode-dark .appearance-preview b { background: #28372f; }.mode-dark .appearance-preview em { background: #17221d; }
+  .mode-system .appearance-preview { background: linear-gradient(120deg, #f6f5ef 0 49.5%, #101815 50.5% 100%); }.mode-system .appearance-preview i { background: linear-gradient(120deg, #dfe5db 0 49.5%, #1d2923 50.5% 100%); }.mode-system .appearance-preview b { background: linear-gradient(120deg, #d6dfd8 0 49.5%, #28372f 50.5% 100%); }.mode-system .appearance-preview em { background: linear-gradient(120deg, #fffefa 0 49.5%, #17221d 50.5% 100%); }
+  .theme-options { margin-top: 10px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; }
+  .theme-options button { min-width: 0; padding: 7px 4px; display: grid; justify-items: center; gap: 5px; border: 1px solid transparent; border-radius: 9px; color: var(--workspace-muted); background: transparent; font-size: 7px; font-weight: 720; cursor: pointer; }
+  .theme-options button:hover, .theme-options button.active { color: var(--workspace-strong); background: var(--workspace-subtle); }
+  .theme-options button.active { border-color: color-mix(in srgb, var(--theme-accent) 48%, transparent); }
+  .theme-options button span { width: 30px; height: 20px; border: 5px solid var(--theme-surface); border-radius: 7px; background: var(--theme-accent); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .15); }
+  .accent-setting { margin-top: 7px; }
+  .wallpaper-setting { position: relative; max-width: 100%; overflow: hidden; }
+  .wallpaper-input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+  .wallpaper-preview { width: 38px; height: 29px; flex: 0 0 auto; border-radius: 7px; background-position: center; background-size: cover; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-strong) 15%, transparent); }
+  .wallpaper-actions { min-width: 0; display: flex; gap: 4px; flex: 0 1 auto; }
+  .wallpaper-actions button { min-height: 28px; padding: 0 8px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 720; cursor: pointer; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
+  .wallpaper-actions button:last-child { width: 28px; padding: 0; display: grid; place-items: center; }
+  .wallpaper-actions button:hover { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 38%, var(--workspace-line)); background: var(--workspace-subtle); }
+  .compact-settings { display: grid; }
+  .workspace-setting-row { width: 100%; max-width: 100%; min-width: 0; min-height: 53px; display: flex; align-items: center; gap: 14px; overflow: hidden; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 62%, transparent); }
+  .workspace-setting-row:last-child { border-bottom: 0; }
+  .workspace-setting-row > span { min-width: 0; flex: 1; display: grid; gap: 3px; }
+  .workspace-setting-row > span strong { color: var(--workspace-strong); font-size: 9px; font-weight: 730; }.workspace-setting-row > span small { color: var(--workspace-muted); font-size: 8px; line-height: 1.35; }
+  .workspace-switch { position: relative; width: 34px; height: 20px; flex: 0 0 auto; appearance: none; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); cursor: pointer; transition: border-color 140ms ease, background 180ms ease; }
+  .workspace-switch::after { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--workspace-muted); content: ""; transition: background 140ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1); }
+  .workspace-switch:checked { border-color: transparent; background: var(--workspace-accent); }.workspace-switch:checked::after { background: #f7fbf8; transform: translateX(14px); }.workspace-switch:disabled { cursor: wait; opacity: .58; }
+  .settings-range { width: 120px; accent-color: var(--workspace-accent); }
+  .group-label { display: block; margin: 8px 0 5px; color: var(--workspace-faint); font-size: 7px; font-weight: 780; letter-spacing: .07em; text-transform: uppercase; }
+  .integration-row { min-height: 49px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 65%, transparent); }
+  .integration-row > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; flex: 1; }
+  .integration-row strong, .preferred-agents > strong, .about-settings strong, .device-card strong { color: var(--workspace-strong); font-size: 9px; }
+  .integration-row small, .about-settings small, .device-card small { overflow: hidden; color: var(--workspace-muted); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+  .integration-icon { width: 28px; height: 28px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
+  .integration-row button, .inline-actions button, .mobile-pairing-action button, .about-settings button, .reset-control button { min-height: 27px; padding: 0 8px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 7px; font-weight: 720; cursor: pointer; }
+  .integration-row button:hover, .integration-row button.active, .inline-actions button:hover, .mobile-pairing-action button:hover, .about-settings button:hover { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 35%, var(--workspace-line)); background: var(--workspace-subtle); }
+  button.primary { color: var(--workspace-raised); border-color: transparent; background: var(--workspace-accent); }
+  .diagnostic-list { padding: 6px 0 8px 35px; display: grid; gap: 5px; }
+  .diagnostic-list > span { display: grid; grid-template-columns: 6px auto 1fr; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 7px; }
+  .diagnostic-list i { width: 5px; height: 5px; border-radius: 50%; background: #c38b3e; }.diagnostic-list .diagnostic-ok i { background: #50a677; }.diagnostic-list .diagnostic-error i { background: #bd615e; }
+  .diagnostic-list b { color: var(--workspace-text); font-weight: 700; }.diagnostic-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inline-actions { padding-top: 10px; display: flex; justify-content: flex-end; gap: 6px; }
+  .shortcut-button { padding: 6px 8px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-subtle); font: 700 8px/1.2 ui-monospace, monospace; cursor: pointer; }
+  .preferred-agents { padding: 10px 0; display: grid; gap: 7px; }
+  .preferred-agents > span { display: flex; flex-wrap: wrap; gap: 5px; }
+  .preferred-agents button { padding: 5px 7px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 7px; cursor: pointer; }
+  .preferred-agents button.active { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 40%, transparent); background: var(--workspace-accent-soft); }
+  .settings-empty, .about-settings p { margin: 4px 0 0; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }
+  .mobile-pairing-action { padding: 10px 0 3px; }
+  .pairing-qr { padding: 10px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.pairing-qr img { width: 96px; height: 96px; border-radius: 7px; }.pairing-qr span { display: grid; gap: 3px; }.pairing-qr strong { color: var(--workspace-strong); font: 750 12px ui-monospace, monospace; }.pairing-qr small { color: var(--workspace-muted); font-size: 7px; }
+  .device-card { margin-top: 9px; padding: 9px 10px 3px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.device-card header { display: flex; align-items: center; gap: 8px; }.device-card header span { min-width: 0; display: grid; gap: 2px; flex: 1; }.device-card header button { border: 0; color: #b7605c; background: transparent; font-size: 7px; cursor: pointer; }
+  .about-settings { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; }.about-settings > span { display: grid; gap: 2px; }.about-settings p { grid-column: 1 / -1; }
+  .reset-control { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }.reset-control > span { margin-right: auto; color: var(--workspace-muted); font-size: 8px; }.reset-control .danger { color: #b65d59; border-color: rgba(182, 93, 89, .28); }
+  .shortcut-scrim { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; background: rgba(5, 11, 8, .45); backdrop-filter: blur(4px); }
+  .shortcut-dialog { width: min(310px, calc(100vw - 36px)); padding: 20px; display: grid; justify-items: center; gap: 15px; border: 1px solid var(--workspace-line); border-radius: 15px; outline: none; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(0, 0, 0, .25); }.shortcut-dialog > strong { color: var(--workspace-strong); font-size: 12px; }.shortcut-dialog > kbd { min-width: 160px; padding: 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-accent); background: var(--workspace-subtle); font: 750 10px ui-monospace, monospace; text-align: center; }.shortcut-dialog > span { display: flex; gap: 7px; }.shortcut-dialog button { min-height: 30px; padding: 0 11px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 730; cursor: pointer; }.shortcut-dialog button.primary { color: var(--workspace-raised); background: var(--workspace-accent); }
+  .header-selectors { min-width: 0; display: flex; align-items: center; gap: 5px; }
+  .header-selectors.expanded { flex-wrap: wrap; }
+  .header-utilities { margin-left: auto; display: flex; align-items: center; gap: 5px; }
+  .header-selectors.expanded .header-utilities { width: 100%; justify-content: flex-end; }
+  .header-selectors.expanded { animation: layout-editor-arrive 160ms cubic-bezier(.16, 1, .3, 1) both; }
+  .project-picker, .layout-picker { min-width: 0; flex: 1; }
+  .project-picker :global(.lume-select), .layout-picker :global(.lume-select) { width: 100%; min-width: 0 !important; }
+  .header-control-icon, .header-control-close, .layout-actions button, .layout-name-editor button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
+  .header-control-icon:hover, .header-control-close:hover, .layout-actions button:hover:not(:disabled), .layout-name-editor button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .layout-actions { padding-top: 5px; display: flex; align-items: center; gap: 3px; }
+  .layout-actions button:disabled, .layout-name-editor button:disabled { opacity: .3; cursor: default; }
+  .layout-actions .delete-layout:hover { color: #b96862; background: color-mix(in srgb, #b96862 8%, transparent); }
+  .layout-name-editor { height: 34px; margin: 6px 0 0; padding: 2px 3px 2px 8px; display: flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 42%, var(--workspace-line)); border-radius: 9px; color: var(--workspace-accent); background: var(--workspace-raised); animation: layout-editor-arrive 160ms cubic-bezier(.16, 1, .3, 1) both; }
+  .layout-name-editor input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--workspace-strong); background: transparent; font-size: 9px; }
+  .layout-name-editor button { width: 25px; height: 25px; }
+  .session-heading { position: relative; z-index: 20; padding: 13px 15px 8px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); }
+  .session-heading strong { flex: 1; color: var(--workspace-strong); font-size: 10px; font-weight: 720; }
+  .session-heading span { font-size: 8px; font-variant-numeric: tabular-nums; }
+  .search-inline { min-width: 0; height: 30px; padding: 0 8px; display: flex; align-items: center; gap: 6px; flex: 1; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-faint); background: var(--workspace-raised); animation: layout-editor-arrive 160ms cubic-bezier(.16, 1, .3, 1) both; }
+  .search-inline:focus-within { border-color: var(--workspace-accent); }
+  .search-inline input { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--workspace-strong); background: transparent; font-size: 9px; }
+  .search-inline input::placeholder { color: var(--workspace-faint); }
+  .search-inline button { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 5px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .search-inline button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .search-toggle { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .search-toggle:hover, .search-toggle.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .session-launcher { position: relative; margin-left: auto; }
+  .session-launcher > button { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .session-launcher > button:hover, .session-launcher > button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .session-launcher-popover { position: fixed; z-index: 1000; box-sizing: border-box; padding: 10px; overflow-y: auto; border: 1px solid var(--workspace-line); border-radius: 12px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 42px rgba(8, 18, 13, .19); }
+  .session-launcher-popover > strong { display: block; margin: 1px 3px 9px; color: var(--workspace-strong); font-size: 10px; }
+  .launcher-agent { border-top: 1px solid var(--workspace-line); }
+  .launcher-agent-row { min-height: 44px; display: flex; align-items: center; gap: 5px; }
+  .launcher-agent-row > span { min-width: 0; flex: 1; overflow: hidden; color: var(--workspace-strong); font-size: 9px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }
+  .launcher-agent-row button { min-height: 26px; padding: 0 6px; border: 0; border-radius: 6px; color: var(--workspace-accent); background: var(--workspace-subtle); font-size: 8px; font-weight: 720; cursor: pointer; }
+  .launcher-agent-row button:disabled { opacity: .45; cursor: default; }
+  .launcher-agent-row button.active { background: var(--workspace-accent-soft); }
+  .launcher-resume-list { max-height: 180px; padding: 0 0 7px 21px; overflow-y: auto; }
+  .launcher-resume-list button { width: 100%; min-height: 39px; padding: 5px 7px; display: grid; gap: 2px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; text-align: left; cursor: pointer; }
+  .launcher-resume-list button:hover { background: var(--workspace-subtle); }
+  .launcher-resume-list strong { overflow: hidden; color: var(--workspace-strong); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+  .launcher-resume-list small { overflow: hidden; color: var(--workspace-muted); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+  .session-launcher-popover p { margin: 8px 3px; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }
+  .session-filters { margin: 0 11px 10px; padding: 3px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--workspace-line); border-radius: 9px; background: color-mix(in srgb, var(--workspace-sidebar) 76%, var(--workspace-bg)); }
+  .session-filters button { min-width: 0; height: 25px; padding: 0 5px; overflow: hidden; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .session-filters button:hover { color: var(--workspace-strong); }
+  .session-filters button.active { color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(26, 42, 34, .08); }
+  .session-filters button:active { transform: scale(.97); }
+  .session-list { min-height: 0; padding: 0 8px 14px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .session-row { position: relative; margin-bottom: 2px; display: flex; align-items: stretch; border-radius: 10px; cursor: grab; transition: background 140ms ease, opacity 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .session-tree-item { min-width: 0; }
+  .session-row:hover { background: var(--workspace-subtle); }
+  .session-row:hover { transform: translateX(2px); }
+  .session-row:active { cursor: grabbing; }
+  .session-row.dragging { opacity: .48; transform: scale(.98); }
+  .session-row.primary-selected { background: var(--workspace-accent-soft); }
+  .session-row.primary-selected::before { position: absolute; top: 13px; bottom: 13px; left: 0; width: 1px; border-radius: 1px; background: var(--workspace-accent); content: ""; }
+  .session-row.secondary-selected,
+  .session-row.tertiary-selected { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 25%, transparent); }
+  .session-select { min-width: 0; min-height: 62px; padding: 9px 4px 9px 10px; display: flex; align-items: flex-start; gap: 9px; flex: 1; border: 0; color: inherit; background: transparent; text-align: left; cursor: inherit; }
+  .session-icon { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
+  .session-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }
+  .session-copy strong, .session-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-copy strong { color: var(--workspace-strong); font-size: 10px; font-weight: 720; letter-spacing: -.01em; }
+  .session-copy small { color: var(--workspace-muted); font-size: 8px; line-height: 1.3; }
+  .session-copy .session-meta { display: flex; align-items: center; gap: 4px; }
+  .session-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-copy em { display: flex; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 8px; font-style: normal; font-weight: 650; }
+  .session-copy em i { width: 5px; height: 5px; border-radius: 50%; background: #8a9891; }
+  .session-copy em.status-running i { background: #4d99cc; }.session-copy em.status-completed i { background: #4daa77; }.session-copy em.status-permission_required i { background: #d6a441; }.session-copy em.status-failed i { background: #c86662; }
+  .session-copy em.status-running i { animation: live-pulse 1.8s ease-out infinite; }
+  .subagent-toggle { min-width: 32px; height: 24px; margin: auto 1px auto 0; padding: 0 3px 0 6px; display: flex; align-items: center; justify-content: center; gap: 2px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: var(--workspace-raised); font-size: 8px; font-weight: 750; cursor: pointer; }
+  .subagent-toggle:hover, .subagent-toggle.open { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 32%, var(--workspace-line)); }
+  .subagent-toggle :global(.lume-icon) { transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }.subagent-toggle.open :global(.lume-icon) { transform: rotate(180deg); }
+  .subagent-list-shell { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 180ms cubic-bezier(.16, 1, .3, 1); }.subagent-list-shell.open { grid-template-rows: 1fr; }
+  .subagent-list { min-height: 0; margin: 0 8px 3px 22px; overflow: hidden; border-left: 1px solid var(--workspace-line); }
+  .subagent-row { min-height: 33px; padding: 4px 6px 4px 12px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); }
+  .subagent-branch { width: 8px; height: 1px; margin-left: -12px; flex: 0 0 auto; background: var(--workspace-line); }
+  .subagent-copy { min-width: 0; display: grid; gap: 1px; }.subagent-copy strong { max-width: 165px; overflow: hidden; color: var(--workspace-text); font-size: 9px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }.subagent-copy small { color: var(--workspace-faint); font-size: 7px; }.subagent-copy small.status-running { color: #4d99cc; }.subagent-copy small.status-failed { color: #c86662; }
+  .internal-heading { margin: 14px 7px 5px; padding-top: 11px; display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--workspace-line); color: var(--workspace-faint); font-size: 8px; font-weight: 750; letter-spacing: .02em; }.internal-heading span { flex: 1; }.internal-heading small { color: var(--workspace-muted); font-size: 8px; }
+  .internal-row { min-width: 0; min-height: 49px; padding: 7px 9px; display: flex; align-items: center; gap: 9px; border-radius: 9px; color: var(--workspace-muted); background: var(--workspace-subtle); }.internal-row .session-copy { gap: 3px; }.internal-live { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--workspace-accent); }
+  .no-results { margin: 36px 20px; color: var(--workspace-muted); font-size: 10px; text-align: center; }
+  .session-skeleton { height: 62px; margin-bottom: 4px; padding: 10px; display: flex; gap: 9px; border-radius: 12px; background: var(--workspace-subtle); }
+  .session-skeleton i { width: 32px; height: 32px; border-radius: 10px; background: var(--workspace-line); }
+  .session-skeleton span { width: 108px; height: 8px; margin-top: 5px; border-radius: 4px; background: var(--workspace-line); }
+  .session-context-menu { position: fixed; z-index: 29; width: min(214px, calc(100vw - 16px)); max-height: calc(100vh - 16px); box-sizing: border-box; padding: 8px; display: grid; gap: 7px; overflow-y: auto; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 12px 36px rgba(6, 19, 11, .2); animation: session-menu-in 130ms cubic-bezier(.16, 1, .3, 1) both; }
+  .session-context-menu > strong { padding: 3px 5px 5px; overflow: hidden; color: var(--workspace-strong); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  .session-context-menu p { margin: 0; padding: 0 5px; color: var(--workspace-muted); font-size: 9px; line-height: 1.5; }
+  .session-context-rename { display: grid; gap: 7px; }
+  .session-context-rename label { padding: 0 2px; color: var(--workspace-muted); font-size: 8px; font-weight: 700; }
+  .session-context-rename input { width: 100%; min-width: 0; height: 33px; padding: 0 9px; border: 1px solid var(--workspace-line); border-radius: 8px; outline: 0; color: var(--workspace-strong); background: var(--workspace-subtle); font-size: 10px; }
+  .session-context-rename input:focus { border-color: color-mix(in srgb, var(--workspace-accent) 55%, var(--workspace-line)); box-shadow: 0 0 0 2px var(--workspace-accent-soft); }
+  .session-context-command, .session-context-actions button { min-height: 32px; padding: 0 9px; border: 0; border-radius: 8px; color: var(--workspace-text); background: var(--workspace-subtle); font-size: 9px; cursor: pointer; }
+  .session-context-command { display: flex; align-items: center; gap: 8px; text-align: left; transition: color 130ms ease, background 130ms ease, transform 130ms cubic-bezier(.16, 1, .3, 1); }
+  .session-context-command:hover, .session-context-actions button:hover { color: var(--workspace-strong); background: var(--workspace-line); }
+  .session-context-command:hover { transform: translateX(1px); }
+  .session-context-command.danger-command { color: #b45c58; }
+  .session-context-command:disabled { opacity: .55; cursor: wait; transform: none; }
+  .session-context-actions { display: flex; gap: 5px; }
+  .session-context-actions button { flex: 1; }
+  .session-context-actions .danger { color: #b45c58; background: color-mix(in srgb, #b45c58 12%, var(--workspace-raised)); }
+  .session-context-actions .danger:hover { background: color-mix(in srgb, #b45c58 20%, var(--workspace-raised)); }
+  .session-context-actions .primary { color: var(--workspace-raised); background: var(--workspace-accent); }
+  .session-context-actions .primary:hover { color: var(--workspace-raised); background: color-mix(in srgb, var(--workspace-accent) 84%, var(--workspace-strong)); }
+  .session-context-actions button:disabled { opacity: .55; cursor: wait; }
+  .workspace-stage { position: relative; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 0px 0px; grid-template-rows: minmax(0, 1fr); overflow: hidden; background: transparent; transition: grid-template-columns 220ms cubic-bezier(.16, 1, .3, 1); }
+  .workspace-stage.inspector-open { grid-template-columns: minmax(0, 1fr) clamp(270px, 23vw, 350px) 0px; }
+  .workspace-stage.review-open { grid-template-columns: minmax(340px, 1fr) 0px clamp(460px, 46vw, 760px); }
+  .inspector-shell { min-width: 0; min-height: 0; height: 100%; overflow: hidden; pointer-events: none; }
+  .inspector-shell.open { pointer-events: auto; }
+  .inspector-content { min-width: 0; width: 100%; height: 100%; }
+  .review-shell { min-width: 0; min-height: 0; height: 100%; overflow: hidden; border-left: 0 solid transparent; pointer-events: none; }
+  .review-shell.open { border-left-width: 1px; border-left-color: var(--workspace-line); pointer-events: auto; }
+  .review-content { min-width: 0; width: 100%; height: 100%; }
+  .workbench { position: relative; width: 100%; max-width: 100%; min-width: 0; min-height: 0; isolation: isolate; contain: inline-size; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; background: var(--workspace-chat-background); }
+  .workspace-wallpaper { position: absolute; z-index: -1; inset: 0; width: 100%; height: 100%; background-position: center; background-size: cover; background-repeat: no-repeat; pointer-events: none; }
+  .workbench.split { grid-template-columns: minmax(0, 1fr) 7px minmax(0, 1fr); }
+  .workbench.resizing { user-select: none; }
+  .workbench.drag-active { cursor: copy; }
+  .layout-drop-preview { position: absolute; z-index: 20; top: 8px; bottom: 8px; min-width: 0; padding: 0 7px; box-sizing: border-box; pointer-events: none; }
+  .layout-drop-preview::before { position: absolute; inset: 0 7px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 64%, var(--workspace-line)); border-radius: 15px; background: color-mix(in srgb, var(--workspace-accent) 10%, var(--workspace-raised)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 9%, transparent), 0 10px 34px color-mix(in srgb, var(--workspace-accent) 11%, transparent); content: ""; animation: drop-preview-arrive 150ms cubic-bezier(.16, 1, .3, 1) both; }
+  .layout-drop-preview span { position: absolute; top: 50%; left: 50%; min-width: max-content; padding: 6px 9px; display: flex; align-items: center; gap: 6px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 34%, var(--workspace-line)); border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 7px 20px rgba(7, 20, 13, .14); font-size: 8px; font-weight: 760; transform: translate(-50%, -50%); }
+  .layout-drop-preview.insert::before { background: color-mix(in srgb, var(--workspace-accent) 17%, var(--workspace-raised)); animation: add-pane-preview 540ms cubic-bezier(.16, 1, .3, 1) both; }
+  .layout-drop-preview.insert span { animation: add-label-pulse 1.1s ease-in-out infinite alternate; }
+  .layout-drop-preview.replace::before { border-style: dashed; opacity: .72; }
+  .layout-drop-preview.move::before { background: color-mix(in srgb, var(--workspace-accent) 8%, var(--workspace-raised)); }
+  .pane-divider { position: relative; width: 7px; min-width: 7px; padding: 0; border: 0; outline: 0; background: transparent; cursor: col-resize; touch-action: none; }
+  .pane-divider::before { position: absolute; inset: 0 3px; background: var(--workspace-line); content: ""; transition: inset 120ms ease, background 120ms ease; }
+  .pane-divider:hover::before,
+  .pane-divider:focus-visible::before,
+  .workbench.resizing .pane-divider::before { inset: 0 2px; background: color-mix(in srgb, var(--workspace-accent) 58%, var(--workspace-line)); }
+  .workspace-empty { margin: auto; display: grid; justify-items: center; gap: 10px; color: var(--workspace-muted); text-align: center; }
+  .empty-mark { width: 58px; height: 58px; display: grid; place-items: center; color: var(--workspace-accent); }
+  .workspace-empty strong { color: var(--workspace-strong); font-size: 17px; letter-spacing: -.03em; }
+  .workspace-empty p { max-width: 360px; margin: 0; font-size: 11px; line-height: 1.6; }
+  .workspace-error { position: fixed; right: 18px; bottom: 18px; max-width: 420px; margin: 0; padding: 10px 12px; border: 1px solid rgba(198, 102, 98, .28); border-radius: 10px; color: #b45c58; background: var(--workspace-pane); font-size: 9px; }
+  @keyframes live-pulse { 0%, 45% { box-shadow: 0 0 0 0 rgba(77, 153, 204, .28); } 80%, 100% { box-shadow: 0 0 0 4px rgba(77, 153, 204, 0); } }
+  @keyframes session-menu-in { from { opacity: 0; transform: translateY(-4px); } }
+  @keyframes layout-editor-arrive { from { opacity: 0; transform: translateY(-3px); } }
+  @keyframes drop-preview-arrive { from { opacity: 0; transform: scale(.985); } }
+  @keyframes add-pane-preview { 0% { opacity: 0; transform: scaleX(.76); } 65% { opacity: 1; transform: scaleX(1.015); } 100% { transform: scaleX(1); } }
+  @keyframes add-label-pulse { from { box-shadow: 0 7px 20px rgba(7, 20, 13, .12), 0 0 0 0 color-mix(in srgb, var(--workspace-accent) 20%, transparent); } to { box-shadow: 0 7px 20px rgba(7, 20, 13, .14), 0 0 0 5px transparent; } }
+  @media (max-width: 980px) { .workspace { grid-template-columns: 216px minmax(0, 1fr); } }
+  @media (max-width: 800px) {
+    .workspace { grid-template-columns: 68px minmax(0, 1fr); }
+    .brand-header { padding: 0; }
+    .brand-top { justify-content: center; }
+    .brand-top > span:nth-child(2), .session-heading > strong, .session-heading > span, .session-filters, .session-copy { display: none; }
+    .header-selectors { padding-bottom: 5px; justify-content: center; flex-wrap: wrap; }
+    .header-utilities { width: 100%; margin-left: 0; justify-content: center; flex-wrap: wrap; }
+    .session-heading { padding: 12px 0 10px; justify-content: center; gap: 3px; }
+    .search-inline { display: none; }
+    .workspace.searching, .workspace.selecting { grid-template-columns: 216px minmax(0, 1fr); }
+    .workspace.selecting .brand-top { padding: 0 11px; justify-content: flex-start; }
+    .workspace.selecting .brand-top > span:nth-child(2) { display: grid; }
+    .workspace.selecting .header-selectors { padding: 0 11px 5px; }
+    .workspace.searching .session-heading, .workspace.selecting .session-heading { padding: 12px 11px 8px; justify-content: flex-start; }
+    .workspace.selecting .session-heading > strong, .workspace.selecting .session-heading > span { display: block; }
+    .workspace.searching .search-inline { display: flex; }
+    .workspace.searching .session-copy, .workspace.selecting .session-copy { display: grid; }
+    .workspace.searching .session-filters, .workspace.selecting .session-filters { display: grid; }
+    .workspace.searching .session-list, .workspace.selecting .session-list { padding: 0 9px 12px; }
+    .workspace.searching .session-select, .workspace.selecting .session-select { justify-content: flex-start; }
+    .session-list { padding: 0 7px 12px; }
+    .session-row { height: 50px; }
+    .subagent-toggle, .subagent-list-shell, .internal-heading span, .internal-heading small, .internal-live { display: none; }
+    .internal-heading { height: 1px; margin: 12px 8px 5px; padding: 0; }
+    .internal-row { justify-content: center; padding: 7px 0; }
+    .session-select { min-height: 50px; padding: 10px; justify-content: center; }
+    .session-row.primary-selected::before { top: 10px; bottom: 10px; }
+  }
+  @media (max-width: 1040px) {
+    .workspace-stage.inspector-open { grid-template-columns: minmax(0, 1fr) 285px 0px; }
+    .workspace-stage.review-open { grid-template-columns: minmax(300px, 1fr) 0px minmax(420px, 48vw); }
+  }
+  @media (max-height: 640px) { .brand-top { height: 46px; }.session-heading { padding-top: 8px; }.session-row { margin-bottom: 0; } }
+  @media (prefers-reduced-motion: reduce) { .session-row, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .layout-actions button, .workspace-stage { transition: none; }.session-copy em.status-running i, .session-context-menu, .layout-name-editor, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span { animation: none; } }
+</style>

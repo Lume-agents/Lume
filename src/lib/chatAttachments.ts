@@ -11,6 +11,10 @@ export interface ResponseFileReference {
   isImage: boolean;
 }
 
+export interface ResponseFileCard extends ResponseFileReference {
+  downloadable: boolean;
+}
+
 export function cleanPromptTransport(value?: string): string {
   const normalized = String(value ?? "").replace(/\r\n?/g, "\n");
   const marker = normalized.indexOf(lumeAttachedFilesMarker);
@@ -74,6 +78,53 @@ export function extractResponseFiles(
     if (result.length === 8) break;
   }
   return result;
+}
+
+export function extractResponseFileCards(
+  text: string | undefined,
+  attachments: PromptAttachment[] = [],
+  workingDirectory?: string,
+): ResponseFileCard[] {
+  const downloads = extractResponseFiles(text, attachments, workingDirectory);
+  const downloadPaths = new Set(downloads.map((file) => responsePathKey(file.path)));
+  const result: ResponseFileCard[] = [];
+  const seen = new Set<string>();
+  const source = String(text ?? "");
+
+  for (const match of source.matchAll(/!?\[[^\]\n]*\]\((<[^>\n]+>|[^)\n]+)\)/g)) {
+    const rawPath = markdownTargetPath(match[1]);
+    const path = resolveResponsePath(rawPath, workingDirectory);
+    if (!path || isSensitivePath(path)) continue;
+    const key = responsePathKey(path);
+    if (seen.has(key)) continue;
+    const attachment = attachments.find((candidate) =>
+      candidate.path && sameResponsePath(candidate.path, path, workingDirectory)
+    );
+    const name = attachment?.name || fileName(path);
+    const mimeType = attachment?.mimeType || mimeForFile(name);
+    seen.add(key);
+    result.push({
+      path,
+      name,
+      mimeType,
+      isImage: mimeType.startsWith("image/") || imageExtensions.has(extension(name)),
+      downloadable: downloadPaths.has(key),
+    });
+    if (result.length === 8) return result;
+  }
+
+  for (const file of downloads) {
+    const key = responsePathKey(file.path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ ...file, downloadable: true });
+    if (result.length === 8) break;
+  }
+  return result;
+}
+
+function responsePathKey(path: string): string {
+  return path.replace(/\\/g, "/").toLowerCase();
 }
 
 function isExplicitResponseFile(

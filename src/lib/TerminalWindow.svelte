@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { fade, slide } from "svelte/transition";
+  import { fade, fly, slide } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import { emit, emitTo, listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -8,14 +9,16 @@
   import type { AgentSession, DockPreviewEvent, DockSide, PermissionAction, Preferences, PromptAttachmentInput, QuestionAnswer, SessionActivity, SessionNote, TerminalWindowState, WorkflowGroupDefinition, WorkflowRole, WorkflowRoleContract, WorkflowStepDefinition } from "$lib/domain";
   import type { HubSession, WorkItemStatus } from "$lib/hubProtocol";
   import BrandIcon from "$lib/BrandIcon.svelte";
+  import { colorWithOpacity, normalizeAccentColor, normalizeAppearanceTheme, type AppearanceTheme } from "$lib/appearance";
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
+  import ThinkingOrb from "$lib/ThinkingOrb.svelte";
   import LumeLogo from "$lib/LumeLogo.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import ResponseAttachments from "$lib/ResponseAttachments.svelte";
-  import { cleanPromptTransport, promptTextKey } from "$lib/chatAttachments";
-  import { isHiddenAgentActivity, isPresentableTraceActivity, needsUserAuthorization } from "$lib/activityPresentation";
+  import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
+  import { activityThinkingLabel, activityThinkingState, formatAgentDuration, isHiddenAgentActivity, needsUserAuthorization } from "$lib/activityPresentation";
   import { displayText, localize, type Language } from "$lib/i18n";
   import {
     clipboardHasFile,
@@ -31,7 +34,15 @@
   } from "$lib/imageAttachments";
   import { renderSafeMarkdown } from "$lib/markdown.js";
   import { BoundedRenderCache } from "$lib/boundedRenderCache";
-  import { latestResponseText, sameResponseText } from "$lib/responseDedup.js";
+  import {
+    buildConversationEntries,
+    buildConversationFeed,
+    type ConversationEntry,
+    type ConversationFeedItem,
+  } from "$lib/sessionConversation";
+
+  type ChatEntry = ConversationEntry;
+  type ChatFeedItem = ConversationFeedItem;
   import {
     displayFileChangePath,
     mergeFileChanges,
@@ -147,6 +158,7 @@
   let collaborationModeNotice = $state<string | null>(null);
   let collaborationModeNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   let composerToolsOpen = $state(false);
+  let reducedMotion = $state(false);
   let modelDialogOpen = $state(false);
   let modelSettings = $state<CodexThreadModelSettings | null>(null);
   let selectedModel = $state("");
@@ -269,6 +281,9 @@
   let textZoom = $state(1);
   let headerActionsOpen = $state(false);
   const effectiveDark = $derived(darkMode ?? systemDark);
+  let appearanceTheme = $state<AppearanceTheme>("lume");
+  let accentColor = $state<string | undefined>(undefined);
+  let accentOpacity = $state(100);
   const workflowGroup = $derived.by(() => {
     if (!windowState?.groupId) return undefined;
     return workflowGroups.find((group) => group.terminalGroupId === windowState?.groupId);
@@ -340,6 +355,15 @@
   function tr(english: string, portuguese: string) {
     return localize(language, english, portuguese);
   }
+
+  const systemBanners = $derived.by<SystemBannerItem[]>(() => {
+    const items: SystemBannerItem[] = [];
+    if (workflowDraftError) items.push({ id: "workflow-error", message: workflowDraftError, tone: "error", onDismiss: () => { workflowDraftError = null; } });
+    if (handoffError) items.push({ id: "handoff-error", message: handoffError, tone: "error", onDismiss: () => { handoffError = null; } });
+    if (modelError) items.push({ id: "model-error", message: modelError, tone: "error", onDismiss: () => { modelError = null; } });
+    if (message) items.push({ id: "terminal-message", message, onDismiss: () => { message = null; } });
+    return items;
+  });
 
   function workflowStepRoleLabel(step: WorkflowStepDefinition) {
     if (step.role === "custom") return step.customRoleLabel.trim() || tr("Custom", "Personalizado");
@@ -1174,263 +1198,12 @@
     }
     return files;
   });
-  type ChatEntry = {
-    id: string;
-    activity: SessionActivity;
-    files: FileChangeSummary[];
-    sequence: number;
-  };
-  function chatTextKey(value?: string): string {
-    return (value ?? "")
-      .replace(/\r\n?/g, "\n")
-      .replace(/[ \t]+$/gm, "")
-      .trim();
-  }
-  function fileChangesKey(files: FileChangeSummary[]): string {
-    return files
-      .map((file) => `${file.path}\u0000${file.added}\u0000${file.removed}`)
-      .sort()
-      .join("\u0001");
-  }
-  function mergeChatAttachments(target: SessionActivity, source: SessionActivity) {
-    const attachments = [...(target.attachments ?? [])];
-    for (const attachment of source.attachments ?? []) {
-      const duplicate = attachments.some((existing) =>
-        existing.path && attachment.path
-          ? existing.path.replace(/\\/g, "/").toLowerCase() === attachment.path.replace(/\\/g, "/").toLowerCase()
-          : existing.name === attachment.name
-      );
-      if (!duplicate) attachments.push(attachment);
-    }
-    if (attachments.length) target.attachments = attachments;
-  }
-  const chatEntries = $derived.by<ChatEntry[]>(() => {
-    let sequence = 0;
-    const uniquePrompts: SessionActivity[] = [];
-    let messageSinceLastPrompt = false;
-    for (const activity of [...chatActivities].sort((left, right) => left.createdAt - right.createdAt)) {
-      if (activity.kind === "message") messageSinceLastPrompt = true;
-      if (activity.kind !== "prompt") continue;
-      const existing = uniquePrompts.at(-1);
-      const duplicate = existing
-        && !messageSinceLastPrompt
-        && !(existing.id.startsWith("local:") && activity.id.startsWith("local:"))
-        && promptTextKey(existing.detail) === promptTextKey(activity.detail)
-        && Math.abs(existing.createdAt - activity.createdAt) < 60_000;
-      if (!duplicate) uniquePrompts.push(activity);
-      messageSinceLastPrompt = false;
-    }
-    const promptTimes = uniquePrompts.map((activity) => activity.createdAt);
-    const promptSegment = (createdAt: number) => {
-      let low = 0;
-      let high = promptTimes.length - 1;
-      let segment = Number.NEGATIVE_INFINITY;
-      while (low <= high) {
-        const middle = (low + high) >> 1;
-        const promptTime = promptTimes[middle];
-        if (promptTime <= createdAt) {
-          segment = promptTime;
-          low = middle + 1;
-        } else {
-          high = middle - 1;
-        }
-      }
-      return segment;
-    };
-    const entries: ChatEntry[] = [];
-    for (const activity of chatActivities) {
-      if (
-        activity.kind === "queued_prompt"
-        || activity.kind === "plan"
-        || activity.kind === "plan_document"
-      ) continue;
-      if (activity.kind === "prompt") {
-        let duplicateIndex = -1;
-        for (let index = entries.length - 1; index >= 0; index -= 1) {
-          const existing = entries[index].activity;
-          if (
-            existing.kind === "prompt"
-            && !(existing.id.startsWith("local:") && activity.id.startsWith("local:"))
-            && promptTextKey(existing.detail) === promptTextKey(activity.detail)
-            && Math.abs(existing.createdAt - activity.createdAt) < 60_000
-          ) {
-            duplicateIndex = index;
-            break;
-          }
-        }
-        const duplicatePrompt = duplicateIndex >= 0
-          && !entries.slice(duplicateIndex + 1).some((entry) =>
-            entry.activity.kind === "prompt" || entry.activity.kind === "message"
-          )
-          ? entries[duplicateIndex]
-          : undefined;
-        if (duplicatePrompt) {
-          mergeChatAttachments(duplicatePrompt.activity, activity);
-          continue;
-        }
-      }
-      const files = activityChanges(activity);
-      const matchingMessage = activity.kind === "message"
-        ? entries.findLast((entry) =>
-            entry.activity.kind === "message" &&
-            sameResponseText(entry.activity.detail, activity.detail) &&
-            promptSegment(entry.activity.createdAt) === promptSegment(activity.createdAt)
-          )
-        : undefined;
-      if (matchingMessage) {
-        const previousCreatedAt = matchingMessage.activity.createdAt;
-        matchingMessage.activity.detail = latestResponseText(
-          matchingMessage.activity.detail,
-          activity.detail,
-          previousCreatedAt,
-          activity.createdAt,
-        );
-        if (activity.createdAt >= previousCreatedAt) {
-          matchingMessage.activity = {
-            ...matchingMessage.activity,
-            ...activity,
-            detail: matchingMessage.activity.detail,
-          };
-        }
-        mergeFileChanges(matchingMessage.files, files);
-        continue;
-      }
-      if (activity.kind === "file" && files.length) {
-        const signature = fileChangesKey(files);
-        const duplicateFileEntry = entries.findLast((entry) =>
-          entry.activity.kind === "file" &&
-          promptSegment(entry.activity.createdAt) === promptSegment(activity.createdAt) &&
-          fileChangesKey(entry.files) === signature
-        );
-        if (duplicateFileEntry) {
-          mergeFileChanges(duplicateFileEntry.files, files);
-          continue;
-        }
-      }
-      entries.push({
-        id: `activity:${activity.id}`,
-        activity: {
-          ...activity,
-          detail: activity.kind === "prompt"
-            ? cleanPromptTransport(activity.detail) || undefined
-            : activity.detail,
-        },
-        files,
-        sequence: sequence++,
-      });
-    }
-    for (const result of session?.results ?? []) {
-      const resultFiles = summarizeFileChanges(
-        result.response,
-        result.files,
-        session?.workingDirectory,
-      );
-      const responseKey = chatTextKey(result.response);
-      const matchingMessage = entries.findLast((entry) =>
-        entry.activity.kind === "message" &&
-        sameResponseText(entry.activity.detail, responseKey) &&
-        promptSegment(entry.activity.createdAt) === promptSegment(result.createdAt)
-      );
-      if (matchingMessage) {
-        matchingMessage.activity.detail = latestResponseText(
-          matchingMessage.activity.detail,
-          result.response,
-          matchingMessage.activity.createdAt,
-          result.createdAt,
-        );
-        if (result.createdAt >= matchingMessage.activity.createdAt) {
-          matchingMessage.activity.createdAt = result.createdAt;
-          matchingMessage.activity.status = "completed";
-        }
-        mergeFileChanges(matchingMessage.files, resultFiles);
-        matchingMessage.activity.files = Array.from(new Set([
-          ...matchingMessage.activity.files,
-          ...result.files,
-        ]));
-      } else if (result.response || resultFiles.length) {
-        entries.push({
-          id: `result:${result.id}`,
-          activity: {
-            id: `response:${result.id}`,
-            kind: result.response ? "message" : "file",
-            title: result.response ? "Resposta do agente" : "Arquivos alterados",
-            detail: result.response || undefined,
-            status: "completed",
-            createdAt: result.createdAt,
-            files: result.files,
-          },
-          files: resultFiles,
-          sequence: sequence++,
-        });
-      }
-    }
-    if (session?.lastResponse) {
-      const responseKey = chatTextKey(session.lastResponse);
-      const matchingMessage = entries.find((entry) =>
-        entry.activity.kind === "message" &&
-        sameResponseText(entry.activity.detail, responseKey)
-      );
-      if (matchingMessage) {
-        matchingMessage.activity.detail = latestResponseText(
-          matchingMessage.activity.detail,
-          session.lastResponse,
-          matchingMessage.activity.createdAt,
-          session.updatedAt,
-        );
-        if (session.updatedAt >= matchingMessage.activity.createdAt) {
-          matchingMessage.activity.createdAt = session.updatedAt;
-          matchingMessage.activity.status = "completed";
-        }
-      } else {
-        entries.push({
-          id: `last-response:${session.id}:${session.updatedAt}`,
-          activity: {
-            id: `response:${session.id}:${session.updatedAt}`,
-            kind: "message",
-            title: "Resposta do agente",
-            detail: session.lastResponse,
-            status: "completed",
-            createdAt: session.updatedAt,
-            files: [],
-          },
-          files: [],
-          sequence: sequence++,
-        });
-      }
-    }
-    return entries.sort((left, right) => {
-      return left.activity.createdAt - right.activity.createdAt ||
-        left.sequence - right.sequence;
-    });
-  });
-  type ChatFeedItem =
-    | { kind: "entry"; id: string; entry: ChatEntry }
-    | { kind: "trace"; id: string; entries: ChatEntry[]; files: FileChangeSummary[] };
-  const chatFeedItems = $derived.by<ChatFeedItem[]>(() => {
-    const feed: ChatFeedItem[] = [];
-    let trace: Extract<ChatFeedItem, { kind: "trace" }> | null = null;
-    for (const entry of chatEntries) {
-      if (isHiddenAgentActivity(entry.activity)) continue;
-      if (isPresentableTraceActivity(entry.activity)) {
-        const previous = trace?.entries[trace.entries.length - 1];
-        if (!trace || (previous && entry.activity.createdAt - previous.activity.createdAt > 180_000)) {
-          trace = {
-            kind: "trace",
-            id: `trace:${entry.id}`,
-            entries: [],
-            files: [],
-          };
-          feed.push(trace);
-        }
-        trace.entries.push(entry);
-        mergeFileChanges(trace.files, entry.files);
-        continue;
-      }
-      trace = null;
-      feed.push({ kind: "entry", id: entry.id, entry });
-    }
-    return feed;
-  });
+  const chatEntries = $derived.by<ConversationEntry[]>(() =>
+    buildConversationEntries(session, chatActivities, activityChanges)
+  );
+  const chatFeedItems = $derived.by<ConversationFeedItem[]>(() =>
+    buildConversationFeed(chatEntries)
+  );
   const unloadedActivityCount = $derived(Math.max(
     0,
     (session?.activityTotal ?? activities.length) - activities.length,
@@ -1444,6 +1217,10 @@
     if (!session || !["running", "permission_required"].includes(session.status)) return null;
     const latest = chatFeedItems.at(-1);
     return latest?.kind === "trace" ? latest.id : null;
+  });
+  const activeThinkingState = $derived.by(() => {
+    const activity = chatActivities.at(-1);
+    return activity ? activityThinkingState(activity) : "breathing";
   });
   const authorizationMessageId = $derived.by<string | null>(() => {
     if (!session) return null;
@@ -1493,6 +1270,8 @@
     let terminalVisible = document.visibilityState !== "hidden";
     let handleDocumentVisibility: (() => void) | undefined;
     const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const syncMotion = () => (reducedMotion = motionPreference.matches);
     const syncSystemTheme = (event: MediaQueryListEvent | MediaQueryList) => {
       systemDark = event.matches;
     };
@@ -1544,6 +1323,8 @@
     }
     syncSystemTheme(colorScheme);
     colorScheme.addEventListener("change", syncSystemTheme);
+    syncMotion();
+    motionPreference.addEventListener("change", syncMotion);
     document.addEventListener("click", openMarkdownLink);
     document.addEventListener("pointerdown", closeHeaderPopovers);
     window.addEventListener("keydown", interruptOnEscape);
@@ -1556,6 +1337,9 @@
       ]);
       language = nextPreferences.language;
       darkMode = nextPreferences.darkMode;
+      appearanceTheme = normalizeAppearanceTheme(nextPreferences.appearanceTheme);
+      accentColor = normalizeAccentColor(nextPreferences.accentColor);
+      accentOpacity = nextPreferences.accentOpacity;
       workflowGroups = nextPreferences.workflowGroups;
       workflowTerminals = nextWorkflowTerminals;
       displayBackend = nextDisplayBackend;
@@ -1644,6 +1428,9 @@
       stopPreferences = await listen<Preferences>("lume://preferences-changed", ({ payload }) => {
         language = payload.language;
         darkMode = payload.darkMode;
+        appearanceTheme = normalizeAppearanceTheme(payload.appearanceTheme);
+        accentColor = normalizeAccentColor(payload.accentColor);
+        accentOpacity = payload.accentOpacity;
         workflowGroups = payload.workflowGroups;
       });
       stopDockPreview = await listen<DockPreviewEvent>("lume://terminal-dock-preview", ({ payload }) => {
@@ -1727,6 +1514,7 @@
       stopNativeDragEnded?.();
       stopWorkflowConnectionHover?.();
       colorScheme.removeEventListener("change", syncSystemTheme);
+      motionPreference.removeEventListener("change", syncMotion);
       document.removeEventListener("click", openMarkdownLink);
       document.removeEventListener("pointerdown", closeHeaderPopovers);
       if (handleDocumentVisibility) document.removeEventListener("visibilitychange", handleDocumentVisibility);
@@ -2063,14 +1851,14 @@
       if (item.sourceApp === "brave") return "Brave";
       return "Web";
     }
-    return { cli: "CLI", vscode: "VS Code", desktop: "Desktop" }[item.source] ?? tr("Source", "Origem");
+    return { cli: "CLI", vscode: "VS Code", desktop: "Lume" }[item.source] ?? tr("Source", "Origem");
   }
 
   function sourceIcon(item: AgentSession) {
     if (item.source === "cli") return "terminal" as const;
     if (item.source === "vscode") return "vscode" as const;
     if (item.source === "web") return item.sourceApp ?? ("browsers" as const);
-    return "unknown" as const;
+    return item.source === "desktop" ? ("lume" as const) : ("unknown" as const);
   }
 
   function queueMove(x: number, y: number) {
@@ -3026,7 +2814,8 @@
   }
 </script>
 
-<main class:dark={effectiveDark} class="terminal-window" onpointerdown={() => void currentWindow.setFocus().catch(() => undefined)}>
+<main class:dark={effectiveDark} class="terminal-window" data-appearance={appearanceTheme} style:--lume-accent={colorWithOpacity(accentColor, accentOpacity)} style:--lume-accent-strong={colorWithOpacity(accentColor, accentOpacity)} onpointerdown={() => void currentWindow.setFocus().catch(() => undefined)}>
+  <SystemBannerStack items={systemBanners} dismissLabel={tr("Dismiss", "Fechar")} />
   {#if session}
     <section
       class:dragging
@@ -3118,10 +2907,12 @@
             <small title={session.workingDirectory}>{sessionDirectoryName(session)}</small>
           </div>
         {/if}
-        <span class="source-badge" title={sourceLabel(session)}>
-          <BrandIcon name={sourceIcon(session)} size={10} />
-          <span class="badge-label">{sourceLabel(session)}</span>
-        </span>
+        {#if session.controlOrigin === "external"}
+          <span class="source-badge" title={sourceLabel(session)}>
+            <BrandIcon name={sourceIcon(session)} size={10} />
+            <span class="badge-label">{sourceLabel(session)}</span>
+          </span>
+        {/if}
         {#if session.permissionProfile.approvalsReviewer === "auto_review" && session.permissionProfile.mode !== "full_access"}
           <span class="access-badge auto-review" title={tr("Automatic approval", "Aprovação automática")}>
             <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6.8.8 2.9 6.3h2.5L4.9 11l4.2-5.7H6.5Z" /></svg>
@@ -3132,12 +2923,6 @@
           <span class="access-badge full-access" title={tr("Full access", "Acesso total")}>
             <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 5V3.7a3 3 0 0 1 5.6-1.5M2.2 5.2h7.6v5.5H2.2Z" /></svg>
             <span class="badge-label">{tr("Full access", "Acesso total")}</span>
-          </span>
-        {/if}
-        {#if session.controlOrigin === "external"}
-          <span class="access-badge external-session" title={tr("External session", "Sessão externa")}>
-            <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.2 2.5H2.3v7.2h7.2V7.8M6.3 2.3h3.4v3.4M9.7 2.3 5.4 6.6" /></svg>
-            <span class="badge-label">{tr("External", "Externa")}</span>
           </span>
         {/if}
         {#if activeRateLimit}
@@ -3187,7 +2972,7 @@
             <svg viewBox="0 0 20 20"><circle cx="5" cy="10" r="1"></circle><circle cx="10" cy="10" r="1"></circle><circle cx="15" cy="10" r="1"></circle></svg>
           </button>
           {#if headerActionsOpen}
-            <span class="header-actions-menu" role="menu" tabindex="-1" onpointerdown={(event) => event.stopPropagation()}>
+            <span class="header-actions-menu" role="menu" tabindex="-1" in:fly={{ y: reducedMotion ? 0 : -6, duration: reducedMotion ? 70 : 160, easing: cubicOut }} out:fly={{ y: reducedMotion ? 0 : -6, duration: reducedMotion ? 60 : 110, easing: cubicOut }} onpointerdown={(event) => event.stopPropagation()}>
               {#if !renamingSession}
                 <button type="button" role="menuitem" onclick={() => { headerActionsOpen = false; beginSessionRename(); }}>
                   <svg viewBox="0 0 20 20"><path d="m4 14-.5 2.5L6 16l9-9-2-2-9 9Z"></path><path d="m11.5 6.5 2 2"></path></svg>
@@ -3373,7 +3158,7 @@
                     <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"></path></svg>
                   </button>
                   {#if workflowRolePickerOpen}
-                    <div class="workflow-role-menu" role="listbox" aria-label={tr("Agent role", "Papel do agente")}>
+                    <div class="workflow-role-menu" role="listbox" aria-label={tr("Agent role", "Papel do agente")} in:fly={{ y: reducedMotion ? 0 : -6, duration: reducedMotion ? 70 : 160, easing: cubicOut }} out:fly={{ y: reducedMotion ? 0 : -6, duration: reducedMotion ? 60 : 110, easing: cubicOut }}>
                       {#each workflowRoles as role}
                         <button class:active={workflowRoleConfigured && workflowEditingStep.role === role} disabled={workflowDraftSaving} type="button" role="option" aria-selected={workflowRoleConfigured && workflowEditingStep.role === role} onclick={() => void selectWorkflowRole(role)}>
                           <i class="role-symbol role-{role}" aria-hidden="true"><WorkflowRoleIcon {role} /></i>
@@ -3429,7 +3214,6 @@
                   {/if}
                 {/if}
               </div>
-              {#if workflowDraftError}<p class="handoff-error">{workflowDraftError}</p>{/if}
               {#if workflowRoleConfigured}
                 <div class="workflow-popover-actions">
                   <button type="button" onclick={() => (workflowDraft = null)}>{tr("Cancel", "Cancelar")}</button>
@@ -3596,6 +3380,12 @@
                       {language}
                       onError={(error) => (message = error)}
                     />
+                    {#if entry.durationMs !== undefined}
+                      <footer class="agent-response-duration" title={tr("Time from prompt to final response", "Tempo entre o prompt e a resposta final")}>
+                        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" /><path d="M10 6.5v4l2.7 1.6" /></svg>
+                        <span>{tr("Worked for", "Trabalhou por")} {formatAgentDuration(entry.durationMs)}</span>
+                      </footer>
+                    {/if}
                   </div>
                 {:else if item.kind === "analysis" && item.detail}
                   <section class:running={item.status === "running"} class="reasoning-update">
@@ -3636,8 +3426,14 @@
               <p class="empty-state">{tr("Messages and agent activity will appear here in real time.", "As mensagens e a atividade do agente aparecerão aqui em tempo real.")}</p>
             {/each}
             {#if session.status === "running"}
-              <div class="agent-typing" aria-label={tr(`${sessionDisplayName(session)} is working`, `${sessionDisplayName(session)} está trabalhando`)}>
-                <span></span><span></span><span></span>
+              <div class="agent-typing">
+                <ThinkingOrb
+                  state={activeThinkingState}
+                  size={34}
+                  speed={0.92}
+                  label={tr(`${sessionDisplayName(session)} is working`, `${sessionDisplayName(session)} está trabalhando`)}
+                />
+                <span>{activityThinkingLabel(activeThinkingState, language)}</span>
               </div>
             {/if}
             {#if session.pendingPermission}
@@ -3809,7 +3605,6 @@
                 <pre>{handoffPreview(handoffDraft) || tr("Select content or write an instruction.", "Selecione um conteúdo ou escreva uma instrução.")}</pre>
               </div>
 
-              {#if handoffError}<p class="handoff-error">{handoffError}</p>{/if}
               {#if selectedHandoffTarget && !handoffTargetCanReceive(selectedHandoffTarget)}
                 <p class="handoff-error">{tr("This agent cannot receive context while its current task is running.", "Este agente não pode receber contexto enquanto a tarefa atual estiver em execução.")}</p>
               {/if}
@@ -3923,7 +3718,6 @@
               {/if}
             {/if}
 
-            {#if modelError}<p class="model-settings-error">{modelError}</p>{/if}
             <footer>
               <button disabled={modelSaving} type="button" onclick={() => (modelDialogOpen = false)}>{tr("Cancel", "Cancelar")}</button>
               <button class="takeover" disabled={modelLoading || modelSaving || (session.agent === "codex" && (!selectedModel || !selectedEffort))} type="button" onclick={() => void saveModelSettings()}>
@@ -3958,7 +3752,7 @@
           onpointercancel={endComposerResize}
         ><span></span></button>
         {#if filteredSlashCommands().length}
-          <div bind:this={slashCommandMenu} class="slash-command-menu" aria-label={tr("Slash commands", "Comandos com barra")}>
+          <div bind:this={slashCommandMenu} class="slash-command-menu" aria-label={tr("Slash commands", "Comandos com barra")} in:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 70 : 160, easing: cubicOut }} out:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 60 : 110, easing: cubicOut }}>
             <div class="slash-command-heading">
               <strong>{tr("Commands", "Comandos")}</strong>
               <small><kbd>↑↓</kbd> {tr("navigate", "navegar")} · <kbd>Enter</kbd> {tr("select", "selecionar")}</small>
@@ -4029,7 +3823,7 @@
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h7M14 6h2M4 14h2M9 14h7M11 4v4M6 12v4" /></svg>
               </button>
               {#if composerToolsOpen}
-                <div class="composer-tools-menu" role="menu" tabindex="-1" onpointerdown={(event) => event.stopPropagation()}>
+                <div class="composer-tools-menu" role="menu" tabindex="-1" in:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 70 : 160, easing: cubicOut }} out:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 60 : 110, easing: cubicOut }} onpointerdown={(event) => event.stopPropagation()}>
                   {#if canCompose && capabilities?.canAttachImages}
                     <button disabled={!readyForPrompt || sending || promptAttachments.length >= 4} type="button" role="menuitem" onclick={() => void chooseAttachments()}>
                       <span class="tool-icon"><svg viewBox="0 0 20 20"><path d="M6.5 10.5 11 6a2.1 2.1 0 0 1 3 3l-6.2 6.2a3.4 3.4 0 1 1-4.8-4.8l6-6" /></svg></span>
@@ -4117,7 +3911,6 @@
           {/if}
         </div>
       </form>
-      {#if message}<p class="message">{message}</p>{/if}
       {#if !windowState?.workflowBridgeOpen}
         <button class="resize-handle resize-nw" type="button" tabindex="-1" aria-label={tr("Resize from top-left corner", "Redimensionar pelo canto superior esquerdo")} onpointerdown={(event) => void beginResize(event, "NorthWest")} onpointermove={moveResize} onpointerup={(event) => void endResize(event)} onpointercancel={(event) => void endResize(event)}></button>
         <button class="resize-handle resize-ne" type="button" tabindex="-1" aria-label={tr("Resize from top-right corner", "Redimensionar pelo canto superior direito")} onpointerdown={(event) => void beginResize(event, "NorthEast")} onpointermove={moveResize} onpointerup={(event) => void endResize(event)} onpointercancel={(event) => void endResize(event)}></button>
@@ -4275,7 +4068,6 @@
   .access-badge.auto-review { color: #315f86; background: #cbdff0; }
   .access-badge.auto-review svg { fill: currentColor; stroke: none; }
   .access-badge.full-access { color: #764c2e; background: #e8ceb1; }
-  .access-badge.external-session { color: #405d50; background: #c7d6ca; }
   .workflow-role-control { position: relative; z-index: 82; height: 0; display: flex; flex: 0 0 0; justify-content: center; overflow: visible; transition: opacity 100ms ease; }
   .workflow-role-fab { position: relative; top: 7px; width: 34px; height: 34px; padding: 0; display: grid; place-items: center; border: 1px solid rgba(54, 148, 101, 0.24); border-radius: 50%; color: #47755f; background: radial-gradient(circle at 34% 24%, rgba(255,255,255,.96) 0 13%, rgba(255,255,255,.34) 31%, transparent 52%), linear-gradient(145deg, #fbfdfc 12%, #e5efe9 88%); box-shadow: inset 0 1px 0 rgba(255,255,255,.95), inset 0 -3px 5px rgba(43,91,67,.1), 0 5px 10px rgba(24,58,41,.18), 0 1px 2px rgba(24,58,41,.14), 0 0 0 3px rgba(59,151,104,.045); cursor: pointer; transition: border-color 150ms ease, box-shadow 170ms ease, transform 170ms cubic-bezier(.2,.8,.2,1); }
   .workflow-role-fab:hover { border-color: rgba(54, 148, 101, 0.38); box-shadow: inset 0 1px 0 rgba(255,255,255,.98), inset 0 -3px 5px rgba(43,91,67,.11), 0 7px 14px rgba(24,58,41,.2), 0 2px 3px rgba(24,58,41,.14), 0 0 0 4px rgba(59,151,104,.07); transform: translateY(-2px); }
@@ -4433,6 +4225,8 @@
   .chat-message header { display: flex; align-items: center; gap: 6px; }
   .chat-message header strong { min-width: 0; flex: 1; color: #4f685c; font: 750 var(--chat-small-font-size) Inter, sans-serif; }
   .chat-message header time { flex: 0 0 auto; color: #9aa59f; font-size: var(--chat-tiny-font-size); }
+  .agent-response-duration { margin-top: 7px; padding-top: 5px; display: flex; align-items: center; gap: 4px; border-top: 1px solid rgba(77, 104, 91, 0.07); color: #85958d; font: 600 var(--chat-tiny-font-size)/1.2 Inter, sans-serif; }
+  .agent-response-duration svg { width: 11px; height: 11px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .intervention-indicator { margin: 6px 0 2px; padding: 3px 1px; display: flex; align-items: center; gap: 7px; color: #806128; }
   .intervention-indicator > span { width: 22px; height: 22px; display: grid; flex: 0 0 auto; place-items: center; color: #a87120; }
   .intervention-indicator svg { width: 18px; height: 18px; overflow: visible; }
@@ -4488,17 +4282,11 @@
   .message-file { min-width: 0; min-height: 38px; padding: 7px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(82, 106, 95, 0.14); border-radius: 7px; color: #52665d; background: rgba(52, 145, 99, 0.045); }
   .message-file svg { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .message-file small { min-width: 0; overflow: hidden; color: inherit; font: 650 var(--chat-tiny-font-size)/1.2 Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-  .agent-typing { width: fit-content; min-width: 38px; height: 25px; padding: 0 9px; display: flex; align-items: center; gap: 4px; border: 1px solid rgba(77, 104, 91, 0.09); border-radius: 9px 9px 9px 3px; background: rgba(69, 99, 84, 0.035); }
-  .agent-typing span { width: 4px; height: 4px; border-radius: 50%; background: #4e7faf; animation: agent-typing-dot 850ms ease-in-out infinite; }
-  .agent-typing span,
+  .agent-typing { width: fit-content; min-height: 38px; padding: 0 3px; display: flex; align-items: center; gap: 8px; color: #4e7faf; }
+  .agent-typing > span { color: transparent; background: linear-gradient(90deg, #718179 10%, #4e87b2 44%, #91bfdd 53%, #4e87b2 62%, #718179 90%); background-size: 240% 100%; background-clip: text; font: 720 max(10px, var(--chat-small-font-size)) Inter, sans-serif; animation: thinking-label-shimmer 1.75s linear infinite; }
+  @keyframes thinking-label-shimmer { to { background-position: -240% 0; } }
   .reasoning-update.running > header > span,
   .workflow-bridge-link { will-change: transform, opacity; }
-  .agent-typing span:nth-child(2) { animation-delay: 130ms; }
-  .agent-typing span:nth-child(3) { animation-delay: 260ms; }
-  @keyframes agent-typing-dot {
-    0%, 60%, 100% { opacity: 0.35; transform: translateY(1px); }
-    30% { opacity: 1; transform: translateY(-3px); }
-  }
   .reasoning-update { min-width: 0; max-width: 94%; padding: 6px 8px 7px; border-left: 2px solid #6d91ae; border-radius: 0 8px 8px 0; background: linear-gradient(90deg, rgba(91, 133, 164, .07), rgba(91, 133, 164, .018)); }
   .reasoning-update > header { display: flex; align-items: center; gap: 6px; color: #698092; }
   .reasoning-update > header > span { width: 21px; height: 21px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 6px; background: rgba(91, 133, 164, .09); }
@@ -4661,7 +4449,6 @@
   .model-settings-loading { min-height: 110px; place-content: center; color: #718078; font: 650 var(--chat-small-font-size) Inter, sans-serif; }
   .model-settings-loading span { width: 16px; height: 16px; margin: 0 auto 4px; border: 2px solid rgba(61, 128, 99, 0.18); border-top-color: #3d8063; border-radius: 50%; animation: model-spin 0.8s linear infinite; }
   @keyframes model-spin { to { transform: rotate(360deg); } }
-  .model-settings-error { padding: 6px 8px; border-radius: 7px; color: #9b4f4f !important; background: rgba(170, 79, 79, 0.08); }
   .terminal-composer { position: relative; box-sizing: border-box; min-height: 63px; padding: 7px 8px 8px 10px; display: flex; flex: 0 0 auto; flex-direction: column; align-items: stretch; gap: 6px; border-top: 1px solid rgba(97, 119, 109, 0.11); }
   .composer-controls { min-width: 0; min-height: 0; display: flex; flex: 1; align-items: flex-end; gap: 6px; }
   .composer-leading-actions { position: relative; display: flex; flex: 0 0 auto; flex-direction: column; justify-content: flex-end; gap: 4px; }
@@ -4670,8 +4457,7 @@
   .terminal-composer .composer-tools-trigger.active { color: #347c59; border-color: rgba(52, 139, 94, 0.25); background: rgba(52, 139, 94, 0.09); }
   .terminal-composer .composer-tools-trigger.active { transform: rotate(4deg); }
   .composer-tools-trigger svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.55; stroke-linecap: round; stroke-linejoin: round; }
-  .composer-tools-menu { position: absolute; z-index: 52; bottom: calc(100% + 7px); left: 0; width: 212px; padding: 5px; display: grid; gap: 2px; border: 1px solid rgba(73, 106, 90, 0.15); border-radius: 11px; color: #52665c; background: rgba(248, 251, 249, 0.99); box-shadow: 0 14px 34px rgba(24, 45, 34, 0.19); animation: composer-tools-in 140ms cubic-bezier(.2,.8,.2,1); }
-  @keyframes composer-tools-in { from { opacity: 0; transform: translateY(5px) scale(.97); } }
+  .composer-tools-menu { position: absolute; z-index: 52; bottom: calc(100% + 7px); left: 0; width: 212px; padding: 5px; display: grid; gap: 2px; border: 1px solid rgba(73, 106, 90, 0.15); border-radius: 11px; color: #52665c; background: rgba(248, 251, 249, 0.99); box-shadow: 0 14px 34px rgba(24, 45, 34, 0.19); }
   .terminal-composer .composer-tools-menu > button { width: 100%; min-height: 38px; height: auto; padding: 5px 6px; display: grid; grid-template-columns: 27px minmax(0, 1fr) auto; align-items: center; gap: 7px; place-items: initial; border: 0; border-radius: 8px; color: inherit; background: transparent; text-align: left; }
   .terminal-composer .composer-tools-menu > button:hover:not(:disabled),
   .terminal-composer .composer-tools-menu > button.active { color: #347b59; background: rgba(52, 139, 94, 0.075); }
@@ -4694,7 +4480,7 @@
   .composer-controls textarea { min-width: 0; min-height: 46px; height: 100%; flex: 1; padding: 7px 8px; resize: none; border: 1px solid rgba(82, 106, 95, 0.14); border-radius: 9px; outline: none; color: #34443d; background: rgba(255, 255, 255, 0.5); font: var(--chat-font-size)/1.4 Inter, sans-serif; }
   .composer-controls textarea:focus { border-color: rgba(52, 151, 103, 0.42); box-shadow: 0 0 0 3px rgba(52, 151, 103, 0.07); }
   .composer-controls textarea:disabled { opacity: 0.58; }
-  .terminal-composer button { width: 29px; height: 29px; display: grid; flex: 0 0 auto; place-items: center; border: 0; border-radius: 8px; color: white; background: #318e62; cursor: pointer; }
+  .terminal-composer button { width: 29px; height: 29px; display: grid; flex: 0 0 auto; place-items: center; border: 0; border-radius: 8px; color: white; background: var(--lume-accent, #318e62); cursor: pointer; }
   .slash-command-menu { position: absolute; z-index: 45; right: 8px; bottom: calc(100% + 5px); left: 10px; max-height: min(230px, 48vh); padding: 5px; display: grid; gap: 2px; overflow-x: hidden; overflow-y: auto; border: 1px solid rgba(80, 105, 94, 0.15); border-radius: 11px; color: #53665d; background: #f8fbf9; box-shadow: 0 12px 32px rgba(28, 52, 41, 0.2); }
   .slash-command-heading { min-height: 24px; padding: 2px 7px 4px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid rgba(80, 105, 94, 0.08); }
   .slash-command-heading strong { color: #667970; font: 800 var(--chat-tiny-font-size) Inter, sans-serif; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -4730,7 +4516,6 @@
   .composer-resize-handle:focus-visible span { width: 31px; opacity: 0.9; }
   .send-spinner { width: 12px; height: 12px; border: 2px solid rgba(255, 255, 255, 0.38); border-top-color: white; border-radius: 50%; animation: send-spin 650ms linear infinite; }
   @keyframes send-spin { to { transform: rotate(360deg); } }
-  .message { margin: -4px 11px 6px; color: #ad4f4f; font-size: var(--chat-small-font-size); }
   .resize-handle { position: absolute; z-index: 20; width: 18px; height: 18px; padding: 0; border: 0; outline: 0; background: transparent; touch-action: none; }
   .resize-handle::after { position: absolute; width: 6px; height: 6px; content: ""; opacity: 0; transition: opacity 120ms ease; }
   .resize-handle:hover::after { opacity: 0.7; }
@@ -4785,7 +4570,6 @@
     background: #cce2d1;
   }
   .terminal-window:not(.dark) .turn-files code { border-color: rgba(65, 103, 84, 0.13); }
-  .terminal-window:not(.dark) .agent-typing,
   .terminal-window:not(.dark) .load-earlier-chat {
     border-color: rgba(66, 94, 81, 0.18);
     background: #e9e6d4;
@@ -4930,7 +4714,6 @@
   .terminal-window.dark .source-badge { color: #a7b5ae; }
   .terminal-window.dark .access-badge.auto-review { color: #b4d3ee; background: #29445d; }
   .terminal-window.dark .access-badge.full-access { color: #e4b88f; background: #543b29; }
-  .terminal-window.dark .access-badge.external-session { color: #c3d1c9; background: #35473e; }
   .terminal-window.dark .terminal-name-editor input { color: #d9e5df; border-color: rgba(195, 218, 207, 0.14); background: rgba(219, 233, 226, 0.055); }
   .terminal-window.dark .header-actions-menu { color: #b7c8bf; border-color: rgba(205, 222, 213, 0.12); background: rgba(24, 35, 30, 0.98); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3); }
   .terminal-window.dark header .header-actions-menu > button,
@@ -5015,6 +4798,7 @@
   .terminal-window.dark .load-earlier-chat:hover { color: #88c8a8; border-color: rgba(91, 177, 137, 0.17); background: rgba(91, 177, 137, 0.045); }
   .terminal-window.dark .load-earlier-chat small { color: #8fa198; background: rgba(205, 222, 213, 0.055); }
   .terminal-window.dark .chat-message { border-color: rgba(205, 222, 213, 0.08); background: rgba(218, 234, 226, 0.035); }
+  .terminal-window.dark .agent-response-duration { border-top-color: rgba(205, 222, 213, 0.07); color: #81938a; }
   .terminal-window.dark .chat-message.agent-message.intervention-required { border-color: rgba(215, 166, 78, 0.17); background: rgba(202, 149, 55, 0.025); }
   .terminal-window.dark .intervention-indicator { color: #dfbd79; }
   .terminal-window.dark .intervention-indicator > span { color: #e1ad51; }
@@ -5037,7 +4821,7 @@
   .terminal-window.dark .workflow-popover-actions button.primary { color: white; border-color: #347c5a; background: #347c5a; }
   .terminal-window.dark .workflow-top,
   .terminal-window.dark .workflow-bottom { background: linear-gradient(90deg, rgba(70, 182, 127, 0.15), #59c58b 45%, rgba(70, 182, 127, 0.15)); }
-  .terminal-window.dark .agent-typing { border-color: rgba(205, 222, 213, 0.08); background: rgba(218, 234, 226, 0.035); }
+  .terminal-window.dark .agent-typing > span { color: transparent; background-image: linear-gradient(90deg, #7f948a 10%, #74acd2 44%, #c2e4f6 53%, #74acd2 62%, #7f948a 90%); }
   .terminal-window.dark .chat-message.user-message { background: rgba(76, 169, 124, 0.09); }
   .terminal-window.dark .chat-message header strong,
   .terminal-window.dark .chat-message.user-message > pre,
@@ -5140,9 +4924,43 @@
     .dock-silhouette { animation: none; }
     .workflow-merge-preview::before,
     .workflow-merge-preview::after { animation: none; }
-    .agent-typing span { animation: none; opacity: 0.7; }
     .send-spinner,
     .mode-spinner { animation: none; }
+    .agent-typing > span,
+    .terminal-window.dark .agent-typing > span { color: #6f9dbb; background: none; animation: none; }
     .workflow-connection { animation: none; opacity: 0.82; }
   }
+  .terminal-window[data-appearance]:not(.dark) .terminal-card { background: var(--lume-surface-light); }
+  .terminal-window.dark[data-appearance] .terminal-card { background: var(--lume-surface-dark); }
+  .terminal-window[data-appearance]:not(.dark) .chat-message.user-message { border-color: var(--lume-user-line-light); background: var(--lume-user-light); }
+  .terminal-window[data-appearance]:not(.dark) .chat-message.user-message > pre { color: var(--lume-ink-light); }
+  .terminal-window[data-appearance]:not(.dark) .chat-message.agent-message:not(.intervention-required) { border-color: var(--lume-line-light); background: var(--lume-message-light); }
+  .terminal-window.dark[data-appearance] .chat-message.user-message { border-color: var(--lume-user-line-dark); background: var(--lume-user-dark); }
+  .terminal-window.dark[data-appearance] .chat-message.user-message > pre { color: var(--lume-ink-dark); }
+  .terminal-window.dark[data-appearance] .chat-message.agent-message:not(.intervention-required) { border-color: var(--lume-line-dark); background: var(--lume-message-dark); }
+  .terminal-window[data-appearance] { --dropdown-surface: var(--lume-raised-light); --dropdown-line: var(--lume-line-light); --dropdown-text: var(--lume-ink-light); --dropdown-strong: var(--lume-ink-strong-light); --dropdown-muted: var(--lume-ink-muted-light); --dropdown-accent: var(--lume-accent-strong); --dropdown-hover: var(--lume-subtle-light); }
+  .terminal-window.dark[data-appearance] { --dropdown-surface: var(--lume-raised-dark); --dropdown-line: var(--lume-line-dark); --dropdown-text: var(--lume-ink-dark); --dropdown-strong: var(--lume-ink-strong-dark); --dropdown-muted: var(--lume-ink-muted-dark); --dropdown-accent: var(--lume-accent); --dropdown-hover: var(--lume-subtle-dark); }
+  .terminal-window[data-appearance] .header-actions-menu,
+  .terminal-window[data-appearance] .slash-command-menu,
+  .terminal-window[data-appearance] .composer-tools-menu,
+  .terminal-window[data-appearance] .workflow-role-menu { border-color: var(--dropdown-line); color: var(--dropdown-text); background: var(--dropdown-surface); }
+  .terminal-window[data-appearance] .workflow-role-menu > button,
+  .terminal-window[data-appearance] .terminal-composer .slash-command-menu > button { color: var(--dropdown-text); }
+  .terminal-window[data-appearance] .workflow-role-menu strong,
+  .terminal-window[data-appearance] .composer-tools-menu strong { color: var(--dropdown-strong); }
+  .terminal-window[data-appearance] .workflow-role-menu small,
+  .terminal-window[data-appearance] .composer-tools-menu small,
+  .terminal-window[data-appearance] .slash-command-menu button > span small { color: var(--dropdown-muted); }
+  .terminal-window[data-appearance] .workflow-role-menu > button:hover,
+  .terminal-window[data-appearance] .workflow-role-menu > button.active,
+  .terminal-window[data-appearance] .terminal-composer .slash-command-menu > button:hover,
+  .terminal-window[data-appearance] .terminal-composer .slash-command-menu > button.active,
+  .terminal-window[data-appearance] .terminal-composer .composer-tools-menu > button:hover:not(:disabled),
+  .terminal-window[data-appearance] .terminal-composer .composer-tools-menu > button.active { color: var(--dropdown-accent); background: var(--dropdown-hover); }
+  .terminal-window[data-appearance] .workflow-role-menu > button > svg,
+  .terminal-window[data-appearance] .slash-command-menu code { color: var(--dropdown-accent); }
+  .terminal-window[data-appearance] header .header-actions-menu > button:not(.danger) { color: var(--dropdown-text); }
+  .terminal-window[data-appearance] header .header-actions-menu > button:hover:not(.danger) { color: var(--dropdown-accent); background: var(--dropdown-hover); }
+  .terminal-window[data-appearance] .handoff-target select { color: var(--dropdown-text); border-color: var(--dropdown-line); background: var(--dropdown-surface); color-scheme: light; }
+  .terminal-window.dark[data-appearance] .handoff-target select { color-scheme: dark; }
 </style>

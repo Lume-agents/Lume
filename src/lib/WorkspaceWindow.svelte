@@ -106,7 +106,7 @@
   let pairingOffer = $state<MobilePairingOffer | null>(null);
   let pairingQr = $state<string | null>(null);
   let mobileBusy = $state(false);
-  let appVersion = $state("0.14.5");
+  let appVersion = $state("0.15.0");
   let updateState = $state<"idle" | "checking" | "available" | "up_to_date" | "downloading" | "ready" | "error">("idle");
   let availableVersion = $state<string | null>(null);
   let updateDetail = $state("");

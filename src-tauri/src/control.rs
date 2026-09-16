@@ -262,12 +262,14 @@ pub fn submit_prompt(
             let working_directory = session.working_directory.as_deref().ok_or_else(|| {
                 "The Codex session has no project directory to reconnect".to_string()
             })?;
+            let model_settings = state.session_model_override(&session.id)?;
             bridge.recover_thread_and_submit_prompt(
                 &session.id,
                 working_directory,
                 &codex_prompt,
                 &image_paths,
                 profile,
+                model_settings,
                 state.clone(),
                 app.clone(),
             )
@@ -342,7 +344,8 @@ pub fn submit_prompt(
 
 fn is_missing_codex_rollout(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
-    normalized.contains("no rollout found") || normalized.contains("rollout not found")
+    normalized.contains("rollout not found")
+        || (normalized.contains("no rollout") && normalized.contains("thread"))
 }
 
 fn is_active_codex_writer(error: &str) -> bool {
@@ -466,11 +469,28 @@ pub fn session_model_settings(
     if session.control_origin != SessionControlOrigin::Lume {
         return Err("Take control of this external CLI before changing its model".into());
     }
+    if matches!(
+        session.status,
+        SessionStatus::Running | SessionStatus::PermissionRequired
+    ) {
+        return Err("Wait for the current task to finish before reading model settings".into());
+    }
     let thread_id = session
         .native_session_id
         .as_deref()
         .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
-    bridge.thread_model_settings(thread_id)
+    match bridge.thread_model_settings(thread_id) {
+        Ok(mut settings) => {
+            apply_pending_model_override(state, session_id, &mut settings)?;
+            Ok(settings)
+        }
+        Err(error) if is_missing_codex_rollout(&error) => {
+            let mut settings = bridge.default_model_settings()?;
+            apply_pending_model_override(state, session_id, &mut settings)?;
+            Ok(settings)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub fn set_session_model_settings(
@@ -502,9 +522,87 @@ pub fn set_session_model_settings(
         .native_session_id
         .as_deref()
         .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
-    let settings = bridge.set_thread_model_settings(thread_id, model, effort)?;
+    let settings = match bridge.set_thread_model_settings(thread_id, model, effort) {
+        Ok(settings) => settings,
+        Err(error) if is_missing_codex_rollout(&error) => {
+            let mut settings = bridge.default_model_settings()?;
+            validate_model_selection(&mut settings, model, effort)?;
+            settings
+        }
+        Err(error) => return Err(error),
+    };
+    state.set_session_model_override(
+        session_id,
+        SessionModelOverride {
+            model: Some(settings.model.clone()),
+            reasoning_effort: settings.reasoning_effort.clone(),
+        },
+    )?;
     protocol::emit_sessions_changed(app);
     Ok(settings)
+}
+
+fn apply_pending_model_override(
+    state: &AppState,
+    session_id: &str,
+    settings: &mut CodexThreadModelSettings,
+) -> Result<(), String> {
+    let pending = state.session_model_override(session_id)?;
+    if let Some(model) = pending.model {
+        let effort = pending.reasoning_effort.unwrap_or_default();
+        validate_model_selection(settings, &model, &effort)?;
+    }
+    Ok(())
+}
+
+fn validate_model_selection(
+    settings: &mut CodexThreadModelSettings,
+    model: &str,
+    effort: &str,
+) -> Result<(), String> {
+    let selected = settings
+        .models
+        .iter()
+        .find(|option| option.model == model)
+        .ok_or_else(|| "The selected Codex model is not available for this account".to_string())?;
+    let effort = if effort.trim().is_empty() {
+        selected.default_reasoning_effort.as_str()
+    } else {
+        effort
+    };
+    if !selected
+        .supported_reasoning_efforts
+        .iter()
+        .any(|option| option.value == effort)
+    {
+        return Err("The selected reasoning effort is not supported by this model".into());
+    }
+    settings.model = model.to_string();
+    settings.reasoning_effort = Some(effort.to_string());
+    Ok(())
+}
+
+pub fn set_session_fast_mode(
+    state: &AppState,
+    bridge: &CodexBridge,
+    session_id: &str,
+    enabled: bool,
+) -> Result<bool, String> {
+    let session = state.connected_session(session_id)?;
+    if session.agent != AgentKind::Codex || session.control_origin != SessionControlOrigin::Lume {
+        return Err("Fast mode requires a Codex session controlled by Lume".into());
+    }
+    if matches!(
+        session.status,
+        SessionStatus::Running | SessionStatus::PermissionRequired
+    ) {
+        return Err("Wait for the current task to finish before changing Fast mode".into());
+    }
+    let thread_id = session
+        .native_session_id
+        .as_deref()
+        .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
+    bridge.set_thread_fast_mode(thread_id, enabled)
 }
 
 pub fn claude_session_model_settings(
@@ -815,6 +913,7 @@ fn cache_attachment_name(name: &str) -> String {
 pub fn terminate_session(
     app: &AppHandle,
     state: &AppState,
+    bridge: &CodexBridge,
     session_id: &str,
 ) -> Result<(), String> {
     let session = state
@@ -822,6 +921,29 @@ pub fn terminate_session(
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or_else(|| "Sessão não encontrada".to_string())?;
+    if session.agent == AgentKind::Codex
+        && session.source == SessionSource::Desktop
+        && session.control_origin == SessionControlOrigin::Lume
+    {
+        let thread_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
+        if matches!(
+            session.status,
+            SessionStatus::Running | SessionStatus::PermissionRequired
+        ) {
+            if let Err(error) = bridge.interrupt_prompt(thread_id, state, app) {
+                if !is_no_active_prompt(&error) {
+                    return Err(error);
+                }
+            }
+        }
+        bridge.discard_queued_prompts(thread_id)?;
+        state.mark_session_terminated(session_id)?;
+        protocol::emit_sessions_changed(app);
+        return Ok(());
+    }
     if session.source != SessionSource::Cli {
         return Err(
             "Esta integração não possui um processo isolado; o Lume não fechará o editor ou navegador inteiro"
@@ -905,109 +1027,99 @@ pub fn take_control_session(
         _ => unreachable!(),
     }
 
-    discovery::release_agent_process_for_takeover(process_id, &session.agent)?;
-    if session.agent == AgentKind::Codex {
-        let thread_id = session.native_session_id.as_deref().ok_or_else(|| {
-            "This external CLI did not provide a resumable session id".to_string()
-        })?;
-        let working_directory = session
-            .working_directory
-            .as_deref()
-            .filter(|directory| !directory.trim().is_empty())
-            .unwrap_or(".");
-        let mut last_writer_error = None;
-        for attempt in 0..25 {
-            match bridge.prepare_thread(
-                working_directory,
-                Some(thread_id),
-                Some(&session.permission_profile.mode),
-                Some(&session.permission_profile.approval_policy),
-            ) {
-                Ok(prepared) if prepared.thread_id == thread_id => {
-                    last_writer_error = None;
-                    break;
-                }
-                Ok(prepared) => {
-                    return Err(format!(
-                        "Codex resumed a different thread ({}) instead of {thread_id}",
-                        prepared.thread_id
-                    ));
-                }
-                Err(error) if is_active_codex_writer(&error) => {
-                    last_writer_error = Some(error);
-                    if attempt < 24 {
-                        std::thread::sleep(std::time::Duration::from_millis(200));
+    state.set_session_takeover_active(session_id, true)?;
+    let takeover_result = (|| -> Result<String, String> {
+        discovery::release_agent_process_for_takeover(process_id, &session.agent)?;
+        if session.agent == AgentKind::Codex {
+            let thread_id = session.native_session_id.as_deref().ok_or_else(|| {
+                "This external CLI did not provide a resumable session id".to_string()
+            })?;
+            let working_directory = session
+                .working_directory
+                .as_deref()
+                .filter(|directory| !directory.trim().is_empty())
+                .unwrap_or(".");
+            let mut last_writer_error = None;
+            for attempt in 0..25 {
+                match bridge.prepare_thread(
+                    working_directory,
+                    Some(thread_id),
+                    Some(&session.permission_profile.mode),
+                    Some(&session.permission_profile.approval_policy),
+                ) {
+                    Ok(prepared) if prepared.thread_id == thread_id => {
+                        last_writer_error = None;
+                        break;
                     }
+                    Ok(prepared) => {
+                        return Err(format!(
+                            "Codex resumed a different thread ({}) instead of {thread_id}",
+                            prepared.thread_id
+                        ));
+                    }
+                    Err(error) if is_active_codex_writer(&error) => {
+                        last_writer_error = Some(error);
+                        if attempt < 24 {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
             }
+            if last_writer_error.is_some() {
+                return Err("The external CLI closed, but Codex has not released this thread yet. Wait a moment and try transferring it again.".into());
+            }
+            // The next direct prompt resumes this thread on a fresh App Server
+            // connection. Give the probe writer a short moment to release first.
+            std::thread::sleep(TAKEOVER_WRITER_SETTLE_DELAY);
         }
-        if last_writer_error.is_some() {
-            return Err("The external CLI closed, but Codex has not released this thread yet. Wait a moment and try transferring it again.".into());
-        }
-        // A successful resume probe releases its writer when the temporary
-        // App Server connection is dropped. Give that release a short moment
-        // to propagate before the replacement TUI claims the same thread.
-        std::thread::sleep(TAKEOVER_WRITER_SETTLE_DELAY);
-    }
-    let integration = match session.agent {
-        AgentKind::Codex => IntegrationKind::Codex,
-        AgentKind::ClaudeCode => IntegrationKind::Claude,
-        _ => unreachable!(),
-    };
-    let model_settings = if session.agent == AgentKind::ClaudeCode {
-        state.session_model_override(session_id)?
-    } else {
-        SessionModelOverride::default()
-    };
-    let launch_request = takeover_launch_request(&session, integration.clone(), model_settings)?;
-    let executable = integrations::lume_executable()?;
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
-    launcher::launch(
-        launch_request,
-        &executable,
-        &app_data_dir,
-        (integration == IntegrationKind::Codex).then_some(crate::codex_bridge::PROXY_URL),
-    )
-    .map_err(|error| {
-        format!("Lume took control, but could not open the replacement CLI: {error}")
-    })?;
-    if integration == IntegrationKind::Codex {
-        let thread_id = session.native_session_id.as_deref().ok_or_else(|| {
-            "This external CLI did not provide a resumable session id".to_string()
-        })?;
-        bridge.wait_for_proxy_thread(thread_id, std::time::Duration::from_secs(12))?;
-    }
-    let controlled_session_id = session
-        .native_session_id
-        .as_deref()
-        .and_then(|native_id| {
-            state.sessions().ok()?.into_iter().find_map(|candidate| {
-                (candidate.native_session_id.as_deref() == Some(native_id)).then_some(candidate.id)
+        let controlled_source = if session.agent == AgentKind::Codex {
+            SessionSource::Desktop
+        } else {
+            let model_settings = state.session_model_override(session_id)?;
+            let launch_request = claude_takeover_launch_request(&session, model_settings)?;
+            let executable = integrations::lume_executable()?;
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| error.to_string())?;
+            launcher::launch(launch_request, &executable, &app_data_dir, None).map_err(
+                |error| {
+                    format!("Lume took control, but could not open the replacement CLI: {error}")
+                },
+            )?;
+            SessionSource::Cli
+        };
+        let controlled_session_id = session
+            .native_session_id
+            .as_deref()
+            .and_then(|native_id| {
+                state.sessions().ok()?.into_iter().find_map(|candidate| {
+                    (candidate.native_session_id.as_deref() == Some(native_id))
+                        .then_some(candidate.id)
+                })
             })
-        })
-        .unwrap_or_else(|| session_id.to_string());
-    state.mark_session_lume_controlled(&controlled_session_id)?;
-    protocol::emit_sessions_changed(app);
-    let promptable_session_id = state
-        .sessions()?
-        .into_iter()
-        .find(|candidate| {
-            candidate.agent == session.agent
-                && candidate.control_origin == SessionControlOrigin::Lume
-                && candidate.native_session_id == session.native_session_id
-        })
-        .map(|candidate| candidate.id)
-        .unwrap_or(controlled_session_id);
-    Ok(promptable_session_id)
+            .unwrap_or_else(|| session_id.to_string());
+        state.mark_session_lume_controlled(&controlled_session_id, controlled_source)?;
+        let promptable_session_id = state
+            .sessions()?
+            .into_iter()
+            .find(|candidate| {
+                candidate.agent == session.agent
+                    && candidate.control_origin == SessionControlOrigin::Lume
+                    && candidate.native_session_id == session.native_session_id
+            })
+            .map(|candidate| candidate.id)
+            .unwrap_or(controlled_session_id);
+        Ok(promptable_session_id)
+    })();
+    let release_result = state.set_session_takeover_active(session_id, false);
+    release_result?;
+    takeover_result
 }
 
-fn takeover_launch_request(
+fn claude_takeover_launch_request(
     session: &crate::domain::AgentSession,
-    agent: IntegrationKind,
     model_settings: SessionModelOverride,
 ) -> Result<LaunchRequest, String> {
     let resume_id = session
@@ -1016,7 +1128,7 @@ fn takeover_launch_request(
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| "This external CLI did not provide a resumable session id".to_string())?;
     Ok(LaunchRequest {
-        agent,
+        agent: IntegrationKind::Claude,
         working_directory: session
             .working_directory
             .clone()
@@ -1084,6 +1196,7 @@ pub fn execute_hub_command(
                     PromptDelivery::NewTurn,
                     false,
                 )?;
+                protocol::emit_sessions_changed(app);
                 Ok(Some(serde_json::json!({
                     "sessionId": controlled_session_id,
                 })))
@@ -1100,7 +1213,7 @@ pub fn execute_hub_command(
             answers,
         } => resolve_question(state, &session_id, &question_id, answers).map(|_| None),
         protocol::HubCommand::TerminateSession { session_id } => {
-            terminate_session(app, state, &session_id).map(|_| None)
+            terminate_session(app, state, bridge, &session_id).map(|_| None)
         }
         protocol::HubCommand::InterruptPrompt { session_id } => {
             interrupt_prompt(app, state, bridge, &session_id).map(|_| None)
@@ -1235,6 +1348,9 @@ mod tests {
             "no rollout found for thread id thread-1"
         ));
         assert!(is_missing_codex_rollout("Rollout not found"));
+        assert!(is_missing_codex_rollout(
+            "no rollout thread id found for this session"
+        ));
         assert!(!is_missing_codex_rollout("The Codex server is offline"));
     }
 
@@ -1247,14 +1363,14 @@ mod tests {
     }
 
     #[test]
-    fn takeover_reopens_the_same_codex_thread_in_a_managed_terminal() {
+    fn claude_takeover_reopens_the_same_thread_in_a_managed_terminal() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");
         state
             .ingest(crate::domain::HookEvent {
                 event: crate::domain::HookEventKind::SessionStarted,
-                session_id: "codex:external".into(),
-                agent: AgentKind::Codex,
-                agent_label: Some("Codex".into()),
+                session_id: "claude:external".into(),
+                agent: AgentKind::ClaudeCode,
+                agent_label: Some("Claude Code".into()),
                 session_name: Some("External thread".into()),
                 project: Some("lume".into()),
                 source: Some(SessionSource::Cli),
@@ -1283,13 +1399,10 @@ mod tests {
             .expect("sessão externa");
         let session = state.sessions().expect("sessões").remove(0);
 
-        let request = takeover_launch_request(
-            &session,
-            IntegrationKind::Codex,
-            SessionModelOverride::default(),
-        )
-        .expect("retomada");
+        let request = claude_takeover_launch_request(&session, SessionModelOverride::default())
+            .expect("retomada");
 
+        assert_eq!(request.agent, IntegrationKind::Claude);
         assert!(request.resume);
         assert_eq!(request.resume_id.as_deref(), Some("thread-external"));
         assert_eq!(request.working_directory, "/work/lume");

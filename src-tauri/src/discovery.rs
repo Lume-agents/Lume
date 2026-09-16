@@ -17,7 +17,7 @@ use tauri::AppHandle;
 
 use crate::{
     agent_plugins::{self, ExternalAgentPlugin},
-    domain::{AgentKind, SessionSource},
+    domain::{AgentKind, InternalService, SessionSource},
     state::AppState,
 };
 
@@ -33,6 +33,7 @@ pub struct DiscoveredProcess {
 
 struct ProcessScan {
     discovered: Vec<DiscoveredProcess>,
+    internal_services: Vec<InternalService>,
     live_pids: HashSet<u32>,
 }
 
@@ -44,12 +45,14 @@ pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
             loop {
                 let plugins = agent_plugins::external_catalog(&app);
                 let scan = scan(&mut system, &plugins);
-                if let Ok(changed) =
-                    state.reconcile_process_snapshot(scan.discovered, scan.live_pids)
-                {
-                    if changed {
-                        crate::protocol::emit_sessions_changed(&app);
-                    }
+                let internal_changed = state
+                    .replace_internal_services(scan.internal_services)
+                    .unwrap_or(false);
+                let sessions_changed = state
+                    .reconcile_process_snapshot(scan.discovered, scan.live_pids)
+                    .unwrap_or(false);
+                if internal_changed || sessions_changed {
+                    crate::protocol::emit_sessions_changed(&app);
                 }
                 thread::sleep(Duration::from_secs(2));
             }
@@ -159,6 +162,45 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
         .map(|(pid, _, agent, label, _)| (*pid, (agent.clone(), label.clone())))
         .collect::<HashMap<_, _>>();
 
+    // Keep process-owned work visible in Workspace without turning it into a
+    // chat, a terminal target, or an extra agent in the main session list.
+    let internal_candidates = candidates
+        .iter()
+        .filter_map(|(pid, _, agent, _, explicit_working_directory)| {
+            if *agent != AgentKind::Codex {
+                return None;
+            }
+            let process = system.process(*pid)?;
+            let working_directory = explicit_working_directory
+                .as_deref()
+                .or_else(|| process.cwd().and_then(|path| path.to_str()));
+            is_codex_internal_process(system, *pid, working_directory).then(|| {
+                (
+                    *pid,
+                    InternalService {
+                        id: format!("codex:internal:{}", pid.as_u32()),
+                        agent: AgentKind::Codex,
+                        label: "Memories".into(),
+                        process_id: pid.as_u32(),
+                    },
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let internal_services = internal_candidates
+        .iter()
+        .filter(|(pid, _)| {
+            !internal_candidates.iter().any(|(ancestor, _)| {
+                ancestor != pid && process_descends_from(system, *pid, *ancestor)
+            })
+        })
+        .map(|(_, service)| service.clone())
+        .collect::<Vec<_>>();
+    let internal_pids = internal_candidates
+        .iter()
+        .map(|(pid, _)| *pid)
+        .collect::<HashSet<_>>();
+
     let discovered = candidates
         .into_iter()
         // Mantém o processo detectado mais próximo da raiz. Um comando executado
@@ -177,9 +219,7 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
             let process = system.process(pid)?;
             let working_directory = explicit_working_directory
                 .or_else(|| process.cwd().map(|path| path.to_string_lossy().to_string()));
-            if agent == AgentKind::Codex
-                && is_codex_internal_process(&system, pid, working_directory.as_deref())
-            {
+            if agent == AgentKind::Codex && internal_pids.contains(&pid) {
                 return None;
             }
             let native_session_ids = if agent == AgentKind::Codex {
@@ -200,6 +240,7 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
 
     ProcessScan {
         discovered,
+        internal_services,
         live_pids,
     }
 }

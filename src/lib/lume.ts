@@ -22,6 +22,8 @@ import type {
   QuestionAnswer,
   ResumableSession,
   ResultNote,
+  ReviewNote,
+  SessionActivity,
   SessionNote,
   RestoredTerminalPlacement,
   ExternalAgentPlugin,
@@ -40,7 +42,13 @@ const inDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" i
 
 export const defaultPreferences: Preferences = {
   language: "en",
+  startupMode: "ask",
   darkMode: undefined,
+  appearanceTheme: "lume",
+  accentColor: undefined,
+  accentOpacity: 100,
+  workspaceBackgroundColor: undefined,
+  workspaceBackgroundOpacity: 96,
   soundEnabled: true,
   soundVolume: 55,
   popupNotificationsEnabled: true,
@@ -69,6 +77,7 @@ export const defaultPreferences: Preferences = {
   openShortcut: "Ctrl+Alt+Shift+L",
   newSessionShortcut: "Ctrl+Alt+Shift+N",
   whiteboardShortcut: "Ctrl+Alt+Shift+B",
+  workspaceShortcut: "Ctrl+Alt+Shift+W",
 };
 
 export async function loadSessions(): Promise<AgentSession[]> {
@@ -83,8 +92,25 @@ export async function renameSession(sessionId: string, name: string): Promise<st
   return invoke<string>("rename_session", { sessionId, name });
 }
 
+export async function forkSessionFromMessage(
+  sessionId: string,
+  turnId: string | undefined,
+  prompt: string,
+  response: string,
+): Promise<string> {
+  return invoke<string>("fork_session_from_message", { sessionId, turnId, prompt, response });
+}
+
 export async function loadHubSnapshot(): Promise<HubSnapshot> {
   return invoke<HubSnapshot>("get_hub_snapshot");
+}
+
+export async function loadWorkspaceConversationPage(
+  sessionId: string,
+  beforeCreatedAt: number,
+  beforeActivityId: string,
+): Promise<{ activities: SessionActivity[]; hasMore: boolean }> {
+  return invoke("get_workspace_conversation_page", { sessionId, beforeCreatedAt, beforeActivityId });
 }
 
 export async function loadTerminalHubSnapshot(label: string, activityLimit = 60): Promise<HubSnapshot> {
@@ -235,6 +261,7 @@ export interface CodexModelOption {
 export interface CodexThreadModelSettings {
   model: string;
   reasoningEffort?: string;
+  serviceTier?: string | null;
   models: CodexModelOption[];
 }
 
@@ -274,6 +301,10 @@ export async function setSessionModelSettings(
   });
 }
 
+export async function setSessionFastMode(sessionId: string, enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_session_fast_mode", { sessionId, enabled });
+}
+
 export async function getClaudeSessionModelSettings(
   sessionId: string,
 ): Promise<SessionModelOverride> {
@@ -301,6 +332,10 @@ export async function steerQueuedPrompt(
 
 export async function openTerminalWindow(sessionId: string): Promise<string> {
   return invoke<string>("open_terminal_window", { sessionId });
+}
+
+export async function openWorkspaceWindow(): Promise<void> {
+  await invoke("open_workspace_window");
 }
 
 export async function markTerminalFrontendReady(label: string): Promise<void> {
@@ -472,9 +507,9 @@ export async function loadHistory(): Promise<HistoryEntry[]> {
   }
 }
 
-export async function loadWorkflowHistory(): Promise<WorkflowHistoryRecord[]> {
+export async function loadWorkflowHistory(limit = 100): Promise<WorkflowHistoryRecord[]> {
   if (!inDesktop()) return [];
-  return invoke<WorkflowHistoryRecord[]>("list_workflow_history", { limit: 100 });
+  return invoke<WorkflowHistoryRecord[]>("list_workflow_history", { limit });
 }
 
 export async function loadResultNotes(): Promise<ResultNote[]> {
@@ -492,6 +527,23 @@ export async function saveResultNote(
 
 export async function deleteResultNote(id: string): Promise<void> {
   await invoke("delete_result_note", { id });
+}
+
+export async function loadReviewNotes(sessionId: string): Promise<ReviewNote[]> {
+  if (!inDesktop()) return [];
+  return invoke<ReviewNote[]>("list_review_notes", { sessionId });
+}
+
+export async function saveReviewNote(
+  sessionId: string,
+  resultId: string,
+  body: string,
+): Promise<ReviewNote> {
+  return invoke<ReviewNote>("save_review_note", { sessionId, resultId, body });
+}
+
+export async function deleteReviewNote(sessionId: string, resultId: string): Promise<void> {
+  await invoke("delete_review_note", { sessionId, resultId });
 }
 
 export async function loadSessionNotes(sessionId: string): Promise<SessionNote[]> {

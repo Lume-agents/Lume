@@ -24,7 +24,7 @@ use crate::{
     domain::{
         AccessMode, AgentKind, AgentRateLimit, HookEvent, HookEventKind, InteractiveQuestion,
         PendingQuestion, PermissionAction, PermissionProfile, PermissionRequest, QuestionOption,
-        SessionActivity, SessionControlOrigin, SessionSource,
+        SessionActivity, SessionControlOrigin, SessionModelOverride, SessionSource, SessionStatus,
     },
     event_server,
     state::{now_millis, AppState},
@@ -96,15 +96,28 @@ pub struct CodexModelOption {
 pub struct CodexThreadModelSettings {
     pub model: String,
     pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
     pub models: Vec<CodexModelOption>,
 }
 
-#[derive(Clone)]
 pub struct CodexBridge {
     process: Arc<Mutex<Option<Child>>>,
     queued_prompts: Arc<Mutex<HashMap<String, VecDeque<QueuedPrompt>>>>,
     collaboration_modes: Arc<Mutex<HashMap<String, String>>>,
     active_proxy_threads: ActiveProxyThreads,
+    owns_process: bool,
+}
+
+impl Clone for CodexBridge {
+    fn clone(&self) -> Self {
+        Self {
+            process: self.process.clone(),
+            queued_prompts: self.queued_prompts.clone(),
+            collaboration_modes: self.collaboration_modes.clone(),
+            active_proxy_threads: self.active_proxy_threads.clone(),
+            owns_process: false,
+        }
+    }
 }
 
 impl CodexBridge {
@@ -146,6 +159,7 @@ impl CodexBridge {
             queued_prompts,
             collaboration_modes,
             active_proxy_threads,
+            owns_process: true,
         })
     }
 
@@ -221,12 +235,47 @@ impl CodexBridge {
         set_thread_name_connection(thread_id, name)
     }
 
+    pub fn fork_thread_at_response(
+        &self,
+        thread_id: &str,
+        last_turn_id: Option<&str>,
+        prompt: &str,
+        response: &str,
+    ) -> Result<String, String> {
+        self.ensure_server()?;
+        let mut server = connect_initialized_plain()?;
+        let stored_turn_id = match last_turn_id.filter(|id| !id.trim().is_empty()) {
+            Some(turn_id) => turn_id.to_string(),
+            None => find_stored_turn_id(&mut server, thread_id, prompt, response)?,
+        };
+
+        send_json(
+            &mut server,
+            json!({
+                "method": "thread/fork",
+                "id": 100,
+                "params": { "threadId": thread_id, "lastTurnId": stored_turn_id }
+            }),
+        )?;
+        let fork = wait_for_plain_value_response(&mut server, 100)?;
+        fork.pointer("/result/thread/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "Codex did not return the forked thread id".to_string())
+    }
+
     pub fn thread_model_settings(
         &self,
         thread_id: &str,
     ) -> Result<CodexThreadModelSettings, String> {
         self.ensure_server()?;
         thread_model_settings_connection(thread_id)
+    }
+
+    pub fn default_model_settings(&self) -> Result<CodexThreadModelSettings, String> {
+        self.ensure_server()?;
+        default_model_settings_connection()
     }
 
     pub fn set_thread_model_settings(
@@ -238,6 +287,14 @@ impl CodexBridge {
         self.ensure_server()?;
         let collaboration_mode = self.collaboration_mode(thread_id)?;
         set_thread_model_settings_connection(thread_id, model, effort, &collaboration_mode)
+    }
+
+    pub fn set_thread_fast_mode(&self, thread_id: &str, enabled: bool) -> Result<bool, String> {
+        self.ensure_server()?;
+        let mut server = connect_initialized_plain()?;
+        send_json(&mut server, thread_fast_mode_request(thread_id, enabled))?;
+        let response = wait_for_plain_value_response(&mut server, 2)?;
+        confirmed_fast_mode(&response, enabled)
     }
 
     pub fn set_collaboration_mode(
@@ -293,6 +350,7 @@ impl CodexBridge {
         prompt: &str,
         attachment_paths: &[String],
         profile: PermissionProfile,
+        model_settings: SessionModelOverride,
         state: AppState,
         app: AppHandle,
     ) -> Result<(), String> {
@@ -316,12 +374,13 @@ impl CodexBridge {
             json!({ "method": "initialized", "params": {} }),
         )?;
 
-        let (_, params) = prepare_thread_request_params(
+        let (_, mut params) = prepare_thread_request_params(
             working_directory,
             None,
             Some(&profile.mode),
             Some(&profile.approval_policy),
         );
+        apply_model_override_to_thread_start(&mut params, &model_settings);
         send_json(
             &mut server,
             json!({ "method": "thread/start", "id": 2, "params": params }),
@@ -529,6 +588,14 @@ impl CodexBridge {
         wait_for_response(&mut server, 3, state, app, &profiles)
     }
 
+    pub fn discard_queued_prompts(&self, thread_id: &str) -> Result<(), String> {
+        self.queued_prompts
+            .lock()
+            .map_err(|_| "Could not access the Codex prompt queue".to_string())?
+            .remove(thread_id);
+        Ok(())
+    }
+
     pub fn refresh_rate_limits(&self, state: &AppState, app: &AppHandle) -> Result<(), String> {
         self.ensure_server()?;
         let mut server = connect_server()?;
@@ -683,6 +750,9 @@ fn is_lume_server_command(command: &[std::ffi::OsString]) -> bool {
 
 impl Drop for CodexBridge {
     fn drop(&mut self) {
+        if !self.owns_process {
+            return;
+        }
         if let Ok(mut process) = self.process.lock() {
             if let Some(process) = process.as_mut() {
                 let _ = process.kill();
@@ -1129,7 +1199,7 @@ fn prompt_connection(
     )?;
     send_json(
         &mut server,
-        json!({ "method": "thread/resume", "id": 2, "params": { "threadId": thread_id } }),
+        json!({ "method": "thread/resume", "id": 2, "params": { "threadId": thread_id, "excludeTurns": true } }),
     )?;
     wait_for_response(&mut server, 2, state, app, &profiles)?;
 
@@ -1178,7 +1248,13 @@ fn prepare_thread_connection(
         &mut server,
         json!({ "method": method, "id": 2, "params": params }),
     )?;
-    let response = wait_for_plain_value_response(&mut server, 2)?;
+    // Resuming a long-lived thread can take substantially longer than the
+    // five-second socket timeout. A timed-out read is not a failed takeover.
+    let response = if resume_id.is_some() {
+        wait_for_plain_value_response_until(&mut server, 2, Duration::from_secs(90))?
+    } else {
+        wait_for_plain_value_response(&mut server, 2)?
+    };
     let thread_id = response
         .pointer("/result/thread/id")
         .and_then(Value::as_str)
@@ -1233,6 +1309,7 @@ fn prepare_thread_request_params(
     params.insert("cwd".into(), json!(working_directory));
     let method = if let Some(thread_id) = resume_id {
         params.insert("threadId".into(), json!(thread_id));
+        params.insert("excludeTurns".into(), json!(true));
         "thread/resume"
     } else {
         params.insert("serviceName".into(), json!("lume"));
@@ -1324,6 +1401,40 @@ fn thread_model_settings_connection(thread_id: &str) -> Result<CodexThreadModelS
     load_thread_model_settings(&mut server, thread_id).map(|(settings, _)| settings)
 }
 
+fn default_model_settings_connection() -> Result<CodexThreadModelSettings, String> {
+    let mut server = connect_initialized_plain()?;
+    send_json(
+        &mut server,
+        json!({
+            "method": "model/list",
+            "id": 2,
+            "params": { "limit": 100, "includeHidden": false }
+        }),
+    )?;
+    let catalog = wait_for_plain_value_response(&mut server, 2)?;
+    default_model_settings_from_catalog(&catalog)
+}
+
+fn thread_fast_mode_request(thread_id: &str, enabled: bool) -> Value {
+    json!({
+        "method": "thread/resume",
+        "id": 2,
+        "params": { "threadId": thread_id, "excludeTurns": true, "serviceTier": if enabled { "fast" } else { "default" } }
+    })
+}
+
+fn confirmed_fast_mode(response: &Value, enabled: bool) -> Result<bool, String> {
+    let actual = response
+        .pointer("/result/serviceTier")
+        .and_then(Value::as_str);
+    match actual {
+        Some("fast") if enabled => Ok(true),
+        Some("default" | "standard") if !enabled => Ok(false),
+        None if !enabled => Ok(false),
+        _ => Err("Codex did not confirm the requested Fast mode".into()),
+    }
+}
+
 fn set_thread_model_settings_connection(
     thread_id: &str,
     model: &str,
@@ -1374,7 +1485,7 @@ fn load_thread_model_settings(
 ) -> Result<(CodexThreadModelSettings, Value), String> {
     send_json(
         server,
-        json!({ "method": "thread/resume", "id": 2, "params": { "threadId": thread_id } }),
+        json!({ "method": "thread/resume", "id": 2, "params": { "threadId": thread_id, "excludeTurns": true } }),
     )?;
     let resumed = wait_for_plain_value_response(server, 2)?;
     send_json(
@@ -1420,6 +1531,10 @@ fn model_settings_from_responses(
         .to_string();
     let reasoning_effort = resumed
         .pointer("/result/reasoningEffort")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let service_tier = resumed
+        .pointer("/result/serviceTier")
         .and_then(Value::as_str)
         .map(str::to_string);
     let models = catalog
@@ -1480,8 +1595,53 @@ fn model_settings_from_responses(
     Ok(CodexThreadModelSettings {
         model,
         reasoning_effort,
+        service_tier,
         models,
     })
+}
+
+fn default_model_settings_from_catalog(
+    catalog: &Value,
+) -> Result<CodexThreadModelSettings, String> {
+    let available = catalog
+        .pointer("/result/data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex did not return its model catalog".to_string())?;
+    let selected = available
+        .iter()
+        .find(|model| model.get("isDefault").and_then(Value::as_bool) == Some(true))
+        .or_else(|| available.first())
+        .ok_or_else(|| "Codex did not return any available models".to_string())?;
+    let model = selected
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .ok_or_else(|| "Codex returned an invalid default model".to_string())?;
+    let effort = selected
+        .get("defaultReasoningEffort")
+        .and_then(Value::as_str);
+    model_settings_from_responses(
+        &json!({
+            "result": {
+                "model": model,
+                "reasoningEffort": effort,
+                "serviceTier": Value::Null
+            }
+        }),
+        catalog,
+    )
+}
+
+fn apply_model_override_to_thread_start(params: &mut Value, settings: &SessionModelOverride) {
+    let Some(params) = params.as_object_mut() else {
+        return;
+    };
+    if let Some(model) = settings.model.as_deref() {
+        params.insert("model".into(), json!(model));
+    }
+    if let Some(effort) = settings.reasoning_effort.as_deref() {
+        params.insert("config".into(), json!({ "model_reasoning_effort": effort }));
+    }
 }
 
 fn update_thread_collaboration_mode(
@@ -1722,8 +1882,32 @@ fn wait_for_plain_value_response(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     expected_id: i64,
 ) -> Result<Value, String> {
+    wait_for_plain_value_response_until(socket, expected_id, Duration::from_secs(10))
+}
+
+fn wait_for_plain_value_response_until(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    expected_id: i64,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
     loop {
-        let message = socket.read().map_err(|error| error.to_string())?;
+        let message = match socket.read() {
+            Ok(message) => message,
+            Err(tungstenite::Error::Io(error))
+                if transient(&error) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(tungstenite::Error::Io(error)) if transient(&error) => {
+                return Err(format!(
+                    "The Codex App Server did not answer within {} seconds. The session was not marked as controlled; try again.",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         let Message::Text(text) = message else {
             continue;
         };
@@ -1851,7 +2035,26 @@ fn monitor_prompt(
 }
 
 fn mark_prompt_monitor_disconnected(thread_id: &str, state: &AppState, app: &AppHandle) {
+    // Codex can persist `task_complete` immediately before closing this client
+    // socket without a WebSocket close frame. Give the rollout watcher time to
+    // publish that terminal state and never replace it with a stale disconnect.
+    thread::sleep(Duration::from_millis(650));
+    if prompt_thread_already_finished(thread_id, state) {
+        return;
+    }
     let _ = event_server::publish_event(state, app, prompt_monitor_disconnected_event(thread_id));
+}
+
+fn prompt_thread_already_finished(thread_id: &str, state: &AppState) -> bool {
+    state.sessions().ok().is_some_and(|sessions| {
+        sessions.iter().any(|session| {
+            session.native_session_id.as_deref() == Some(thread_id)
+                && matches!(
+                    session.status,
+                    SessionStatus::Completed | SessionStatus::Failed
+                )
+        })
+    })
 }
 
 fn prompt_monitor_disconnected_event(thread_id: &str) -> HookEvent {
@@ -2279,9 +2482,12 @@ fn activity_event(value: &Value, method: &str) -> Option<HookEvent> {
     let params = value.get("params")?;
     let thread_id = text_at(params, "threadId")?;
     let activity = match method {
-        "item/started" | "item/completed" => {
-            codex_item_activity(thread_id, params.get("item")?, method == "item/completed")?
-        }
+        "item/started" | "item/completed" => codex_item_activity(
+            thread_id,
+            params.get("item")?,
+            method == "item/completed",
+            text_at(params, "turnId"),
+        )?,
         "item/agentMessage/delta" => {
             codex_delta_activity(thread_id, params, "message", "Resposta do agente", "delta")?
         }
@@ -2398,12 +2604,19 @@ fn codex_delta_activity(
 }
 
 fn codex_activity_id(thread_id: &str, value: &Value) -> Option<String> {
-    text_at(value, "itemId")
-        .or_else(|| text_at(value, "id"))
-        .map(|item_id| format!("codex:{thread_id}:{item_id}"))
+    let item_id = text_at(value, "itemId").or_else(|| text_at(value, "id"))?;
+    Some(match text_at(value, "turnId") {
+        Some(turn_id) => format!("codex:{thread_id}:turn:{turn_id}:item:{item_id}"),
+        None => format!("codex:{thread_id}:{item_id}"),
+    })
 }
 
-fn codex_item_activity(thread_id: &str, item: &Value, completed: bool) -> Option<SessionActivity> {
+fn codex_item_activity(
+    thread_id: &str,
+    item: &Value,
+    completed: bool,
+    turn_id: Option<&str>,
+) -> Option<SessionActivity> {
     let item_type = text_at(item, "type")?;
     let item_id = text_at(item, "id")
         .map(str::to_string)
@@ -2469,7 +2682,7 @@ fn codex_item_activity(thread_id: &str, item: &Value, completed: bool) -> Option
             Vec::new(),
         ),
         "subAgentActivity" => (
-            "tool",
+            "subagent",
             format!(
                 "Subagente · {}",
                 text_at(item, "agentPath").unwrap_or("atividade")
@@ -2514,7 +2727,10 @@ fn codex_item_activity(thread_id: &str, item: &Value, completed: bool) -> Option
         _ => return None,
     };
     Some(SessionActivity {
-        id: format!("codex:{thread_id}:{item_id}"),
+        id: turn_id.map_or_else(
+            || format!("codex:{thread_id}:{item_id}"),
+            |turn_id| format!("codex:{thread_id}:turn:{turn_id}:item:{item_id}"),
+        ),
         kind: kind.into(),
         title,
         detail: detail.map(|detail| truncate_text(&detail, 16 * 1024)),
@@ -2538,6 +2754,92 @@ fn user_message_text(item: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     (!text.is_empty()).then_some(text)
+}
+
+fn turn_matches_response(turn: &Value, prompt: &str, response: &str, strict: bool) -> bool {
+    let Some(items) = turn.get("items").and_then(Value::as_array) else {
+        return false;
+    };
+    let prompt_match = items.iter().any(|item| {
+        text_at(item, "type") == Some("userMessage")
+            && user_message_text(item).is_some_and(|value| comparable_message(&value, prompt))
+    });
+    if !prompt_match {
+        return false;
+    }
+    if !strict || response.trim().is_empty() {
+        return true;
+    }
+    items.iter().any(|item| {
+        text_at(item, "type") == Some("agentMessage")
+            && first_value_text(item, &["text", "content"])
+                .is_some_and(|value| comparable_message(&value, response))
+    })
+}
+
+fn find_stored_turn_id(
+    server: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    thread_id: &str,
+    prompt: &str,
+    response: &str,
+) -> Result<String, String> {
+    let mut cursor: Option<String> = None;
+    let mut prompt_only_match: Option<String> = None;
+    for page in 0..20_i64 {
+        let request_id = 2 + page;
+        let mut params = json!({
+            "threadId": thread_id,
+            "limit": 50,
+            "sortDirection": "desc",
+            "itemsView": "full"
+        });
+        if let Some(cursor) = cursor.as_deref() {
+            params["cursor"] = json!(cursor);
+        }
+        send_json(
+            server,
+            json!({ "method": "thread/turns/list", "id": request_id, "params": params }),
+        )?;
+        let page = wait_for_plain_value_response(server, request_id)?;
+        let turns = page
+            .pointer("/result/data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Codex did not return the stored conversation turns".to_string())?;
+        for turn in turns {
+            if turn_matches_response(turn, prompt, response, true) {
+                return text_at(turn, "id")
+                    .map(str::to_string)
+                    .ok_or_else(|| "The matching Codex turn has no id".to_string());
+            }
+            if prompt_only_match.is_none() && turn_matches_response(turn, prompt, response, false) {
+                prompt_only_match = text_at(turn, "id").map(str::to_string);
+            }
+        }
+        cursor = page
+            .pointer("/result/nextCursor")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    prompt_only_match.ok_or_else(|| "Could not match this response to a stored Codex turn".into())
+}
+
+fn comparable_message(left: &str, right: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let left = normalize(left);
+    let right = normalize(right);
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    left == right || left.contains(&right) || right.contains(&left)
 }
 
 fn files_from_diff(diff: &str) -> Vec<String> {
@@ -2910,12 +3212,29 @@ mod tests {
     }
 
     #[test]
+    fn cloned_bridge_does_not_own_the_shared_server_process() {
+        let bridge = CodexBridge {
+            process: Arc::new(Mutex::new(None)),
+            queued_prompts: Arc::new(Mutex::new(HashMap::new())),
+            collaboration_modes: Arc::new(Mutex::new(HashMap::new())),
+            active_proxy_threads: Arc::new(Mutex::new(HashMap::new())),
+            owns_process: true,
+        };
+
+        let command_bridge = bridge.clone();
+
+        assert!(bridge.owns_process);
+        assert!(!command_bridge.owns_process);
+    }
+
+    #[test]
     fn queued_prompts_keep_their_order_until_the_active_turn_finishes() {
         let bridge = CodexBridge {
             process: Arc::new(Mutex::new(None)),
             queued_prompts: Arc::new(Mutex::new(HashMap::new())),
             collaboration_modes: Arc::new(Mutex::new(HashMap::new())),
             active_proxy_threads: Arc::new(Mutex::new(HashMap::new())),
+            owns_process: true,
         };
         bridge
             .queue_prompt(
@@ -3056,7 +3375,8 @@ mod tests {
             &json!({
                 "result": {
                     "model": "gpt-test",
-                    "reasoningEffort": "high"
+                    "reasoningEffort": "high",
+                    "serviceTier": "fast"
                 }
             }),
             &json!({
@@ -3079,11 +3399,78 @@ mod tests {
 
         assert_eq!(settings.model, "gpt-test");
         assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(settings.service_tier.as_deref(), Some("fast"));
         assert_eq!(settings.models[0].supported_reasoning_efforts.len(), 2);
         assert_eq!(
             settings.models[0].supported_reasoning_efforts[1].value,
             "high"
         );
+    }
+
+    #[test]
+    fn model_catalog_can_supply_defaults_before_a_rollout_exists() {
+        let settings = default_model_settings_from_catalog(&json!({
+            "result": {
+                "data": [
+                    {
+                        "model": "gpt-other",
+                        "isDefault": false,
+                        "defaultReasoningEffort": "low",
+                        "supportedReasoningEfforts": [
+                            { "reasoningEffort": "low", "description": "Quick" }
+                        ]
+                    },
+                    {
+                        "model": "gpt-default",
+                        "isDefault": true,
+                        "defaultReasoningEffort": "high",
+                        "supportedReasoningEfforts": [
+                            { "reasoningEffort": "high", "description": "Deep" }
+                        ]
+                    }
+                ]
+            }
+        }))
+        .expect("default settings");
+
+        assert_eq!(settings.model, "gpt-default");
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(settings.models.len(), 2);
+    }
+
+    #[test]
+    fn pending_model_settings_are_applied_when_starting_a_recovered_thread() {
+        let (_, mut params) = prepare_thread_request_params("/work/lume", None, None, None);
+        apply_model_override_to_thread_start(
+            &mut params,
+            &SessionModelOverride {
+                model: Some("gpt-test".into()),
+                reasoning_effort: Some("xhigh".into()),
+            },
+        );
+
+        assert_eq!(params.get("model"), Some(&json!("gpt-test")));
+        assert_eq!(
+            params.pointer("/config/model_reasoning_effort"),
+            Some(&json!("xhigh"))
+        );
+    }
+
+    #[test]
+    fn fast_mode_is_a_service_tier_not_a_reasoning_effort() {
+        assert_eq!(
+            thread_fast_mode_request("thread-1", true),
+            json!({"method": "thread/resume", "id": 2, "params": {"threadId": "thread-1", "excludeTurns": true, "serviceTier": "fast"}})
+        );
+        assert_eq!(
+            confirmed_fast_mode(&json!({"result": {"serviceTier": "fast"}}), true),
+            Ok(true)
+        );
+        assert_eq!(
+            confirmed_fast_mode(&json!({"result": {"serviceTier": null}}), false),
+            Ok(false)
+        );
+        assert!(confirmed_fast_mode(&json!({"result": {"serviceTier": "default"}}), true).is_err());
     }
 
     #[test]
@@ -3390,6 +3777,24 @@ mod tests {
     }
 
     #[test]
+    fn late_prompt_disconnect_does_not_replace_a_completed_thread() {
+        let state = AppState::new(std::path::Path::new(":memory:")).expect("state");
+        let mut started = prompt_monitor_disconnected_event("thread-1");
+        started.event = HookEventKind::SessionStarted;
+        started.status_label = Some("Session started".into());
+        state.ingest(started).expect("started session");
+        assert!(!prompt_thread_already_finished("thread-1", &state));
+
+        let mut completed = prompt_monitor_disconnected_event("thread-1");
+        completed.event = HookEventKind::Completed;
+        completed.status_label = Some("Task completed".into());
+        completed.last_response = Some("Done".into());
+        state.ingest(completed).expect("completed session");
+
+        assert!(prompt_thread_already_finished("thread-1", &state));
+    }
+
+    #[test]
     fn completed_turn_carries_the_last_agent_message() {
         let mut responses = HashMap::new();
         remember_response(
@@ -3491,6 +3896,7 @@ mod tests {
                 "aggregatedOutput": "12 tests passed"
             }),
             true,
+            None,
         )
         .expect("atividade de comando");
         assert_eq!(command.kind, "test");
@@ -3509,6 +3915,7 @@ mod tests {
                 ]
             }),
             true,
+            None,
         )
         .expect("atividade de arquivo");
         assert_eq!(files.kind, "file");
@@ -3544,7 +3951,7 @@ mod tests {
         )
         .expect("delta de comando");
         let activity = event.activity.expect("atividade");
-        assert_eq!(activity.id, "codex:thread-1:command-1");
+        assert_eq!(activity.id, "codex:thread-1:turn:turn-1:item:command-1");
         assert!(activity.append_detail);
         assert_eq!(activity.detail.as_deref(), Some("compiling…"));
 
@@ -3603,7 +4010,50 @@ mod tests {
 
         assert_eq!(method, "thread/resume");
         assert_eq!(text_at(&params, "threadId"), Some("thread-1"));
+        assert_eq!(params.get("excludeTurns"), Some(&json!(true)));
         assert_eq!(text_at(&params, "cwd"), Some("/work/lume"));
         assert!(params.get("serviceName").is_none());
+    }
+
+    #[test]
+    fn fork_turn_matching_uses_the_prompt_and_final_response() {
+        let turn = json!({
+            "id": "turn-2",
+            "items": [
+                { "type": "userMessage", "content": [{ "type": "text", "text": "Review the current change" }] },
+                { "type": "agentMessage", "text": "The change is ready. All checks passed." }
+            ]
+        });
+
+        assert!(turn_matches_response(
+            &turn,
+            "Review the current change",
+            "The change is ready. All checks passed.",
+            true,
+        ));
+        assert!(!turn_matches_response(
+            &turn,
+            "Review another change",
+            "The change is ready. All checks passed.",
+            true,
+        ));
+    }
+
+    #[test]
+    fn fork_turn_matching_accepts_cleaned_lume_prompt_text() {
+        let turn = json!({
+            "id": "turn-3",
+            "items": [{
+                "type": "userMessage",
+                "content": [{ "type": "text", "text": "Inspect this image\n\nFiles attached through Lume: /tmp/image.png" }]
+            }]
+        });
+
+        assert!(turn_matches_response(
+            &turn,
+            "Inspect this image",
+            "",
+            false,
+        ));
     }
 }

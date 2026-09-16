@@ -747,6 +747,7 @@ function statusLabel(status, hasQuestion = false) {
 
 function sourceLabel(session) {
   if (session.source === "web" && session.sourceApp) return session.sourceApp;
+  if (session.source === "desktop") return "Lume";
   return session.source || "agent";
 }
 
@@ -1654,12 +1655,15 @@ function renderSessions(snapshot, trackChanges = true) {
     const stop = scopes.includes("terminate") && session.capabilities?.canTerminate
       ? `<button class="stop-agent" data-command="terminate" data-session="${escapeHtml(session.id)}">Stop agent</button>`
       : "";
+    const source = session.controlOrigin === "external"
+      ? `<span class="source-badge">${escapeHtml(sourceLabel(session))}</span>`
+      : "";
     return `
       <article class="session tone-${statusClass(session.status)} ${expanded ? "expanded" : ""}">
         <button class="session-summary" data-chat-session="${escapeHtml(session.id)}" type="button" aria-label="Open chat with ${escapeHtml(sessionDisplayName(session))}">
           <span class="agent-icon agent-${escapeHtml(session.agent)}">${agentVisual(session)}</span>
           <span class="session-heading"><strong>${escapeHtml(sessionDisplayName(session))}</strong><small>${escapeHtml(session.agentLabel)} · ${escapeHtml(session.project)}</small></span>
-          <span class="source-badge">${escapeHtml(sourceLabel(session))}</span>
+          ${source}
           <span class="status-badge"><i></i>${escapeHtml(statusLabel(session.status, Boolean(session.pendingQuestion)))}</span>
           <svg class="chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
         </button>

@@ -31,7 +31,7 @@ use std::{
 
 use domain::{
     AgentKind, AgentSession, HistoryEntry, HookEvent, HookEventKind, PermissionAction, Preferences,
-    PromptAttachmentInput, PromptDelivery, QuestionAnswer, ResultNote, SessionActivity,
+    PromptAttachmentInput, PromptDelivery, QuestionAnswer, ResultNote, ReviewNote, SessionActivity,
     SessionControlOrigin, SessionNote, SessionSource, WorkflowRole, WorkflowRoleContract,
 };
 use integrations::{CompanionStatus, IntegrationDiagnostic, IntegrationKind, IntegrationStatus};
@@ -40,18 +40,63 @@ use state::AppState;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
 fn reveal_main_window(app: &AppHandle) {
+    if let Some(workspace) = app.get_webview_window("workspace") {
+        if workspace.is_visible().unwrap_or(false) {
+            let _ = workspace.unminimize();
+            let _ = workspace.set_focus();
+            return;
+        }
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn reveal_workspace_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("workspace") {
+        window.unminimize().map_err(|error| error.to_string())?;
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        if let Some(main) = app.get_webview_window("main") {
+            let _ = main.hide();
+        }
+        return Ok(());
+    }
+
+    let window = WebviewWindowBuilder::new(app, "workspace", WebviewUrl::App("workspace/".into()))
+        .title("Lume · Workspace")
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(720.0, 520.0)
+        .resizable(true)
+        .decorations(false)
+        .transparent(true)
+        .center()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let app_for_close = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            reveal_main_window(&app_for_close);
+        }
+    });
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.hide();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_workspace_window(app: AppHandle) -> Result<(), String> {
+    reveal_workspace_window(&app)
 }
 
 struct PendingShortcutAction(Mutex<Option<String>>);
@@ -60,7 +105,12 @@ fn shortcut_action_from_args(args: &[String]) -> Option<&str> {
     (args.get(1).map(String::as_str) == Some("shortcut"))
         .then(|| args.get(2).map(String::as_str))
         .flatten()
-        .filter(|action| matches!(*action, "open" | "palette" | "new-session" | "whiteboard"))
+        .filter(|action| {
+            matches!(
+                *action,
+                "open" | "palette" | "new-session" | "whiteboard" | "workspace"
+            )
+        })
 }
 
 #[tauri::command]
@@ -74,7 +124,7 @@ fn take_pending_shortcut_action(
         .map(|mut action| action.take())
 }
 
-fn shortcut_bindings(preferences: &Preferences) -> [(&str, &'static str, &'static str); 4] {
+fn shortcut_bindings(preferences: &Preferences) -> [(&str, &'static str, &'static str); 5] {
     [
         (&preferences.open_shortcut, "open", "Abrir o Lume"),
         (
@@ -91,6 +141,11 @@ fn shortcut_bindings(preferences: &Preferences) -> [(&str, &'static str, &'stati
             &preferences.whiteboard_shortcut,
             "whiteboard",
             "Abrir o whiteboard",
+        ),
+        (
+            &preferences.workspace_shortcut,
+            "workspace",
+            "Abrir o Workspace",
         ),
     ]
 }
@@ -127,8 +182,12 @@ fn register_global_shortcuts(app: &AppHandle, preferences: &Preferences) -> Resu
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
-                    reveal_main_window(app);
-                    let _ = app.emit("lume://shortcut", action);
+                    if action == "workspace" {
+                        let _ = reveal_workspace_window(app);
+                    } else {
+                        reveal_main_window(app);
+                        let _ = app.emit("lume://shortcut", action);
+                    }
                 })
         {
             let _ = app.global_shortcut().unregister_all();
@@ -177,11 +236,63 @@ fn rename_session(
 }
 
 #[tauri::command]
+async fn fork_session_from_message(
+    state: State<'_, AppState>,
+    bridge: State<'_, codex_bridge::CodexBridge>,
+    session_id: String,
+    turn_id: Option<String>,
+    prompt: String,
+    response: String,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = state.connected_session(&session_id)?;
+        if session.agent != AgentKind::Codex {
+            return Err("This agent does not support native conversation forks in Lume yet".into());
+        }
+        let thread_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or_else(|| "This Codex session has not provided its thread id".to_string())?;
+        bridge.fork_thread_at_response(thread_id, turn_id.as_deref(), &prompt, &response)
+    })
+    .await
+    .map_err(|error| format!("Could not complete the conversation fork: {error}"))?
+}
+
+#[tauri::command]
 fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSnapshot, String> {
-    Ok(protocol::HubSnapshot::with_activity_limit(
-        state.bounded_sessions(60)?,
+    Ok(
+        protocol::HubSnapshot::with_activity_limit(state.bounded_sessions(60)?, 60)
+            .with_internal_services(state.internal_services()?),
+    )
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceConversationPage {
+    activities: Vec<SessionActivity>,
+    has_more: bool,
+}
+
+#[tauri::command]
+fn get_workspace_conversation_page(
+    state: State<'_, AppState>,
+    session_id: String,
+    before_created_at: i64,
+    before_activity_id: String,
+) -> Result<WorkspaceConversationPage, String> {
+    let (activities, has_more) = state.conversation_activities_before(
+        &session_id,
+        before_created_at,
+        &before_activity_id,
         60,
-    ))
+    )?;
+    Ok(WorkspaceConversationPage {
+        activities,
+        has_more,
+    })
 }
 
 #[tauri::command]
@@ -443,9 +554,10 @@ fn refresh_agent_rate_limits(
 fn terminate_session(
     app: AppHandle,
     state: State<'_, AppState>,
+    bridge: State<'_, codex_bridge::CodexBridge>,
     session_id: String,
 ) -> Result<(), String> {
-    control::terminate_session(&app, state.inner(), &session_id)
+    control::terminate_session(&app, state.inner(), bridge.inner(), &session_id)
 }
 
 #[tauri::command]
@@ -479,6 +591,7 @@ async fn take_control_session(
                 true,
             )?;
         }
+        protocol::emit_sessions_changed(&app);
         Ok(())
     })
     .await
@@ -541,6 +654,16 @@ fn set_session_model_settings(
         &model,
         &effort,
     )
+}
+
+#[tauri::command]
+fn set_session_fast_mode(
+    state: State<'_, AppState>,
+    bridge: State<'_, codex_bridge::CodexBridge>,
+    session_id: String,
+    enabled: bool,
+) -> Result<bool, String> {
+    control::set_session_fast_mode(state.inner(), bridge.inner(), &session_id, enabled)
 }
 
 #[tauri::command]
@@ -622,6 +745,33 @@ fn save_result_note(
 #[tauri::command]
 fn delete_result_note(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.delete_result_note(&id)
+}
+
+#[tauri::command]
+fn list_review_notes(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<ReviewNote>, String> {
+    state.review_notes(&session_id)
+}
+
+#[tauri::command]
+fn save_review_note(
+    state: State<'_, AppState>,
+    session_id: String,
+    result_id: String,
+    body: String,
+) -> Result<ReviewNote, String> {
+    state.save_review_note(&session_id, &result_id, &body)
+}
+
+#[tauri::command]
+fn delete_review_note(
+    state: State<'_, AppState>,
+    session_id: String,
+    result_id: String,
+) -> Result<(), String> {
+    state.delete_review_note(&session_id, &result_id)
 }
 
 #[tauri::command]
@@ -1009,8 +1159,34 @@ fn validate_workflow_groups(preferences: &Preferences) -> Result<(), String> {
 fn set_preferences(
     app: AppHandle,
     state: State<'_, AppState>,
-    preferences: Preferences,
+    mut preferences: Preferences,
 ) -> Result<(), String> {
+    const APPEARANCE_THEMES: [&str; 5] = ["lume", "forest", "ocean", "violet", "ember"];
+    if !APPEARANCE_THEMES.contains(&preferences.appearance_theme.as_str()) {
+        return Err("Unknown appearance theme".into());
+    }
+    if !matches!(
+        preferences.startup_mode.as_str(),
+        "ask" | "orb" | "workspace"
+    ) {
+        return Err("Unknown startup mode".into());
+    }
+    preferences.accent_color = preferences.accent_color.and_then(|color| {
+        let valid = color.len() == 7
+            && color.starts_with('#')
+            && color[1..].chars().all(|value| value.is_ascii_hexdigit());
+        valid.then(|| color.to_ascii_lowercase())
+    });
+    preferences.workspace_background_color =
+        preferences.workspace_background_color.and_then(|color| {
+            let valid = color.len() == 7
+                && color.starts_with('#')
+                && color[1..].chars().all(|value| value.is_ascii_hexdigit());
+            valid.then(|| color.to_ascii_lowercase())
+        });
+    preferences.accent_opacity = preferences.accent_opacity.clamp(20, 100);
+    preferences.workspace_background_opacity =
+        preferences.workspace_background_opacity.clamp(35, 100);
     validate_workflow_groups(&preferences)?;
     let previous = state.preferences()?;
     let overlay_configuration_changed = previous.monitor_id != preferences.monitor_id
@@ -1575,11 +1751,7 @@ fn launch_session_impl(
     if request.target == "vscode" && !integrations::vscode_status().configured {
         return Err("Conecte o Lume Companion ao VS Code nos Ajustes".into());
     }
-    let executable = integrations::lume_executable()?;
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
+    let headless_codex = uses_headless_codex(&request);
     let resume_preview = request
         .resume
         .then(|| request.resume_id.as_deref())
@@ -1618,22 +1790,33 @@ fn launch_session_impl(
             .as_ref()
             .and_then(|preview| prepared_resume_preview_event(&request, preview))
     };
-    let codex_remote = if request.agent == IntegrationKind::Codex {
-        Some(codex_bridge::PROXY_URL)
-    } else {
-        None
-    };
     let codex_thread_id = (request.agent == IntegrationKind::Codex)
         .then(|| request.resume_id.clone())
         .flatten();
-    launcher::launch(request, &executable, &app_data_dir, codex_remote)?;
-    if let Some(thread_id) = codex_thread_id.as_deref() {
-        bridge.wait_for_proxy_thread(thread_id, std::time::Duration::from_secs(12))?;
+    if !headless_codex {
+        let executable = integrations::lume_executable()?;
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?;
+        let codex_remote = if request.agent == IntegrationKind::Codex {
+            Some(codex_bridge::PROXY_URL)
+        } else {
+            None
+        };
+        launcher::launch(request, &executable, &app_data_dir, codex_remote)?;
+        if let Some(thread_id) = codex_thread_id.as_deref() {
+            bridge.wait_for_proxy_thread(thread_id, std::time::Duration::from_secs(12))?;
+        }
     }
     if let Some(event) = prepared_event {
         event_server::publish_event(&state, &app, event)?;
     }
     Ok(())
+}
+
+fn uses_headless_codex(request: &LaunchRequest) -> bool {
+    request.agent == IntegrationKind::Codex && request.target == "auto"
 }
 
 fn codex_resume_error(error: String) -> String {
@@ -1662,6 +1845,8 @@ fn prepared_codex_session_event(
         project,
         source: Some(if request.target == "vscode" {
             SessionSource::Vscode
+        } else if uses_headless_codex(request) {
+            SessionSource::Desktop
         } else {
             SessionSource::Cli
         }),
@@ -1752,9 +1937,13 @@ pub fn run() {
     let startup_shortcut_action = shortcut_action_from_args(&startup_args).map(str::to_string);
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
-            reveal_main_window(app);
             let action = shortcut_action_from_args(&args).unwrap_or("open");
-            let _ = app.emit("lume://shortcut", action);
+            if action == "workspace" {
+                let _ = reveal_workspace_window(app);
+            } else {
+                reveal_main_window(app);
+                let _ = app.emit("lume://shortcut", action);
+            }
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1797,7 +1986,8 @@ pub fn run() {
             app.manage(state.clone());
             let codex_bridge =
                 codex_bridge::CodexBridge::start(state.clone(), app.handle().clone())?;
-            app.manage(codex_bridge.clone());
+            let workflow_codex_bridge = codex_bridge.clone();
+            app.manage(codex_bridge);
             codex_sessions::start(state.clone(), app.handle().clone())?;
             event_server::start(state.clone(), app.handle().clone())?;
             let browser_control = browser_server::BrowserControl::default();
@@ -1829,7 +2019,7 @@ pub fn run() {
             workflow_runtime.start_monitor(
                 state.clone(),
                 app.handle().clone(),
-                codex_bridge,
+                workflow_codex_bridge,
                 browser_control,
             );
             app.manage(workflow_runtime);
@@ -1861,8 +2051,10 @@ pub fn run() {
             }
 
             let show = MenuItem::with_id(app, "show", "Mostrar Lume", true, None::<&str>)?;
+            let workspace =
+                MenuItem::with_id(app, "workspace", "Abrir Workspace", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Sair", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &workspace, &quit])?;
 
             TrayIconBuilder::new()
                 .icon(
@@ -1885,6 +2077,9 @@ pub fn run() {
                 })
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => reveal_main_window(app),
+                    "workspace" => {
+                        let _ = reveal_workspace_window(app);
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -1898,7 +2093,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             rename_session,
+            fork_session_from_message,
             get_hub_snapshot,
+            get_workspace_conversation_page,
             get_terminal_hub_snapshot,
             execute_hub_command,
             begin_mobile_pairing,
@@ -1921,6 +2118,7 @@ pub fn run() {
             set_session_collaboration_mode,
             get_session_model_settings,
             set_session_model_settings,
+            set_session_fast_mode,
             get_claude_session_model_settings,
             set_claude_session_model_settings,
             steer_queued_prompt,
@@ -1931,6 +2129,9 @@ pub fn run() {
             list_result_notes,
             save_result_note,
             delete_result_note,
+            list_review_notes,
+            save_review_note,
+            delete_review_note,
             list_session_notes,
             save_session_note,
             delete_session_note,
@@ -1953,6 +2154,7 @@ pub fn run() {
             set_preferences,
             move_overlay,
             resize_overlay_surface,
+            open_workspace_window,
             open_terminal_window,
             terminal_frontend_ready,
             toggle_terminal_group_fullscreen,
@@ -2040,13 +2242,13 @@ mod tests {
     fn default_global_shortcuts_are_valid_and_unique() {
         let bindings = parsed_shortcut_bindings(&Preferences::default()).expect("atalhos padrão");
 
-        assert_eq!(bindings.len(), 4);
+        assert_eq!(bindings.len(), 5);
         assert_eq!(
             bindings
                 .iter()
                 .map(|(_, action, _)| *action)
                 .collect::<Vec<_>>(),
-            vec!["open", "palette", "new-session", "whiteboard"]
+            vec!["open", "palette", "new-session", "whiteboard", "workspace"]
         );
     }
 
@@ -2174,6 +2376,12 @@ mod tests {
         let args = vec!["lume".into(), "shortcut".into(), "palette".into()];
 
         assert_eq!(shortcut_action_from_args(&args), Some("palette"));
+
+        let workspace_args = vec!["lume".into(), "shortcut".into(), "workspace".into()];
+        assert_eq!(
+            shortcut_action_from_args(&workspace_args),
+            Some("workspace")
+        );
     }
 
     #[test]
@@ -2214,6 +2422,64 @@ mod tests {
         assert!(event
             .permission_profile
             .is_some_and(|profile| profile.can_respond_from_lume));
+    }
+
+    #[test]
+    fn automatic_codex_launch_is_managed_without_a_native_client() {
+        let mut request = LaunchRequest {
+            agent: IntegrationKind::Codex,
+            working_directory: "/work/lume".into(),
+            resume: false,
+            resume_id: None,
+            target: "auto".into(),
+            initial_prompt: None,
+            permission_mode: None,
+            approval_policy: None,
+            model: None,
+            reasoning_effort: None,
+        };
+
+        assert!(uses_headless_codex(&request));
+        request.target = "terminal".into();
+        assert!(!uses_headless_codex(&request));
+        request.target = "vscode".into();
+        assert!(!uses_headless_codex(&request));
+    }
+
+    #[test]
+    fn headless_codex_session_is_identified_as_lume_desktop() {
+        let request = LaunchRequest {
+            agent: IntegrationKind::Codex,
+            working_directory: "/work/lume".into(),
+            resume: true,
+            resume_id: Some("thread-headless".into()),
+            target: "auto".into(),
+            initial_prompt: None,
+            permission_mode: None,
+            approval_policy: None,
+            model: None,
+            reasoning_effort: None,
+        };
+        let event = prepared_codex_session_event(
+            &request,
+            codex_bridge::PreparedThread {
+                thread_id: "thread-headless".into(),
+                thread_name: Some("Managed by Lume".into()),
+                permission_profile: domain::PermissionProfile {
+                    mode: domain::AccessMode::WorkspaceWrite,
+                    label: "Acesso ao projeto".into(),
+                    approval_policy: "on-request".into(),
+                    approvals_reviewer: None,
+                    can_respond_from_lume: true,
+                    available_actions: vec![PermissionAction::AllowOnce],
+                },
+            },
+            None,
+        );
+
+        assert_eq!(event.source, Some(SessionSource::Desktop));
+        assert_eq!(event.control_origin, domain::SessionControlOrigin::Lume);
+        assert_eq!(event.process_id, None);
     }
 
     #[test]

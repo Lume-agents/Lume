@@ -98,6 +98,15 @@ export interface AgentSession {
   results: SessionResult[];
   activities: SessionActivity[];
   rateLimits?: AgentRateLimit[];
+  promptTokenUsage?: PromptTokenUsage[];
+}
+
+export interface PromptTokenUsage {
+  turnId: string;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  createdAt: number;
 }
 
 export interface InternalService {
@@ -133,7 +142,7 @@ export interface AgentRateLimit {
 
 export interface SessionActivity {
   id: string;
-  kind: "prompt" | "queued_prompt" | "message" | "activity" | "analysis" | "plan" | "plan_document" | "command" | "file" | "test" | "tool" | "subagent" | "permission" | "question";
+  kind: "prompt" | "queued_prompt" | "message" | "activity" | "analysis" | "plan" | "plan_document" | "command" | "file" | "test" | "tool" | "subagent" | "permission" | "question" | "warning";
   title: string;
   detail?: string;
   status: "running" | "completed" | "failed" | "waiting" | "interrupted";
@@ -200,6 +209,10 @@ export interface Preferences {
   accentOpacity: number;
   workspaceBackgroundColor?: string;
   workspaceBackgroundOpacity: number;
+  workspaceLightBackgroundColor?: string;
+  workspaceLightBackgroundOpacity: number;
+  workspaceDarkBackgroundColor?: string;
+  workspaceDarkBackgroundOpacity: number;
   soundEnabled: boolean;
   soundVolume: number;
   popupNotificationsEnabled: boolean;
@@ -530,6 +543,58 @@ export interface PairedDevice {
   createdAt: number;
   lastSeenAt?: number;
   scopes: MobileScope[];
+}
+
+export interface DiscoveredLumeNode {
+  nodeId: string;
+  address: string;
+  port: number;
+  identityFingerprint: string;
+  certificateSha256: string;
+  protocolMinimum: number;
+  protocolMaximum: number;
+}
+
+export interface RemoteLumeNode {
+  nodeId: string;
+  address: string;
+  port: number;
+  identity: {
+    algorithm: string;
+    publicKey: string;
+    fingerprint: string;
+  };
+  certificateSha256: string;
+  deviceId: string;
+  pairedAt: number;
+  lastSeenAt?: number;
+}
+
+export interface RemoteLumeNodeHealth {
+  lifecycle: "disabled" | "offline" | "running";
+  enabled: boolean;
+  nodeId: string;
+  displayName: string;
+  identityFingerprint: string;
+  processId?: number;
+  startedAt?: number;
+  heartbeatAt?: number;
+  protocolMinimum: number;
+  protocolMaximum: number;
+  capabilities: string[];
+  transports: string[];
+  network?: {
+    port: number;
+    discoveryAvailable: boolean;
+  };
+  machine: {
+    hostname: string;
+    operatingSystem: string;
+    architecture: string;
+    logicalCpuCount: number;
+    totalMemoryBytes: number;
+    availableMemoryBytes: number;
+  };
 }
 
 export interface TerminalWindowState {

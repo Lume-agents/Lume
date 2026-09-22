@@ -13,16 +13,18 @@
   import AccentColorPicker from "$lib/AccentColorPicker.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
+  import WorkspaceSidebarToggleIcon from "$lib/WorkspaceSidebarToggleIcon.svelte";
   import { copyResolvedColorTokens } from "$lib/floatingTheme";
   import { appearanceAttributes, appearanceThemes, type AppearanceTheme } from "$lib/appearance";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import { collectAgentAlerts } from "$lib/agentAlerts";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import WorkspaceInspector from "$lib/WorkspaceInspector.svelte";
   import WorkspaceReviewCenter from "$lib/WorkspaceReviewCenter.svelte";
   import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
-  import { resolveLiveResumableSession } from "$lib/sessionIdentity";
-  import { subagentsForSession } from "$lib/workspaceAgents";
+  import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
+  import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, Preferences, ResumableSession } from "$lib/domain";
   import type { HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
@@ -46,12 +48,14 @@
     loadPreferences,
     loadVscodeStatus,
     launchAgentSession,
+    refreshAgentRateLimits,
     removeExternalPlugin,
     renameSession,
     revealBrowserCompanion,
     revealPluginDirectory,
     revokePairedDevice,
     savePreferences,
+    setNativeFileDialogActive,
     setPairedDeviceScopes,
     takeControlSession,
     terminateSession,
@@ -78,6 +82,20 @@
   type WorkspaceDropGeometry = {
     bounds: DOMRect;
     panes: Array<{ node: HTMLElement; bounds: DOMRect }>;
+  };
+
+  type PaneHeaderGesture = {
+    pointerId: number;
+    captureTarget: HTMLElement;
+    sessionId: string;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    holdTimer: number;
+    mode: "pending" | "relocating";
+    layoutReady: boolean;
+    previousMaximizedPaneId: string | null;
   };
 
   let sessions = $state<HubSession[]>([]);
@@ -107,6 +125,8 @@
   let pairingQr = $state<string | null>(null);
   let mobileBusy = $state(false);
   let appVersion = $state("0.15.0");
+  let dismissedAgentAlertIds = $state<string[]>([]);
+  let rateLimitRefreshRequested = false;
   let updateState = $state<"idle" | "checking" | "available" | "up_to_date" | "downloading" | "ready" | "error">("idle");
   let availableVersion = $state<string | null>(null);
   let updateDetail = $state("");
@@ -115,6 +135,12 @@
   let loading = $state(true);
   let internalServices = $state<InternalService[]>([]);
   let expandedSubagentSessions = $state<Set<string>>(new Set());
+  let sidebarCollapsed = $state(false);
+  let sidebarTextHidden = $state(false);
+  let sidebarElement = $state<HTMLElement | null>(null);
+  const sidebarMotion = new WeakMap<HTMLElement, Animation>();
+  let sidebarToggleBusy = false;
+  const observedSubagentIds = new Map<string, Set<string>>();
   let error = $state("");
   let query = $state("");
   let searchOpen = $state(false);
@@ -144,7 +170,16 @@
   let tertiaryRatio = $state(0.34);
   let resizingDivider = $state<0 | 1 | null>(null);
   let draggingSessionId = $state<string | null>(null);
+  let headerRelocatingSessionId = $state<string | null>(null);
   let workspaceDropIntent = $state<WorkspaceDropIntent | null>(null);
+  let showDragPreview = $state(false);
+  let dragPreviewElement = $state<HTMLDivElement | null>(null);
+  let dragPreviewFrame = 0;
+  let dragPreviewPosition: { x: number; y: number } | null = null;
+  let dragPreviewTarget: { x: number; y: number } | null = null;
+  let dragPreviewVelocity = { x: 0, y: 0 };
+  let dragPreviewReducedMotion = false;
+  let paneHeaderGesture: PaneHeaderGesture | null = null;
   let namedLayouts = $state<WorkspaceNamedLayout[]>([]);
   let selectedNamedLayoutId = $state("");
   let namingLayout = $state(false);
@@ -161,6 +196,7 @@
 
   async function openAgentSearch() {
     launcherOpen = false;
+    sidebarCollapsed = false;
     searchOpen = true;
     await tick();
     searchInput?.focus();
@@ -169,6 +205,63 @@
   function closeAgentSearch() {
     searchOpen = false;
     query = "";
+  }
+
+  async function toggleSidebar() {
+    if (sidebarToggleBusy) return;
+    sidebarToggleBusy = true;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (sidebarCollapsed && !reducedMotion) sidebarTextHidden = true;
+    if (!sidebarCollapsed && !reducedMotion) {
+      sidebarTextHidden = true;
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 110));
+    }
+    const movingNodes = sidebarElement
+      ? [...sidebarElement.querySelectorAll<HTMLElement>(".brand-mark, .sidebar-toggle, .header-control-icon, .header-utilities button, .session-launcher > button, .session-icon")]
+        .filter((node) => node.getClientRects().length && node.getBoundingClientRect().bottom > 0)
+        .slice(0, 32)
+      : [];
+    const originalRects = new Map(movingNodes.map((node) => [node, node.getBoundingClientRect()]));
+    for (const node of movingNodes) sidebarMotion.get(node)?.cancel();
+    sidebarCollapsed = !sidebarCollapsed;
+    if (sidebarCollapsed) {
+      closeAgentSearch();
+      headerControl = null;
+      namingLayout = false;
+      launcherOpen = false;
+      sessionContextMenu = null;
+      filter = "all";
+    }
+    await tick();
+    if (reducedMotion) {
+      sidebarTextHidden = false;
+      sidebarToggleBusy = false;
+      return;
+    }
+    for (const node of movingNodes) {
+      if (!node.isConnected || !node.getClientRects().length) continue;
+      const before = originalRects.get(node);
+      if (!before) continue;
+      const after = node.getBoundingClientRect();
+      const x = before.left - after.left;
+      const y = before.top - after.top;
+      if (Math.abs(x) < 2 && Math.abs(y) < 2) continue;
+      const animation = node.animate(
+        [{ transform: `translate(${x}px, ${y}px)` }, { transform: "translate(0, 0)" }],
+        { duration: sidebarCollapsed ? 220 : 260, easing: "cubic-bezier(.16, 1, .3, 1)" },
+      );
+      sidebarMotion.set(node, animation);
+    }
+    if (!sidebarCollapsed) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+    sidebarTextHidden = false;
+    sidebarToggleBusy = false;
+  }
+
+  function openHeaderControl(control: "project" | "layout") {
+    sidebarCollapsed = false;
+    headerControl = control;
   }
   let launchError = $state("");
   let pendingOpenedSession: { nativeId?: string; agent: string; knownIds: Set<string>; startedAt: number } | null = null;
@@ -294,6 +387,7 @@
   ] as const;
 
   const orderedSessions = $derived.by(() => {
+    const paneOrder = [primaryId, secondaryId, tertiaryId];
     const priority: Record<HubSession["status"], number> = {
       permission_required: 0,
       running: 1,
@@ -301,9 +395,16 @@
       failed: 3,
       waiting_for_input: 4,
     };
-    return [...sessions].sort((left, right) =>
-      priority[left.status] - priority[right.status] || right.updatedAt - left.updatedAt
-    );
+    return [...sessions].sort((left, right) => {
+      const leftPane = paneOrder.indexOf(left.id);
+      const rightPane = paneOrder.indexOf(right.id);
+      if (leftPane !== -1 || rightPane !== -1) {
+        if (leftPane === -1) return 1;
+        if (rightPane === -1) return -1;
+        return leftPane - rightPane;
+      }
+      return priority[left.status] - priority[right.status] || right.updatedAt - left.updatedAt;
+    });
   });
   const workspaceProjects = $derived.by(() => {
     const projects = new Map<string, string>();
@@ -338,6 +439,26 @@
         )
       : []
   );
+
+  $effect(() => {
+    const currentSessions = sessions;
+    const liveSessionIds = new Set(currentSessions.map((session) => session.id));
+    const newlyActiveParents: string[] = [];
+    for (const session of currentSessions) {
+      const children = subagentsForSession(session);
+      const observed = observedSubagentIds.get(session.id) ?? new Set<string>();
+      if (children.some((child) => !observed.has(child.id) && (child.status === "running" || Date.now() - child.startedAt < 2_500))) {
+        newlyActiveParents.push(session.id);
+      }
+      observedSubagentIds.set(session.id, new Set(children.map((child) => child.id)));
+    }
+    for (const sessionId of observedSubagentIds.keys()) {
+      if (!liveSessionIds.has(sessionId)) observedSubagentIds.delete(sessionId);
+    }
+    if (newlyActiveParents.length) {
+      expandedSubagentSessions = new Set([...expandedSubagentSessions, ...newlyActiveParents]);
+    }
+  });
   const primary = $derived(sessions.find((session) => session.id === primaryId) ?? null);
   const secondary = $derived(sessions.find((session) => session.id === secondaryId) ?? null);
   const tertiary = $derived(sessions.find((session) => session.id === tertiaryId) ?? null);
@@ -358,6 +479,23 @@
     preferences.darkMode === undefined ? "system" : preferences.darkMode ? "dark" : "light"
   );
   const appearance = $derived(appearanceAttributes(preferences));
+  const selectedAppearanceTheme = $derived(
+    appearanceThemes.find((theme) => theme.value === appearance.theme) ?? appearanceThemes[0]
+  );
+  const workspaceCanvasColor = $derived(
+    darkMode
+      ? preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor ?? selectedAppearanceTheme.darkSurface
+      : preferences.workspaceLightBackgroundColor ?? selectedAppearanceTheme.lightSurface
+  );
+  const workspaceCanvasOpacity = $derived(
+    darkMode
+      ? preferences.workspaceDarkBackgroundColor
+        ? preferences.workspaceDarkBackgroundOpacity
+        : preferences.workspaceBackgroundColor
+          ? preferences.workspaceBackgroundOpacity
+          : preferences.workspaceDarkBackgroundOpacity
+      : preferences.workspaceLightBackgroundOpacity
+  );
   const detectedProjects = $derived.by(() => {
     const projects = new Map<string, string>();
     for (const [key, profile] of Object.entries(preferences.projectProfiles)) {
@@ -393,15 +531,47 @@
     return language === "pt-BR" ? portuguese : english;
   }
 
+  async function withNativeDialog<T>(open: () => Promise<T>): Promise<T> {
+    let overlaysLowered = false;
+    try {
+      await setNativeFileDialogActive(true);
+      overlaysLowered = true;
+    } catch {
+      // The picker remains usable on platforms without native z-order control.
+    }
+    try {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      return await open();
+    } finally {
+      if (overlaysLowered) await setNativeFileDialogActive(false).catch(() => undefined);
+    }
+  }
+
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
     const items: SystemBannerItem[] = [];
     if (settingsError) items.push({ id: "settings-error", message: settingsError, tone: "error", onDismiss: () => { settingsError = ""; } });
     if (launchError) items.push({ id: "launch-error", message: launchError, tone: "error", onDismiss: () => { launchError = ""; } });
     if (sessionContextError) items.push({ id: "session-error", message: sessionContextError, tone: "error", onDismiss: () => { sessionContextError = ""; } });
+    const openedSessionIds = new Set([primary?.id, secondary?.id, tertiary?.id].filter(Boolean));
+    for (const alert of collectAgentAlerts(sessions.filter((session) => !openedSessionIds.has(session.id)), language)) {
+      if (dismissedAgentAlertIds.includes(alert.id)) continue;
+      items.push({
+        id: alert.id,
+        message: alert.message,
+        tone: alert.tone,
+        duration: alert.duration,
+        onDismiss: () => dismissAgentAlert(alert.id),
+      });
+    }
     if (settingsMessage) items.push({ id: "settings-message", message: settingsMessage, tone: "success", onDismiss: () => { settingsMessage = ""; } });
     if (layoutMessage) items.push({ id: "layout-message", message: layoutMessage, onDismiss: () => { layoutMessage = ""; } });
     return items;
   });
+
+  function dismissAgentAlert(id: string) {
+    if (dismissedAgentAlertIds.includes(id)) return;
+    dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-200);
+  }
 
   function sessionName(session: HubSession) {
     return session.sessionName?.trim() || session.project?.trim() || session.agentLabel;
@@ -570,17 +740,30 @@
     return displayText(language, session.statusLabel);
   }
 
-  function toggleSubagents(sessionId: string) {
+  function toggleSubagents(session: HubSession) {
     const next = new Set(expandedSubagentSessions);
-    if (next.has(sessionId)) next.delete(sessionId);
-    else next.add(sessionId);
+    if (next.has(session.id)) next.delete(session.id);
+    else {
+      next.add(session.id);
+      for (const child of subagentsForSession(session)) noteSubagentInteraction(child.id);
+    }
     expandedSubagentSessions = next;
   }
 
-  function selectPrimary(session: HubSession) {
-    if (secondaryId === session.id) secondaryId = primaryId;
-    if (tertiaryId === session.id) tertiaryId = primaryId;
-    primaryId = session.id;
+  function activateSidebarSession(session: HubSession, hasSubagents: boolean) {
+    if (focusedPaneId === session.id) {
+      if (hasSubagents) toggleSubagents(session);
+      return;
+    }
+    selectSession(session);
+  }
+
+  function selectSession(session: HubSession) {
+    if (![primaryId, secondaryId, tertiaryId].includes(session.id)) {
+      if (focusedPaneId === secondaryId) secondaryId = session.id;
+      else if (focusedPaneId === tertiaryId) tertiaryId = session.id;
+      else primaryId = session.id;
+    }
     focusedPaneId = session.id;
     if (maximizedPaneId) maximizedPaneId = session.id;
     persistWorkspaceLayout();
@@ -599,7 +782,7 @@
   }
 
   async function startSession(agent: IntegrationStatus["kind"]) {
-    const selected = await openDialog({ directory: true, multiple: false, title: tr("Project for the new session", "Projeto da nova sessão") });
+    const selected = await withNativeDialog(() => openDialog({ directory: true, multiple: false, title: tr("Project for the new session", "Projeto da nova sessão") }));
     if (!selected || Array.isArray(selected)) return;
     launching = agent;
     launchError = "";
@@ -635,8 +818,10 @@
     const liveSession = resolveLiveResumableSession(stored, sessions);
     if (liveSession) {
       projectFilter = "all";
-      maximizedPaneId = null;
-      selectPrimary(liveSession);
+      if (!hasOpenWorkspacePane(sessions, [primaryId, secondaryId, tertiaryId])) {
+        maximizedPaneId = null;
+        selectSession(liveSession);
+      }
       launcherOpen = false;
       return;
     }
@@ -705,11 +890,6 @@
   }
 
   function beginSidebarSessionDrag(event: DragEvent, sessionId: string) {
-    const target = event.target instanceof Element ? event.target : null;
-    if (target?.closest(".subagent-toggle")) {
-      event.preventDefault();
-      return;
-    }
     draggingSessionId = sessionId;
     workspaceDropIntent = null;
     workspaceDropGeometry = null;
@@ -718,13 +898,185 @@
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/x-lume-session", sessionId);
       event.dataTransfer.setData("text/plain", sessionId);
+      const image = document.createElement("canvas");
+      image.width = image.height = 1;
+      image.style.cssText = "position:fixed;top:0;left:0;pointer-events:none;";
+      document.body.append(image);
+      try {
+        event.dataTransfer.setDragImage(image, 0, 0);
+        dragPreviewReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        showDragPreview = true;
+        window.addEventListener("dragover", trackSidebarDragPreview);
+        void tick().then(() => {
+          if (draggingSessionId === sessionId && showDragPreview) positionDragPreview(event.clientX, event.clientY);
+        });
+      } catch {
+        // Unsupported WebViews keep their native drag image.
+      } finally {
+        window.setTimeout(() => image.remove(), 0);
+      }
     }
   }
 
   function finishSidebarSessionDrag() {
+    window.removeEventListener("dragover", trackSidebarDragPreview);
+    if (dragPreviewFrame) cancelAnimationFrame(dragPreviewFrame);
+    dragPreviewFrame = 0;
+    dragPreviewPosition = null;
+    dragPreviewTarget = null;
+    dragPreviewVelocity = { x: 0, y: 0 };
+    showDragPreview = false;
     draggingSessionId = null;
     workspaceDropIntent = null;
     workspaceDropGeometry = null;
+  }
+
+  function trackSidebarDragPreview(event: DragEvent) {
+    if (event.clientX || event.clientY) positionDragPreview(event.clientX, event.clientY);
+  }
+
+  function animateDragPreview() {
+    dragPreviewFrame = 0;
+    if (!dragPreviewElement || !dragPreviewTarget || !dragPreviewPosition) return;
+    const target = dragPreviewTarget;
+    const position = dragPreviewPosition;
+    if (dragPreviewReducedMotion) {
+      position.x = target.x;
+      position.y = target.y;
+      dragPreviewVelocity = { x: 0, y: 0 };
+    } else {
+      dragPreviewVelocity.x = (dragPreviewVelocity.x + (target.x - position.x) * .18) * .68;
+      dragPreviewVelocity.y = (dragPreviewVelocity.y + (target.y - position.y) * .18) * .68;
+      position.x += dragPreviewVelocity.x;
+      position.y += dragPreviewVelocity.y;
+      const lag = Math.hypot(target.x - position.x, target.y - position.y);
+      if (lag > 52) {
+        position.x = target.x - (target.x - position.x) * 52 / lag;
+        position.y = target.y - (target.y - position.y) * 52 / lag;
+      }
+    }
+    const tilt = dragPreviewReducedMotion ? 0 : Math.max(-4, Math.min(4, dragPreviewVelocity.x * .55));
+    dragPreviewElement.style.transform = `translate3d(${position.x}px, ${position.y}px, 0) rotate(${tilt}deg)`;
+    dragPreviewElement.style.visibility = "visible";
+    if (Math.abs(target.x - position.x) > .2 || Math.abs(target.y - position.y) > .2
+      || Math.abs(dragPreviewVelocity.x) > .2 || Math.abs(dragPreviewVelocity.y) > .2) {
+      dragPreviewFrame = requestAnimationFrame(animateDragPreview);
+    }
+  }
+
+  function positionDragPreview(clientX: number, clientY: number) {
+    const x = Math.max(8, Math.min(clientX + 15, window.innerWidth - 238));
+    const y = Math.max(8, Math.min(clientY + 15, window.innerHeight - 80));
+    dragPreviewTarget = { x, y };
+    if (!dragPreviewPosition) dragPreviewPosition = { x, y };
+    if (!dragPreviewFrame) dragPreviewFrame = requestAnimationFrame(animateDragPreview);
+  }
+
+  function finishPaneHeaderGesture(commit = false) {
+    const gesture = paneHeaderGesture;
+    if (!gesture) return;
+    window.clearTimeout(gesture.holdTimer);
+    window.removeEventListener("pointermove", movePaneHeaderGesture);
+    window.removeEventListener("pointerup", releasePaneHeaderGesture);
+    window.removeEventListener("pointercancel", cancelPaneHeaderGesture);
+    window.removeEventListener("blur", cancelPaneHeaderGesture);
+    window.removeEventListener("keydown", escapePaneHeaderGesture, true);
+    if (gesture.captureTarget.hasPointerCapture(gesture.pointerId)) {
+      gesture.captureTarget.releasePointerCapture(gesture.pointerId);
+    }
+    paneHeaderGesture = null;
+    if (gesture.mode !== "relocating") return;
+    const intent = workspaceDropIntent;
+    if (commit && intent?.kind === "move" && currentPaneIds().includes(gesture.sessionId)
+      && intent.index < currentPaneIds().length) applySessionDrop(gesture.sessionId, intent);
+    else if (gesture.previousMaximizedPaneId) maximizedPaneId = gesture.previousMaximizedPaneId;
+    headerRelocatingSessionId = null;
+    finishSidebarSessionDrag();
+  }
+
+  function movePaneHeaderGesture(event: PointerEvent) {
+    const gesture = paneHeaderGesture;
+    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    if (!event.buttons) {
+      finishPaneHeaderGesture();
+      return;
+    }
+    gesture.lastX = event.clientX;
+    gesture.lastY = event.clientY;
+    if (gesture.mode === "pending") {
+      if (Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) < 6) return;
+      finishPaneHeaderGesture();
+      event.preventDefault();
+      void getCurrentWindow().startDragging();
+      return;
+    }
+    event.preventDefault();
+    positionDragPreview(event.clientX, event.clientY);
+    if (gesture.layoutReady) trackWorkspaceDropAt(event.clientX, event.clientY, gesture.sessionId);
+  }
+
+  function releasePaneHeaderGesture(event: PointerEvent) {
+    if (event.pointerId === paneHeaderGesture?.pointerId) finishPaneHeaderGesture(true);
+  }
+
+  function cancelPaneHeaderGesture() {
+    finishPaneHeaderGesture();
+  }
+
+  function escapePaneHeaderGesture(event: KeyboardEvent) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    finishPaneHeaderGesture();
+  }
+
+  function beginPaneHeaderGesture(event: PointerEvent) {
+    if (event.button !== 0 || !event.isPrimary || paneHeaderGesture) return;
+    const target = event.target instanceof Element ? event.target : null;
+    const header = target?.closest(".pane-header");
+    if (!(header instanceof HTMLElement) || target?.closest("button, input, textarea, select, a, summary, [role='button']")) return;
+    const pane = header.closest<HTMLElement>("[data-workspace-pane]");
+    const sessionId = pane?.dataset.workspacePane;
+    if (!sessionId || !currentPaneIds().includes(sessionId)) return;
+    const gesture: PaneHeaderGesture = {
+      pointerId: event.pointerId,
+      captureTarget: header,
+      sessionId,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      holdTimer: 0,
+      mode: "pending",
+      layoutReady: false,
+      previousMaximizedPaneId: null,
+    };
+    paneHeaderGesture = gesture;
+    gesture.holdTimer = window.setTimeout(() => {
+      if (paneHeaderGesture !== gesture) return;
+      gesture.mode = "relocating";
+      try { header.setPointerCapture(event.pointerId); } catch { /* The window listeners still handle the gesture. */ }
+      gesture.layoutReady = !maximizedPaneId;
+      gesture.previousMaximizedPaneId = maximizedPaneId;
+      draggingSessionId = sessionId;
+      headerRelocatingSessionId = sessionId;
+      dragPreviewReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      showDragPreview = true;
+      workspaceDropIntent = null;
+      workspaceDropGeometry = null;
+      maximizedPaneId = null;
+      void tick().then(() => {
+        if (paneHeaderGesture !== gesture) return;
+        gesture.layoutReady = true;
+        positionDragPreview(gesture.lastX, gesture.lastY);
+        trackWorkspaceDropAt(gesture.lastX, gesture.lastY, sessionId);
+      });
+    }, 360);
+    window.addEventListener("pointermove", movePaneHeaderGesture);
+    window.addEventListener("pointerup", releasePaneHeaderGesture);
+    window.addEventListener("pointercancel", cancelPaneHeaderGesture);
+    window.addEventListener("blur", cancelPaneHeaderGesture);
+    window.addEventListener("keydown", escapePaneHeaderGesture, true);
   }
 
   function setWorkspaceDropIntent(next: WorkspaceDropIntent) {
@@ -765,17 +1117,29 @@
     if (!sourceId || !workbenchElement) return;
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    trackWorkspaceDropAt(event.clientX, event.clientY, sourceId);
+  }
+
+  function trackWorkspaceDropAt(clientX: number, clientY: number, sourceId: string) {
     const paneIds = currentPaneIds();
     const geometry = workspaceDropBounds();
     if (!geometry) return;
     const { bounds, panes: paneNodes } = geometry;
+    if (clientX < bounds.left || clientX > bounds.right || clientY < bounds.top || clientY > bounds.bottom) {
+      workspaceDropIntent = null;
+      return;
+    }
     if (!paneNodes.length) {
       setWorkspaceDropIntent({ kind: "insert", index: 0, left: 0, width: 100 });
       return;
     }
-    const cursorPaneIndex = paneAtCursor(event.clientX, paneNodes);
+    const cursorPaneIndex = paneAtCursor(clientX, paneNodes);
     const existingIndex = paneIds.indexOf(sourceId);
     if (existingIndex >= 0) {
+      if (cursorPaneIndex === existingIndex) {
+        workspaceDropIntent = null;
+        return;
+      }
       const target = paneNodes[cursorPaneIndex]?.bounds ?? bounds;
       setWorkspaceDropIntent({
         kind: "move",
@@ -790,8 +1154,8 @@
       const replaceInset = Math.min(110, Math.max(54, cursorPane.width * .28));
       const replaceHysteresis = workspaceDropIntent?.kind === "replace"
         && workspaceDropIntent.index === cursorPaneIndex ? 12 : 0;
-      const insideReplaceZone = event.clientX >= cursorPane.left + replaceInset - replaceHysteresis
-        && event.clientX <= cursorPane.right - replaceInset + replaceHysteresis;
+      const insideReplaceZone = clientX >= cursorPane.left + replaceInset - replaceHysteresis
+        && clientX <= cursorPane.right - replaceInset + replaceHysteresis;
       if (insideReplaceZone) {
         setWorkspaceDropIntent({
           kind: "replace",
@@ -802,10 +1166,10 @@
         return;
       }
       const paneCenter = cursorPane.left + cursorPane.width / 2;
-      let insertIndex = event.clientX < paneCenter ? cursorPaneIndex : cursorPaneIndex + 1;
+      let insertIndex = clientX < paneCenter ? cursorPaneIndex : cursorPaneIndex + 1;
       const currentInsertIndex = workspaceDropIntent?.kind === "insert" ? workspaceDropIntent.index : null;
       const currentBelongsToPane = currentInsertIndex === cursorPaneIndex || currentInsertIndex === cursorPaneIndex + 1;
-      if (currentBelongsToPane && Math.abs(event.clientX - paneCenter) <= 18) {
+      if (currentBelongsToPane && Math.abs(clientX - paneCenter) <= 18) {
         insertIndex = currentInsertIndex;
       }
       const nextCount = paneIds.length + 1;
@@ -850,12 +1214,17 @@
       finishSidebarSessionDrag();
       return;
     }
+    applySessionDrop(sourceId, intent);
+    finishSidebarSessionDrag();
+  }
+
+  function applySessionDrop(sourceId: string, intent: WorkspaceDropIntent) {
     const paneIds = currentPaneIds();
     const previousCount = paneIds.length;
     const sourceIndex = paneIds.indexOf(sourceId);
     if (intent.kind === "insert" && sourceIndex < 0 && paneIds.length < 3) {
       paneIds.splice(Math.min(intent.index, paneIds.length), 0, sourceId);
-    } else if (intent.kind === "move" && sourceIndex >= 0 && intent.index !== sourceIndex) {
+    } else if (intent.kind === "move" && sourceIndex >= 0 && intent.index < paneIds.length && intent.index !== sourceIndex) {
       [paneIds[sourceIndex], paneIds[intent.index]] = [paneIds[intent.index], paneIds[sourceIndex]];
     } else if (intent.kind === "replace") {
       paneIds[Math.min(intent.index, paneIds.length - 1)] = sourceId;
@@ -870,7 +1239,6 @@
     focusedPaneId = sourceId;
     maximizedPaneId = null;
     persistWorkspaceLayout();
-    finishSidebarSessionDrag();
   }
 
   function togglePaneMaximize(sessionId: string) {
@@ -1239,7 +1607,7 @@
   }
 
   async function addExternalPlugin() {
-    const selected = await openDialog({ multiple: false, directory: false, filters: [{ name: "Lume plugin", extensions: ["json"] }] });
+    const selected = await withNativeDialog(() => openDialog({ multiple: false, directory: false, filters: [{ name: "Lume plugin", extensions: ["json"] }] }));
     if (!selected || Array.isArray(selected)) return;
     installingPlugin = true;
     try {
@@ -1447,6 +1815,12 @@
   }
 
   onMount(() => {
+    const narrowSidebar = window.matchMedia("(max-width: 800px)");
+    const syncSidebarWidth = (event: MediaQueryListEvent | MediaQueryList) => {
+      sidebarCollapsed = event.matches;
+    };
+    syncSidebarWidth(narrowSidebar);
+    narrowSidebar.addEventListener("change", syncSidebarWidth);
     restoreNamedLayouts();
     restoreWorkspaceLayout();
     try { streamMessages = localStorage.getItem(workspaceStreamMessagesKey) !== "false"; }
@@ -1516,6 +1890,8 @@
       if (sessionContextMenu && !(target instanceof Element && target.closest(".session-context-menu"))) sessionContextMenu = null;
     };
     document.addEventListener("pointerdown", closeLauncher);
+    const paneDragHost = workbenchElement;
+    paneDragHost?.addEventListener("pointerdown", beginPaneHeaderGesture);
     let disposed = false;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     let refreshRunning = false;
@@ -1532,8 +1908,13 @@
       try {
         const snapshot = await loadHubSnapshot();
         if (!disposed) {
+          const hadOpenPane = hasOpenWorkspacePane(sessions, [primaryId, secondaryId, tertiaryId]);
           sessions = snapshot.sessions;
           internalServices = snapshot.internalServices ?? [];
+          if (!rateLimitRefreshRequested && sessions.some((session) => session.agent === "codex")) {
+            rateLimitRefreshRequested = true;
+            void refreshAgentRateLimits("codex").catch(() => undefined);
+          }
           error = "";
           reconcileSelection();
           if (pendingOpenedSession) {
@@ -1543,8 +1924,10 @@
             ));
             if (opened) {
               projectFilter = "all";
-              maximizedPaneId = null;
-              selectPrimary(opened);
+              if (!hadOpenPane) {
+                maximizedPaneId = null;
+                selectSession(opened);
+              }
               pendingOpenedSession = null;
             } else if (Date.now() - pending.startedAt > 30_000) {
               pendingOpenedSession = null;
@@ -1598,23 +1981,29 @@
       if (refreshTimer) clearTimeout(refreshTimer);
       stopSessions?.();
       stopPreferences?.();
+      narrowSidebar.removeEventListener("change", syncSidebarWidth);
       colorScheme.removeEventListener("change", syncSystemTheme);
       window.removeEventListener("keydown", handleWorkspaceKeydown);
       document.removeEventListener("pointerdown", closeLauncher);
+      paneDragHost?.removeEventListener("pointerdown", beginPaneHeaderGesture);
+      finishPaneHeaderGesture();
+      finishSidebarSessionDrag();
     };
   });
 </script>
 
 <main
   class:dark={darkMode}
+  class:sidebar-collapsed={sidebarCollapsed}
+  class:sidebar-text-hidden={sidebarTextHidden}
   class:searching={searchOpen}
   class:selecting={headerControl !== null}
   class="workspace terminal-window"
   data-appearance={appearance.theme}
   style:--lume-accent={appearance.accentCss}
   style:--lume-accent-strong={appearance.accentCss}
-  style:--workspace-background-color={preferences.workspaceBackgroundColor}
-  style:--workspace-background-opacity={`${preferences.workspaceBackgroundOpacity}%`}
+  style:--workspace-background-color={workspaceCanvasColor}
+  style:--workspace-background-opacity={`${workspaceCanvasOpacity}%`}
 >
   <SystemBannerStack items={systemBanners} dismissLabel={tr("Dismiss", "Fechar")} />
   {#each workspaceResizeEdges as direction}
@@ -1626,11 +2015,12 @@
       onpointerdown={(event) => beginWorkspaceResize(event, direction)}
     ></button>
   {/each}
-  <aside class="sidebar">
+  <aside class="sidebar" bind:this={sidebarElement}>
     <header class="brand-header" role="group" aria-label={tr("Workspace controls", "Controles do Workspace")} onpointerdown={beginWorkspaceDrag}>
       <div class="brand-top">
         <span class="brand-mark"><BrandIcon name="lume" size={25} /></span>
-        <span><strong>Lume</strong><small>Workspace</small></span>
+        <span class="brand-copy"><strong>Lume</strong><small>Workspace</small></span>
+        <button class="sidebar-toggle" type="button" aria-label={sidebarCollapsed ? tr("Expand sidebar", "Expandir barra lateral") : tr("Collapse sidebar", "Recolher barra lateral")} title={sidebarCollapsed ? tr("Expand sidebar", "Expandir barra lateral") : tr("Collapse sidebar", "Recolher barra lateral")} onclick={() => void toggleSidebar()}><WorkspaceSidebarToggleIcon collapsed={sidebarCollapsed} /></button>
       </div>
     <div class:expanded={headerControl !== null} class="header-selectors">
       {#if headerControl === "project"}
@@ -1664,8 +2054,8 @@
         </div>
         <button class="header-control-close" type="button" aria-label={tr("Close layout selector", "Fechar seletor de layouts")} onclick={() => { headerControl = null; namingLayout = false; }}><LumeIcon name="close" size={14} /></button>
       {:else}
-        <button class="header-control-icon" type="button" aria-label={tr("Select project", "Selecionar projeto")} title={tr("Select project", "Selecionar projeto")} onclick={() => (headerControl = "project")}><WorkspaceHeaderIcon name="project" /></button>
-        <button class="header-control-icon" type="button" aria-label={tr("Saved layouts", "Layouts salvos")} title={tr("Saved layouts", "Layouts salvos")} onclick={() => (headerControl = "layout")}><WorkspaceHeaderIcon name="layout" /></button>
+        <button class="header-control-icon" type="button" aria-label={tr("Select project", "Selecionar projeto")} title={tr("Select project", "Selecionar projeto")} onclick={() => openHeaderControl("project")}><WorkspaceHeaderIcon name="project" /></button>
+        <button class="header-control-icon" type="button" aria-label={tr("Saved layouts", "Layouts salvos")} title={tr("Saved layouts", "Layouts salvos")} onclick={() => openHeaderControl("layout")}><WorkspaceHeaderIcon name="layout" /></button>
       {/if}
       {#if headerControl === null}
       <div class="header-utilities">
@@ -1750,43 +2140,43 @@
           <div class="session-skeleton" aria-hidden="true"><i></i><span></span></div>
         {/each}
       {:else if filteredSessions.length}
-        {#each filteredSessions as session (session.id)}
+        {#each filteredSessions as session, index (session.id)}
           {@const childAgents = subagentsForSession(session)}
-          <div class="session-tree-item">
+          {@const waitingForChildren = parentWaitingForSubagents(session, childAgents)}
+          {@const selected = currentPaneIds().includes(session.id)}
+          <div class:focused={session.id === focusedPaneId} class:secondary-selected={selected && session.id !== focusedPaneId} class:connected={selected} class:connected-above={selected && index > 0 && currentPaneIds().includes(filteredSessions[index - 1].id)} class:connected-below={selected && index < filteredSessions.length - 1 && currentPaneIds().includes(filteredSessions[index + 1].id)} class="session-tree-item">
           <div
-            class:primary-selected={session.id === primaryId}
-            class:secondary-selected={session.id === secondaryId}
-            class:tertiary-selected={session.id === tertiaryId}
             class:dragging={draggingSessionId === session.id}
             class="session-row"
             role="group"
             aria-label={sessionName(session)}
-            title={tr("Drag to arrange this agent", "Arraste para organizar este agente")}
+            title={sidebarCollapsed ? sessionName(session) : tr("Drag to arrange this agent", "Arraste para organizar este agente")}
             draggable={true}
             ondragstart={(event) => beginSidebarSessionDrag(event, session.id)}
             ondragend={finishSidebarSessionDrag}
             oncontextmenu={(event) => { event.preventDefault(); openSessionContextMenu(session, event.clientX, event.clientY); }}
           >
-            <button class="session-select" type="button" aria-current={session.id === primaryId ? "page" : undefined} onclick={() => selectPrimary(session)} onkeydown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openSessionContextMenu(session, rect.left + rect.width / 2, rect.bottom); } }}>
-              <span class="session-icon"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName(session)} size={34} /></span>
+            <button class="session-select" type="button" aria-label={`${sessionName(session)} · ${waitingForChildren ? tr("Waiting for subagents", "Aguardando subagentes") : statusLabel(session)}`} aria-current={session.id === focusedPaneId ? "page" : undefined} aria-expanded={childAgents.length ? expandedSubagentSessions.has(session.id) : undefined} aria-controls={childAgents.length ? `workspace-subagents-${session.id}` : undefined} onclick={() => activateSidebarSession(session, childAgents.length > 0)} onkeydown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openSessionContextMenu(session, rect.left + rect.width / 2, rect.bottom); } }}>
+              <span class="session-icon"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName(session)} size={34} /><i class="session-status-dot status-{waitingForChildren ? 'subagents' : session.status}" aria-hidden="true"></i></span>
               <span class="session-copy">
                 <strong>{sessionName(session)}</strong>
                 <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{session.agentLabel} · {sessionSubtitle(session)}</span></small>
-                <em class="status-{session.status}"><i></i>{statusLabel(session)}</em>
+                <em class="status-{waitingForChildren ? 'subagents' : session.status}"><i></i>{waitingForChildren ? tr("Waiting for subagents", "Aguardando subagentes") : statusLabel(session)}</em>
               </span>
-            </button>
             {#if childAgents.length}
-              <button class:open={expandedSubagentSessions.has(session.id)} class="subagent-toggle" type="button" aria-expanded={expandedSubagentSessions.has(session.id)} aria-label={tr(`${childAgents.length} subagents of ${sessionName(session)}`, `${childAgents.length} subagentes de ${sessionName(session)}`)} title={tr("Show subagents", "Mostrar subagentes")} onclick={() => toggleSubagents(session.id)}>
+              <span class:open={expandedSubagentSessions.has(session.id)} class="subagent-toggle" aria-hidden="true">
                 <span>{childAgents.length}</span><LumeIcon name="chevron-down" size={12} />
-              </button>
+              </span>
             {/if}
+            </button>
           </div>
           {#if childAgents.length}
-            <div class:open={expandedSubagentSessions.has(session.id)} class="subagent-list-shell" aria-hidden={!expandedSubagentSessions.has(session.id)}>
-            <div class="subagent-list" aria-label={tr(`Subagents of ${sessionName(session)}`, `Subagentes de ${sessionName(session)}`)}>
+            <div id={`workspace-subagents-${session.id}`} class:open={expandedSubagentSessions.has(session.id)} class="subagent-list-shell" aria-hidden={!expandedSubagentSessions.has(session.id)}>
+            <div class="subagent-list" role="list" aria-label={tr(`Subagents of ${sessionName(session)}`, `Subagentes de ${sessionName(session)}`)}>
               {#each childAgents as child (child.id)}
-                <div class="subagent-row">
+                <div class="subagent-row" role="listitem">
                   <span class="subagent-branch" aria-hidden="true"></span>
+                  <span class="subagent-avatar"><ThreadAvatar seed={`${session.id}:subagent:${child.id}`} label={child.label} size={24} /></span>
                   <span class="subagent-copy"><strong>{child.label}</strong><small class="subagent-status status-{child.status}">{child.status === "running" ? tr("Working", "Executando") : child.status === "failed" ? tr("Failed", "Falhou") : child.status === "waiting" ? tr("Waiting", "Aguardando") : child.status === "interrupted" ? tr("Interrupted", "Interrompido") : tr("Finished", "Concluído")}</small></span>
                 </div>
               {/each}
@@ -1910,7 +2300,7 @@
                   aria-pressed={appearance.theme === theme.value && !appearance.accent}
                   onclick={() => selectTheme(theme.value)}
                 >
-                  <span style:--theme-accent={theme.accent} style:--theme-surface={theme.surface}></span>
+                  <span style:--theme-accent={theme.accent} style:--theme-surface={darkMode ? theme.darkSurface : theme.lightSurface}></span>
                   {theme.label}
                 </button>
               {/each}
@@ -1920,14 +2310,18 @@
               <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} {language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void savePreferencePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void savePreferencePatch({ accentColor: undefined, accentOpacity: 100 })} />
             </div>
             <div class="workspace-setting-row accent-setting">
-              <span><strong>{tr("Workspace background", "Fundo do Workspace")}</strong><small>{preferences.workspaceBackgroundColor ?? tr("Using the base theme", "Usando o tema base")} · {preferences.workspaceBackgroundOpacity}%</small></span>
-              <AccentColorPicker value={preferences.workspaceBackgroundColor} opacity={preferences.workspaceBackgroundOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.surface ?? "#14231c"} readyColors={["#0f1915", "#14231c", "#16251e", "#101f28", "#1b1726", "#261a13", "#e8ede7", "#ede9df"]} minimumOpacity={35} {language} label={tr("Workspace background", "Fundo do Workspace")} onValueChange={(color, opacity) => void savePreferencePatch({ workspaceBackgroundColor: color, workspaceBackgroundOpacity: opacity })} onReset={() => void savePreferencePatch({ workspaceBackgroundColor: undefined, workspaceBackgroundOpacity: 96 })} />
+              <span><strong>{tr("Light workspace", "Workspace claro")}</strong><small>{preferences.workspaceLightBackgroundColor ?? tr("Using the light preset", "Usando o preset claro")} · {preferences.workspaceLightBackgroundOpacity}%</small></span>
+              <AccentColorPicker value={preferences.workspaceLightBackgroundColor} opacity={preferences.workspaceLightBackgroundOpacity} fallback={selectedAppearanceTheme.lightSurface} readyColors={["#f7f8f4", "#eef2ec", "#e9eee8", "#e9eee3", "#e5edf0", "#ece9f1", "#f0e9e2"]} minimumOpacity={35} {language} label={tr("Light workspace background", "Fundo claro do Workspace")} onValueChange={(color, opacity) => void savePreferencePatch({ workspaceLightBackgroundColor: color, workspaceLightBackgroundOpacity: opacity })} onReset={() => void savePreferencePatch({ workspaceLightBackgroundColor: undefined, workspaceLightBackgroundOpacity: 96 })} />
+            </div>
+            <div class="workspace-setting-row accent-setting">
+              <span><strong>{tr("Dark workspace", "Workspace escuro")}</strong><small>{preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor ?? tr("Using the dark preset", "Usando o preset escuro")} · {workspaceCanvasOpacity}%</small></span>
+              <AccentColorPicker value={preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor} opacity={workspaceCanvasOpacity} fallback={selectedAppearanceTheme.darkSurface} readyColors={["#0f1915", "#14231c", "#182116", "#101f28", "#1b1726", "#261a13", "#121916"]} minimumOpacity={35} {language} label={tr("Dark workspace background", "Fundo escuro do Workspace")} onValueChange={(color, opacity) => void savePreferencePatch({ workspaceDarkBackgroundColor: color, workspaceDarkBackgroundOpacity: opacity })} onReset={() => void savePreferencePatch({ workspaceDarkBackgroundColor: undefined, workspaceDarkBackgroundOpacity: 96, workspaceBackgroundColor: undefined })} />
             </div>
             <div class="workspace-setting-row wallpaper-setting">
               <span><strong>{tr("Background image", "Imagem de fundo")}</strong><small>{workspaceBackgroundImage ? tr("Stored locally on this device", "Salva localmente neste dispositivo") : tr("Add your own workspace backdrop", "Adicione um plano de fundo ao Workspace")}</small></span>
               {#if workspaceBackgroundImage}<i class="wallpaper-preview" style:background-image={`url("${workspaceBackgroundImage}")`} aria-hidden="true"></i>{/if}
               <div class="wallpaper-actions">
-                <button type="button" onclick={() => workspaceBackgroundInput?.click()}>{workspaceBackgroundImage ? tr("Change", "Trocar") : tr("Choose", "Escolher")}</button>
+                <button type="button" title={workspaceBackgroundImage ? tr("Change background image", "Trocar imagem de fundo") : tr("Choose background image", "Escolher imagem de fundo")} aria-label={workspaceBackgroundImage ? tr("Change background image", "Trocar imagem de fundo") : tr("Choose background image", "Escolher imagem de fundo")} onclick={() => workspaceBackgroundInput?.click()}><LumeIcon name="image" size={14} /></button>
                 {#if workspaceBackgroundImage}<button type="button" aria-label={tr("Remove background image", "Remover imagem de fundo")} onclick={removeBackgroundImage}><LumeIcon name="close" size={12} /></button>{/if}
               </div>
               <input bind:this={workspaceBackgroundInput} class="wallpaper-input" type="file" accept="image/png,image/jpeg,image/webp" onchange={(event) => { const file = event.currentTarget.files?.[0]; if (file) loadBackgroundImage(file); }} />
@@ -2171,13 +2565,14 @@
     </div>
   {/if}
 
-  <section class:inspector-open={inspectorOpen} class:review-open={reviewOpen} class="workspace-stage">
+  <section class:inspector-open={inspectorOpen} class:review-open={reviewOpen} class:maximized={Boolean(maximizedSession)} class="workspace-stage">
     <section
       bind:this={workbenchElement}
-      class:split={Boolean(secondary)}
-      class:three-pane={Boolean(tertiary)}
+      class:split={Boolean(secondary) && !maximizedSession}
+      class:three-pane={Boolean(tertiary) && !maximizedSession}
       class:resizing={resizingDivider !== null}
       class:drag-active={draggingSessionId !== null}
+      class:header-relocating={headerRelocatingSessionId !== null}
       class="workbench"
       aria-label={tr("Workspace layout", "Layout do Workspace")}
       style:grid-template-columns={workbenchColumns()}
@@ -2308,7 +2703,7 @@
             {workspaceDropIntent.kind === "insert"
               ? tr("Add pane", "Adicionar painel")
               : workspaceDropIntent.kind === "move"
-                ? tr("Move here", "Mover para cá")
+                ? tr("Swap positions", "Trocar posições")
                 : tr("Replace pane", "Substituir painel")}
           </span>
         </div>
@@ -2329,6 +2724,16 @@
       {/if}
     </div>
   </section>
+  {#if showDragPreview && draggingSessionId}
+    {@const dragSession = sessions.find((session) => session.id === draggingSessionId)}
+    {#if dragSession}
+      <div class="session-drag-preview" bind:this={dragPreviewElement} aria-hidden="true">
+        <ThreadAvatar seed={dragSession.nativeSessionId || dragSession.sessionName || dragSession.id} label={sessionName(dragSession)} size={34} />
+        <span><strong>{sessionName(dragSession)}</strong><small><BrandIcon name={dragSession.agent} size={11} />{dragSession.agentLabel} · {sessionSubtitle(dragSession)}</small></span>
+        <LumeIcon name="layout" size={15} />
+      </div>
+    {/if}
+  {/if}
 </main>
 
 <style>
@@ -2353,6 +2758,8 @@
     --workspace-user-line: var(--lume-user-line-light);
     --workspace-code: var(--lume-code-light);
     --workspace-scroll-thumb: var(--lume-scroll-light);
+    --file-monochrome-filter: grayscale(1) brightness(0) contrast(.82);
+    --file-monochrome-opacity: .78;
     --chat-small-font-size: 10px;
     --chat-tiny-font-size: 8px;
     width: 100%;
@@ -2367,6 +2774,7 @@
     background: var(--workspace-bg);
     font-family: "Segoe UI Variable", "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
     accent-color: var(--workspace-accent);
+    transition: grid-template-columns 240ms cubic-bezier(.16, 1, .3, 1);
   }
   .workspace.dark {
     --workspace-background-color: var(--lume-canvas-dark);
@@ -2387,6 +2795,8 @@
     --workspace-user-line: var(--lume-user-line-dark);
     --workspace-code: var(--lume-code-dark);
     --workspace-scroll-thumb: var(--lume-scroll-dark);
+    --file-monochrome-filter: grayscale(1) brightness(0) invert(.94) contrast(.9);
+    --file-monochrome-opacity: .88;
   }
   ::selection { color: var(--workspace-strong); background: var(--workspace-accent-soft); }
   button, input { font: inherit; }
@@ -2402,7 +2812,9 @@
   .brand-top { min-width: 0; height: 52px; display: flex; align-items: center; gap: 10px; cursor: grab; }
   .brand-top:active { cursor: grabbing; }
   .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
-  .brand-top > span:nth-child(2) { min-width: 0; flex: 1; display: grid; }
+  .brand-copy { min-width: 0; flex: 1; display: grid; opacity: 1; transform: translateX(0); transition: opacity 130ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .sidebar-toggle { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
+  .sidebar-toggle:hover, .sidebar-toggle:focus-visible { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .brand-header strong { color: var(--workspace-strong); font-size: 14px; letter-spacing: -.02em; }
   .brand-header small { color: var(--workspace-muted); font-size: 9px; font-weight: 650; letter-spacing: .01em; }
   .compact-mode, .settings-button, .inspector-button { width: 29px; height: 29px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
@@ -2444,8 +2856,7 @@
   .wallpaper-input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
   .wallpaper-preview { width: 38px; height: 29px; flex: 0 0 auto; border-radius: 7px; background-position: center; background-size: cover; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-strong) 15%, transparent); }
   .wallpaper-actions { min-width: 0; display: flex; gap: 4px; flex: 0 1 auto; }
-  .wallpaper-actions button { min-height: 28px; padding: 0 8px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 720; cursor: pointer; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
-  .wallpaper-actions button:last-child { width: 28px; padding: 0; display: grid; place-items: center; }
+  .wallpaper-actions button { width: 28px; min-height: 28px; padding: 0; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
   .wallpaper-actions button:hover { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 38%, var(--workspace-line)); background: var(--workspace-subtle); }
   .compact-settings { display: grid; }
   .workspace-setting-row { width: 100%; max-width: 100%; min-width: 0; min-height: 53px; display: flex; align-items: center; gap: 14px; overflow: hidden; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 62%, transparent); }
@@ -2532,19 +2943,26 @@
   .session-filters button.active { color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(26, 42, 34, .08); }
   .session-filters button:active { transform: scale(.97); }
   .session-list { min-height: 0; padding: 0 8px 14px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
-  .session-row { position: relative; margin-bottom: 2px; display: flex; align-items: stretch; border-radius: 10px; cursor: grab; transition: background 140ms ease, opacity 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
-  .session-tree-item { min-width: 0; }
+  .session-row { position: relative; display: flex; align-items: stretch; border-radius: 10px; cursor: grab; transition: background 140ms ease, opacity 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .session-tree-item { position: relative; min-width: 0; margin-bottom: 2px; border-radius: 10px; transition: background 140ms ease; }
+  .session-tree-item.focused { background: var(--workspace-accent-soft); }
+  .session-tree-item.focused::before { position: absolute; top: 13px; bottom: 13px; left: 0; width: 1px; border-radius: 1px; background: var(--workspace-accent); content: ""; }
+  .session-tree-item.secondary-selected { background: color-mix(in srgb, var(--workspace-accent-soft) 42%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 25%, transparent); }
+  .session-tree-item.connected { border: 1px solid color-mix(in srgb, var(--workspace-accent) 25%, transparent); background: color-mix(in srgb, var(--workspace-accent-soft) 72%, var(--workspace-sidebar)); box-shadow: none; }
+  .session-tree-item.connected-above { border-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+  .session-tree-item.connected-below { margin-bottom: 0; border-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+  .session-tree-item.connected.focused { background: color-mix(in srgb, var(--workspace-accent-soft) 72%, var(--workspace-sidebar)); }
   .session-row:hover { background: var(--workspace-subtle); }
   .session-row:hover { transform: translateX(2px); }
   .session-row:active { cursor: grabbing; }
   .session-row.dragging { opacity: .48; transform: scale(.98); }
-  .session-row.primary-selected { background: var(--workspace-accent-soft); }
-  .session-row.primary-selected::before { position: absolute; top: 13px; bottom: 13px; left: 0; width: 1px; border-radius: 1px; background: var(--workspace-accent); content: ""; }
-  .session-row.secondary-selected,
-  .session-row.tertiary-selected { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 25%, transparent); }
+  .session-tree-item.focused .session-row:hover { background: color-mix(in srgb, var(--workspace-accent) 7%, transparent); }
+  .session-tree-item.secondary-selected .session-row:hover { background: color-mix(in srgb, var(--workspace-accent) 5%, transparent); }
   .session-select { min-width: 0; min-height: 62px; padding: 9px 4px 9px 10px; display: flex; align-items: flex-start; gap: 9px; flex: 1; border: 0; color: inherit; background: transparent; text-align: left; cursor: inherit; }
-  .session-icon { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
-  .session-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }
+  .session-icon { position: relative; width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
+  .session-icon :global(.thread-avatar) { transition: transform 230ms cubic-bezier(.16, 1, .3, 1); }
+  .session-status-dot { position: absolute; top: 0; right: 0; width: 9px; height: 9px; box-sizing: border-box; border: 2px solid var(--workspace-sidebar); border-radius: 50%; background: #8a9891; opacity: 0; transform: scale(.55); pointer-events: none; transition: opacity 130ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .session-copy { min-width: 0; display: grid; gap: 2px; flex: 1; opacity: 1; transform: translateX(0); transition: opacity 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .session-copy strong, .session-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-copy strong { color: var(--workspace-strong); font-size: 10px; font-weight: 720; letter-spacing: -.01em; }
   .session-copy small { color: var(--workspace-muted); font-size: 8px; line-height: 1.3; }
@@ -2554,13 +2972,17 @@
   .session-copy em i { width: 5px; height: 5px; border-radius: 50%; background: #8a9891; }
   .session-copy em.status-running i { background: #4d99cc; }.session-copy em.status-completed i { background: #4daa77; }.session-copy em.status-permission_required i { background: #d6a441; }.session-copy em.status-failed i { background: #c86662; }
   .session-copy em.status-running i { animation: live-pulse 1.8s ease-out infinite; }
-  .subagent-toggle { min-width: 32px; height: 24px; margin: auto 1px auto 0; padding: 0 3px 0 6px; display: flex; align-items: center; justify-content: center; gap: 2px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: var(--workspace-raised); font-size: 8px; font-weight: 750; cursor: pointer; }
-  .subagent-toggle:hover, .subagent-toggle.open { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 32%, var(--workspace-line)); }
+  .session-copy em.status-subagents i { background: var(--workspace-accent); }
+  .subagent-toggle { min-width: 22px; margin: auto 1px auto auto; display: flex; align-items: center; justify-content: center; gap: 2px; flex: 0 0 auto; color: var(--workspace-muted); font-size: 8px; font-weight: 750; pointer-events: none; }
+  .session-select:hover .subagent-toggle, .subagent-toggle.open { color: var(--workspace-accent); }
   .subagent-toggle :global(.lume-icon) { transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }.subagent-toggle.open :global(.lume-icon) { transform: rotate(180deg); }
   .subagent-list-shell { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 180ms cubic-bezier(.16, 1, .3, 1); }.subagent-list-shell.open { grid-template-rows: 1fr; }
-  .subagent-list { min-height: 0; margin: 0 8px 3px 22px; overflow: hidden; border-left: 1px solid var(--workspace-line); }
-  .subagent-row { min-height: 33px; padding: 4px 6px 4px 12px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); }
-  .subagent-branch { width: 8px; height: 1px; margin-left: -12px; flex: 0 0 auto; background: var(--workspace-line); }
+  .subagent-list { min-height: 0; margin: 0 8px 3px 22px; overflow: hidden; }
+  .subagent-row { position: relative; min-height: 35px; padding: 4px 6px 4px 19px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); }
+  .subagent-list-shell.open .subagent-row { animation: subagent-enter 210ms cubic-bezier(.16, 1, .3, 1) both; }
+  .subagent-branch { position: absolute; top: 0; left: 0; width: 15px; height: 50%; border-bottom: 1px solid var(--workspace-line); border-left: 1px solid var(--workspace-line); border-bottom-left-radius: 8px; }
+  .subagent-row:not(:last-child)::after { position: absolute; top: 50%; bottom: 0; left: 0; border-left: 1px solid var(--workspace-line); content: ""; }
+  .subagent-avatar { width: 24px; height: 24px; display: grid; place-items: center; flex: 0 0 auto; }
   .subagent-copy { min-width: 0; display: grid; gap: 1px; }.subagent-copy strong { max-width: 165px; overflow: hidden; color: var(--workspace-text); font-size: 9px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }.subagent-copy small { color: var(--workspace-faint); font-size: 7px; }.subagent-copy small.status-running { color: #4d99cc; }.subagent-copy small.status-failed { color: #c86662; }
   .internal-heading { margin: 14px 7px 5px; padding-top: 11px; display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--workspace-line); color: var(--workspace-faint); font-size: 8px; font-weight: 750; letter-spacing: .02em; }.internal-heading span { flex: 1; }.internal-heading small { color: var(--workspace-muted); font-size: 8px; }
   .internal-row { min-width: 0; min-height: 49px; padding: 7px 9px; display: flex; align-items: center; gap: 9px; border-radius: 9px; color: var(--workspace-muted); background: var(--workspace-subtle); }.internal-row .session-copy { gap: 3px; }.internal-live { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--workspace-accent); }
@@ -2591,6 +3013,7 @@
   .workspace-stage { position: relative; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 0px 0px; grid-template-rows: minmax(0, 1fr); overflow: hidden; background: transparent; transition: grid-template-columns 220ms cubic-bezier(.16, 1, .3, 1); }
   .workspace-stage.inspector-open { grid-template-columns: minmax(0, 1fr) clamp(270px, 23vw, 350px) 0px; }
   .workspace-stage.review-open { grid-template-columns: minmax(340px, 1fr) 0px clamp(460px, 46vw, 760px); }
+  .workspace-stage.maximized { grid-template-columns: minmax(0, 1fr) 0px 0px; }
   .inspector-shell { min-width: 0; min-height: 0; height: 100%; overflow: hidden; pointer-events: none; }
   .inspector-shell.open { pointer-events: auto; }
   .inspector-content { min-width: 0; width: 100%; height: 100%; }
@@ -2601,7 +3024,8 @@
   .workspace-wallpaper { position: absolute; z-index: -1; inset: 0; width: 100%; height: 100%; background-position: center; background-size: cover; background-repeat: no-repeat; pointer-events: none; }
   .workbench.split { grid-template-columns: minmax(0, 1fr) 7px minmax(0, 1fr); }
   .workbench.resizing { user-select: none; }
-  .workbench.drag-active { cursor: copy; }
+  .workbench.drag-active { cursor: move; }
+  .workbench.header-relocating { cursor: grabbing; }
   .layout-drop-preview { position: absolute; z-index: 20; top: 8px; bottom: 8px; min-width: 0; padding: 0 7px; box-sizing: border-box; pointer-events: none; }
   .layout-drop-preview::before { position: absolute; inset: 0 7px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 64%, var(--workspace-line)); border-radius: 15px; background: color-mix(in srgb, var(--workspace-accent) 10%, var(--workspace-raised)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 9%, transparent), 0 10px 34px color-mix(in srgb, var(--workspace-accent) 11%, transparent); content: ""; animation: drop-preview-arrive 150ms cubic-bezier(.16, 1, .3, 1) both; }
   .layout-drop-preview span { position: absolute; top: 50%; left: 50%; min-width: max-content; padding: 6px 9px; display: flex; align-items: center; gap: 6px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 34%, var(--workspace-line)); border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 7px 20px rgba(7, 20, 13, .14); font-size: 8px; font-weight: 760; transform: translate(-50%, -50%); }
@@ -2609,6 +3033,13 @@
   .layout-drop-preview.insert span { animation: add-label-pulse 1.1s ease-in-out infinite alternate; }
   .layout-drop-preview.replace::before { border-style: dashed; opacity: .72; }
   .layout-drop-preview.move::before { background: color-mix(in srgb, var(--workspace-accent) 8%, var(--workspace-raised)); }
+  .session-drag-preview { position: fixed; z-index: 80; top: 0; left: 0; width: 220px; min-height: 58px; box-sizing: border-box; padding: 9px 11px; display: flex; align-items: center; gap: 9px; visibility: hidden; pointer-events: none; border: 1px solid color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); border-radius: 11px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 12px 32px rgba(0, 0, 0, .22); animation: drag-card-appear 140ms ease-out both; will-change: transform; }
+  .session-drag-preview > span { min-width: 0; display: grid; gap: 3px; flex: 1; }
+  .session-drag-preview strong, .session-drag-preview small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-drag-preview strong { color: var(--workspace-strong); font-size: 10px; font-weight: 720; }
+  .session-drag-preview small { display: flex; align-items: center; gap: 4px; color: var(--workspace-muted); font-size: 8px; }
+  .session-drag-preview > :global(.lume-icon) { flex: 0 0 auto; color: var(--workspace-accent); }
+  @keyframes drag-card-appear { from { opacity: .65; } to { opacity: 1; } }
   .pane-divider { position: relative; width: 7px; min-width: 7px; padding: 0; border: 0; outline: 0; background: transparent; cursor: col-resize; touch-action: none; }
   .pane-divider::before { position: absolute; inset: 0 3px; background: var(--workspace-line); content: ""; transition: inset 120ms ease, background 120ms ease; }
   .pane-divider:hover::before,
@@ -2621,43 +3052,55 @@
   .workspace-error { position: fixed; right: 18px; bottom: 18px; max-width: 420px; margin: 0; padding: 10px 12px; border: 1px solid rgba(198, 102, 98, .28); border-radius: 10px; color: #b45c58; background: var(--workspace-pane); font-size: 9px; }
   @keyframes live-pulse { 0%, 45% { box-shadow: 0 0 0 0 rgba(77, 153, 204, .28); } 80%, 100% { box-shadow: 0 0 0 4px rgba(77, 153, 204, 0); } }
   @keyframes session-menu-in { from { opacity: 0; transform: translateY(-4px); } }
+  @keyframes subagent-enter { from { opacity: 0; transform: translateY(3px); } }
   @keyframes layout-editor-arrive { from { opacity: 0; transform: translateY(-3px); } }
   @keyframes drop-preview-arrive { from { opacity: 0; transform: scale(.985); } }
   @keyframes add-pane-preview { 0% { opacity: 0; transform: scaleX(.76); } 65% { opacity: 1; transform: scaleX(1.015); } 100% { transform: scaleX(1); } }
   @keyframes add-label-pulse { from { box-shadow: 0 7px 20px rgba(7, 20, 13, .12), 0 0 0 0 color-mix(in srgb, var(--workspace-accent) 20%, transparent); } to { box-shadow: 0 7px 20px rgba(7, 20, 13, .14), 0 0 0 5px transparent; } }
-  @media (max-width: 980px) { .workspace { grid-template-columns: 216px minmax(0, 1fr); } }
-  @media (max-width: 800px) {
-    .workspace { grid-template-columns: 68px minmax(0, 1fr); }
-    .brand-header { padding: 0; }
-    .brand-top { justify-content: center; }
-    .brand-top > span:nth-child(2), .session-heading > strong, .session-heading > span, .session-filters, .session-copy { display: none; }
-    .header-selectors { padding-bottom: 5px; justify-content: center; flex-wrap: wrap; }
-    .header-utilities { width: 100%; margin-left: 0; justify-content: center; flex-wrap: wrap; }
-    .session-heading { padding: 12px 0 10px; justify-content: center; gap: 3px; }
-    .search-inline { display: none; }
-    .workspace.searching, .workspace.selecting { grid-template-columns: 216px minmax(0, 1fr); }
-    .workspace.selecting .brand-top { padding: 0 11px; justify-content: flex-start; }
-    .workspace.selecting .brand-top > span:nth-child(2) { display: grid; }
-    .workspace.selecting .header-selectors { padding: 0 11px 5px; }
-    .workspace.searching .session-heading, .workspace.selecting .session-heading { padding: 12px 11px 8px; justify-content: flex-start; }
-    .workspace.selecting .session-heading > strong, .workspace.selecting .session-heading > span { display: block; }
-    .workspace.searching .search-inline { display: flex; }
-    .workspace.searching .session-copy, .workspace.selecting .session-copy { display: grid; }
-    .workspace.searching .session-filters, .workspace.selecting .session-filters { display: grid; }
-    .workspace.searching .session-list, .workspace.selecting .session-list { padding: 0 9px 12px; }
-    .workspace.searching .session-select, .workspace.selecting .session-select { justify-content: flex-start; }
-    .session-list { padding: 0 7px 12px; }
-    .session-row { height: 50px; }
-    .subagent-toggle, .subagent-list-shell, .internal-heading span, .internal-heading small, .internal-live { display: none; }
-    .internal-heading { height: 1px; margin: 12px 8px 5px; padding: 0; }
-    .internal-row { justify-content: center; padding: 7px 0; }
-    .session-select { min-height: 50px; padding: 10px; justify-content: center; }
-    .session-row.primary-selected::before { top: 10px; bottom: 10px; }
-  }
-  @media (max-width: 1040px) {
-    .workspace-stage.inspector-open { grid-template-columns: minmax(0, 1fr) 285px 0px; }
+  @media (max-width: 980px) { .workspace:not(.sidebar-collapsed) { grid-template-columns: 216px minmax(0, 1fr); } }
+  .workspace.sidebar-collapsed { grid-template-columns: 56px minmax(0, 1fr); }
+  .workspace.sidebar-collapsed .brand-header { padding: 2px 3px 7px; border-bottom: 0; }
+  .workspace.sidebar-collapsed .brand-top { height: 69px; flex-direction: column; justify-content: center; gap: 5px; }
+  .workspace.sidebar-collapsed .brand-mark { width: 27px; height: 27px; }
+  .workspace.sidebar-collapsed .sidebar-toggle { width: 27px; height: 27px; }
+  .workspace.sidebar-text-hidden .brand-copy,
+  .workspace.sidebar-text-hidden .session-copy { opacity: 0; transform: translateX(-6px); }
+  .workspace.sidebar-collapsed .brand-copy,
+  .workspace.sidebar-collapsed .session-copy { display: none; }
+  .workspace.sidebar-collapsed .session-heading > .search-toggle,
+  .workspace.sidebar-collapsed .session-heading > strong,
+  .workspace.sidebar-collapsed .session-heading > span,
+  .workspace.sidebar-collapsed .session-filters { display: none; }
+  .workspace.sidebar-collapsed .header-selectors,
+  .workspace.sidebar-collapsed .header-utilities { margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+  .workspace.sidebar-collapsed .header-selectors { padding-top: 10px; }
+  .workspace.sidebar-collapsed .session-heading { padding: 5px 0 9px; flex-direction: column; justify-content: center; gap: 0; border-bottom: 1px solid var(--workspace-line); }
+  .workspace.sidebar-collapsed .session-launcher { margin: 0; }
+  .workspace.sidebar-collapsed .session-list { padding: 7px 3px 12px; }
+  .workspace.sidebar-collapsed .session-row { height: 44px; }
+  .workspace.sidebar-collapsed .session-select { min-height: 44px; padding: 5px; gap: 0; align-items: center; justify-content: center; }
+  .workspace.sidebar-collapsed .session-icon :global(.thread-avatar) { transform: scale(.8); }
+  .workspace.sidebar-collapsed .session-status-dot { opacity: 1; transform: scale(1); }
+  .workspace.sidebar-collapsed .session-status-dot.status-running { background: #4d99cc; }
+  .workspace.sidebar-collapsed .session-status-dot.status-completed { background: #4daa77; }
+  .workspace.sidebar-collapsed .session-status-dot.status-permission_required,
+  .workspace.sidebar-collapsed .session-status-dot.status-waiting_for_input { background: #d6a441; }
+  .workspace.sidebar-collapsed .session-status-dot.status-failed { background: #c86662; }
+  .workspace.sidebar-collapsed .session-status-dot.status-subagents { background: var(--workspace-accent); }
+  .workspace.sidebar-collapsed .subagent-toggle,
+  .workspace.sidebar-collapsed .subagent-list-shell,
+  .workspace.sidebar-collapsed .internal-heading span,
+  .workspace.sidebar-collapsed .internal-heading small,
+  .workspace.sidebar-collapsed .internal-live { display: none; }
+  .workspace.sidebar-collapsed .internal-heading { height: 1px; margin: 12px 8px 5px; padding: 0; }
+  .workspace.sidebar-collapsed .internal-row { justify-content: center; padding: 7px 0; }
+  .workspace.sidebar-collapsed .session-tree-item.focused::before { top: 10px; bottom: 10px; }
+  @media (max-width: 1100px) {
+    .workspace-stage.inspector-open { grid-template-columns: minmax(0, 1fr) 0px 0px; }
+    .inspector-shell { position: absolute; z-index: 34; top: 0; right: 0; bottom: 0; width: min(350px, calc(100% - 44px)); opacity: 0; transform: translateX(20px); transition: opacity 150ms ease, transform 210ms cubic-bezier(.16, 1, .3, 1); }
+    .inspector-shell.open { opacity: 1; transform: translateX(0); box-shadow: -16px 0 40px rgba(4, 15, 9, .16); }
     .workspace-stage.review-open { grid-template-columns: minmax(300px, 1fr) 0px minmax(420px, 48vw); }
   }
-  @media (max-height: 640px) { .brand-top { height: 46px; }.session-heading { padding-top: 8px; }.session-row { margin-bottom: 0; } }
-  @media (prefers-reduced-motion: reduce) { .session-row, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .layout-actions button, .workspace-stage { transition: none; }.session-copy em.status-running i, .session-context-menu, .layout-name-editor, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span { animation: none; } }
+  @media (max-height: 640px) { .brand-top { height: 46px; }.session-heading { padding-top: 8px; }.session-tree-item { margin-bottom: 0; } }
+  @media (prefers-reduced-motion: reduce) { .workspace, .brand-copy, .session-copy, .session-icon :global(.thread-avatar), .session-status-dot, .session-row, .session-tree-item, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .sidebar-toggle, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .layout-actions button, .workspace-stage { transition: none; }.session-copy em.status-running i, .session-context-menu, .layout-name-editor, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span, .subagent-row, .session-drag-preview { animation: none; } }
 </style>

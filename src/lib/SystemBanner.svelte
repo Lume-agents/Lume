@@ -23,7 +23,7 @@
     onDismiss?: () => void;
   }>();
 
-  const icon = $derived<LumeIconName>(tone === "success" ? "check" : tone === "error" ? "close" : "bolt");
+  const icon = $derived<LumeIconName>(tone === "success" ? "check" : tone === "error" ? "close" : tone === "warning" ? "warning" : "bolt");
   let timeout: ReturnType<typeof setTimeout> | null = null;
 
   function clearDismissTimer() {

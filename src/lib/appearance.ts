@@ -6,13 +6,14 @@ export const appearanceThemes: Array<{
   value: AppearanceTheme;
   label: string;
   accent: string;
-  surface: string;
+  lightSurface: string;
+  darkSurface: string;
 }> = [
-  { value: "lume", label: "Lume", accent: "#43b47d", surface: "#14231c" },
-  { value: "forest", label: "Forest", accent: "#8cbf54", surface: "#182116" },
-  { value: "ocean", label: "Ocean", accent: "#4ea6d8", surface: "#101f28" },
-  { value: "violet", label: "Violet", accent: "#9b82df", surface: "#1b1726" },
-  { value: "ember", label: "Ember", accent: "#d58a4b", surface: "#261a13" },
+  { value: "lume", label: "Lume", accent: "#43b47d", lightSurface: "#e9eee8", darkSurface: "#14231c" },
+  { value: "forest", label: "Forest", accent: "#8cbf54", lightSurface: "#e9eee3", darkSurface: "#182116" },
+  { value: "ocean", label: "Ocean", accent: "#4ea6d8", lightSurface: "#e5edf0", darkSurface: "#101f28" },
+  { value: "violet", label: "Violet", accent: "#9b82df", lightSurface: "#ece9f1", darkSurface: "#1b1726" },
+  { value: "ember", label: "Ember", accent: "#d58a4b", lightSurface: "#f0e9e2", darkSurface: "#261a13" },
 ];
 
 export function normalizeAppearanceTheme(value: string | undefined): AppearanceTheme {

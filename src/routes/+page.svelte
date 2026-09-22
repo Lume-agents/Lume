@@ -23,6 +23,7 @@
   import LumeLogo from "$lib/LumeLogo.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import { collectAgentAlerts } from "$lib/agentAlerts";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import StartupModeChooser from "$lib/StartupModeChooser.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
@@ -42,6 +43,7 @@
     AgentKind,
     AgentSession,
     CompanionStatus,
+    DiscoveredLumeNode,
     ExternalAgentPlugin,
     HistoryEntry,
     IntegrationDiagnostic,
@@ -50,6 +52,8 @@
     MobilePairingOffer,
     MobileScope,
     PairedDevice,
+    RemoteLumeNode,
+    RemoteLumeNodeHealth,
     PermissionAction,
     Preferences,
     PromptAttachmentInput,
@@ -69,6 +73,7 @@
     beginMobilePairing,
     answerQuestion,
     diagnoseIntegration,
+    discoverLumeNodes,
     disableMobileGateway,
     decidePermission,
     defaultPreferences,
@@ -82,6 +87,8 @@
     loadMobileGatewayStatus,
     loadOverlayPosition,
     loadPairedDevices,
+    loadRemoteLumeNodeHealth,
+    loadRemoteLumeNodes,
     loadPreferences,
     loadWorkflowRun,
     loadSessions,
@@ -97,10 +104,13 @@
     interruptPrompt,
     removeExternalPlugin,
     readLocalImageDataUrl,
+    refreshAgentRateLimits,
     rebindWorkflowSession,
     renameSession,
     revealBrowserCompanion,
     revokePairedDevice,
+    forgetRemoteLumeNode,
+    pairLumeNode,
     launchAgentSession,
     savePreferences,
     saveResultNote,
@@ -247,6 +257,8 @@
   let availableVersion = $state<string | null>(null);
   let updateDetail = $state("Updates are checked automatically.");
   let updateProgress = $state<number | null>(null);
+  let dismissedAgentAlertIds = $state<string[]>([]);
+  let rateLimitRefreshRequested = false;
   let pendingUpdate: Update | null = null;
   let suppressCompactToggle = false;
   let dragState: {
@@ -272,6 +284,13 @@
   let mobileBusy = $state(false);
   let mobileMessage = $state<string | null>(null);
   let mobileMessageIsError = $state(false);
+  let remoteNodes = $state<RemoteLumeNode[]>([]);
+  let discoveredNodes = $state<DiscoveredLumeNode[]>([]);
+  let remoteNodeHealth = $state<Record<string, RemoteLumeNodeHealth>>({});
+  let remotePairingUri = $state("");
+  let remoteNodeBusy = $state(false);
+  let remoteNodeMessage = $state<string | null>(null);
+  let remoteNodeMessageIsError = $state(false);
   const mobileApkUrl = "https://github.com/tulerws/Lume/releases/latest/download/Lume-Mobile.apk";
   const startupRouteKey = "lume:startup-mode-routed:v1";
 
@@ -323,11 +342,28 @@
           ? [noteMessage ? { id: "note-message", message: noteMessage, tone: "success", onDismiss: () => (noteMessage = null) } : null]
           : [
               settingsMessage ? { id: "settings-message", message: settingsMessage, tone: settingsMessageIsError ? "error" : "success", onDismiss: () => (settingsMessage = null) } : null,
+              remoteNodeMessage ? { id: "remote-node-message", message: remoteNodeMessage, tone: remoteNodeMessageIsError ? "error" : "success", onDismiss: () => (remoteNodeMessage = null) } : null,
               pluginMessage ? { id: "plugin-message", message: pluginMessage, onDismiss: () => (pluginMessage = null) } : null,
               mobileMessage ? { id: "mobile-message", message: mobileMessage, tone: mobileMessageIsError ? "error" : "success", onDismiss: () => (mobileMessage = null) } : null,
             ];
-    return items.filter((item): item is SystemBannerItem => item !== null);
+    const visibleItems = items.filter((item): item is SystemBannerItem => item !== null);
+    for (const alert of collectAgentAlerts(sessions, preferences.language)) {
+      if (dismissedAgentAlertIds.includes(alert.id)) continue;
+      visibleItems.push({
+        id: alert.id,
+        message: alert.message,
+        tone: alert.tone,
+        duration: alert.duration,
+        onDismiss: () => dismissAgentAlert(alert.id),
+      });
+    }
+    return visibleItems;
   });
+
+  function dismissAgentAlert(id: string) {
+    if (dismissedAgentAlertIds.includes(id)) return;
+    dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-200);
+  }
 
   function withDevMobileDevice(devices: PairedDevice[]) {
     return dev && !devices.some((device) => device.id === devMobileDeviceId)
@@ -430,6 +466,13 @@
 
   const effectiveDark = $derived(preferences.darkMode ?? systemDark);
   const appearance = $derived(appearanceAttributes(preferences));
+  const darkWorkspaceOpacity = $derived(
+    preferences.workspaceDarkBackgroundColor
+      ? preferences.workspaceDarkBackgroundOpacity
+      : preferences.workspaceBackgroundColor
+        ? preferences.workspaceBackgroundOpacity
+        : preferences.workspaceDarkBackgroundOpacity
+  );
   $effect(() => {
     const root = document.documentElement;
     root.dataset.theme = effectiveDark ? "dark" : "light";
@@ -556,6 +599,12 @@
       ]);
       if (disposed) return;
       sessions = nextSessions;
+      if (!rateLimitRefreshRequested && sessions.some((session) => session.agent === "codex")) {
+        rateLimitRefreshRequested = true;
+        void refreshAgentRateLimits("codex")
+          .then(() => refreshSessions(false))
+          .catch(() => undefined);
+      }
       selectedProfileKey = detectedProjects[0]?.key ?? null;
       void initializeUpdater();
       integrations = nextIntegrations;
@@ -1786,6 +1835,94 @@
     }
   }
 
+  async function refreshRemoteNodes() {
+    if (!isTauri) return;
+    try {
+      remoteNodes = await loadRemoteLumeNodes();
+    } catch (error) {
+      remoteNodeMessageIsError = true;
+      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
+    }
+  }
+
+  async function scanRemoteNodes() {
+    if (!isTauri || remoteNodeBusy) return;
+    remoteNodeBusy = true;
+    remoteNodeMessage = null;
+    try {
+      discoveredNodes = await discoverLumeNodes();
+      remoteNodeMessageIsError = false;
+      remoteNodeMessage = discoveredNodes.length
+        ? tr(
+            `${discoveredNodes.length} Lume Node${discoveredNodes.length === 1 ? "" : "s"} found.`,
+            `${discoveredNodes.length} Lume Node${discoveredNodes.length === 1 ? " encontrado" : "s encontrados"}.`,
+          )
+        : tr("No Lume Node was found on this network.", "Nenhum Lume Node foi encontrado nesta rede.");
+    } catch (error) {
+      remoteNodeMessageIsError = true;
+      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      remoteNodeBusy = false;
+    }
+  }
+
+  async function connectRemoteNode() {
+    const pairingUri = remotePairingUri.trim();
+    if (!isTauri || remoteNodeBusy || !pairingUri) return;
+    remoteNodeBusy = true;
+    remoteNodeMessage = null;
+    try {
+      const remote = await pairLumeNode(pairingUri);
+      remotePairingUri = "";
+      await refreshRemoteNodes();
+      remoteNodeMessageIsError = false;
+      remoteNodeMessage = tr(`Connected to ${remote.nodeId}.`, `Conectado a ${remote.nodeId}.`);
+    } catch (error) {
+      remoteNodeMessageIsError = true;
+      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      remoteNodeBusy = false;
+    }
+  }
+
+  async function checkRemoteNode(nodeId: string) {
+    if (remoteNodeBusy) return;
+    remoteNodeBusy = true;
+    remoteNodeMessage = null;
+    try {
+      const health = await loadRemoteLumeNodeHealth(nodeId);
+      remoteNodeHealth = { ...remoteNodeHealth, [nodeId]: health };
+      await refreshRemoteNodes();
+      remoteNodeMessageIsError = false;
+      remoteNodeMessage = tr(`${health.displayName} is reachable.`, `${health.displayName} está acessível.`);
+    } catch (error) {
+      remoteNodeMessageIsError = true;
+      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      remoteNodeBusy = false;
+    }
+  }
+
+  async function removeRemoteNode(nodeId: string) {
+    if (remoteNodeBusy) return;
+    remoteNodeBusy = true;
+    remoteNodeMessage = null;
+    try {
+      await forgetRemoteLumeNode(nodeId);
+      remoteNodes = await loadRemoteLumeNodes();
+      const nextHealth = { ...remoteNodeHealth };
+      delete nextHealth[nodeId];
+      remoteNodeHealth = nextHealth;
+      remoteNodeMessageIsError = false;
+      remoteNodeMessage = tr("Remote computer removed.", "Computador remoto removido.");
+    } catch (error) {
+      remoteNodeMessageIsError = true;
+      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      remoteNodeBusy = false;
+    }
+  }
+
   async function toggleMobileAccess() {
     if (!isTauri || mobileBusy) return;
     mobileBusy = true;
@@ -1946,7 +2083,7 @@
     if (nextView === "settings") {
       selectedProfileKey ??= detectedProjects[0]?.key ?? null;
       settingsMessage = null;
-      await refreshMobileSettings();
+      await Promise.all([refreshMobileSettings(), refreshRemoteNodes()]);
     }
   }
 
@@ -3603,7 +3740,7 @@
               <div class="appearance-theme-list">
                 {#each appearanceThemes as theme (theme.value)}
                   <button class:active={appearance.theme === theme.value && !appearance.accent} type="button" title={theme.label} aria-label={theme.label} onclick={() => void selectAppearanceTheme(theme.value)}>
-                    <i style:--theme-accent={theme.accent} style:--theme-surface={theme.surface}></i>
+                    <i style:--theme-accent={theme.accent} style:--theme-surface={effectiveDark ? theme.darkSurface : theme.lightSurface}></i>
                   </button>
                 {/each}
               </div>
@@ -3613,8 +3750,12 @@
               <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} language={preferences.language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void updateAppearancePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void updateAppearancePatch({ accentColor: undefined, accentOpacity: 100 })} />
             </div>
             <div class="field-row appearance-accent-row">
-              <span><strong>{tr("Workspace background", "Fundo do Workspace")}</strong><small>{preferences.workspaceBackgroundColor ?? tr("Base theme color", "Cor do tema base")} · {preferences.workspaceBackgroundOpacity}%</small></span>
-              <AccentColorPicker value={preferences.workspaceBackgroundColor} opacity={preferences.workspaceBackgroundOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.surface ?? "#14231c"} readyColors={["#0f1915", "#14231c", "#16251e", "#101f28", "#1b1726", "#261a13", "#e8ede7", "#ede9df"]} minimumOpacity={35} language={preferences.language} label={tr("Workspace background", "Fundo do Workspace")} onValueChange={(color, opacity) => void updateAppearancePatch({ workspaceBackgroundColor: color, workspaceBackgroundOpacity: opacity })} onReset={() => void updateAppearancePatch({ workspaceBackgroundColor: undefined, workspaceBackgroundOpacity: 96 })} />
+              <span><strong>{tr("Light workspace", "Workspace claro")}</strong><small>{preferences.workspaceLightBackgroundColor ?? tr("Light theme preset", "Preset do tema claro")} · {preferences.workspaceLightBackgroundOpacity}%</small></span>
+              <AccentColorPicker value={preferences.workspaceLightBackgroundColor} opacity={preferences.workspaceLightBackgroundOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.lightSurface ?? "#e9eee8"} readyColors={["#f7f8f4", "#eef2ec", "#e9eee8", "#e9eee3", "#e5edf0", "#ece9f1", "#f0e9e2"]} minimumOpacity={35} language={preferences.language} label={tr("Light workspace background", "Fundo claro do Workspace")} onValueChange={(color, opacity) => void updateAppearancePatch({ workspaceLightBackgroundColor: color, workspaceLightBackgroundOpacity: opacity })} onReset={() => void updateAppearancePatch({ workspaceLightBackgroundColor: undefined, workspaceLightBackgroundOpacity: 96 })} />
+            </div>
+            <div class="field-row appearance-accent-row">
+              <span><strong>{tr("Dark workspace", "Workspace escuro")}</strong><small>{preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor ?? tr("Dark theme preset", "Preset do tema escuro")} · {darkWorkspaceOpacity}%</small></span>
+              <AccentColorPicker value={preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor} opacity={darkWorkspaceOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.darkSurface ?? "#14231c"} readyColors={["#0f1915", "#14231c", "#182116", "#101f28", "#1b1726", "#261a13", "#121916"]} minimumOpacity={35} language={preferences.language} label={tr("Dark workspace background", "Fundo escuro do Workspace")} onValueChange={(color, opacity) => void updateAppearancePatch({ workspaceDarkBackgroundColor: color, workspaceDarkBackgroundOpacity: opacity })} onReset={() => void updateAppearancePatch({ workspaceDarkBackgroundColor: undefined, workspaceDarkBackgroundOpacity: 96, workspaceBackgroundColor: undefined })} />
             </div>
             <div class="field-row">
               <span><strong>{tr("Open Lume as", "Abrir o Lume como")}</strong><small>{tr("Choose the default view for the next launch.", "Escolha a visualização padrão da próxima abertura.")}</small></span>
@@ -3868,6 +4009,69 @@
             {:else}
               <p class="profile-empty">{tr("Profiles appear after a project is detected.", "Os perfis aparecem depois que um projeto é detectado.")}</p>
             {/if}
+              </div>
+            </details>
+            <details class="settings-section" data-remote-nodes-section>
+              <summary class="settings-section-label">{tr("Remote computers", "Computadores remotos")}</summary>
+              <div class="settings-section-content">
+                <div class="remote-node-panel">
+                  <div class="remote-node-heading">
+                    <span>
+                      <strong>Lume Node</strong>
+                      <small>{tr("Pair a trusted computer on this network with read-only access.", "Pareie um computador confiável nesta rede com acesso somente leitura.")}</small>
+                    </span>
+                    <button disabled={!isTauri || remoteNodeBusy} type="button" onclick={() => void scanRemoteNodes()}>
+                      {remoteNodeBusy ? "…" : tr("Scan", "Buscar")}
+                    </button>
+                  </div>
+
+                  <div class="remote-pair-control">
+                    <input
+                      aria-label={tr("One-time Lume Node pairing link", "Link de pareamento de uso único do Lume Node")}
+                      autocomplete="off"
+                      placeholder="lume://pair-node?…"
+                      spellcheck="false"
+                      type="password"
+                      bind:value={remotePairingUri}
+                      onkeydown={(event) => {
+                        if (event.key === "Enter") void connectRemoteNode();
+                      }}
+                    />
+                    <button disabled={!isTauri || remoteNodeBusy || !remotePairingUri.trim()} type="button" onclick={() => void connectRemoteNode()}>
+                      {tr("Pair", "Parear")}
+                    </button>
+                  </div>
+
+                  {#if discoveredNodes.length}
+                    <div class="discovered-node-list" aria-label={tr("Discovered Lume Nodes", "Lume Nodes encontrados")}>
+                      {#each discoveredNodes as node (`${node.nodeId}:${node.address}:${node.port}`)}
+                        <span><i aria-hidden="true"></i><strong>{node.nodeId}</strong><small>{node.address}:{node.port}</small></span>
+                      {/each}
+                    </div>
+                  {/if}
+
+                  {#if remoteNodes.length}
+                    <div class="remote-node-list">
+                      {#each remoteNodes as node (node.nodeId)}
+                        {@const health = remoteNodeHealth[node.nodeId]}
+                        <article class="remote-node-row">
+                          <i class:online={health?.lifecycle === "running"} aria-hidden="true"></i>
+                          <span>
+                            <strong>{health?.displayName ?? node.nodeId}</strong>
+                            <small>{health ? `${health.machine.operatingSystem} · ${health.machine.architecture}` : `${node.address}:${node.port}`}</small>
+                          </span>
+                          <div>
+                            <button disabled={remoteNodeBusy} type="button" onclick={() => void checkRemoteNode(node.nodeId)}>{tr("Check", "Verificar")}</button>
+                            <button class="remove" disabled={remoteNodeBusy} type="button" onclick={() => void removeRemoteNode(node.nodeId)}>{tr("Remove", "Remover")}</button>
+                          </div>
+                        </article>
+                      {/each}
+                    </div>
+                  {:else}
+                    <p class="remote-node-empty">{tr("No paired computers yet.", "Nenhum computador pareado ainda.")}</p>
+                  {/if}
+
+                </div>
               </div>
             </details>
             <details class="settings-section" data-mobile-access-section>
@@ -4871,6 +5075,34 @@
     box-shadow: 0 0 0 2px rgba(74, 122, 102, 0.08);
   }
   .profile-empty { margin: 5px 1px 2px; color: #89938f; font-size: 9px; line-height: 1.45; }
+  .remote-node-panel { padding: 11px; display: grid; gap: 9px; border: 1px solid rgba(92, 111, 103, 0.11); border-radius: 13px; background: rgba(84, 111, 99, 0.035); }
+  .remote-node-heading { display: flex; align-items: center; gap: 9px; }
+  .remote-node-heading > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
+  .remote-node-heading strong,
+  .remote-node-row strong,
+  .discovered-node-list strong { color: #35423d; font-size: 9px; }
+  .remote-node-heading small,
+  .remote-node-row small,
+  .discovered-node-list small { overflow: hidden; color: #89938f; font-size: 8px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+  .remote-node-panel button { min-height: 25px; padding: 0 7px; border: 1px solid rgba(82, 105, 95, 0.14); border-radius: 7px; color: #577064; background: transparent; font-size: 8px; font-weight: 680; cursor: pointer; }
+  .remote-node-panel button:disabled { cursor: default; opacity: 0.5; }
+  .remote-pair-control { display: flex; align-items: center; gap: 6px; }
+  .remote-pair-control input { width: 0; min-width: 0; height: 29px; padding: 0 8px; flex: 1; border: 1px solid rgba(92, 111, 103, 0.14); border-radius: 8px; outline: 0; color: #53665d; background: rgba(255, 255, 255, 0.48); font-family: inherit; font-size: 8px; }
+  .remote-pair-control input:focus-visible { border-color: rgba(69, 113, 94, 0.42); box-shadow: 0 0 0 2px rgba(74, 122, 102, 0.08); }
+  .discovered-node-list,
+  .remote-node-list { display: grid; border-top: 1px solid rgba(92, 111, 103, 0.09); }
+  .discovered-node-list > span,
+  .remote-node-row { min-width: 0; min-height: 40px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid rgba(92, 111, 103, 0.08); }
+  .discovered-node-list > span:last-child,
+  .remote-node-row:last-child { border-bottom: 0; }
+  .discovered-node-list i,
+  .remote-node-row > i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #bf9345; }
+  .remote-node-row > i.online { background: #4d9d76; }
+  .discovered-node-list > span > strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .remote-node-row > span { min-width: 0; flex: 1; display: grid; gap: 1px; }
+  .remote-node-row > div { display: flex; gap: 4px; }
+  .remote-node-row button.remove { color: #8a5e5e; border-color: rgba(151, 91, 91, 0.14); }
+  .remote-node-empty { margin: 0; color: #7d8b84; font-size: 8px; line-height: 1.4; }
   .mobile-access-card { padding: 11px; display: grid; gap: 9px; border: 1px solid rgba(92, 111, 103, 0.11); border-radius: 13px; background: rgba(84, 111, 99, 0.035); }
   .mobile-access-header,
   .mobile-address,
@@ -5076,6 +5308,21 @@
   .overlay-shell.dark .update-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .terminal-picker-copy small { color: #9aaba3; }
   .overlay-shell.dark .project-name { color: #9aaba3; }
+  .overlay-shell.dark .remote-node-panel { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
+  .overlay-shell.dark .remote-node-heading strong,
+  .overlay-shell.dark .remote-node-row strong,
+  .overlay-shell.dark .discovered-node-list strong { color: #dce7e1; }
+  .overlay-shell.dark .remote-node-heading small,
+  .overlay-shell.dark .remote-node-row small,
+  .overlay-shell.dark .discovered-node-list small,
+  .overlay-shell.dark .remote-node-empty { color: #aebdb5; }
+  .overlay-shell.dark .remote-node-panel button { color: #b9c8c0; border-color: rgba(207, 223, 215, 0.12); }
+  .overlay-shell.dark .remote-pair-control input { color: #c6d5cd; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
+  .overlay-shell.dark .discovered-node-list,
+  .overlay-shell.dark .remote-node-list,
+  .overlay-shell.dark .discovered-node-list > span,
+  .overlay-shell.dark .remote-node-row { border-color: rgba(190, 209, 200, 0.08); }
+  .overlay-shell.dark .remote-node-row button.remove { color: #d19a9a; border-color: rgba(209, 131, 131, 0.16); }
   .overlay-shell.dark .mobile-access-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .mobile-access-card strong { color: #dce7e1; }
   .overlay-shell.dark .mobile-access-card span,

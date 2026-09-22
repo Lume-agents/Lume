@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   activityCategory,
   activityGroupSummary,
+  activityRunFiles,
   activityRunTitle,
   activityThinkingLabel,
   activityThinkingState,
@@ -63,6 +64,18 @@ const compactRuns = groupConsecutiveTraceActivities(compactTrace);
 assert.deepEqual(compactRuns.map((run) => run.activities.length), [1, 3, 1]);
 assert.equal(activityRunTitle(compactRuns[1], "pt-BR"), "3 comandos executados");
 assert.equal(activityRunTitle(compactRuns[1], "en"), "3 commands run");
+const readRuns = groupConsecutiveTraceActivities([
+  { ...activity("command", "sed -n '1,40p' src/composer.rs", "composer content"), id: "read-1" },
+  { ...activity("command", 'cat "src/shell.rs" src/transcript.rs', "shell content"), id: "read-2" },
+]);
+assert.deepEqual(readRuns.map((run) => run.category), ["read"]);
+assert.deepEqual(activityRunFiles(readRuns[0]), ["src/composer.rs", "src/shell.rs", "src/transcript.rs"]);
+assert.equal(activityRunTitle(readRuns[0], "en"), "Read 3 files");
+assert.equal(activityRunTitle(readRuns[0], "pt-BR"), "3 arquivos lidos");
+assert.equal(activityCategory(activity("command", "cat src/parser.rs", "the file documents rg usage")), "read");
+assert.deepEqual(activityRunFiles({ id: "edited", category: "edit", activities: [
+  activity("file", "Files changed", "", ["src/main.rs", "src/main.rs", "*** Begin Patch\n+bad"]),
+] }), ["src/main.rs"]);
 assert.deepEqual(groupConsecutiveTraceActivities([
   compactTrace[1],
   { ...compactTrace[2], status: "failed" },
@@ -72,7 +85,10 @@ assert.equal(isHiddenAgentActivity(activity("tool", "functions · update_plan"))
 assert.equal(isHiddenAgentActivity(activity("tool", "functions.get_goal")), true);
 assert.equal(isGenericAnalysisPlaceholder({ ...activity("analysis", "Analisando a solicitação"), status: "running" }), true);
 assert.equal(isGenericAnalysisPlaceholder(activity("analysis", "Analisando a solicitação")), true);
-assert.equal(isGenericAnalysisPlaceholder(activity("analysis", "Análise concluída")), false);
+assert.equal(isGenericAnalysisPlaceholder(activity("analysis", "Análise concluída")), true);
+assert.equal(isGenericAnalysisPlaceholder(activity("analysis", "Analysis completed")), true);
+assert.equal(isGenericAnalysisPlaceholder(activity("analysis", "Análise concluída", "[]")), true);
+assert.equal(isGenericAnalysisPlaceholder(activity("analysis", "Análise concluída", "Analisei o fluxo de autenticação.")), false);
 assert.equal(formatAgentDuration(0), "< 1s");
 assert.equal(formatAgentDuration(42_400), "42s");
 assert.equal(formatAgentDuration(134_000), "2m 14s");

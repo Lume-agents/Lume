@@ -1,12 +1,15 @@
 <script lang="ts">
   import BrandIcon from "$lib/BrandIcon.svelte";
-  import LumeIcon from "$lib/LumeIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
+  import LumeIcon from "$lib/LumeIcon.svelte";
+  import ThreadAvatar from "$lib/ThreadAvatar.svelte";
+  import { displayFileChangePath } from "$lib/fileChanges";
   import type { HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
-  import { displayFileChangePath } from "$lib/fileChanges";
+  import { refreshAgentRateLimits } from "$lib/lume";
   import { buildReviewTurns } from "$lib/reviewDiffs";
+  import { subagentsForSession } from "$lib/workspaceAgents";
 
   let { session, language = "en", onClose, onOpenReview } = $props<{
     session: HubSession | null;
@@ -15,10 +18,30 @@
     onOpenReview: (path?: string) => void;
   }>();
 
+  let usageRefreshing = $state(false);
+  let requestedUsageKey = "";
+
   const latestTurn = $derived(session ? buildReviewTurns(session.activities, session.results, session.workingDirectory)[0] : null);
   const changes = $derived(latestTurn?.files ?? []);
+  const visibleChanges = $derived(changes.slice(0, 6));
   const checks = $derived(latestTurn?.checks ?? []);
-  const currentWork = $derived(session?.workSummary.plan ?? session?.workSummary.todo ?? null);
+  const subagents = $derived(session ? subagentsForSession(session) : []);
+  const visibleSubagents = $derived([...subagents]
+    .sort((left, right) => Number(["running", "waiting"].includes(right.status)) - Number(["running", "waiting"].includes(left.status)) || right.updatedAt - left.updatedAt)
+    .slice(0, 5));
+  const totalAdded = $derived(changes.reduce((total, file) => total + file.added, 0));
+  const totalRemoved = $derived(changes.reduce((total, file) => total + file.removed, 0));
+  const tokenSamples = $derived((session?.promptTokenUsage ?? []).slice(-14));
+  const tokenGraph = $derived(tokenGraphGeometry(tokenSamples));
+  const automaticAccess = $derived(session?.permissionProfile.mode !== "full_access" && ["auto_review", "approve_for_me"].includes(session?.permissionProfile.approvalsReviewer?.replaceAll("-", "_") ?? ""));
+  const fullAccess = $derived(session?.permissionProfile.mode === "full_access");
+
+  $effect(() => {
+    const key = session?.agent === "codex" ? `${session.agent}:${session.nativeSessionId ?? session.id}` : "";
+    if (!key || key === requestedUsageKey) return;
+    requestedUsageKey = key;
+    void refreshUsage();
+  });
 
   function tr(english: string, portuguese: string) {
     return language === "pt-BR" ? portuguese : english;
@@ -28,15 +51,80 @@
     return Math.max(0, Math.min(100, Math.round(100 - used)));
   }
 
-  function formatReset(value?: number) {
-    if (!value) return "";
-    return new Intl.DateTimeFormat(language, { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+  function rateWindowLabel(windowMinutes?: number, fallback = "") {
+    if (windowMinutes) {
+      if (windowMinutes >= 1_440) return `${Math.round(windowMinutes / 1_440)}d`;
+      if (windowMinutes >= 60) return `${Math.round(windowMinutes / 60)}h`;
+      return `${windowMinutes}m`;
+    }
+    return fallback.match(/\b\d+\s*[dhm]\b/i)?.[0]?.replaceAll(" ", "") ?? fallback;
+  }
+
+  function tokenGraphGeometry(samples: NonNullable<HubSession["promptTokenUsage"]>) {
+    if (!samples.length) return { points: "", area: "", dots: [] as Array<{ x: number; y: number; tokens: number }> };
+    const width = 226;
+    const height = 54;
+    const insetX = 4;
+    const insetTop = 12;
+    const insetBottom = 10;
+    const firstTime = samples[0]?.createdAt ?? 0;
+    const lastTime = samples.at(-1)?.createdAt ?? firstTime;
+    const timeSpan = Math.max(1, lastTime - firstTime);
+    const maximum = Math.max(1, ...samples.map((sample) => sample.totalTokens));
+    const dots = samples.map((sample, index) => ({
+      x: samples.length === 1 ? width / 2 : insetX + ((sample.createdAt - firstTime) / timeSpan || index / (samples.length - 1)) * (width - insetX * 2),
+      y: height - insetBottom - (sample.totalTokens / maximum) * (height - insetTop - insetBottom),
+      tokens: sample.totalTokens,
+    }));
+    const points = dots.length === 1
+      ? `${insetX},${dots[0].y.toFixed(1)} ${width - insetX},${dots[0].y.toFixed(1)}`
+      : dots.map((dot) => `${dot.x.toFixed(1)},${dot.y.toFixed(1)}`).join(" ");
+    const area = `${insetX},${height - insetBottom} ${points} ${width - insetX},${height - insetBottom}`;
+    return { points, area, dots };
+  }
+
+  function subagentStatus(status: (typeof subagents)[number]["status"]) {
+    if (status === "running") return tr("Working", "Executando");
+    if (status === "waiting") return tr("Waiting", "Aguardando");
+    if (status === "failed") return tr("Failed", "Falhou");
+    if (status === "interrupted") return tr("Interrupted", "Interrompido");
+    return tr("Finished", "Concluído");
+  }
+
+  async function refreshUsage() {
+    if (!session || session.agent !== "codex" || usageRefreshing) return;
+    usageRefreshing = true;
+    try {
+      await refreshAgentRateLimits("codex");
+    } catch { /* Keep the last known usage without adding noisy inspector copy. */ }
+    finally {
+      usageRefreshing = false;
+    }
   }
 </script>
 
 <aside class="workspace-inspector" aria-label={tr("Session inspector", "Inspector da sessão")}>
   <header>
-    <span><strong>{tr("Inspector", "Inspector")}</strong><small>{session ? displayText(language, session.statusLabel) : tr("No session selected", "Nenhuma sessão selecionada")}</small></span>
+    {#if session}
+      <span class="agent-icon"><BrandIcon name={session.agent} size={21} /></span>
+      <span class="header-copy">
+        <strong>{session.sessionName?.trim() || session.project || session.agentLabel}</strong>
+        <small>{tr("Inspector", "Inspector")} · {displayText(language, session.statusLabel)}</small>
+      </span>
+      {#if automaticAccess}
+        <span class="inspector-access-badge auto-review" title={tr("Approve for me", "Aprovar por mim")}>
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6.8.8 2.9 6.3h2.5L4.9 11l4.2-5.7H6.5Z" /></svg>
+          <span>{tr("Approve for me", "Aprovar por mim")}</span>
+        </span>
+      {:else if fullAccess}
+        <span class="inspector-access-badge full-access" title={tr("Full access", "Acesso total")}>
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 5V3.7a3 3 0 0 1 5.6-1.5M2.2 5.2h7.6v5.5H2.2Z" /></svg>
+          <span>{tr("Full access", "Acesso total")}</span>
+        </span>
+      {/if}
+    {:else}
+      <span class="header-copy"><strong>{tr("Inspector", "Inspector")}</strong><small>{tr("No session selected", "Nenhuma sessão selecionada")}</small></span>
+    {/if}
     <button type="button" aria-label={tr("Close inspector", "Fechar inspector")} title={tr("Close inspector", "Fechar inspector")} onclick={onClose}>
       <LumeIcon name="close" size={16} />
     </button>
@@ -44,71 +132,86 @@
 
   {#if session}
     <div class="inspector-scroll">
-      <section class="session-summary">
-        <span class="agent-icon"><BrandIcon name={session.agent} size={21} /></span>
-        <span><strong>{session.sessionName?.trim() || session.project || session.agentLabel}</strong><small>{session.agentLabel} · {session.project}</small></span>
+      <section class="session-overview" aria-label={tr("Session overview", "Resumo da sessão")}>
+        <span><strong>{session.activityTotal}</strong><small>{tr("events", "eventos")}</small></span>
+        <span><strong>{session.results.length}</strong><small>{tr("results", "resultados")}</small></span>
+        <span><strong>{subagents.length}</strong><small>{tr("subagents", "subagentes")}</small></span>
       </section>
 
-      <details class="inspector-section" open>
-        <summary>{tr("Current work", "Trabalho atual")}</summary>
-        {#if session.workSummary.goal}
-          <div class="goal-summary">
-            <span class="goal-state state-{session.workSummary.goal.status}"></span>
-            <span><strong>{session.workSummary.goal.objective}</strong><small>{displayText(language, session.workSummary.goal.status)}</small></span>
-          </div>
-        {/if}
-        {#if currentWork?.items.length}
-          <ul class="work-items">
-            {#each currentWork.items as item}
-              <li class:item-active={item.status === "in_progress"} class:item-done={item.status === "completed"}><i></i><span>{item.label}</span></li>
+      {#if session.agent === "codex"}
+        <section class="usage-section" aria-label={tr("Codex usage", "Uso do Codex")}>
+          <div class="usage-gauges" class:loading={usageRefreshing && !session.rateLimits?.length}>
+            {#each session.rateLimits ?? [] as limit (limit.id)}
+              {@const remaining = remainingRate(Number(limit.usedPercent))}
+              <div class="usage-gauge" style:--usage-remaining={remaining}>
+                <svg viewBox="0 0 60 39" aria-hidden="true">
+                  <path class="gauge-track" pathLength="100" d="M7 33a23 23 0 0 1 46 0" />
+                  <path class="gauge-progress" pathLength="100" d="M7 33a23 23 0 0 1 46 0" style:stroke-dasharray={`${remaining} 100`} />
+                </svg>
+                <strong>{remaining}</strong>
+                <em>{rateWindowLabel(limit.windowMinutes, limit.label)}</em>
+              </div>
             {/each}
-          </ul>
-        {:else if !session.workSummary.goal}
-          <p class="empty-section">{tr("No active plan or goal.", "Nenhum plano ou objetivo ativo.")}</p>
-        {/if}
-      </details>
+            {#if !session.rateLimits?.length}<i></i><i></i>{/if}
+          </div>
+          <div class="token-chart">
+            <span>{tr("Tokens / prompt", "Tokens / prompt")}</span>
+            <svg class:empty={!tokenGraph.points} class="token-graph" viewBox="0 0 226 54" role="img" aria-label={tr("Tokens used per prompt over time", "Tokens usados por prompt ao longo do tempo")}>
+              <path class="graph-grid" d="M4 14H222M4 28H222M4 42H222" />
+              <polygon points={tokenGraph.area} />
+              <polyline points={tokenGraph.points || "4,42 222,42"} />
+              {#each tokenGraph.dots as dot}
+                <circle cx={dot.x} cy={dot.y} r="2"><title>{dot.tokens.toLocaleString(language)} tokens</title></circle>
+              {/each}
+            </svg>
+            <small>{tr("Time →", "Tempo →")}</small>
+          </div>
+        </section>
+      {/if}
+
+      {#if subagents.length}
+        <details class="inspector-section" open>
+          <summary><span>{tr("Subagents", "Subagentes")}</span><em>{subagents.length}</em></summary>
+          <div class="subagent-list">
+            {#each visibleSubagents as agent (agent.id)}
+              <div>
+                <ThreadAvatar seed={`${session.id}:inspector:${agent.id}`} label={agent.label} size={24} />
+                <span><strong>{agent.label}</strong><small class="status-{agent.status}">{subagentStatus(agent.status)}</small></span>
+              </div>
+            {/each}
+          </div>
+        </details>
+      {/if}
 
       <details class="inspector-section" open>
         <summary><span>{tr("Changed files", "Arquivos alterados")}</span><em>{changes.length}</em></summary>
         {#if changes.length}
-          <button class="open-review" type="button" onclick={() => onOpenReview()}><LumeIcon name="diff" size={13} /><span>{tr("Open review center", "Abrir central de revisão")}</span></button>
+          <div class="files-toolbar">
+            <span><strong>{changes.length} {changes.length === 1 ? tr("file", "arquivo") : tr("files", "arquivos")}</strong><small><b>+{totalAdded}</b><i>−{totalRemoved}</i></small></span>
+            <button type="button" onclick={() => onOpenReview()}><LumeIcon name="diff" size={13} /><span>{tr("Review", "Revisar")}</span></button>
+          </div>
           <div class="inspector-files">
-            {#each changes as file (file.path)}
+            {#each visibleChanges as file (file.path)}
               <button type="button" title={file.path} onclick={() => onOpenReview(file.path)}>
-                <FileTypeIcon path={file.path} />
+                <FileTypeIcon path={file.path} size={15} />
                 <span>{displayFileChangePath(file.path)}</span>
-                <b>+{file.added}</b><i>-{file.removed}</i>
+                <small><b>+{file.added}</b><i>−{file.removed}</i></small>
               </button>
             {/each}
           </div>
+          {#if changes.length > visibleChanges.length}<button class="review-more" type="button" onclick={() => onOpenReview()}>{tr(`View all ${changes.length} files`, `Ver todos os ${changes.length} arquivos`)}</button>{/if}
         {:else}
           <p class="empty-section">{tr("No changed files in the latest turn.", "Nenhum arquivo alterado no último turno.")}</p>
         {/if}
       </details>
 
-      <details class="inspector-section" open>
-        <summary><span>{tr("Checks", "Validações")}</span><em>{checks.length}</em></summary>
+      <details class="inspector-section" open={checks.length > 0}>
+        <summary><span>{tr("Validations", "Validações")}</span><em>{checks.length}</em></summary>
+        <p class="section-description">{tr("Tests, builds, and checks reported by the agent in the latest turn.", "Testes, builds e verificações reportados pelo agente no último turno.")}</p>
         {#if checks.length}
-          <ul class="check-list">{#each checks as check}<li><i></i><span>{check}</span></li>{/each}</ul>
+          <ul class="check-list">{#each checks as check}<li title={check}><i><LumeIcon name="check" size={9} /></i><span>{check}</span></li>{/each}</ul>
         {:else}
-          <p class="empty-section">{tr("No checks reported in the latest turn.", "Nenhuma validação informada no último turno.")}</p>
-        {/if}
-      </details>
-
-      <details class="inspector-section" open>
-        <summary>{tr("Usage", "Uso")}</summary>
-        {#if session.rateLimits?.length}
-          <div class="rate-limits">
-            {#each session.rateLimits as limit (limit.id)}
-              {@const remaining = remainingRate(Number(limit.usedPercent))}
-              <div>
-                <span><strong>{limit.label}</strong><small>{remaining}% {tr("left", "restante")}{limit.resetsAt ? ` · ${formatReset(limit.resetsAt)}` : ""}</small></span>
-                <i><b style:width={`${remaining}%`}></b></i>
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <p class="empty-section">{tr("Rate limits are unavailable for this source.", "Limites indisponíveis para esta origem.")}</p>
+          <p class="empty-section">{tr("No validation evidence was reported.", "Nenhuma evidência de validação foi reportada.")}</p>
         {/if}
       </details>
 
@@ -116,7 +219,6 @@
         <summary>{tr("Session details", "Detalhes da sessão")}</summary>
         <dl>
           <div><dt>{tr("Source", "Origem")}</dt><dd>{session.source}</dd></div>
-          <div><dt>{tr("Access", "Acesso")}</dt><dd>{displayText(language, session.permissionProfile.label)}</dd></div>
           <div><dt>{tr("Directory", "Diretório")}</dt><dd title={session.workingDirectory}>{session.workingDirectory || "—"}</dd></div>
           <div><dt>{tr("Thread", "Thread")}</dt><dd title={session.nativeSessionId}>{session.nativeSessionId || "—"}</dd></div>
         </dl>
@@ -129,19 +231,28 @@
 
 <style>
   .workspace-inspector { min-width: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border-left: 1px solid var(--workspace-line); color: var(--workspace-text); background: var(--workspace-sidebar); }
-  .workspace-inspector > header { min-height: 64px; padding: 11px 12px 11px 15px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--workspace-line); }
-  .workspace-inspector > header > span { min-width: 0; display: grid; gap: 2px; flex: 1; }.workspace-inspector > header strong { color: var(--workspace-strong); font-size: 11px; }.workspace-inspector > header small { color: var(--workspace-muted); font-size: 8px; }
-  .workspace-inspector > header button { width: 29px; height: 29px; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; }.workspace-inspector > header button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
-  .inspector-scroll { min-height: 0; padding: 0 14px 24px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
-  .session-summary { min-height: 70px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--workspace-line); }.session-summary > span:last-child { min-width: 0; display: grid; gap: 3px; }.session-summary strong, .session-summary small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.session-summary strong { color: var(--workspace-strong); font-size: 10px; }.session-summary small { color: var(--workspace-muted); font-size: 8px; }.agent-icon { width: 31px; height: 31px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
-  .inspector-section { border-bottom: 1px solid var(--workspace-line); }.inspector-section > summary { min-height: 44px; display: flex; align-items: center; gap: 7px; color: var(--workspace-strong); font-size: 9px; font-weight: 750; list-style: none; cursor: pointer; }.inspector-section > summary::-webkit-details-marker { display: none; }.inspector-section > summary::after { width: 6px; height: 6px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .5; transform: rotate(45deg); transition: transform 160ms ease; }.inspector-section[open] > summary::after { transform: rotate(225deg); }.inspector-section > summary em { min-width: 18px; height: 18px; display: grid; place-items: center; border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 7px; font-style: normal; }.inspector-section[open] { padding-bottom: 12px; }
-  .goal-summary { padding: 4px 0 8px; display: flex; align-items: flex-start; gap: 8px; }.goal-summary > span:last-child { min-width: 0; display: grid; gap: 3px; }.goal-summary strong { color: var(--workspace-text); font-size: 9px; line-height: 1.4; }.goal-summary small { color: var(--workspace-muted); font-size: 7px; text-transform: capitalize; }.goal-state { width: 7px; height: 7px; margin-top: 3px; flex: 0 0 auto; border-radius: 50%; background: #4e98ca; }.goal-state.state-complete { background: #50aa79; }.goal-state.state-blocked { background: #c66762; }
-  .work-items, .check-list { margin: 0; padding: 0; display: grid; gap: 6px; list-style: none; }.work-items li, .check-list li { min-width: 0; display: flex; align-items: flex-start; gap: 7px; color: var(--workspace-muted); font-size: 8px; line-height: 1.4; }.work-items i, .check-list i { width: 7px; height: 7px; margin-top: 2px; flex: 0 0 auto; border: 1px solid var(--workspace-faint); border-radius: 50%; }.work-items .item-active { color: var(--workspace-text); }.work-items .item-active i { border-color: #4e98ca; background: #4e98ca; }.work-items .item-done i, .check-list i { border-color: #50aa79; background: #50aa79; }.work-items .item-done span { text-decoration: line-through; opacity: .7; }
-  .open-review { width: 100%; min-height: 30px; margin: 0 0 5px; padding: 0 7px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 22%, var(--workspace-line)); border-radius: 8px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 8px; font-weight: 720; cursor: pointer; }.open-review:hover { border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); }
-  .inspector-files { display: grid; gap: 2px; }.inspector-files > button { width: 100%; min-width: 0; min-height: 27px; padding: 0 4px; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font-size: 8px; text-align: left; cursor: pointer; }.inspector-files > button:hover { background: var(--workspace-subtle); }.inspector-files span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.inspector-files b { color: #438f67; font-size: 7px; }.inspector-files > button > i { color: #b96862; font-size: 7px; font-style: normal; }
-  .empty-section { margin: 0; padding: 0 0 5px; color: var(--workspace-faint); font-size: 8px; line-height: 1.45; }
-  .rate-limits { display: grid; gap: 9px; }.rate-limits > div { display: grid; gap: 5px; }.rate-limits span { display: flex; gap: 6px; }.rate-limits strong { min-width: 0; flex: 1; color: var(--workspace-text); font-size: 8px; }.rate-limits small { color: var(--workspace-muted); font-size: 7px; }.rate-limits > div > i { height: 3px; overflow: hidden; border-radius: 2px; background: var(--workspace-line); }.rate-limits b { height: 100%; display: block; border-radius: inherit; background: var(--workspace-accent); }
-  .metadata-section dl { margin: 0; display: grid; gap: 8px; }.metadata-section dl > div { min-width: 0; display: grid; grid-template-columns: 55px minmax(0, 1fr); gap: 8px; }.metadata-section dt { color: var(--workspace-faint); font-size: 7px; }.metadata-section dd { margin: 0; overflow: hidden; color: var(--workspace-text); font-size: 8px; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
-  .inspector-empty { margin: auto; padding: 24px; display: grid; justify-items: center; gap: 10px; color: var(--workspace-faint); font-size: 9px; text-align: center; }
-  @media (prefers-reduced-motion: reduce) { .inspector-section > summary::after { transition: none; } }
+  .workspace-inspector > header { min-height: 64px; padding: 10px 12px 10px 15px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-line); }
+  .header-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }.header-copy strong, .header-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.header-copy strong { color: var(--workspace-strong); font-size: 12px; letter-spacing: -.015em; }.header-copy small { color: var(--workspace-muted); font-size: 9px; }
+  .agent-icon { width: 31px; height: 31px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
+  .inspector-access-badge { min-height: 21px; padding: 0 6px; display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; border-radius: 999px; font-size: 7px; font-weight: 780; line-height: 1; white-space: nowrap; }.inspector-access-badge svg { width: 9px; height: 9px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; }.inspector-access-badge.auto-review { color: #315f86; background: #cbdff0; }.inspector-access-badge.auto-review svg { fill: currentColor; stroke: none; }.inspector-access-badge.full-access { color: #764c2e; background: #e8ceb1; }
+  :global(.workspace.dark) .inspector-access-badge.auto-review { color: #b4d3ee; background: #29445d; }:global(.workspace.dark) .inspector-access-badge.full-access { color: #e4b88f; background: #543b29; }
+  .workspace-inspector > header button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; }.workspace-inspector > header button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .inspector-scroll { min-height: 0; padding: 0 15px 24px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .session-overview { min-height: 58px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; border-bottom: 1px solid var(--workspace-line); }.session-overview > span { min-width: 0; display: grid; gap: 2px; text-align: center; }.session-overview > span + span { border-left: 1px solid var(--workspace-line); }.session-overview strong { color: var(--workspace-strong); font-size: 13px; font-variant-numeric: tabular-nums; }.session-overview small { color: var(--workspace-faint); font-size: 8px; text-transform: uppercase; letter-spacing: .045em; }
+  .usage-section { min-height: 72px; margin: 13px 0 3px; display: grid; grid-template-columns: minmax(126px, 47%) minmax(0, 1fr); align-items: center; gap: 9px; }
+  .usage-gauges { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; }.usage-gauge { position: relative; width: 62px; height: 51px; flex: 0 1 62px; --usage-color: color-mix(in srgb, #43a873 calc(var(--usage-remaining) * 1%), #ca605c); }.usage-gauge svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; fill: none; stroke-linecap: round; }.gauge-track { stroke: var(--workspace-line); stroke-width: 5.5; }.gauge-progress { stroke: var(--usage-color); stroke-width: 5.5; transition: stroke-dasharray 360ms cubic-bezier(.16, 1, .3, 1); }.usage-gauge strong { position: absolute; right: 0; bottom: 3px; left: 0; color: var(--workspace-strong); font-size: 15px; font-variant-numeric: tabular-nums; line-height: 1; text-align: center; }.usage-gauge em { position: absolute; top: 1px; right: 2px; color: var(--workspace-muted); font-size: 7px; font-style: normal; font-weight: 780; }.usage-gauges > i { width: 56px; height: 30px; border: 5px solid var(--workspace-line); border-bottom: 0; border-radius: 32px 32px 0 0; opacity: .5; }.usage-gauges.loading > i { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
+  .token-chart { min-width: 0; display: grid; grid-template-rows: auto 48px auto; gap: 3px; }.token-chart > span, .token-chart > small { color: var(--workspace-muted); font-size: 10px; font-weight: 720; line-height: 1.2; }.token-chart > small { color: var(--workspace-faint); text-align: right; }.token-graph { width: 100%; min-width: 0; height: 48px; overflow: visible; }.token-graph .graph-grid { fill: none; stroke: color-mix(in srgb, var(--workspace-line) 54%, transparent); stroke-width: .7; }.token-graph polygon { fill: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }.token-graph polyline { fill: none; stroke: var(--workspace-accent); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }.token-graph.empty polyline { stroke: var(--workspace-line); stroke-dasharray: 3 4; }.token-graph circle { fill: var(--workspace-raised); stroke: var(--workspace-accent); stroke-width: 1.3; }
+  .inspector-section { border-bottom: 1px solid var(--workspace-line); }.inspector-section > summary { min-height: 46px; display: flex; align-items: center; gap: 7px; color: var(--workspace-strong); font-size: 10px; font-weight: 750; list-style: none; cursor: pointer; }.inspector-section > summary::-webkit-details-marker { display: none; }.inspector-section > summary::after { width: 6px; height: 6px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .5; transform: rotate(45deg); transition: transform 160ms ease; }.inspector-section[open] > summary::after { transform: rotate(225deg); }.inspector-section > summary em { min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 8px; font-style: normal; }.inspector-section[open] { padding-bottom: 13px; }
+  .check-list { margin: 0; padding: 0; display: grid; gap: 7px; list-style: none; }.check-list li { min-width: 0; display: flex; align-items: flex-start; gap: 7px; color: var(--workspace-muted); font-size: 9px; line-height: 1.45; }
+  .subagent-list { display: grid; gap: 3px; }.subagent-list > div { min-width: 0; min-height: 36px; padding: 4px 5px; display: flex; align-items: center; gap: 8px; border-radius: 8px; }.subagent-list > div:hover { background: var(--workspace-subtle); }.subagent-list > div > span { min-width: 0; display: grid; gap: 2px; }.subagent-list strong { overflow: hidden; color: var(--workspace-text); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.subagent-list small { color: var(--workspace-faint); font-size: 8px; }.subagent-list small.status-running { color: #4e98ca; }.subagent-list small.status-failed { color: #c66762; }.subagent-list small.status-completed { color: #50aa79; }
+  .files-toolbar { min-height: 40px; margin-bottom: 4px; padding-bottom: 8px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 65%, transparent); }.files-toolbar > span { min-width: 0; display: grid; gap: 2px; flex: 1; }.files-toolbar > span > strong { color: var(--workspace-text); font-size: 9px; }.files-toolbar > span small { display: flex; gap: 5px; font-size: 8px; }.files-toolbar b, .inspector-files b { color: #43a873; }.files-toolbar i, .inspector-files i { color: #c16660; font-style: normal; }.files-toolbar button { min-height: 28px; padding: 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 28%, var(--workspace-line)); border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 8px; font-weight: 740; cursor: pointer; }.files-toolbar button:hover { border-color: color-mix(in srgb, var(--workspace-accent) 52%, var(--workspace-line)); }
+  .inspector-files { display: grid; gap: 1px; }.inspector-files > button { width: 100%; min-width: 0; min-height: 31px; padding: 0 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font-size: 9px; text-align: left; cursor: pointer; }.inspector-files > button:hover { background: var(--workspace-subtle); }.inspector-files > button > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.inspector-files > button > small { display: flex; gap: 4px; flex: 0 0 auto; font-size: 7px; }.review-more { margin: 5px 0 0 4px; padding: 3px 0; border: 0; color: var(--workspace-accent); background: transparent; font-size: 8px; font-weight: 720; cursor: pointer; }
+  .section-description { margin: -1px 0 9px; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }.check-list li > i { width: 15px; height: 15px; margin-top: 0; display: grid; place-items: center; flex: 0 0 auto; border-radius: 50%; color: #43a873; background: color-mix(in srgb, #43a873 12%, transparent); }.check-list li span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+  .empty-section { margin: 0; padding: 0 0 5px; color: var(--workspace-faint); font-size: 9px; line-height: 1.45; }
+  .metadata-section dl { margin: 0; display: grid; gap: 9px; }.metadata-section dl > div { min-width: 0; display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 8px; }.metadata-section dt { color: var(--workspace-faint); font-size: 8px; }.metadata-section dd { margin: 0; overflow: hidden; color: var(--workspace-text); font-size: 9px; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
+  .inspector-empty { margin: auto; padding: 24px; display: grid; justify-items: center; gap: 10px; color: var(--workspace-faint); font-size: 10px; text-align: center; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes usage-pulse { to { opacity: .9; } }
+  @media (max-width: 300px) { .session-overview small { font-size: 7px; } }
+  @media (prefers-reduced-motion: reduce) { .inspector-section > summary::after, .gauge-progress { transition: none; }.usage-gauges.loading > i { animation: none; } }
 </style>

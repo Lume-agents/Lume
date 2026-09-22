@@ -23,9 +23,10 @@ export function activityCategory(activity: SessionActivity): ActivityCategory {
   if (activity.kind === "file" || /apply_patch|patch|edit(?:ed)?\s+file/.test(title)) return "edit";
   if (activity.kind === "test") return "test";
   if (/web.?search|search_query|pesquisa na web/.test(searchable)) return "search";
-  if (/\b(?:rg|grep|find|fd)\b/.test(detail) || /search|searched|buscar|procurar/.test(title)) return "search";
+  if (/^\s*(?:cat|sed\s+-n|head|tail|bat|type|ls|stat)\b/.test(title)) return "read";
+  if (/\b(?:rg|grep|find|fd)\b/.test(searchable) || /search|searched|buscar|procurar/.test(title)) return "search";
   if (/view_image|read|inspect|open file|imagem inspecionada/.test(title)) return "read";
-  if (/^\s*(?:cat|sed\s+-n|head|tail|ls|stat)\b/.test(detail)) return "read";
+  if (/^\s*(?:cat|sed\s+-n|head|tail|bat|type|ls|stat)\b/.test(title) || /^\s*(?:cat|sed\s+-n|head|tail|bat|type|ls|stat)\b/.test(detail)) return "read";
   if (
     activity.kind === "command"
     || /^(?:exec|exec_command|shell|terminal)$/.test(title)
@@ -68,13 +69,13 @@ export function activityThinkingLabel(state: ActivityThinkingState, language: La
 }
 
 export function isPresentableTraceActivity(activity: SessionActivity): boolean {
-  if (["prompt", "message", "analysis", "queued_prompt", "plan", "plan_document"].includes(activity.kind)) return false;
+  if (["prompt", "message", "analysis", "queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return !/^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
 }
 
 export function isHiddenAgentActivity(activity: SessionActivity): boolean {
-  if (["plan", "plan_document", "queued_prompt"].includes(activity.kind)) return true;
+  if (["plan", "plan_document", "queued_prompt", "warning"].includes(activity.kind)) return true;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return /^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
 }
@@ -85,7 +86,10 @@ export function isGenericAnalysisPlaceholder(activity: SessionActivity): boolean
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
-  return title === "analisando a solicitacao" || title === "analyzing request";
+  if (title === "analisando a solicitacao" || title === "analyzing request") return true;
+  const detail = activity.detail?.trim();
+  return (title === "analise concluida" || title === "analysis completed")
+    && (!detail || ["[]", "{}", "null"].includes(detail));
 }
 
 export function needsUserAuthorization(text?: string): boolean {
@@ -143,6 +147,37 @@ export function activityDisplayTitle(activity: SessionActivity, language: Langua
 
 export type ActivityRun = { id: string; category: ActivityCategory | "analysis"; activities: SessionActivity[] };
 
+function readCommandFiles(activity: SessionActivity): string[] {
+  const title = normalizedToolTitle(activity.title);
+  const command = /^(?:cat|sed|head|tail|bat|type)\s/i.test(title)
+    ? title
+    : /^(?:cat|sed|head|tail|bat|type)\s/i.test(firstLine(activity.detail))
+      ? firstLine(activity.detail)
+      : "";
+  if (!command) {
+    const detail = activity.detail?.trim() ?? "";
+    return /^(?:read|open file)$/i.test(title) && /^[^\r\n{}<>|]+\.[\w-]+$/.test(detail)
+      ? [detail]
+      : [];
+  }
+  const tokens = [...command.matchAll(/"([^"]+)"|'([^']+)'|([^\s;|&<>]+)/g)]
+    .map((match) => match[1] ?? match[2] ?? match[3]);
+  return tokens.slice(1).filter((token) =>
+    !token.startsWith("-")
+    && !token.startsWith("$")
+    && !/^\d+(?:,\d+)?p?$/.test(token)
+    && /(?:[\\/]|\.[a-z\d-]{1,12}$)/i.test(token)
+  );
+}
+
+export function activityRunFiles(run: ActivityRun): string[] {
+  if (run.category !== "read" && run.category !== "edit") return [];
+  const files = run.activities.flatMap((activity) =>
+    activity.files.length ? activity.files : run.category === "read" ? readCommandFiles(activity) : [],
+  );
+  return [...new Set(files.filter((path) => path.length < 500 && !/[\r\n]/.test(path) && !path.includes("***")))];
+}
+
 export function groupConsecutiveTraceActivities(activities: SessionActivity[]): ActivityRun[] {
   const runs: ActivityRun[] = [];
   for (const activity of activities) {
@@ -164,13 +199,18 @@ export function groupConsecutiveTraceActivities(activities: SessionActivity[]): 
 
 export function activityRunTitle(run: ActivityRun, language: Language): string {
   const count = run.activities.length;
+  const files = activityRunFiles(run);
+  if (run.category === "read" && files.length) {
+    return language === "pt-BR"
+      ? `${files.length} arquivo${files.length === 1 ? " lido" : "s lidos"}`
+      : `Read ${files.length} file${files.length === 1 ? "" : "s"}`;
+  }
   if (count === 1) return activityDisplayTitle(run.activities[0], language);
   const pt = language === "pt-BR";
   if (run.category === "command") return pt ? `${count} comandos executados` : `${count} commands run`;
   if (run.category === "test") return pt ? `${count} validações executadas` : `${count} checks run`;
   if (run.category === "edit") {
-    const files = new Set(run.activities.flatMap((activity) => activity.files));
-    const total = files.size || count;
+    const total = files.length || count;
     return pt ? `${total} arquivo${total === 1 ? " alterado" : "s alterados"}` : `${total} file${total === 1 ? " edited" : "s edited"}`;
   }
   if (run.category === "read") return pt ? `${count} leituras de contexto` : `${count} context reads`;

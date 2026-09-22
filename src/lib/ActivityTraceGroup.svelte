@@ -4,7 +4,9 @@
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import ActivityTypeIcon from "$lib/ActivityTypeIcon.svelte";
-  import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunTitle, groupConsecutiveTraceActivities, type ActivityRun } from "$lib/activityPresentation";
+  import FileTypeIcon from "$lib/FileTypeIcon.svelte";
+  import { displayFileChangePath } from "$lib/fileChanges";
+  import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunFiles, activityRunTitle, groupConsecutiveTraceActivities, type ActivityRun } from "$lib/activityPresentation";
 
   let { activities, language = "en", active = false, plain = false } = $props<{
     activities: SessionActivity[];
@@ -27,6 +29,8 @@
     : visibleActivities.map((activity: SessionActivity) => ({ id: activity.id, category: activity.kind === "analysis" ? "analysis" : activityCategory(activity), activities: [activity] })));
   let expanded = $state(true);
   let expandedRuns = $state<string[]>([]);
+  let collapsedFileRuns = $state<string[]>([]);
+  let selectedFileKey = $state("");
   let initialized = false;
   let wasActive = false;
 
@@ -53,8 +57,25 @@
       : [...expandedRuns, id];
   }
 
+  function toggleFileRun(id: string) {
+    collapsedFileRuns = collapsedFileRuns.includes(id)
+      ? collapsedFileRuns.filter((value) => value !== id)
+      : [...collapsedFileRuns, id];
+  }
+
+  function fileDetail(run: ActivityRun, path: string): string {
+    const activity = run.activities.find((item) => activityRunFiles({ ...run, activities: [item] }).includes(path));
+    return activity?.detail ?? "";
+  }
+
   function motionDuration(duration: number) {
     return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration;
+  }
+
+  function runStatus(run: ActivityRun) {
+    return run.activities.some((item) => item.status === "failed") ? "failed"
+      : run.activities.some((item) => item.status === "running") ? "running"
+      : run.activities.at(-1)?.status;
   }
 </script>
 
@@ -82,8 +103,52 @@
       {#each visibleRuns as run, index (run.id)}
         {@const activity = run.activities[0]}
         {@const preview = activityPreview(activity)}
-        {#if run.activities.length > 1}
-          {@const status = run.activities.some((item: SessionActivity) => item.status === "failed") ? "failed" : run.activities.some((item: SessionActivity) => item.status === "running") ? "running" : run.activities.at(-1)?.status}
+        {@const runFiles = plain ? activityRunFiles(run) : []}
+        {#if plain && runFiles.length > 0}
+          {@const status = runStatus(run)}
+          <div
+            class:failed={status === "failed"}
+            class:interrupted={status === "interrupted"}
+            class:running={status === "running"}
+            class:waiting={status === "waiting"}
+            class:open={!collapsedFileRuns.includes(run.id)}
+            class="activity-row file-tree-row"
+            style={`--step-delay: ${Math.min(index, 4) * 22}ms`}
+          >
+            <button class="event-trigger" type="button" aria-expanded={!collapsedFileRuns.includes(run.id)} onclick={() => toggleFileRun(run.id)}>
+              <span class="activity-status" aria-label={status}>
+                {#if status === "completed"}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
+                {:else}<i></i>{/if}
+              </span>
+              <span class="activity-type"><ActivityTypeIcon category={run.category} /></span>
+              <span class="activity-copy"><strong>{activityRunTitle(run, language)}</strong></span>
+              <svg class="row-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
+            </button>
+            {#if !collapsedFileRuns.includes(run.id)}
+              <div class="file-tree" in:slide={{ duration: motionDuration(190), easing: cubicOut }} out:slide={{ duration: motionDuration(130), easing: cubicOut }}>
+                <div class="file-tree-files" role="list">
+                  {#each runFiles as path, fileIndex (path)}
+                    {@const detail = fileDetail(run, path)}
+                    {@const fileKey = `${run.id}:${path}`}
+                    <div class="file-node" role="listitem" style={`--file-delay: ${Math.min(fileIndex, 6) * 30}ms`}>
+                      <button class="file-node-trigger" type="button" title={path} disabled={!detail} aria-expanded={detail ? selectedFileKey === fileKey : undefined} onclick={() => (selectedFileKey = selectedFileKey === fileKey ? "" : fileKey)}>
+                        <span class="file-node-action">{run.category === "read" ? tr("Read", "Leu") : tr("Edited", "Editou")}</span>
+                        <FileTypeIcon {path} />
+                        <span class="file-node-name">{displayFileChangePath(path)}</span>
+                      </button>
+                      {#if detail && selectedFileKey === fileKey}
+                        <div class="file-node-detail" in:slide={{ duration: motionDuration(180), easing: cubicOut }} out:slide={{ duration: motionDuration(120), easing: cubicOut }}>
+                          <pre>{detail}</pre>
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
+        {:else if run.activities.length > 1}
+          {@const status = runStatus(run)}
           <div
             class:failed={status === "failed"}
             class:interrupted={status === "interrupted"}
@@ -176,7 +241,7 @@
   .activity-cluster { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; overflow: hidden; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .18)); border-radius: 10px; background: color-mix(in srgb, var(--workspace-subtle, #eef4f0) 62%, transparent); transition: border-color 80ms ease, background 80ms ease; }
   .activity-cluster.active { border-color: color-mix(in srgb, #4e91bf 24%, transparent); }
   .activity-cluster.plain, .activity-cluster.plain.active { border: 0; border-radius: 0; background: transparent; }
-  .activity-cluster.plain .cluster-summary { padding-inline: 6px; border-radius: 7px; background: var(--workspace-subtle, #eef4f0); }
+  .activity-cluster.plain .cluster-summary { padding-inline: 6px; border-radius: 7px; background: transparent; }
   .activity-cluster.plain .cluster-mark, .activity-cluster.plain .cluster-summary > small { background: transparent; }
   .activity-cluster.plain .activity-list { padding-left: 13px; }
   .activity-cluster.plain .activity-row pre { border: 0; border-radius: 0; background: transparent; }
@@ -205,12 +270,24 @@
   .activity-status i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
   .activity-row.running .activity-status { color: #4e91bf; border-color: rgba(78, 145, 191, .3); }
   .activity-row.running .activity-status i { will-change: transform, opacity; animation: activity-pulse 1s ease-in-out infinite; }
-  .activity-row.running .activity-copy strong { color: transparent; background: linear-gradient(90deg, #4e7fa6 12%, #82b8dc 45%, #4e7fa6 78%); background-size: 220% 100%; background-clip: text; animation: step-shimmer 1.65s linear infinite; }
+  .activity-row.running .activity-copy strong { color: #4e7fa6; }
   .activity-row.failed .activity-status { color: #b85d59; border-color: rgba(184, 93, 89, .28); }
   .activity-row.waiting .activity-status { color: #c2943f; border-color: rgba(194, 148, 63, .28); }
   .activity-row.interrupted .activity-status { color: #839088; border-color: rgba(131, 144, 136, .25); }
   .activity-row pre { min-width: 0; max-width: calc(100% - 20px); max-height: 180px; margin: 0 0 8px 20px; padding: 7px 8px; overflow: auto; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .12)); border-radius: 7px; color: var(--workspace-text, #4f6258); background: var(--workspace-pane, #eaf0ed); font: var(--chat-tiny-font-size, 7px)/1.5 "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
   .grouped-activity-details { min-width: 0; margin: 0 0 8px 17px; display: grid; gap: 5px; }
+  .file-tree { min-width: 0; padding: 0 0 7px 17px; display: grid; gap: 1px; }
+  .file-tree-files { min-width: 0; display: grid; gap: 1px; }
+  .file-node { position: relative; min-width: 0; padding-left: 10px; color: var(--workspace-muted, #61736a); animation: file-node-arrive 280ms cubic-bezier(.16, 1, .3, 1) both; animation-delay: var(--file-delay); }
+  .file-node::before { position: absolute; top: 0; left: -17px; width: 20px; height: 50%; border-bottom: 1px solid color-mix(in srgb, var(--workspace-accent, #428066) 23%, transparent); border-left: 1px solid color-mix(in srgb, var(--workspace-accent, #428066) 23%, transparent); border-bottom-left-radius: 6px; content: ""; }
+  .file-node-trigger { min-width: 0; min-height: 26px; padding: 3px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 6px; color: inherit; background: transparent; text-align: left; cursor: pointer; }
+  .file-node-trigger:hover:not(:disabled), .file-node-trigger:focus-visible { color: var(--workspace-accent, #428066); background: var(--workspace-subtle, #eef4f0); }
+  .file-node-trigger:disabled { cursor: default; }
+  .file-node-detail { min-width: 0; margin: 3px 0 0 8px; }
+  .file-node-detail pre { max-width: 100%; margin: 0 0 5px; }
+  .file-node-action { flex: 0 0 auto; color: var(--workspace-muted, #61736a); font: 600 var(--activity-detail-size, var(--chat-tiny-font-size, 7px))/1.3 Inter, sans-serif; }
+  .file-node :global(.file-type-icon) { flex: 0 0 auto; }
+  .file-node-name { min-width: 0; padding: 3px 6px; overflow: hidden; border-radius: 5px; color: var(--workspace-strong, #52665c); background: color-mix(in srgb, var(--workspace-subtle, #eef4f0) 75%, transparent); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 7px))/1.3 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
   .grouped-activity-detail { min-width: 0; display: grid; grid-template-columns: 15px minmax(0, 1fr); align-items: start; gap: 5px; }
   .grouped-activity-detail > span { padding-top: 2px; color: var(--workspace-faint, #89958f); font: 650 var(--chat-tiny-font-size, 7px)/1.5 "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
   .grouped-activity-detail pre { max-width: 100%; max-height: 120px; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
@@ -225,22 +302,23 @@
   :global(.terminal-window.dark) .activity-row:last-child { border-left-color: transparent; }
   :global(.terminal-window.dark) .activity-status { background: var(--workspace-pane, #141d19); }
   :global(.terminal-window.dark) .activity-copy strong { color: #bccdc4; }
-  :global(.terminal-window.dark) .activity-row.running .activity-copy strong { color: transparent; background-image: linear-gradient(90deg, #72a9cf 12%, #a2cce7 45%, #72a9cf 78%); }
+  :global(.terminal-window.dark) .activity-row.running .activity-copy strong { color: #72a9cf; }
   :global(.terminal-window.dark) .activity-copy code { color: #7f9188; }
   :global(.terminal-window.dark) .activity-row pre { color: #adbbb4; background: rgba(4, 12, 8, .18); }
   :global(.terminal-window.dark) .activity-cluster.plain, :global(.terminal-window.dark) .activity-cluster.plain.active { border: 0; background: transparent; }
-  :global(.terminal-window.dark) .activity-cluster.plain .cluster-summary { background: var(--workspace-subtle, #1d2a23); }
+  :global(.terminal-window.dark) .activity-cluster.plain .cluster-summary { background: transparent; }
   :global(.terminal-window.dark) .activity-cluster.plain .cluster-mark, :global(.terminal-window.dark) .activity-cluster.plain .cluster-summary > small, :global(.terminal-window.dark) .activity-cluster.plain .activity-row pre { background: transparent; }
   :global(.terminal-window.dark) .load-earlier-activities { color: #8fa198; border-color: rgba(177, 207, 191, .08); }
   :global(.terminal-window.dark) .load-earlier-activities:hover { color: #8bc5a8; }
   @keyframes activity-pulse { 50% { opacity: .38; transform: scale(.62); } }
-  @keyframes step-shimmer { to { background-position: -220% 0; } }
   @keyframes step-arrive { from { opacity: 0; transform: translateY(5px); } }
+  @keyframes file-node-arrive { from { opacity: 0; transform: translateY(3px); } }
   .activity-row { animation: step-arrive 240ms cubic-bezier(.16, 1, .3, 1) both; animation-delay: var(--step-delay); }
   @media (prefers-reduced-motion: reduce) {
     .activity-cluster, .cluster-chevron, .row-chevron { transition: none; }
     .activity-row { animation: none; }
-    .activity-row.running .activity-copy strong { color: #4e7fa6; background: none; animation: none; }
+    .file-node { animation: none; }
+    .activity-row.running .activity-copy strong { color: #4e7fa6; }
     :global(.terminal-window.dark) .activity-row.running .activity-copy strong { color: #72a9cf; }
     .activity-row.running .activity-status i { animation: none; }
   }

@@ -54,7 +54,7 @@
 <style>
   .header-icon { display: block; flex: 0 0 auto; overflow: visible; }
   .header-icon.layout { overflow: hidden; }
-  .folder-front, .folder-paper, .layout-vertical, .layout-horizontal, .detective-face, .detective-hat, .bead, .lume-head { transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .folder-front, .folder-paper, .layout-vertical, .layout-horizontal, .detective-face, .detective-hat, .bead, .lume-head { transform-box: fill-box; transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .folder-paper { opacity: 0; transition: opacity 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .folder-front { transform-origin: 4px 9.5px; }
   .bead { fill: var(--workspace-sidebar, #17231d); transition: transform 160ms cubic-bezier(.16, 1, .3, 1), fill 120ms ease; }

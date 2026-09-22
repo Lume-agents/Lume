@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  hasOpenWorkspacePane,
   resolveLiveResumableSession,
   resolveTerminalSession,
   terminalMatchesSession,
@@ -128,5 +129,10 @@ assert.equal(
   "claude-live",
   "Claude resume entries must match the Claude Code runtime identity",
 );
+
+assert.equal(hasOpenWorkspacePane([lume], [lume.id, null, null]), true);
+assert.equal(hasOpenWorkspacePane([lume], [null, lume.id, null]), true);
+assert.equal(hasOpenWorkspacePane([lume], ["closed-session", null, null]), false);
+assert.equal(hasOpenWorkspacePane([], [null, null, null]), false);
 
 console.log("session identity test suite passed");

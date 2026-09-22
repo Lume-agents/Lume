@@ -12,6 +12,7 @@
     | "copy"
     | "diff"
     | "file"
+    | "image"
     | "inspector"
     | "layout"
     | "mode-default"
@@ -26,13 +27,17 @@
     | "sources"
     | "fork"
     | "settings"
+    | "goal"
+    | "task-list"
     | "split"
     | "stop"
     | "take-control"
     | "steer"
     | "plus"
     | "rename"
-    | "trash";
+    | "refresh"
+    | "trash"
+    | "warning";
 </script>
 
 <script lang="ts">
@@ -66,7 +71,10 @@
   focusable="false"
 >
   {#if label}<title>{label}</title>{/if}
-  {#if name === "inspector"}
+  {#if name === "warning"}
+    <path d="M10.3 4.1 2.9 17a2 2 0 0 0 1.8 3h14.6a2 2 0 0 0 1.8-3L13.7 4.1a2 2 0 0 0-3.4 0Z" />
+    <path d="M12 9v4.5M12 17h.01" />
+  {:else if name === "inspector"}
     <rect x="3" y="4" width="18" height="16" rx="3" />
     <path d="M14.5 4v16M17.5 8h.01M17.5 12h.01M17.5 16h.01" />
   {:else if name === "layout"}
@@ -115,6 +123,10 @@
     <path d="M7 7v4a3 3 0 0 0 3 3h5M9 9h4a4 4 0 0 0 4-4" />
   {:else if name === "file"}
     <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 13h6M9 17h4" />
+  {:else if name === "image"}
+    <rect x="3" y="4" width="18" height="16" rx="3" />
+    <circle cx="9" cy="9" r="1.6" />
+    <path d="m5.5 17 4.2-4.2 3.1 3.1 2.2-2.2 3.5 3.3" />
   {:else if name === "note"}
     <path d="M5 4h14v13H9l-4 3v-3H5zM8 8h8M8 12h6" />
   {:else if name === "attachment"}
@@ -125,6 +137,12 @@
     <path d="M5 7h14M5 12h10M5 17h7" />
   {:else if name === "mode-plan"}
     <path d="M5 4.5h14v15H5zM8 8h8M8 12h6M8 16h3" />
+  {:else if name === "goal"}
+    <circle cx="12" cy="12" r="8" />
+    <circle cx="12" cy="12" r="3.5" />
+    <path d="M12 2.5v3M21.5 12h-3M12 21.5v-3M2.5 12h3" />
+  {:else if name === "task-list"}
+    <path d="m4.5 6.5 1.7 1.7 3-3M11 7h8M4.5 12l1.7 1.7 3-3M11 12h8M5 17h3M11 17h8" />
   {:else if name === "send"}
     <path d="m3.5 11 17-7-6.5 17-3.2-7-7.3-3Z" />
     <path d="m10.8 14 4.5-5" />
@@ -141,6 +159,8 @@
   {:else if name === "rename"}
     <path d="m4 20 1.3-5.2L15.6 4.5a2.1 2.1 0 0 1 3 0l.9.9a2.1 2.1 0 0 1 0 3L9.2 18.7Z" />
     <path d="m14 6.1 3.9 3.9M5.3 14.8l3.9 3.9" />
+  {:else if name === "refresh"}
+    <path d="M19 8a7.5 7.5 0 1 0 .4 7M19 4v4h-4" />
   {:else if name === "trash"}
     <path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
   {:else if name === "chevron-down"}

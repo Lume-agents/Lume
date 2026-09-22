@@ -9,6 +9,8 @@ The goal is to let Lume manage supported agent sessions without requiring a visi
 - Preserve native CLI and VS Code as opt-in destinations.
 - Keep one stable session identity across discovery, transfer, prompts and restarts.
 - Do not weaken approval, sandbox or permission settings during a transfer.
+- Authenticate local bridges, reject browser-originated bridge connections and keep the App Server on an ephemeral loopback port.
+- Never replay a prompt after restart when delivery could not be confirmed.
 
 ## Phase 1 — Headless Codex sessions
 
@@ -24,7 +26,7 @@ Exit criteria: a new or resumed Codex session appears immediately in Lume, accep
 
 ## Phase 2 — Headless Take Control
 
-Status: implemented locally for Codex; manual validation pending. Claude Code still uses its native managed CLI.
+Status: implemented locally for Codex with a durable, exclusive transfer journal; manual validation pending. Claude Code Take Control remains disabled until its managed path guarantees one writer and preserves permissions.
 
 - Stop only the confirmed external agent process.
 - Wait for the active writer to be released.
@@ -54,10 +56,14 @@ Exit criteria: supported Claude Code prompts run in the background with complete
 
 ## Phase 5 — Recovery and performance
 
-- Persist execution host and ownership separately from UI source.
-- Reconcile managed sessions after a Lume restart without repeating turns.
+Status: core recovery safeguards implemented locally; cross-platform measurements and manual failure injection pending.
+
+- Persist Lume-managed ownership as sanitized metadata, separately from conversation history.
+- Reconcile managed sessions and interrupted Take Control operations after restart without repeating turns.
 - Clean up orphaned monitors without deleting transcripts.
-- Bound queues, event buffers and reconnect attempts.
+- Bound queues and reconnect attempts; recover uncertain queued prompts as user-visible failures instead of replaying them.
+- Track active turns from live App Server events so queue polling does not repeatedly load complete histories.
+- Cache mobile command results by request ID to prevent duplicate destructive retries.
 - Measure idle and active CPU/RAM with multiple managed sessions.
 
 Exit criteria: restart, suspension and process failure recover deterministically on Windows, Ubuntu, Pop!_OS and Fedora.

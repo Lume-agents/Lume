@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
@@ -16,7 +16,7 @@ use crate::{
         PromptDelivery, QuestionAnswer, SessionActivity, SessionControlOrigin, SessionSource,
         SessionStatus, WorkflowGroupDefinition, WorkflowHistoryRecord,
     },
-    state::now_millis,
+    state::{now_millis, visible_subagent_ids},
 };
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -103,7 +103,7 @@ impl SessionCapabilities {
                 || (session.agent == AgentKind::Codex
                     && session.source == SessionSource::Desktop
                     && session.control_origin == SessionControlOrigin::Lume
-                    && session.native_session_id.is_some()),
+                    && has_nonempty_value(session.native_session_id.as_deref())),
             can_open_source: matches!(session.source, SessionSource::Web | SessionSource::Vscode),
             can_read_results: !session.results.is_empty() || session.last_response.is_some(),
             can_attach_images: session.source != SessionSource::Web
@@ -115,8 +115,9 @@ impl SessionCapabilities {
                 && can_interrupt_session(session),
             can_take_control: session.control_origin == SessionControlOrigin::External
                 && session.source == SessionSource::Cli
-                && matches!(session.agent, AgentKind::Codex | AgentKind::ClaudeCode)
-                && session.native_session_id.is_some()
+                && session.agent == AgentKind::Codex
+                && has_nonempty_value(session.native_session_id.as_deref())
+                && has_nonempty_value(session.working_directory.as_deref())
                 && session.process_id.is_some(),
             prompt_deliveries: if session.agent == AgentKind::Codex
                 && session.source != SessionSource::Web
@@ -135,20 +136,13 @@ impl SessionCapabilities {
 }
 
 fn can_interrupt_session(session: &AgentSession) -> bool {
-    if session.source != SessionSource::Web
+    session.source != SessionSource::Web
         && session.agent == AgentKind::Codex
-        && session.native_session_id.is_some()
-    {
-        return true;
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        session.source == SessionSource::Cli && session.process_id.is_some()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        false
-    }
+        && has_nonempty_value(session.native_session_id.as_deref())
+}
+
+fn has_nonempty_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty())
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -240,14 +234,71 @@ fn work_summary(activities: &[SessionActivity]) -> AgentWorkSummary {
 }
 
 fn plan_summary(activities: &[SessionActivity]) -> Option<PlanSummary> {
-    activities.iter().rev().find_map(plan_activity_summary)
+    activities
+        .iter()
+        .rev()
+        .find_map(plan_document_summary)
+        .or_else(|| activities.iter().rev().find_map(plan_activity_summary))
+}
+
+fn plan_document_summary(activity: &SessionActivity) -> Option<PlanSummary> {
+    if activity.kind != "plan_document" {
+        return None;
+    }
+    let content = activity.detail.as_deref()?.trim();
+    if content.is_empty() {
+        return None;
+    }
+    let mut items = Vec::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        let (label, status) = if let Some(rest) = line
+            .strip_prefix("- [x] ")
+            .or_else(|| line.strip_prefix("- [X] "))
+        {
+            (rest, WorkItemStatus::Completed)
+        } else if let Some(rest) = line.strip_prefix("- [ ] ") {
+            (rest, WorkItemStatus::Pending)
+        } else if let Some(rest) = line.strip_prefix("## ") {
+            (rest, WorkItemStatus::Pending)
+        } else {
+            continue;
+        };
+        let label = label.trim();
+        if !label.is_empty() && !items.iter().any(|item: &WorkItem| item.label == label) {
+            items.push(WorkItem {
+                label: label.to_string(),
+                status,
+            });
+        }
+        if items.len() == 8 {
+            break;
+        }
+    }
+    if items.is_empty() {
+        items.push(WorkItem {
+            label: content
+                .lines()
+                .next()?
+                .trim_start_matches('#')
+                .trim()
+                .to_string(),
+            status: WorkItemStatus::Pending,
+        });
+    }
+    Some(PlanSummary {
+        items,
+        explanation: None,
+        content: Some(content.to_string()),
+        updated_at: activity.created_at,
+    })
 }
 
 fn plan_activity_summary(activity: &SessionActivity) -> Option<PlanSummary> {
     let detail = activity.detail.as_deref()?;
     let (items, explanation) = if activity.kind == "plan" {
         (plan_items(detail), plan_explanation(detail))
-    } else if activity.kind == "tool" {
+    } else if activity_is_todo_tool(activity) {
         (todo_items(detail)?, None)
     } else {
         return None;
@@ -336,7 +387,7 @@ fn todo_summary(activities: &[SessionActivity]) -> Option<TodoSummary> {
     let tool_todo = activities
         .iter()
         .rev()
-        .filter(|activity| activity.kind == "tool")
+        .filter(|activity| activity_is_todo_tool(activity))
         .find_map(|activity| {
             let items = activity
                 .detail
@@ -348,15 +399,232 @@ fn todo_summary(activities: &[SessionActivity]) -> Option<TodoSummary> {
                 updated_at: activity.created_at,
             })
         });
+    let message_todo = message_todo_summary(activities);
 
-    match (structured_plan, tool_todo) {
-        (Some(plan), Some(todo)) => Some(if plan.updated_at >= todo.updated_at {
-            plan
-        } else {
-            todo
-        }),
-        (plan, todo) => plan.or(todo),
+    [structured_plan, tool_todo, message_todo]
+        .into_iter()
+        .flatten()
+        .max_by_key(|summary| summary.updated_at)
+}
+
+fn activity_is_todo_tool(activity: &SessionActivity) -> bool {
+    if activity.kind != "tool" {
+        return false;
     }
+    let name = activity
+        .title
+        .rsplit(['·', '.', ':', '/'])
+        .next()
+        .unwrap_or(&activity.title)
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    name == "todowrite"
+}
+
+fn message_todo_summary(activities: &[SessionActivity]) -> Option<TodoSummary> {
+    let (start_index, mut items) = activities
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, activity)| matches!(activity.kind.as_str(), "message" | "analysis"))
+        .find_map(|(index, activity)| {
+            explicit_message_todo(activity.detail.as_deref()?).map(|items| (index, items))
+        })?;
+    let mut updated_at = activities[start_index].created_at;
+
+    for activity in activities.iter().skip(start_index + 1) {
+        if !matches!(activity.kind.as_str(), "message" | "analysis") {
+            continue;
+        }
+        let Some(detail) = activity.detail.as_deref() else {
+            continue;
+        };
+        let mut changed = false;
+        for line in detail.lines() {
+            let Some(update) = message_task_line(line, false) else {
+                continue;
+            };
+            if let Some(item) = items
+                .iter_mut()
+                .find(|item| item.label.trim().eq_ignore_ascii_case(update.label.trim()))
+            {
+                if item.status != update.status {
+                    item.status = update.status;
+                    changed = true;
+                }
+            }
+        }
+        for completed_label in completed_section_items(detail) {
+            let Some(index) = best_todo_match(&items, &completed_label) else {
+                continue;
+            };
+            if items[index].status != WorkItemStatus::Completed {
+                items[index].status = WorkItemStatus::Completed;
+                changed = true;
+            }
+        }
+        if changed {
+            updated_at = activity.created_at;
+        }
+    }
+
+    Some(TodoSummary { items, updated_at })
+}
+
+fn completed_section_items(detail: &str) -> Vec<String> {
+    let mut completed_section = false;
+    let mut items = Vec::new();
+    for raw_line in detail.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(label) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            if completed_section && !label.trim().is_empty() {
+                items.push(label.trim().to_string());
+            }
+            continue;
+        }
+        let heading = line
+            .trim_start_matches('#')
+            .trim()
+            .trim_end_matches(':')
+            .trim()
+            .to_lowercase();
+        completed_section = heading.starts_with("conclu")
+            || heading.starts_with("completed")
+            || heading.starts_with("feito")
+            || heading.starts_with("finalizado");
+    }
+    items
+}
+
+fn best_todo_match(items: &[WorkItem], completed_label: &str) -> Option<usize> {
+    let completed_tokens = task_tokens(completed_label);
+    if completed_tokens.is_empty() {
+        return None;
+    }
+    let mut ranked = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.status != WorkItemStatus::Completed)
+        .map(|(index, item)| {
+            let item_tokens = task_tokens(&item.label);
+            let overlap = item_tokens.intersection(&completed_tokens).count();
+            (index, overlap, item_tokens)
+        })
+        .filter(|(_, overlap, _)| *overlap > 0)
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1));
+    let (index, overlap, item_tokens) = ranked.first()?;
+    if *overlap >= 2 {
+        return Some(*index);
+    }
+    if ranked
+        .get(1)
+        .is_some_and(|candidate| candidate.1 == *overlap)
+    {
+        return None;
+    }
+    item_tokens
+        .intersection(&completed_tokens)
+        .next()
+        .filter(|token| token.chars().count() >= 5)
+        .map(|_| *index)
+}
+
+fn task_tokens(value: &str) -> HashSet<String> {
+    const STOP_WORDS: &[&str] = &[
+        "para", "com", "sem", "uma", "uns", "das", "dos", "que", "the", "and", "for", "with",
+        "from", "this", "that", "de", "do", "da", "em", "no", "na", "ao", "aos",
+    ];
+    value
+        .to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| token.chars().count() >= 3 && !STOP_WORDS.contains(token))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+pub(crate) fn is_work_tracking_message(detail: &str) -> bool {
+    explicit_message_todo(detail).is_some()
+        || !completed_section_items(detail).is_empty()
+        || detail
+            .lines()
+            .any(|line| message_task_line(line, false).is_some())
+}
+
+fn explicit_message_todo(detail: &str) -> Option<Vec<WorkItem>> {
+    let mut after_heading = false;
+    let mut items = Vec::new();
+    for raw_line in detail.lines() {
+        let line = raw_line.trim();
+        if !after_heading {
+            let heading = line
+                .trim_start_matches('#')
+                .trim()
+                .trim_end_matches(':')
+                .to_ascii_lowercase();
+            after_heading = heading == "todo"
+                || heading == "to do"
+                || heading.starts_with("todo ")
+                || heading.starts_with("to do ")
+                || (line.ends_with(':') && (heading.contains("todo") || heading.contains("to do")));
+            continue;
+        }
+        if let Some(item) = message_task_line(line, true) {
+            if !items
+                .iter()
+                .any(|existing: &WorkItem| existing.label == item.label)
+            {
+                items.push(item);
+            }
+        }
+        if items.len() == 12 {
+            break;
+        }
+    }
+    (!items.is_empty()).then_some(items)
+}
+
+fn message_task_line(line: &str, allow_plain_bullet: bool) -> Option<WorkItem> {
+    let line = line.trim();
+    let (status, label) = if let Some(label) = line
+        .strip_prefix("- [x] ")
+        .or_else(|| line.strip_prefix("- [X] "))
+    {
+        (WorkItemStatus::Completed, label)
+    } else if let Some(label) = line.strip_prefix("- [ ] ") {
+        (WorkItemStatus::Pending, label)
+    } else if let Some(label) = line.strip_prefix('✓') {
+        (WorkItemStatus::Completed, label)
+    } else if let Some(label) = line.strip_prefix('●') {
+        (WorkItemStatus::InProgress, label)
+    } else if let Some(label) = line.strip_prefix('○') {
+        (WorkItemStatus::Pending, label)
+    } else if allow_plain_bullet {
+        let label = line
+            .strip_prefix("- ")
+            .or_else(|| numbered_task_label(line))?;
+        (WorkItemStatus::Pending, label)
+    } else {
+        return None;
+    };
+    let label = label.trim();
+    (!label.is_empty()).then(|| WorkItem {
+        label: label.to_string(),
+        status,
+    })
+}
+
+fn numbered_task_label(line: &str) -> Option<&str> {
+    let marker_end = line.find(['.', ')'])?;
+    let marker = &line[..marker_end];
+    (!marker.is_empty() && marker.chars().all(|character| character.is_ascii_digit()))
+        .then(|| line[marker_end + 1..].trim_start())
+        .filter(|label| !label.is_empty())
 }
 
 fn plan_items(detail: &str) -> Vec<WorkItem> {
@@ -366,6 +634,11 @@ fn plan_items(detail: &str) -> Vec<WorkItem> {
         if !items.is_empty() {
             return items;
         }
+    }
+
+    let javascript_items = javascript_work_items(detail, &["step"]);
+    if !javascript_items.is_empty() {
+        return javascript_items;
     }
 
     detail
@@ -424,40 +697,204 @@ fn collect_plan_items(value: &Value, items: &mut Vec<WorkItem>) {
 }
 
 fn todo_items(detail: &str) -> Option<Vec<WorkItem>> {
-    let value = serde_json::from_str::<Value>(detail).ok()?;
-    let todos = find_json_value(&value, &["todos", "tasks", "plan"])?;
-    let entries = todos.as_array()?;
-    let items = entries
-        .iter()
-        .filter_map(|entry| {
-            let label = find_json_value(
-                entry,
-                &[
-                    "content",
-                    "subject",
-                    "task",
-                    "title",
-                    "text",
-                    "step",
-                    "description",
-                ],
+    let label_keys = [
+        "content",
+        "subject",
+        "task",
+        "title",
+        "text",
+        "step",
+        "description",
+    ];
+    let items = serde_json::from_str::<Value>(detail)
+        .ok()
+        .and_then(|value| {
+            let entries = find_json_value(&value, &["todos", "tasks", "plan"])?
+                .as_array()?
+                .clone();
+            Some(
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let label = find_json_value(entry, &label_keys)
+                            .and_then(Value::as_str)?
+                            .trim();
+                        if label.is_empty() {
+                            return None;
+                        }
+                        let status = find_json_value(entry, &["status"])
+                            .and_then(Value::as_str)
+                            .map(work_item_status)
+                            .unwrap_or(WorkItemStatus::Pending);
+                        Some(WorkItem {
+                            label: label.to_string(),
+                            status,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
             )
-            .and_then(Value::as_str)?
-            .trim();
-            if label.is_empty() {
-                return None;
-            }
-            let status = find_json_value(entry, &["status"])
-                .and_then(Value::as_str)
-                .map(work_item_status)
-                .unwrap_or(WorkItemStatus::Pending);
-            Some(WorkItem {
-                label: label.to_string(),
-                status,
-            })
         })
-        .collect::<Vec<_>>();
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| javascript_work_items(detail, &label_keys));
     (!items.is_empty()).then_some(items)
+}
+
+fn javascript_work_items(detail: &str, label_keys: &[&str]) -> Vec<WorkItem> {
+    let mut items = Vec::new();
+    for (start, character) in detail.char_indices() {
+        if character != '{' {
+            continue;
+        }
+        let Some(end) = javascript_object_end(detail, start) else {
+            continue;
+        };
+        let object = &detail[start..end];
+        let Some(label) = label_keys
+            .iter()
+            .find_map(|key| javascript_string_property(object, key))
+        else {
+            continue;
+        };
+        let label = label.trim();
+        if label.is_empty() || items.iter().any(|item: &WorkItem| item.label == label) {
+            continue;
+        }
+        let status = javascript_string_property(object, "status")
+            .as_deref()
+            .map(work_item_status)
+            .unwrap_or(WorkItemStatus::Pending);
+        items.push(WorkItem {
+            label: label.to_string(),
+            status,
+        });
+    }
+    items
+}
+
+fn javascript_object_end(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut index = start;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let current = bytes[index];
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if current == b'\\' {
+                escaped = true;
+            } else if current == active_quote {
+                quote = None;
+            }
+        } else {
+            match current {
+                b'\'' | b'"' | b'`' => quote = Some(current),
+                b'{' => depth += 1,
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(index + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn javascript_string_property(source: &str, key: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let key_bytes = key.as_bytes();
+    let mut index = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let current = bytes[index];
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if current == b'\\' {
+                escaped = true;
+            } else if current == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(current, b'\'' | b'"') {
+            let key_start = index + 1;
+            let key_end = key_start + key_bytes.len();
+            if source.as_bytes().get(key_start..key_end) == Some(key_bytes)
+                && bytes.get(key_end) == Some(&current)
+            {
+                index = key_end + 1;
+            } else {
+                quote = Some(current);
+                index += 1;
+                continue;
+            }
+        } else if source.as_bytes().get(index..index + key_bytes.len()) == Some(key_bytes)
+            && (index == 0 || !is_javascript_identifier(bytes[index - 1]))
+            && bytes
+                .get(index + key_bytes.len())
+                .is_none_or(|value| !is_javascript_identifier(*value))
+        {
+            index += key_bytes.len();
+        } else {
+            index += 1;
+            continue;
+        }
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b':') {
+            continue;
+        }
+        index += 1;
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        let delimiter = *bytes.get(index)?;
+        if !matches!(delimiter, b'\'' | b'"' | b'`') {
+            continue;
+        }
+        index += 1;
+        let value_start = index;
+        let mut segment_start = value_start;
+        let mut value = String::new();
+        while index < bytes.len() {
+            if bytes[index] == b'\\' {
+                value.push_str(&source[segment_start..index]);
+                index += 1;
+                let escaped = *bytes.get(index)?;
+                value.push(match escaped {
+                    b'n' => '\n',
+                    b'r' => '\r',
+                    b't' => '\t',
+                    value => value as char,
+                });
+                index += 1;
+                segment_start = index;
+                continue;
+            }
+            if bytes[index] == delimiter {
+                if value.is_empty() {
+                    return Some(source[value_start..index].to_string());
+                }
+                value.push_str(&source[segment_start..index]);
+                return Some(value);
+            }
+            index += 1;
+        }
+    }
+    None
+}
+
+fn is_javascript_identifier(value: u8) -> bool {
+    value.is_ascii_alphanumeric() || matches!(value, b'_' | b'$')
 }
 
 fn work_item_status(status: &str) -> WorkItemStatus {
@@ -668,16 +1105,19 @@ impl HubSnapshot {
         let mut snapshot = Self::new(sessions);
         let limit = activity_limit.max(1);
         for session in &mut snapshot.sessions {
+            let recent_subagents = visible_subagent_ids(&session.session.activities);
+            session.session.activities.retain(|activity| {
+                activity.kind != "subagent" || recent_subagents.contains(&activity.id)
+            });
             let activity_start = session.session.activities.len().saturating_sub(limit);
             if activity_start > 0 {
-                let active_subagents = session.session.activities[..activity_start]
+                let recent_children = session.session.activities[..activity_start]
                     .iter()
-                    .filter(|activity| activity.kind == "subagent" && activity.status == "running")
-                    .take(8)
+                    .filter(|activity| recent_subagents.contains(&activity.id))
                     .cloned()
                     .collect::<Vec<_>>();
                 session.session.activities.drain(..activity_start);
-                session.session.activities.splice(0..0, active_subagents);
+                session.session.activities.splice(0..0, recent_children);
             }
             let result_start = session.session.results.len().saturating_sub(limit);
             if result_start > 0 {
@@ -797,11 +1237,6 @@ impl HubCommandRequest {
                 prompt,
                 attachments,
                 ..
-            }
-            | HubCommand::TakeControlSession {
-                session_id,
-                prompt,
-                attachments,
             } => {
                 validate_identifier("session_id", session_id, 512)?;
                 if prompt.trim().is_empty() && attachments.is_empty() {
@@ -810,18 +1245,15 @@ impl HubCommandRequest {
                         "O prompt e os anexos estão vazios",
                     ));
                 }
-                if prompt.len() > 16 * 1024 {
-                    return Err(ProtocolError::new(
-                        "prompt_too_large",
-                        "O prompt excede 16 KB",
-                    ));
-                }
-                if attachments.len() > 4 {
-                    return Err(ProtocolError::new(
-                        "too_many_attachments",
-                        "O prompt aceita no máximo 4 imagens",
-                    ));
-                }
+                validate_prompt_payload(prompt, attachments)?;
+            }
+            HubCommand::TakeControlSession {
+                session_id,
+                prompt,
+                attachments,
+            } => {
+                validate_identifier("session_id", session_id, 512)?;
+                validate_prompt_payload(prompt, attachments)?;
             }
             HubCommand::ResolvePermission {
                 session_id,
@@ -925,6 +1357,25 @@ impl HubCommandRequest {
         }
         Ok(())
     }
+}
+
+fn validate_prompt_payload(
+    prompt: &str,
+    attachments: &[PromptAttachmentInput],
+) -> Result<(), ProtocolError> {
+    if prompt.len() > 16 * 1024 {
+        return Err(ProtocolError::new(
+            "prompt_too_large",
+            "O prompt excede 16 KB",
+        ));
+    }
+    if attachments.len() > 4 {
+        return Err(ProtocolError::new(
+            "too_many_attachments",
+            "O prompt aceita no máximo 4 imagens",
+        ));
+    }
+    Ok(())
 }
 
 pub fn is_version_newer(candidate: &str, installed: &str) -> bool {
@@ -1213,6 +1664,7 @@ mod tests {
             results: Vec::new(),
             activities: Vec::new(),
             rate_limits: Vec::new(),
+            prompt_token_usage: Vec::new(),
         }
     }
 
@@ -1232,14 +1684,14 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_keeps_a_running_subagent_when_activity_is_bounded() {
+    fn snapshot_keeps_a_completed_subagent_after_more_prompts() {
         let mut parent = session();
         parent.activities.push(SessionActivity {
             id: "child-1".into(),
             kind: "subagent".into(),
             title: "Reviewer".into(),
             detail: None,
-            status: "running".into(),
+            status: "completed".into(),
             created_at: 1,
             files: Vec::new(),
             attachments: Vec::new(),
@@ -1251,6 +1703,19 @@ mod tests {
             activity.kind = "tool".into();
             activity.created_at = index + 2;
             parent.activities.push(activity);
+        }
+        let snapshot = HubSnapshot::with_activity_limit(vec![parent.clone()], 60);
+        assert!(snapshot.sessions[0]
+            .session
+            .activities
+            .iter()
+            .any(|activity| activity.id == "child-1"));
+        for index in 0..3 {
+            let mut prompt = parent.activities[0].clone();
+            prompt.id = format!("prompt-{index}");
+            prompt.kind = "prompt".into();
+            prompt.created_at = index + 72;
+            parent.activities.push(prompt);
         }
         let snapshot = HubSnapshot::with_activity_limit(vec![parent], 60);
         assert!(snapshot.sessions[0]
@@ -1387,6 +1852,14 @@ mod tests {
         );
         external.source = SessionSource::Vscode;
         assert!(!SessionCapabilities::for_session(&external).can_take_control);
+
+        external.source = SessionSource::Cli;
+        external.working_directory = None;
+        assert!(!SessionCapabilities::for_session(&external).can_take_control);
+
+        external.working_directory = Some("/work/lume".into());
+        external.agent = AgentKind::ClaudeCode;
+        assert!(!SessionCapabilities::for_session(&external).can_take_control);
     }
 
     #[test]
@@ -1420,7 +1893,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_keeps_a_planning_document_out_of_the_current_plan() {
+    fn snapshot_exposes_saved_plan_separately_from_the_current_todo() {
         let mut session = session();
         session.activities.extend([
             SessionActivity {
@@ -1456,8 +1929,16 @@ mod tests {
             .as_ref()
             .expect("plan");
         assert_eq!(plan.items.len(), 2);
-        assert!(plan.content.is_none());
-        assert_eq!(plan.updated_at, 10);
+        assert_eq!(plan.items[0].label, "Fase 1");
+        assert!(plan.content.is_some());
+        assert_eq!(plan.updated_at, 20);
+        let todo = snapshot.sessions[0]
+            .work_summary
+            .todo
+            .as_ref()
+            .expect("todo");
+        assert_eq!(todo.items.len(), 2);
+        assert_eq!(todo.updated_at, 10);
     }
 
     #[test]
@@ -1487,6 +1968,206 @@ mod tests {
         assert_eq!(todo.items.len(), 2);
         assert_eq!(todo.items[1].label, "Build tray");
         assert_eq!(todo.items[1].status, WorkItemStatus::InProgress);
+    }
+
+    #[test]
+    fn snapshot_ignores_tool_catalog_descriptions_as_todo_items() {
+        let mut session = session();
+        session.activities.push(SessionActivity {
+            id: "tool-catalog".into(),
+            kind: "tool".into(),
+            title: "Tool catalog".into(),
+            detail: Some(
+                r#"{"tools":[{"name":"github_update_issue","description":"Access repositories, issues, and pull requests."},{"name":"web_run","description":"Tools in the web namespace."}]}"#
+                    .into(),
+            ),
+            status: "completed".into(),
+            created_at: 21,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        });
+
+        let snapshot = HubSnapshot::new(vec![session]);
+        assert!(snapshot.sessions[0].work_summary.todo.is_none());
+        assert!(snapshot.sessions[0].work_summary.plan.is_none());
+    }
+
+    #[test]
+    fn snapshot_tracks_explicit_todo_messages_when_the_agent_has_no_plan_tool() {
+        let mut session = session();
+        session.activities.extend([
+            SessionActivity {
+                id: "todo-message".into(),
+                kind: "message".into(),
+                title: "Resposta do agente".into(),
+                detail: Some(
+                    "TODO de teste:\n\n- Conferir estados\n- Validar reordenação\n- Rodar checks"
+                        .into(),
+                ),
+                status: "running".into(),
+                created_at: 20,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            },
+            SessionActivity {
+                id: "todo-progress-1".into(),
+                kind: "message".into(),
+                title: "Resposta do agente".into(),
+                detail: Some("✓ Conferir estados\n\nSeguindo para a próxima etapa.".into()),
+                status: "running".into(),
+                created_at: 21,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            },
+            SessionActivity {
+                id: "todo-progress-2".into(),
+                kind: "message".into(),
+                title: "Resposta do agente".into(),
+                detail: Some("● Validar reordenação".into()),
+                status: "running".into(),
+                created_at: 22,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            },
+        ]);
+
+        let snapshot = HubSnapshot::new(vec![session]);
+        let todo = snapshot.sessions[0]
+            .work_summary
+            .todo
+            .as_ref()
+            .expect("todo from explicit agent message");
+        assert_eq!(todo.items.len(), 3);
+        assert_eq!(todo.items[0].status, WorkItemStatus::Completed);
+        assert_eq!(todo.items[1].status, WorkItemStatus::InProgress);
+        assert_eq!(todo.items[2].status, WorkItemStatus::Pending);
+        assert_eq!(todo.updated_at, 22);
+    }
+
+    #[test]
+    fn snapshot_tracks_numbered_todo_after_a_goal_announcement() {
+        let mut session = session();
+        session.activities.push(SessionActivity {
+            id: "numbered-todo-message".into(),
+            kind: "message".into(),
+            title: "Resposta do agente".into(),
+            detail: Some(
+                "Goal criada. TO DO ativo:\n\n1. Proteger o bridge local.\n2. Persistir ownership e filas."
+                    .into(),
+            ),
+            status: "running".into(),
+            created_at: 24,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        });
+
+        let snapshot = HubSnapshot::new(vec![session]);
+        let todo = snapshot.sessions[0]
+            .work_summary
+            .todo
+            .as_ref()
+            .expect("numbered todo");
+        assert_eq!(todo.items.len(), 2);
+        assert_eq!(todo.items[0].label, "Proteger o bridge local.");
+        assert_eq!(todo.items[1].label, "Persistir ownership e filas.");
+    }
+
+    #[test]
+    fn work_summaries_parse_nested_javascript_tool_arguments() {
+        let plan = plan_items(
+            r#"{plan:[{step:"Inspect",status:"in_progress"},{step:'Fix',status:'pending'}]}"#,
+        );
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].label, "Inspect");
+        assert_eq!(plan[0].status, WorkItemStatus::InProgress);
+        assert_eq!(plan[1].label, "Fix");
+
+        let todo = todo_items(
+            r#"{todos:[{content:"Inspect",status:"completed"},{content:'Ship',status:'pending'}]}"#,
+        )
+        .expect("todo items");
+        assert_eq!(todo.len(), 2);
+        assert_eq!(todo[0].label, "Inspect");
+        assert_eq!(todo[0].status, WorkItemStatus::Completed);
+        assert_eq!(todo[1].label, "Ship");
+    }
+
+    #[test]
+    fn snapshot_tracks_explicit_todo_from_intermediate_agent_updates() {
+        let mut session = session();
+        session.activities.push(SessionActivity {
+            id: "todo-analysis".into(),
+            kind: "analysis".into(),
+            title: "Atualização".into(),
+            detail: Some("TODO desta rodada:\n\n- Corrigir bookmark\n- Revisar SVGs".into()),
+            status: "running".into(),
+            created_at: 30,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        });
+
+        let snapshot = HubSnapshot::new(vec![session]);
+        let todo = snapshot.sessions[0]
+            .work_summary
+            .todo
+            .as_ref()
+            .expect("todo from intermediate agent update");
+        assert_eq!(todo.items.len(), 2);
+        assert_eq!(todo.items[0].label, "Corrigir bookmark");
+        assert_eq!(todo.updated_at, 30);
+    }
+
+    #[test]
+    fn snapshot_reconciles_completed_summary_bullets_with_todo_items() {
+        let mut session = session();
+        session.activities.extend([
+            SessionActivity {
+                id: "todo-analysis".into(),
+                kind: "analysis".into(),
+                title: "Atualização".into(),
+                detail: Some(
+                    "TODO desta rodada:\n\n- Refinar o bookmark e a task-list responsiva aos temas.\n- Criar ícones próprios para PLAN, GOAL e TODO.\n- Adicionar progresso percentual ao GOAL.\n- Garantir duração em todas as respostas finais.\n- Animar Ver mais e Ver menos.\n- Explicar o gráfico do Inspector.\n- Abrir o TODO automaticamente ao criar e concluir tarefas."
+                        .into(),
+                ),
+                status: "running".into(),
+                created_at: 40,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            },
+            SessionActivity {
+                id: "todo-final".into(),
+                kind: "message".into(),
+                title: "Resposta do agente".into(),
+                detail: Some(
+                    "Concluído:\n\n- Bookmark agora revela o menu por trás do trigger.\n- TODO menor e abrindo automaticamente ao criar e concluir tarefas.\n- SVGs próprios para TODO, PLAN e GOAL.\n- GOAL ganhou progresso percentual.\n- Respostas finais mostram duração.\n- Ver mais e Ver menos ganharam transição.\n- Gráfico do Inspector agora está explicado."
+                        .into(),
+                ),
+                status: "completed".into(),
+                created_at: 41,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            },
+        ]);
+
+        let snapshot = HubSnapshot::new(vec![session]);
+        let todo = snapshot.sessions[0]
+            .work_summary
+            .todo
+            .as_ref()
+            .expect("todo reconciled from completion summary");
+        assert!(todo
+            .items
+            .iter()
+            .all(|item| item.status == WorkItemStatus::Completed));
+        assert_eq!(todo.updated_at, 41);
     }
 
     #[test]
@@ -1672,6 +2353,15 @@ mod tests {
                 attachments: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn mobile_can_transfer_control_without_sending_a_prompt() {
+        let request: HubCommandRequest = serde_json::from_str(
+            r#"{"requestId":"mobile-control-only","type":"take_control_session","sessionId":"codex:thread-1","prompt":""}"#,
+        )
+        .expect("control-only command");
+        request.validate().expect("valid control-only takeover");
     }
 
     #[test]

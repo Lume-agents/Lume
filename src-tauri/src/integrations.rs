@@ -4,6 +4,7 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Mutex, OnceLock},
     time::UNIX_EPOCH,
 };
 
@@ -176,7 +177,7 @@ pub(crate) fn indexed_session_names(
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("sessions");
-            codex_session_names(&root)
+            cached_codex_session_names(&root)
         }
         // Claude does not currently maintain a compact thread-name index.
         // Its hook events remain the authoritative source for live names.
@@ -185,6 +186,37 @@ pub(crate) fn indexed_session_names(
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini => HashMap::new(),
     })
+}
+
+/// Returns a small, recent slice of Codex rollouts for process discovery.
+///
+/// Unlike the resume picker, this deliberately inspects only the newest date
+/// directories and files. Windows process arguments do not expose the thread
+/// id for a newly-opened TUI, so discovery correlates these records with the
+/// process start time without repeatedly walking the complete history.
+#[cfg(target_os = "windows")]
+pub(crate) fn recent_codex_sessions_for_discovery(limit: usize) -> Vec<ResumableSession> {
+    let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) else {
+        return Vec::new();
+    };
+    let root = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(home).join(".codex"))
+        .join("sessions");
+    let names = cached_codex_session_names(&root);
+    recent_codex_resume_files(&root, limit)
+        .into_iter()
+        .filter_map(|path| {
+            let file = fs::File::open(&path).ok()?;
+            let first_line = BufReader::new(file).lines().next()?.ok()?;
+            let value = serde_json::from_str::<Value>(&first_line).ok()?;
+            let mut session = codex_resume_metadata(&value, file_updated_at(&path))?;
+            if let Some(name) = names.get(&session.id) {
+                session.name = name.clone();
+            }
+            Some(session)
+        })
+        .collect()
 }
 
 pub(crate) fn native_session_title(kind: &IntegrationKind, session_id: &str) -> Option<String> {
@@ -361,12 +393,59 @@ fn codex_session_names(root: &Path) -> HashMap<String, String> {
     let Ok(file) = fs::File::open(index_path) else {
         return HashMap::new();
     };
-    BufReader::new(file)
+    codex_session_name_entries(BufReader::new(file))
+}
+
+fn codex_session_name_entries(reader: impl BufRead) -> HashMap<String, String> {
+    reader
         .lines()
         .map_while(Result::ok)
         .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
         .filter_map(|value| codex_session_name_entry(&value))
         .collect()
+}
+
+struct CodexSessionNameCache {
+    path: PathBuf,
+    length: u64,
+    updated_at: i64,
+    names: HashMap<String, String>,
+}
+
+static CODEX_SESSION_NAME_CACHE: OnceLock<Mutex<Option<CodexSessionNameCache>>> = OnceLock::new();
+
+fn cached_codex_session_names(root: &Path) -> HashMap<String, String> {
+    let Some(index_path) = root.parent().map(|home| home.join("session_index.jsonl")) else {
+        return HashMap::new();
+    };
+    let Ok(metadata) = fs::metadata(&index_path) else {
+        return HashMap::new();
+    };
+    let updated_at = file_updated_at(&index_path);
+    let cache = CODEX_SESSION_NAME_CACHE.get_or_init(|| Mutex::new(None));
+    let Ok(mut cache) = cache.lock() else {
+        return codex_session_names(root);
+    };
+    if let Some(current) = cache.as_ref() {
+        if current.path == index_path
+            && current.length == metadata.len()
+            && current.updated_at == updated_at
+        {
+            return current.names.clone();
+        }
+    }
+
+    // Re-read only when the compact index changes. Starting in the middle of a
+    // concurrently appended JSONL record can permanently lose that name, so a
+    // changed index is parsed from the beginning instead of from a byte offset.
+    let names = codex_session_names(root);
+    *cache = Some(CodexSessionNameCache {
+        path: index_path,
+        length: metadata.len(),
+        updated_at,
+        names: names.clone(),
+    });
+    names
 }
 
 fn codex_session_name_entry(value: &Value) -> Option<(String, String)> {
@@ -716,6 +795,57 @@ fn resume_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_resume_files(root, &mut files);
     files
+}
+
+#[cfg(target_os = "windows")]
+fn recent_codex_resume_files(root: &Path, limit: usize) -> Vec<PathBuf> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut directories = vec![root.to_path_buf()];
+    for (depth, per_directory_limit) in [2usize, 2, 7].into_iter().enumerate() {
+        let mut next = directories
+            .iter()
+            .flat_map(|directory| sorted_child_directories(directory, per_directory_limit))
+            .collect::<Vec<_>>();
+        if next.is_empty() {
+            break;
+        }
+        next.sort_by(|left, right| right.cmp(left));
+        next.truncate(if depth == 2 { 14 } else { 4 });
+        directories = next;
+    }
+    let mut files = directories
+        .iter()
+        .flat_map(|directory| {
+            fs::read_dir(directory)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_file()
+                        && path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|path| std::cmp::Reverse(file_updated_at(path)));
+    files.truncate(limit);
+    files
+}
+
+#[cfg(target_os = "windows")]
+fn sorted_child_directories(root: &Path, limit: usize) -> Vec<PathBuf> {
+    let mut directories = fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_type().ok()?.is_dir().then(|| entry.path()))
+        .collect::<Vec<_>>();
+    directories.sort_by(|left, right| right.cmp(left));
+    directories.truncate(limit);
+    directories
 }
 
 fn collect_resume_files(directory: &Path, files: &mut Vec<PathBuf>) {

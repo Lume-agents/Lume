@@ -12,9 +12,9 @@ use crate::{
     domain::{
         AccessMode, AgentKind, AgentRateLimit, AgentSession, HistoryEntry, HookEvent,
         HookEventKind, PairedDevice, PermissionAction, PermissionProfile, PermissionRequest,
-        Preferences, PromptAttachment, QuestionAnswer, ResultNote, ReviewNote, SessionActivity,
-        SessionControlOrigin, SessionModelOverride, SessionNote, SessionResult, SessionSource,
-        SessionStatus, WorkflowHistoryRecord,
+        Preferences, PromptAttachment, PromptTokenUsage, QuestionAnswer, ResultNote, ReviewNote,
+        SessionActivity, SessionControlOrigin, SessionModelOverride, SessionNote, SessionResult,
+        SessionSource, SessionStatus, WorkflowHistoryRecord,
     },
     integrations::{self, IntegrationKind},
     store::Store,
@@ -33,6 +33,12 @@ struct WorkspaceSnapshot {
     files: HashMap<String, u64>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PendingCodexModelUpdate {
+    pub settings: SessionModelOverride,
+    pub collaboration_mode: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     sessions: Arc<Mutex<Vec<AgentSession>>>,
@@ -47,12 +53,52 @@ pub struct AppState {
     session_aliases: Arc<Mutex<HashMap<String, String>>>,
     archived_conversations: Arc<Mutex<HashMap<String, Vec<SessionActivity>>>>,
     session_model_overrides: Arc<Mutex<HashMap<(AgentKind, String), SessionModelOverride>>>,
+    pending_codex_model_updates: Arc<Mutex<HashMap<String, PendingCodexModelUpdate>>>,
+    active_codex_turns: Arc<Mutex<HashMap<String, String>>>,
+    hub_command_responses: Arc<Mutex<HashMap<String, (i64, crate::protocol::HubCommandResponse)>>>,
 }
 
 impl AppState {
     pub fn new(database_path: &Path) -> Result<Self, String> {
         let store = Store::open(database_path)?;
-        let sessions = Vec::new();
+        let mut sessions = store.load_sessions()?;
+        for recovery in store.take_takeover_recoveries()? {
+            let mut recovered = recovery.session;
+            let recovered_id = recovered.id.clone();
+            recovered.process_id = None;
+            recovered.pending_permission = None;
+            recovered.pending_question = None;
+            recovered.updated_at = now_millis();
+            if recovery.phase == "source_released" {
+                recovered.control_origin = SessionControlOrigin::Lume;
+                recovered.source = SessionSource::Desktop;
+                recovered.source_app = None;
+                recovered.status = SessionStatus::WaitingForInput;
+                recovered.status_label = "Recovered in Lume".into();
+                recovered.permission_profile.can_respond_from_lume = true;
+                recovered.permission_profile.available_actions = vec![
+                    PermissionAction::AllowOnce,
+                    PermissionAction::AllowSession,
+                    PermissionAction::Deny,
+                ];
+                store.save_session(&recovered)?;
+            } else {
+                recovered.control_origin = SessionControlOrigin::External;
+                recovered.status = SessionStatus::Failed;
+                recovered.status_label =
+                    "Take Control interrupted; rediscover the CLI and retry".into();
+            }
+            if let Some(existing) = sessions.iter_mut().find(|session| {
+                session.agent == recovered.agent
+                    && session.native_session_id == recovered.native_session_id
+            }) {
+                *existing = recovered;
+            } else {
+                sessions.push(recovered);
+            }
+            store.delete_takeover_operation(&recovered_id)?;
+        }
+        let queued_recoveries = store.take_queued_prompt_recoveries()?;
         // O banco é pequeno; a limpeza física na inicialização também remove
         // vestígios deixados em WAL/páginas livres por versões anteriores.
         store.scrub_deleted_content()?;
@@ -60,7 +106,7 @@ impl AppState {
         let cutoff =
             now_millis() - i64::from(preferences.history_retention_days) * 24 * 60 * 60 * 1_000;
         store.purge_history(cutoff)?;
-        Ok(Self {
+        let state = Self {
             sessions: Arc::new(Mutex::new(sessions)),
             internal_services: Arc::new(Mutex::new(Vec::new())),
             store: Arc::new(Mutex::new(store)),
@@ -73,7 +119,136 @@ impl AppState {
             session_aliases: Arc::new(Mutex::new(preferences.session_aliases)),
             archived_conversations: Arc::new(Mutex::new(HashMap::new())),
             session_model_overrides: Arc::new(Mutex::new(HashMap::new())),
-        })
+            pending_codex_model_updates: Arc::new(Mutex::new(HashMap::new())),
+            active_codex_turns: Arc::new(Mutex::new(HashMap::new())),
+            hub_command_responses: Arc::new(Mutex::new(HashMap::new())),
+        };
+        for recovery in queued_recoveries {
+            let target = state.sessions()?.into_iter().find(|session| {
+                session.id == recovery.session_id
+                    || session.native_session_id.as_deref() == Some(recovery.thread_id.as_str())
+            });
+            if let Some(session) = target {
+                state.mark_queued_prompt_needs_attention(&session.id, &recovery.activity_id)?;
+            }
+            state.clear_queued_prompt(&recovery.activity_id)?;
+        }
+        Ok(state)
+    }
+
+    pub fn persist_queued_prompt(
+        &self,
+        session_id: &str,
+        activity_id: &str,
+        thread_id: &str,
+    ) -> Result<(), String> {
+        self.store
+            .lock()
+            .map_err(|_| "Could not save the Codex prompt queue".to_string())?
+            .save_queued_prompt(session_id, activity_id, thread_id, now_millis())
+    }
+
+    pub fn clear_queued_prompt(&self, activity_id: &str) -> Result<(), String> {
+        self.store
+            .lock()
+            .map_err(|_| "Could not update the Codex prompt queue".to_string())?
+            .delete_queued_prompt(activity_id)
+    }
+
+    pub fn clear_queued_prompts_for_thread(&self, thread_id: &str) -> Result<(), String> {
+        self.store
+            .lock()
+            .map_err(|_| "Could not update the Codex prompt queue".to_string())?
+            .delete_queued_prompts_for_thread(thread_id)
+    }
+
+    pub fn persist_takeover_phase(
+        &self,
+        session: &AgentSession,
+        phase: &str,
+    ) -> Result<(), String> {
+        self.store
+            .lock()
+            .map_err(|_| "Could not save the Take Control operation".to_string())?
+            .save_takeover_operation(session, phase, now_millis())
+    }
+
+    pub fn clear_takeover_operation(&self, session_id: &str) -> Result<(), String> {
+        self.store
+            .lock()
+            .map_err(|_| "Could not finish the Take Control operation".to_string())?
+            .delete_takeover_operation(session_id)
+    }
+
+    pub fn set_codex_active_turn(
+        &self,
+        thread_id: &str,
+        turn_id: Option<&str>,
+    ) -> Result<(), String> {
+        let mut turns = self
+            .active_codex_turns
+            .lock()
+            .map_err(|_| "Could not update the active Codex turn".to_string())?;
+        if let Some(turn_id) = turn_id.filter(|value| !value.trim().is_empty()) {
+            turns.insert(thread_id.to_string(), turn_id.to_string());
+        } else {
+            turns.remove(thread_id);
+        }
+        Ok(())
+    }
+
+    pub fn codex_active_turn(&self, thread_id: &str) -> Result<Option<String>, String> {
+        self.active_codex_turns
+            .lock()
+            .map_err(|_| "Could not read the active Codex turn".to_string())
+            .map(|turns| turns.get(thread_id).cloned())
+    }
+
+    pub fn codex_thread_for_turn(&self, turn_id: &str) -> Result<Option<String>, String> {
+        self.active_codex_turns
+            .lock()
+            .map_err(|_| "Could not read the active Codex turn".to_string())
+            .map(|turns| {
+                turns.iter().find_map(|(thread_id, active_turn_id)| {
+                    (active_turn_id == turn_id).then(|| thread_id.clone())
+                })
+            })
+    }
+
+    pub fn cached_hub_command_response(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<crate::protocol::HubCommandResponse>, String> {
+        let cutoff = now_millis() - 10 * 60 * 1_000;
+        let mut responses = self
+            .hub_command_responses
+            .lock()
+            .map_err(|_| "Could not access the command response cache".to_string())?;
+        responses.retain(|_, (created_at, _)| *created_at >= cutoff);
+        Ok(responses
+            .get(request_id)
+            .map(|(_, response)| response.clone()))
+    }
+
+    pub fn cache_hub_command_response(
+        &self,
+        response: crate::protocol::HubCommandResponse,
+    ) -> Result<(), String> {
+        let mut responses = self
+            .hub_command_responses
+            .lock()
+            .map_err(|_| "Could not update the command response cache".to_string())?;
+        if responses.len() >= 128 {
+            if let Some(oldest) = responses
+                .iter()
+                .min_by_key(|(_, (created_at, _))| *created_at)
+                .map(|(request_id, _)| request_id.clone())
+            {
+                responses.remove(&oldest);
+            }
+        }
+        responses.insert(response.request_id.clone(), (now_millis(), response));
+        Ok(())
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -86,6 +261,38 @@ impl AppState {
         self.attach_archived_conversations(&mut sessions)?;
         self.attach_session_plans(&mut sessions)?;
         self.finalize_sessions(sessions)
+    }
+
+    pub fn codex_subagent_thread(
+        &self,
+        session_id: &str,
+        activity_id: &str,
+    ) -> Result<(String, String), String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Could not access sessions".to_string())?;
+        let session = sessions
+            .iter()
+            .find(|session| session.id == session_id && session.agent == AgentKind::Codex)
+            .ok_or_else(|| "Codex session not found".to_string())?;
+        let parent_thread_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or_else(|| "Codex thread ID is unavailable".to_string())?;
+        if !session
+            .activities
+            .iter()
+            .any(|activity| activity.id == activity_id && activity.kind == "subagent")
+        {
+            return Err("Subagent does not belong to this session".into());
+        }
+        let prefix = format!("codex:{parent_thread_id}:subagent:");
+        let child_thread_id = activity_id
+            .strip_prefix(&prefix)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "Subagent thread ID is unavailable".to_string())?;
+        Ok((parent_thread_id.to_string(), child_thread_id.to_string()))
     }
 
     pub fn terminal_sessions<F>(
@@ -107,6 +314,11 @@ impl AppState {
         self.attach_recent_archived_conversations(&mut sessions, activity_limit)?;
         self.attach_session_plans(&mut sessions)?;
         for session in &mut sessions {
+            let recent_subagents = visible_subagent_ids(&session.activities);
+            let current_work = visible_work_activity_ids(&session.activities);
+            session.activities.retain(|activity| {
+                activity.kind != "subagent" || recent_subagents.contains(&activity.id)
+            });
             let start = session
                 .activities
                 .len()
@@ -116,7 +328,8 @@ impl AppState {
                 recent.extend(session.activities.drain(..).filter(|activity| {
                     activity.kind == "plan_document"
                         || (activity.kind == "queued_prompt" && activity.status == "waiting")
-                        || (activity.kind == "subagent" && activity.status == "running")
+                        || recent_subagents.contains(&activity.id)
+                        || current_work.contains(&activity.id)
                 }));
                 recent.sort_by_key(|activity| activity.created_at);
                 session.activities = recent;
@@ -195,6 +408,20 @@ impl AppState {
             .lock()
             .map_err(|_| "Could not read the conversation history".to_string())?
             .conversation_activities_before(&session, before_created_at, before_activity_id, limit)
+    }
+
+    pub fn conversation_prompts_before(
+        &self,
+        session_id: &str,
+        before: Option<(i64, &str)>,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<crate::store::ConversationPromptIndexEntry>, bool), String> {
+        let session = self.connected_session(session_id)?;
+        self.store
+            .lock()
+            .map_err(|_| "Could not read the prompt index".to_string())?
+            .conversation_prompts_before(&session, before, query, limit)
     }
 
     pub fn session_status(
@@ -605,6 +832,7 @@ impl AppState {
         &self,
         session_id: &str,
         source: SessionSource,
+        provider_thread_name: Option<&str>,
     ) -> Result<(), String> {
         let snapshots = {
             let mut sessions = self
@@ -632,6 +860,9 @@ impl AppState {
                 .iter_mut()
                 .filter(|session| matching_ids.contains(&session.id))
             {
+                if let Some(name) = provider_thread_name.and_then(normalized_session_name) {
+                    session.session_name = name;
+                }
                 session.control_origin = SessionControlOrigin::Lume;
                 session.source = source.clone();
                 session.source_app = None;
@@ -700,6 +931,9 @@ impl AppState {
             .sessions_in_takeover
             .lock()
             .map_err(|_| "Could not reserve this session for transfer".to_string())?;
+        if active && matching_ids.iter().any(|id| takeovers.contains(id)) {
+            return Err("A transfer is already in progress for this session".into());
+        }
         for id in matching_ids {
             if active {
                 takeovers.insert(id);
@@ -741,6 +975,48 @@ impl AppState {
             .map_err(|_| "Could not save the session model settings".to_string())?
             .insert(key, settings.clone());
         Ok(settings)
+    }
+
+    pub(crate) fn queue_codex_model_update(
+        &self,
+        thread_id: &str,
+        settings: SessionModelOverride,
+        collaboration_mode: String,
+    ) -> Result<(), String> {
+        self.pending_codex_model_updates
+            .lock()
+            .map_err(|_| "Could not queue the Codex model change".to_string())?
+            .insert(
+                thread_id.to_string(),
+                PendingCodexModelUpdate {
+                    settings,
+                    collaboration_mode,
+                },
+            );
+        Ok(())
+    }
+
+    pub(crate) fn take_codex_model_update(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<PendingCodexModelUpdate>, String> {
+        self.pending_codex_model_updates
+            .lock()
+            .map_err(|_| "Could not read the queued Codex model change".to_string())
+            .map(|mut updates| updates.remove(thread_id))
+    }
+
+    pub(crate) fn restore_codex_model_update(
+        &self,
+        thread_id: &str,
+        update: PendingCodexModelUpdate,
+    ) -> Result<(), String> {
+        self.pending_codex_model_updates
+            .lock()
+            .map_err(|_| "Could not restore the queued Codex model change".to_string())?
+            .entry(thread_id.to_string())
+            .or_insert(update);
+        Ok(())
     }
 
     pub fn record_queued_prompt_activity(
@@ -804,48 +1080,53 @@ impl AppState {
         Ok(())
     }
 
-    #[cfg(test)]
     pub fn mark_queued_prompt_needs_attention(
         &self,
         session_id: &str,
         activity_id: &str,
     ) -> Result<(), String> {
-        let mut sessions = self
-            .sessions
+        let snapshot = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "Could not update the Codex prompt queue".to_string())?;
+            let session = sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| "Session not found".to_string())?;
+            if let Some(activity) = session
+                .activities
+                .iter_mut()
+                .find(|activity| activity.id == activity_id)
+            {
+                activity.title = "Queued prompt was not replayed".into();
+                activity.status = "failed".into();
+            } else {
+                remember_activity(
+                    session,
+                    SessionActivity {
+                        id: activity_id.to_string(),
+                        kind: "queued_prompt".into(),
+                        title: "Queued prompt was not replayed".into(),
+                        detail: Some(
+                            "Lume could not confirm delivery and did not resend it automatically."
+                                .into(),
+                        ),
+                        status: "failed".into(),
+                        created_at: now_millis(),
+                        files: Vec::new(),
+                        attachments: Vec::new(),
+                        append_detail: false,
+                    },
+                );
+            }
+            session.updated_at = now_millis();
+            session.clone()
+        };
+        self.store
             .lock()
-            .map_err(|_| "Could not update the Codex prompt queue".to_string())?;
-        let session = sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-            .ok_or_else(|| "Session not found".to_string())?;
-        if let Some(activity) = session
-            .activities
-            .iter_mut()
-            .find(|activity| activity.id == activity_id)
-        {
-            activity.title = "Queued prompt was not replayed".into();
-            activity.status = "failed".into();
-        } else {
-            remember_activity(
-                session,
-                SessionActivity {
-                    id: activity_id.to_string(),
-                    kind: "queued_prompt".into(),
-                    title: "Queued prompt was not replayed".into(),
-                    detail: Some(
-                        "Lume could not confirm delivery and did not resend it automatically."
-                            .into(),
-                    ),
-                    status: "failed".into(),
-                    created_at: now_millis(),
-                    files: Vec::new(),
-                    attachments: Vec::new(),
-                    append_detail: false,
-                },
-            );
-        }
-        session.updated_at = now_millis();
-        Ok(())
+            .map_err(|_| "Could not save the Codex prompt queue".to_string())?
+            .save_session(&snapshot)
     }
 
     pub fn mark_prompt_interrupted(&self, session_id: &str) -> Result<(), String> {
@@ -899,6 +1180,40 @@ impl AppState {
         let changed = current.get(&agent) != Some(&limits);
         current.insert(agent, limits);
         Ok(changed)
+    }
+
+    pub fn record_codex_turn_token_usage(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        total_tokens: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> Result<(), String> {
+        if thread_id.trim().is_empty() || turn_id.trim().is_empty() {
+            return Ok(());
+        }
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Não foi possível registrar o uso de tokens".to_string())?;
+        let Some(session) = sessions.iter_mut().find(|session| {
+            session.agent == AgentKind::Codex
+                && session.native_session_id.as_deref() == Some(thread_id)
+        }) else {
+            return Ok(());
+        };
+        remember_prompt_token_usage(
+            session,
+            PromptTokenUsage {
+                turn_id: turn_id.to_string(),
+                total_tokens,
+                input_tokens,
+                output_tokens,
+                created_at: now_millis(),
+            },
+        );
+        Ok(())
     }
 
     pub fn history(&self, limit: usize) -> Result<Vec<HistoryEntry>, String> {
@@ -1291,6 +1606,9 @@ impl AppState {
             .map_err(|_| "Não foi possível persistir o encerramento".to_string())?;
         for entry in history {
             store.add_history(&entry)?;
+        }
+        for session_id in removed_ids {
+            store.delete_session(&session_id)?;
         }
         Ok(true)
     }
@@ -2028,16 +2346,22 @@ impl AppState {
             .map(|process| process.process_id)
             .collect::<std::collections::HashSet<_>>();
         let discovered = coalesce_discovered_processes(discovered);
-        let mut sessions = self
+        let session_snapshot = self
             .sessions
             .lock()
-            .map_err(|_| "Não foi possível atualizar os processos".to_string())?;
-        let recovered_identities = recover_process_identities(&discovered, &sessions);
+            .map_err(|_| "Não foi possível atualizar os processos".to_string())?
+            .clone();
+        // Identity and activity recovery may read provider history from disk.
+        // Keep that work outside the global sessions lock so UI snapshots and
+        // commands remain responsive while Windows Defender scans those files.
+        let recovered_identities = recover_process_identities(&discovered, &session_snapshot);
         let recovered_work = recovered_identities
             .iter()
             .filter(|(process_id, (native_id, _))| {
-                !sessions.iter().any(|session| {
-                    session.process_id == Some(**process_id)
+                !session_snapshot.iter().any(|session| {
+                    (session.process_id == Some(**process_id)
+                        && (session.native_session_id.as_deref() == Some(native_id.as_str())
+                            || !session.activities.is_empty()))
                         || (session.native_session_id.as_deref() == Some(native_id.as_str())
                             && !session.activities.is_empty())
                 })
@@ -2047,7 +2371,10 @@ impl AppState {
                     .iter()
                     .find(|process| {
                         process.process_id == *process_id
-                            && process.native_session_ids.contains(native_id)
+                            && (process.native_session_ids.contains(native_id)
+                                || recovered_identities
+                                    .get(process_id)
+                                    .is_some_and(|(recovered_id, _)| recovered_id == native_id))
                     })
                     .and_then(|process| integration_kind_for_agent(&process.agent));
                 let activities = kind
@@ -2057,6 +2384,10 @@ impl AppState {
                 (*process_id, activities)
             })
             .collect::<HashMap<_, _>>();
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Não foi possível atualizar os processos".to_string())?;
         let mut missing_process_scans = self
             .missing_process_scans
             .lock()
@@ -2369,6 +2700,7 @@ impl AppState {
                     .cloned()
                     .unwrap_or_default(),
                 rate_limits: Vec::new(),
+                prompt_token_usage: Vec::new(),
             };
             snapshots.push(session.clone());
             sessions.push(session);
@@ -2505,10 +2837,21 @@ fn session_from_event(event: &HookEvent, now: i64) -> AgentSession {
         results: Vec::new(),
         activities: Vec::new(),
         rate_limits: Vec::new(),
+        prompt_token_usage: Vec::new(),
     }
 }
 
 fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) {
+    if activity.kind == "token_usage" {
+        if let Some(usage) = activity
+            .detail
+            .as_deref()
+            .and_then(|detail| serde_json::from_str::<PromptTokenUsage>(detail).ok())
+        {
+            remember_prompt_token_usage(session, usage);
+        }
+        return;
+    }
     if activity.kind == "prompt" {
         normalize_lume_prompt_activity(&mut activity);
         let incoming_key = activity
@@ -2617,7 +2960,75 @@ fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) 
     prune_transient_activities(&mut session.activities, 160);
 }
 
+fn remember_prompt_token_usage(session: &mut AgentSession, usage: PromptTokenUsage) {
+    if let Some(existing) = session.prompt_token_usage.iter_mut().find(|existing| {
+        existing.turn_id == usage.turn_id
+            || ((existing.created_at - usage.created_at).abs() <= 15_000
+                && existing.total_tokens == usage.total_tokens)
+    }) {
+        *existing = usage;
+    } else {
+        session.prompt_token_usage.push(usage);
+        session
+            .prompt_token_usage
+            .sort_by_key(|sample| sample.created_at);
+        if session.prompt_token_usage.len() > 32 {
+            session
+                .prompt_token_usage
+                .drain(..session.prompt_token_usage.len() - 32);
+        }
+    }
+}
+
+pub(crate) fn visible_subagent_ids(activities: &[SessionActivity]) -> HashSet<String> {
+    activities
+        .iter()
+        .rev()
+        .filter(|activity| activity.kind == "subagent")
+        // The workspace decides when an idle child is hidden. Keep a bounded
+        // history here so opening its portal can extend its lifetime.
+        .take(64)
+        .map(|activity| activity.id.clone())
+        .collect()
+}
+
+fn visible_work_activity_ids(activities: &[SessionActivity]) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let mut has_plan = false;
+    let mut has_todo = false;
+    let mut goal_events = 0;
+    for activity in activities.iter().rev() {
+        if activity.kind == "plan_document" {
+            ids.insert(activity.id.clone());
+        } else if activity.kind == "plan" && !has_plan {
+            ids.insert(activity.id.clone());
+            has_plan = true;
+        } else if activity.kind == "tool" {
+            let title = activity.title.to_ascii_lowercase();
+            if ["create_goal", "get_goal", "update_goal"]
+                .iter()
+                .any(|tool| title.contains(tool))
+                && goal_events < 12
+            {
+                ids.insert(activity.id.clone());
+                goal_events += 1;
+            } else if !has_todo
+                && (title.contains("todo")
+                    || activity.detail.as_deref().is_some_and(|detail| {
+                        detail.contains("\"todos\"") || detail.contains("\"tasks\"")
+                    }))
+            {
+                ids.insert(activity.id.clone());
+                has_todo = true;
+            }
+        }
+    }
+    ids
+}
+
 fn prune_transient_activities(activities: &mut Vec<SessionActivity>, limit: usize) {
+    let recent_subagents = visible_subagent_ids(activities);
+    let current_work = visible_work_activity_ids(activities);
     let transient_count = activities
         .iter()
         .filter(|activity| {
@@ -2636,7 +3047,11 @@ fn prune_transient_activities(activities: &mut Vec<SessionActivity>, limit: usiz
             activity.kind.as_str(),
             "prompt" | "message" | "queued_prompt"
         );
-        if transient && remove > 0 {
+        if transient
+            && remove > 0
+            && !recent_subagents.contains(&activity.id)
+            && !current_work.contains(&activity.id)
+        {
             remove -= 1;
             false
         } else {
@@ -3180,6 +3595,9 @@ fn reported_file_candidate(token: &str, extensions: &[&str]) -> Option<String> {
 
 fn merge_results(target: &mut AgentSession, source: &AgentSession) {
     merge_permission_scope(&mut target.permission_profile, &source.permission_profile);
+    for usage in &source.prompt_token_usage {
+        remember_prompt_token_usage(target, usage.clone());
+    }
     for activity in &source.activities {
         remember_activity(target, activity.clone());
     }
@@ -3260,7 +3678,11 @@ fn apply_metadata(session: &mut AgentSession, event: &HookEvent) {
         && session.process_id.is_some()
         && event.process_id.is_none()
         && event.native_session_id.is_some();
-    if !keeps_bound_process_source {
+    let keeps_managed_desktop_source = session.agent == AgentKind::Codex
+        && session.control_origin == SessionControlOrigin::Lume
+        && session.source == SessionSource::Desktop
+        && event.process_id.is_none();
+    if !keeps_bound_process_source && !keeps_managed_desktop_source {
         if let Some(source) = &event.source {
             session.source = source.clone();
         }
@@ -3380,7 +3802,19 @@ fn recover_process_identities(
         }
     }
 
-    recover_process_identities_from_index(unresolved, sessions, &indexed_names)
+    let recovered =
+        recover_process_identities_from_index(unresolved.clone(), sessions, &indexed_names);
+    #[cfg(target_os = "windows")]
+    {
+        let mut recovered = recovered;
+        let recent = integrations::recent_codex_sessions_for_discovery(48);
+        recovered.extend(infer_recent_codex_process_identities(
+            unresolved, sessions, &recent,
+        ));
+        return recovered;
+    }
+    #[cfg(not(target_os = "windows"))]
+    recovered
 }
 
 fn recover_process_identities_from_index(
@@ -3419,6 +3853,65 @@ fn recover_process_identities_from_index(
             Some((process.process_id, (native_id, name)))
         })
         .collect()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn infer_recent_codex_process_identities(
+    mut unresolved: Vec<&DiscoveredProcess>,
+    sessions: &[AgentSession],
+    candidates: &[integrations::ResumableSession],
+) -> HashMap<u32, (String, String)> {
+    unresolved.retain(|process| {
+        process.agent == AgentKind::Codex
+            && process.source == SessionSource::Cli
+            && process.native_session_ids.is_empty()
+            && process.started_at > 0
+    });
+    unresolved.sort_by_key(|process| std::cmp::Reverse(process.started_at));
+
+    let mut claimed = HashSet::<String>::new();
+    let mut recovered = HashMap::new();
+    for process in unresolved {
+        let current_native_id = sessions
+            .iter()
+            .find(|session| session.process_id == Some(process.process_id))
+            .and_then(|session| session.native_session_id.as_deref());
+        let process_started_at = (process.started_at as i64).saturating_mul(1_000);
+        let candidate = candidates
+            .iter()
+            .filter(|candidate| candidate.source == "CLI")
+            .filter(|candidate| !claimed.contains(&candidate.id))
+            .filter(|candidate| {
+                same_directory(
+                    process.working_directory.as_deref(),
+                    Some(candidate.working_directory.as_str()),
+                )
+            })
+            .filter(|candidate| candidate.updated_at.saturating_add(30_000) >= process_started_at)
+            .filter(|candidate| {
+                sessions.iter().all(|session| {
+                    session.native_session_id.as_deref() != Some(candidate.id.as_str())
+                        || session.process_id.is_none()
+                        || session.process_id == Some(process.process_id)
+                })
+            })
+            .min_by_key(|candidate| {
+                if current_native_id == Some(candidate.id.as_str()) {
+                    0
+                } else {
+                    candidate.updated_at.abs_diff(process_started_at)
+                }
+            });
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        claimed.insert(candidate.id.clone());
+        recovered.insert(
+            process.process_id,
+            (candidate.id.clone(), candidate.name.clone()),
+        );
+    }
+    recovered
 }
 
 fn session_needs_recovered_identity(session: &AgentSession) -> bool {
@@ -3761,6 +4254,7 @@ mod tests {
             agent: AgentKind::ClaudeCode,
             agent_label: "Claude Code".into(),
             process_id,
+            started_at: 0,
             native_session_ids: Vec::new(),
             working_directory: Some("/work/lume".into()),
             source: SessionSource::Cli,
@@ -3967,6 +4461,37 @@ mod tests {
     }
 
     #[test]
+    fn queued_codex_model_update_is_taken_once_and_can_be_restored() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let settings = SessionModelOverride {
+            model: Some("gpt-test".into()),
+            reasoning_effort: Some("high".into()),
+        };
+        state
+            .queue_codex_model_update("thread-1", settings.clone(), "default".into())
+            .expect("queue update");
+
+        let update = state
+            .take_codex_model_update("thread-1")
+            .expect("take update")
+            .expect("queued update");
+        assert_eq!(update.settings, settings);
+        assert_eq!(update.collaboration_mode, "default");
+        assert!(state
+            .take_codex_model_update("thread-1")
+            .expect("empty queue")
+            .is_none());
+
+        state
+            .restore_codex_model_update("thread-1", update)
+            .expect("restore update");
+        assert!(state
+            .take_codex_model_update("thread-1")
+            .expect("restored update")
+            .is_some());
+    }
+
+    #[test]
     fn transferred_session_becomes_promptable_without_losing_its_thread() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");
         let mut event = started_event("codex:external", 4242);
@@ -3976,7 +4501,11 @@ mod tests {
         state.ingest(event).expect("sessão externa");
 
         state
-            .mark_session_lume_controlled("codex:external", SessionSource::Desktop)
+            .mark_session_lume_controlled(
+                "codex:external",
+                SessionSource::Desktop,
+                Some("Lume principal"),
+            )
             .expect("transferência");
 
         let session = state.sessions().expect("sessões").remove(0);
@@ -3986,6 +4515,7 @@ mod tests {
             session.native_session_id.as_deref(),
             Some("thread-external")
         );
+        assert_eq!(session.session_name, "Lume principal");
         assert_eq!(session.status, SessionStatus::WaitingForInput);
         assert!(session.process_id.is_none());
         assert!(session.permission_profile.can_respond_from_lume);
@@ -4005,7 +4535,7 @@ mod tests {
         state.sessions.lock().expect("sessões").push(alias);
 
         state
-            .mark_session_lume_controlled("codex:external", SessionSource::Desktop)
+            .mark_session_lume_controlled("codex:external", SessionSource::Desktop, None)
             .expect("transferência");
 
         let sessions = state.connected_sessions().expect("sessões");
@@ -4044,6 +4574,44 @@ mod tests {
                 .expect("reconciliação final");
         }
         assert!(state.sessions().expect("sessões").is_empty());
+    }
+
+    #[test]
+    fn takeover_reservation_rejects_a_concurrent_transfer() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut event = started_event("codex:takeover-concurrent", 4242);
+        event.agent = AgentKind::Codex;
+        state.ingest(event).expect("session");
+        state
+            .set_session_takeover_active("codex:takeover-concurrent", true)
+            .expect("first reservation");
+        assert!(state
+            .set_session_takeover_active("codex:takeover-concurrent", true)
+            .expect_err("second reservation")
+            .contains("already in progress"));
+    }
+
+    #[test]
+    fn pidless_proxy_updates_do_not_change_a_managed_desktop_source() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut event = started_event("codex:managed-source", 4242);
+        event.agent = AgentKind::Codex;
+        event.native_session_id = Some("thread-managed-source".into());
+        state.ingest(event.clone()).expect("external session");
+        state
+            .mark_session_lume_controlled("codex:managed-source", SessionSource::Desktop, None)
+            .expect("managed session");
+
+        event.event = HookEventKind::Activity;
+        event.source = Some(SessionSource::Cli);
+        event.process_id = None;
+        event.control_origin = SessionControlOrigin::External;
+        state.ingest(event).expect("proxy update");
+
+        let session = state.sessions().expect("sessions").remove(0);
+        assert_eq!(session.source, SessionSource::Desktop);
+        assert_eq!(session.control_origin, SessionControlOrigin::Lume);
+        assert!(session.process_id.is_none());
     }
 
     #[test]
@@ -4090,6 +4658,7 @@ mod tests {
             agent: AgentKind::Codex,
             agent_label: "Codex".into(),
             process_id: 4104,
+            started_at: 0,
             native_session_ids: vec!["thread-main".into()],
             working_directory: Some("/home/user".into()),
             source: SessionSource::Cli,
@@ -4105,6 +4674,68 @@ mod tests {
             recovered.get(&4104),
             Some(&("thread-main".into(), "Lume principal".into()))
         );
+    }
+
+    #[test]
+    fn recent_codex_rollout_recovers_a_windows_process_without_cli_arguments() {
+        let process = DiscoveredProcess {
+            agent: AgentKind::Codex,
+            agent_label: "Codex".into(),
+            process_id: 4105,
+            started_at: 1_780_000_000,
+            native_session_ids: Vec::new(),
+            working_directory: Some("C:\\work\\lume".into()),
+            source: SessionSource::Cli,
+        };
+        let candidates = vec![integrations::ResumableSession {
+            id: "thread-recent".into(),
+            agent: IntegrationKind::Codex,
+            name: "Lume principal".into(),
+            project: "lume".into(),
+            working_directory: "C:/work/lume".into(),
+            source: "CLI".into(),
+            updated_at: 1_780_000_002_000,
+        }];
+
+        let recovered = infer_recent_codex_process_identities(vec![&process], &[], &candidates);
+
+        assert_eq!(
+            recovered.get(&4105),
+            Some(&("thread-recent".into(), "Lume principal".into()))
+        );
+    }
+
+    #[test]
+    fn recent_codex_rollout_is_not_shared_by_two_processes() {
+        let first = DiscoveredProcess {
+            agent: AgentKind::Codex,
+            agent_label: "Codex".into(),
+            process_id: 4106,
+            started_at: 1_780_000_000,
+            native_session_ids: Vec::new(),
+            working_directory: Some("C:/work/lume".into()),
+            source: SessionSource::Cli,
+        };
+        let second = DiscoveredProcess {
+            process_id: 4107,
+            started_at: 1_780_000_001,
+            ..first.clone()
+        };
+        let candidates = vec![integrations::ResumableSession {
+            id: "thread-only".into(),
+            agent: IntegrationKind::Codex,
+            name: "Only thread".into(),
+            project: "lume".into(),
+            working_directory: "C:/work/lume".into(),
+            source: "CLI".into(),
+            updated_at: 1_780_000_001_500,
+        }];
+
+        let recovered =
+            infer_recent_codex_process_identities(vec![&first, &second], &[], &candidates);
+
+        assert_eq!(recovered.len(), 1);
+        assert!(recovered.contains_key(&4107));
     }
 
     #[test]
@@ -4935,6 +5566,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 agent_label: "Codex".into(),
                 process_id: 4242,
+                started_at: 0,
                 native_session_ids: Vec::new(),
                 working_directory: Some("/work/lume".into()),
                 source: SessionSource::Cli,
@@ -4978,6 +5610,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 agent_label: "Codex".into(),
                 process_id: 4242,
+                started_at: 0,
                 native_session_ids: vec!["thread-1".into()],
                 working_directory: Some("/home/user".into()),
                 source: SessionSource::Cli,
@@ -5352,6 +5985,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 agent_label: "Codex".into(),
                 process_id: 5252,
+                started_at: 0,
                 native_session_ids: Vec::new(),
                 working_directory: Some("/home/user/.vscode/extensions/openai.chatgpt".into()),
                 source: SessionSource::Vscode,
@@ -5390,6 +6024,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 agent_label: "Codex".into(),
                 process_id: 5252,
+                started_at: 0,
                 native_session_ids: Vec::new(),
                 working_directory: Some("/home/user/.vscode/extensions/openai.chatgpt".into()),
                 source: SessionSource::Vscode,
@@ -5421,6 +6056,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 agent_label: "Codex".into(),
                 process_id: 5252,
+                started_at: 0,
                 native_session_ids: Vec::new(),
                 working_directory: Some("/home/user/.vscode/extensions/openai.chatgpt".into()),
                 source: SessionSource::Vscode,
@@ -5503,6 +6139,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 agent_label: "Codex".into(),
                 process_id: 4242,
+                started_at: 0,
                 native_session_ids: Vec::new(),
                 working_directory: Some(home.to_string_lossy().into_owned()),
                 source: SessionSource::Cli,
@@ -5787,5 +6424,180 @@ mod tests {
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_file(database_path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(database_path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn restart_restores_only_sanitized_lume_managed_sessions() {
+        let database_path = std::env::temp_dir().join(format!(
+            "lume-managed-restart-{}-{}.sqlite3",
+            std::process::id(),
+            now_millis()
+        ));
+        {
+            let state = AppState::new(&database_path).expect("initial state");
+            let mut event = started_event("codex:managed-restart", 4455);
+            event.agent = AgentKind::Codex;
+            event.native_session_id = Some("thread-managed-restart".into());
+            event.last_response = Some("sensitive response".into());
+            state.ingest(event).expect("external session");
+            state
+                .mark_session_lume_controlled(
+                    "codex:managed-restart",
+                    SessionSource::Desktop,
+                    Some("Managed thread"),
+                )
+                .expect("managed session");
+        }
+
+        let restarted = AppState::new(&database_path).expect("restart");
+        let sessions = restarted.sessions().expect("sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].control_origin, SessionControlOrigin::Lume);
+        assert_eq!(sessions[0].source, SessionSource::Desktop);
+        assert_eq!(sessions[0].status, SessionStatus::WaitingForInput);
+        assert!(sessions[0].process_id.is_none());
+        assert!(sessions[0].last_response.is_none());
+        drop(restarted);
+
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn restart_marks_queued_prompts_for_attention_without_replaying_them() {
+        let database_path = std::env::temp_dir().join(format!(
+            "lume-queue-restart-{}-{}.sqlite3",
+            std::process::id(),
+            now_millis()
+        ));
+        {
+            let state = AppState::new(&database_path).expect("initial state");
+            let mut event = started_event("codex:queue-restart", 4466);
+            event.agent = AgentKind::Codex;
+            event.native_session_id = Some("thread-queue-restart".into());
+            state.ingest(event).expect("external session");
+            state
+                .mark_session_lume_controlled("codex:queue-restart", SessionSource::Desktop, None)
+                .expect("managed session");
+            state
+                .persist_queued_prompt(
+                    "codex:queue-restart",
+                    "queued-after-crash",
+                    "thread-queue-restart",
+                )
+                .expect("queued journal");
+        }
+
+        let restarted = AppState::new(&database_path).expect("restart");
+        let session = restarted.sessions().expect("sessions").remove(0);
+        let queued = session
+            .activities
+            .iter()
+            .find(|activity| activity.id == "queued-after-crash")
+            .expect("recovery activity");
+        assert_eq!(queued.status, "failed");
+        assert_eq!(queued.title, "Queued prompt was not replayed");
+        drop(restarted);
+
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn restart_recovers_a_takeover_after_the_source_was_released() {
+        let database_path = std::env::temp_dir().join(format!(
+            "lume-takeover-restart-{}-{}.sqlite3",
+            std::process::id(),
+            now_millis()
+        ));
+        {
+            let state = AppState::new(&database_path).expect("initial state");
+            let mut event = started_event("codex:takeover-restart", 4477);
+            event.agent = AgentKind::Codex;
+            event.native_session_id = Some("thread-takeover-restart".into());
+            state.ingest(event).expect("external session");
+            let session = state.sessions().expect("sessions").remove(0);
+            state
+                .persist_takeover_phase(&session, "source_released")
+                .expect("takeover journal");
+        }
+
+        let restarted = AppState::new(&database_path).expect("restart");
+        let session = restarted.sessions().expect("sessions").remove(0);
+        assert_eq!(session.control_origin, SessionControlOrigin::Lume);
+        assert_eq!(session.source, SessionSource::Desktop);
+        assert_eq!(session.status, SessionStatus::WaitingForInput);
+        assert!(session.process_id.is_none());
+        drop(restarted);
+
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn hub_command_responses_are_cached_for_idempotent_retries() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let response = crate::protocol::HubCommandResponse::success("request-1".into());
+        state
+            .cache_hub_command_response(response.clone())
+            .expect("cache response");
+
+        assert_eq!(
+            state
+                .cached_hub_command_response("request-1")
+                .expect("cached response"),
+            Some(response)
+        );
+    }
+
+    #[test]
+    fn activity_pruning_keeps_current_plan_todo_and_goal() {
+        let activity =
+            |id: &str, kind: &str, title: &str, detail: Option<&str>, created_at| SessionActivity {
+                id: id.into(),
+                kind: kind.into(),
+                title: title.into(),
+                detail: detail.map(Into::into),
+                status: "completed".into(),
+                created_at,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            };
+        let mut activities = vec![
+            activity(
+                "goal",
+                "tool",
+                "functions · get_goal",
+                Some(r#"{"objective":"Ship"}"#),
+                1,
+            ),
+            activity(
+                "todo",
+                "tool",
+                "TodoWrite",
+                Some(r#"{"todos":[{"content":"Test"}]}"#),
+                2,
+            ),
+            activity("plan", "plan", "Plan updated", Some("○ Test"), 3),
+        ];
+        for index in 0..10 {
+            activities.push(activity(
+                &format!("command-{index}"),
+                "command",
+                "Command",
+                None,
+                10 + index,
+            ));
+        }
+
+        prune_transient_activities(&mut activities, 2);
+
+        for id in ["goal", "todo", "plan"] {
+            assert!(activities.iter().any(|activity| activity.id == id));
+        }
     }
 }

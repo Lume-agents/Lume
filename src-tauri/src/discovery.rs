@@ -26,6 +26,8 @@ pub struct DiscoveredProcess {
     pub agent: AgentKind,
     pub agent_label: String,
     pub process_id: u32,
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    pub started_at: u64,
     pub native_session_ids: Vec<String>,
     pub working_directory: Option<String>,
     pub source: SessionSource,
@@ -231,6 +233,7 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
                 agent,
                 agent_label,
                 process_id: pid.as_u32(),
+                started_at: process.start_time(),
                 native_session_ids,
                 working_directory,
                 source: source_for(&system, pid),
@@ -583,14 +586,45 @@ fn detect_external_agent(
     })
 }
 
-pub fn terminate_agent_process(process_id: u32, expected_agent: &AgentKind) -> Result<(), String> {
+pub fn terminate_agent_process(
+    process_id: u32,
+    expected_agent: &AgentKind,
+    expected_native_session_id: Option<&str>,
+) -> Result<(), String> {
     let (system, target_pid, targets) = agent_process_tree(process_id, expected_agent)?;
+    verify_process_session_identity(&system, target_pid, expected_native_session_id, "terminate")?;
+    #[cfg(not(target_os = "windows"))]
+    if let Some(process) = system.process(target_pid) {
+        let _ = process.kill_with(Signal::Interrupt);
+        if wait_for_process_exit(target_pid, 8, Duration::from_millis(100)) {
+            return Ok(());
+        }
+    }
+    let mut requested_root = false;
+    for pid in &targets {
+        let Some(process) = system.process(*pid) else {
+            continue;
+        };
+        #[cfg(not(target_os = "windows"))]
+        let requested = process.kill_with(Signal::Term).unwrap_or(false);
+        #[cfg(target_os = "windows")]
+        let requested = process.kill();
+        if *pid == target_pid {
+            requested_root = requested;
+        }
+    }
+    if !requested_root {
+        return Err("O sistema recusou o encerramento do agente".into());
+    }
+    if wait_for_process_exit(target_pid, 30, Duration::from_millis(100)) {
+        return Ok(());
+    }
     let mut terminated_root = false;
     for pid in targets {
         let Some(process) = system.process(pid) else {
             continue;
         };
-        let terminated = process.kill_with(Signal::Term).unwrap_or(false) || process.kill();
+        let terminated = process.kill();
         if pid == target_pid {
             terminated_root = terminated;
         }
@@ -605,8 +639,19 @@ pub fn terminate_agent_process(process_id: u32, expected_agent: &AgentKind) -> R
 pub fn release_agent_process_for_takeover(
     process_id: u32,
     expected_agent: &AgentKind,
+    expected_native_session_id: Option<&str>,
 ) -> Result<(), String> {
     let (system, target_pid, targets) = agent_process_tree(process_id, expected_agent)?;
+    verify_process_session_identity(&system, target_pid, expected_native_session_id, "transfer")?;
+
+    #[cfg(not(target_os = "windows"))]
+    if let Some(process) = system.process(target_pid) {
+        let _ = process.kill_with(Signal::Interrupt);
+        if wait_for_process_exit(target_pid, 8, Duration::from_millis(100)) {
+            return Ok(());
+        }
+    }
+
     let mut requested_root = false;
     for pid in targets {
         let Some(process) = system.process(pid) else {
@@ -624,8 +669,33 @@ pub fn release_agent_process_for_takeover(
         return Err("The operating system refused to release this agent session".into());
     }
 
-    for _ in 0..30 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    if wait_for_process_exit(target_pid, 30, Duration::from_millis(100)) {
+        return Ok(());
+    }
+    Err("The external CLI did not close in time; Lume did not take control".into())
+}
+
+fn verify_process_session_identity(
+    system: &System,
+    target_pid: Pid,
+    expected_native_session_id: Option<&str>,
+    operation: &str,
+) -> Result<(), String> {
+    let Some(expected_native_session_id) = expected_native_session_id else {
+        return Ok(());
+    };
+    let observed = native_session_ids_for_process_tree(system, target_pid);
+    if !observed.is_empty() && !observed.iter().any(|id| id == expected_native_session_id) {
+        return Err(format!(
+            "The detected process no longer owns the session selected to {operation}"
+        ));
+    }
+    Ok(())
+}
+
+fn wait_for_process_exit(target_pid: Pid, attempts: usize, delay: Duration) -> bool {
+    for _ in 0..attempts {
+        std::thread::sleep(delay);
         let mut refreshed = System::new();
         refreshed.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[target_pid]),
@@ -633,10 +703,10 @@ pub fn release_agent_process_for_takeover(
             ProcessRefreshKind::nothing(),
         );
         if refreshed.process(target_pid).is_none() {
-            return Ok(());
+            return true;
         }
     }
-    Err("The external CLI did not close in time; Lume did not take control".into())
+    false
 }
 
 fn agent_process_tree(

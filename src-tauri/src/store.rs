@@ -3,12 +3,34 @@ use std::path::Path;
 use rusqlite::{params, Connection};
 
 use crate::domain::{
-    AgentSession, HistoryEntry, MobileScope, PairedDevice, Preferences, ResultNote, ReviewNote,
-    SessionActivity, SessionNote, WorkflowHistoryRecord,
+    AgentKind, AgentSession, HistoryEntry, MobileScope, PairedDevice, Preferences, ResultNote,
+    ReviewNote, SessionActivity, SessionControlOrigin, SessionNote, SessionStatus,
+    WorkflowHistoryRecord,
 };
 
 pub struct Store {
     connection: Connection,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationPromptIndexEntry {
+    pub id: String,
+    pub created_at: i64,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct QueuedPromptRecovery {
+    pub session_id: String,
+    pub activity_id: String,
+    pub thread_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct TakeoverRecovery {
+    pub session: AgentSession,
+    pub phase: String,
 }
 
 impl Store {
@@ -102,6 +124,23 @@ impl Store {
                  );
                  CREATE INDEX IF NOT EXISTS idx_conversation_activities_thread
                     ON conversation_activities(thread_key, created_at ASC);
+                 CREATE TABLE IF NOT EXISTS managed_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS queued_prompt_journal (
+                    activity_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS takeover_operations (
+                    session_id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                 );
                  CREATE TABLE IF NOT EXISTS workflow_runs (
                     workflow_id TEXT PRIMARY KEY,
                     payload TEXT NOT NULL,
@@ -122,12 +161,26 @@ impl Store {
         Ok(Self { connection })
     }
 
-    #[cfg(test)]
     pub fn load_sessions(&self) -> Result<Vec<AgentSession>, String> {
-        Ok(Vec::new())
+        let mut statement = self
+            .connection
+            .prepare("SELECT payload FROM managed_sessions ORDER BY updated_at DESC")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        let mut sessions = Vec::new();
+        for payload in rows {
+            let payload = payload.map_err(|error| error.to_string())?;
+            if let Ok(session) = serde_json::from_str::<AgentSession>(&payload) {
+                sessions.push(session);
+            }
+        }
+        Ok(sessions)
     }
 
     pub fn save_session(&self, session: &AgentSession) -> Result<(), String> {
+        self.save_managed_session(session)?;
         let Some(thread_key) = Self::conversation_key(session) else {
             return Ok(());
         };
@@ -177,8 +230,170 @@ impl Store {
         Ok(())
     }
 
-    pub fn delete_session(&self, _session_id: &str) -> Result<(), String> {
+    fn save_managed_session(&self, session: &AgentSession) -> Result<(), String> {
+        if session.control_origin != SessionControlOrigin::Lume
+            || session.agent != AgentKind::Codex
+            || session
+                .native_session_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+        {
+            return Ok(());
+        }
+        let mut durable = session.clone();
+        durable.source_app = None;
+        durable.process_id = None;
+        durable.status = SessionStatus::WaitingForInput;
+        durable.status_label = "Ready in Lume".into();
+        durable.pending_permission = None;
+        durable.pending_question = None;
+        durable.last_response = None;
+        durable.results.clear();
+        durable.activities.clear();
+        durable.rate_limits.clear();
+        durable.prompt_token_usage.clear();
+        let payload = serde_json::to_string(&durable).map_err(|error| error.to_string())?;
+        self.connection
+            .execute(
+                "INSERT INTO managed_sessions(session_id, payload, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at",
+                params![durable.id, payload, durable.updated_at],
+            )
+            .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM managed_sessions WHERE session_id = ?1",
+                [session_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn save_queued_prompt(
+        &self,
+        session_id: &str,
+        activity_id: &str,
+        thread_id: &str,
+        created_at: i64,
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "INSERT INTO queued_prompt_journal(activity_id, session_id, thread_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(activity_id) DO NOTHING",
+                params![activity_id, session_id, thread_id, created_at],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_queued_prompt(&self, activity_id: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM queued_prompt_journal WHERE activity_id = ?1",
+                [activity_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_queued_prompts_for_thread(&self, thread_id: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM queued_prompt_journal WHERE thread_id = ?1",
+                [thread_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn take_queued_prompt_recoveries(&self) -> Result<Vec<QueuedPromptRecovery>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT session_id, activity_id, thread_id
+                 FROM queued_prompt_journal ORDER BY created_at ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(QueuedPromptRecovery {
+                    session_id: row.get(0)?,
+                    activity_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        let recoveries = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        Ok(recoveries)
+    }
+
+    pub fn save_takeover_operation(
+        &self,
+        session: &AgentSession,
+        phase: &str,
+        updated_at: i64,
+    ) -> Result<(), String> {
+        let mut durable = session.clone();
+        durable.pending_permission = None;
+        durable.pending_question = None;
+        durable.last_response = None;
+        durable.results.clear();
+        durable.activities.clear();
+        durable.rate_limits.clear();
+        durable.prompt_token_usage.clear();
+        let payload = serde_json::to_string(&durable).map_err(|error| error.to_string())?;
+        self.connection
+            .execute(
+                "INSERT INTO takeover_operations(session_id, payload, phase, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                    payload = excluded.payload,
+                    phase = excluded.phase,
+                    updated_at = excluded.updated_at",
+                params![session.id, payload, phase, updated_at],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_takeover_operation(&self, session_id: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM takeover_operations WHERE session_id = ?1",
+                [session_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn take_takeover_recoveries(&self) -> Result<Vec<TakeoverRecovery>, String> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT payload, phase FROM takeover_operations ORDER BY updated_at ASC")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut recoveries = Vec::new();
+        for row in rows {
+            let (payload, phase) = row.map_err(|error| error.to_string())?;
+            if let Ok(session) = serde_json::from_str::<AgentSession>(&payload) {
+                recoveries.push(TakeoverRecovery { session, phase });
+            }
+        }
+        Ok(recoveries)
     }
 
     pub fn conversation_key(session: &AgentSession) -> Option<String> {
@@ -193,6 +408,11 @@ impl Store {
     pub fn is_archivable_conversation_activity(activity: &SessionActivity) -> bool {
         matches!(activity.kind.as_str(), "prompt" | "queued_prompt")
             || (activity.kind == "message" && activity.status != "running")
+            || matches!(activity.kind.as_str(), "plan" | "plan_document" | "warning")
+            || (activity.kind == "tool"
+                && ["create_goal", "get_goal", "update_goal", "todo_write"]
+                    .iter()
+                    .any(|tool| activity.title.contains(tool)))
     }
 
     pub fn conversation_activities(
@@ -305,6 +525,56 @@ impl Store {
         activities.truncate(limit);
         activities.reverse();
         Ok((activities, has_more))
+    }
+
+    pub fn conversation_prompts_before(
+        &self,
+        session: &AgentSession,
+        before: Option<(i64, &str)>,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<ConversationPromptIndexEntry>, bool), String> {
+        let Some(thread_key) = Self::conversation_key(session) else {
+            return Ok((Vec::new(), false));
+        };
+        let limit = limit.clamp(1, 40);
+        let query = query.map(str::trim).filter(|query| !query.is_empty());
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT activity_id, created_at,
+                        substr(coalesce(json_extract(payload, '$.detail'), ''), 1, 220)
+                 FROM conversation_activities
+                 WHERE thread_key = ?1 AND json_extract(payload, '$.kind') = 'prompt'
+                   AND (?2 IS NULL OR created_at < ?2 OR (created_at = ?2 AND activity_id < ?3))
+                   AND (?4 IS NULL OR instr(lower(coalesce(json_extract(payload, '$.detail'), '')), lower(?4)) > 0)
+                 ORDER BY created_at DESC, activity_id DESC LIMIT ?5",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(
+                params![
+                    thread_key,
+                    before.map(|value| value.0),
+                    before.map(|value| value.1),
+                    query,
+                    (limit + 1) as i64
+                ],
+                |row| {
+                    Ok(ConversationPromptIndexEntry {
+                        id: row.get(0)?,
+                        created_at: row.get(1)?,
+                        detail: row.get(2)?,
+                    })
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut prompts = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let has_more = prompts.len() > limit;
+        prompts.truncate(limit);
+        Ok((prompts, has_more))
     }
 
     pub fn save_session_plan(
@@ -985,6 +1255,7 @@ mod tests {
             }],
             activities: Vec::new(),
             rate_limits: Vec::new(),
+            prompt_token_usage: Vec::new(),
         };
         store.save_session(&session).expect("salva a sessão");
         let loaded = store.load_sessions().expect("carrega as sessões");
@@ -1057,6 +1328,50 @@ mod tests {
             .expect("primeira pagina");
         assert!(!has_more);
         assert_eq!(first[0].id, "message-1");
+
+        for index in 5..=7 {
+            threaded.activities.push(SessionActivity {
+                id: format!("prompt-{index}"),
+                kind: "prompt".into(),
+                title: "You".into(),
+                detail: Some(format!("prompt {index} {}", "x".repeat(300))),
+                status: "completed".into(),
+                created_at: index,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            });
+        }
+        store.save_session(&threaded).expect("arquiva prompts");
+        let (recent_prompts, has_more) = store
+            .conversation_prompts_before(&threaded, None, None, 2)
+            .expect("lista prompts recentes");
+        assert!(has_more);
+        assert_eq!(
+            recent_prompts
+                .iter()
+                .map(|prompt| prompt.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prompt-7", "prompt-6"]
+        );
+        assert!(recent_prompts[0].detail.chars().count() <= 220);
+        let (older_prompts, has_more) = store
+            .conversation_prompts_before(
+                &threaded,
+                Some((recent_prompts[1].created_at, &recent_prompts[1].id)),
+                None,
+                2,
+            )
+            .expect("pagina prompts antigos");
+        assert!(!has_more);
+        assert_eq!(older_prompts[0].id, "prompt-5");
+
+        let (matching_prompts, has_more) = store
+            .conversation_prompts_before(&threaded, None, Some("PROMPT 6"), 2)
+            .expect("pesquisa prompts");
+        assert!(!has_more);
+        assert_eq!(matching_prompts.len(), 1);
+        assert_eq!(matching_prompts[0].id, "prompt-6");
     }
 
     #[test]
@@ -1191,6 +1506,10 @@ mod tests {
         assert_eq!(preferences.accent_opacity, 100);
         assert!(preferences.workspace_background_color.is_none());
         assert_eq!(preferences.workspace_background_opacity, 96);
+        assert!(preferences.workspace_light_background_color.is_none());
+        assert_eq!(preferences.workspace_light_background_opacity, 96);
+        assert!(preferences.workspace_dark_background_color.is_none());
+        assert_eq!(preferences.workspace_dark_background_opacity, 96);
         assert_eq!(preferences.language, "en");
         assert_eq!(preferences.startup_mode, "ask");
         assert_eq!(preferences.sound_volume, 55);

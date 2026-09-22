@@ -216,6 +216,16 @@ pub struct AgentRateLimit {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PromptTokenUsage {
+    pub turn_id: String,
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionActivity {
     pub id: String,
     pub kind: String,
@@ -302,6 +312,8 @@ pub struct AgentSession {
     pub activities: Vec<SessionActivity>,
     #[serde(default)]
     pub rate_limits: Vec<AgentRateLimit>,
+    #[serde(default)]
+    pub prompt_token_usage: Vec<PromptTokenUsage>,
 }
 
 /// Process-owned helpers are reported separately from user-facing chats.
@@ -672,6 +684,10 @@ pub struct Preferences {
     pub accent_opacity: u8,
     pub workspace_background_color: Option<String>,
     pub workspace_background_opacity: u8,
+    pub workspace_light_background_color: Option<String>,
+    pub workspace_light_background_opacity: u8,
+    pub workspace_dark_background_color: Option<String>,
+    pub workspace_dark_background_opacity: u8,
     pub sound_enabled: bool,
     pub sound_volume: u8,
     pub popup_notifications_enabled: bool,
@@ -707,6 +723,10 @@ impl Default for Preferences {
             accent_opacity: 100,
             workspace_background_color: None,
             workspace_background_opacity: 96,
+            workspace_light_background_color: None,
+            workspace_light_background_opacity: 96,
+            workspace_dark_background_color: None,
+            workspace_dark_background_opacity: 96,
             sound_enabled: true,
             sound_volume: 55,
             popup_notifications_enabled: true,

@@ -7,8 +7,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    webview::PageLoadEvent, AppHandle, Emitter, LogicalSize, Manager, WebviewUrl,
-    WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 
 use crate::{
@@ -280,6 +279,7 @@ pub struct TerminalWindows {
     workflow_bridges: Arc<Mutex<HashMap<String, WorkflowBridgePlacement>>>,
     workflow_connection_hovers: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     visible: Arc<Mutex<bool>>,
+    workspace_restore_visible: Arc<Mutex<Option<bool>>>,
 }
 
 impl Default for TerminalWindows {
@@ -296,6 +296,7 @@ impl Default for TerminalWindows {
             workflow_bridges: Arc::default(),
             workflow_connection_hovers: Arc::default(),
             visible: Arc::new(Mutex::new(true)),
+            workspace_restore_visible: Arc::default(),
         }
     }
 }
@@ -1013,6 +1014,37 @@ impl TerminalWindows {
         }
     }
 
+    fn close_workflow_bridges_for_terminal(&self, app: &AppHandle, terminal_label: &str) {
+        let labels = self
+            .workflow_bridges
+            .lock()
+            .map(|bridges| {
+                bridges
+                    .iter()
+                    .filter(|(_, bridge)| {
+                        bridge.source_label == terminal_label
+                            || bridge.target_label == terminal_label
+                    })
+                    .map(|(label, _)| label.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for label in labels {
+            if let Some(window) = app.get_webview_window(&label) {
+                let window_to_close = window.clone();
+                if window
+                    .run_on_main_thread(move || {
+                        let _ = window_to_close.close();
+                    })
+                    .is_ok()
+                {
+                    continue;
+                }
+            }
+            self.restore_workflow_bridge(app, &label);
+        }
+    }
+
     pub fn open(
         &self,
         app: &AppHandle,
@@ -1120,8 +1152,6 @@ impl TerminalWindows {
             .map_err(|_| "Não foi possível guardar o mini terminal".to_string())?
             .insert(label.clone(), placement.clone());
 
-        let ready_registry = self.clone();
-        let ready_label = label.clone();
         let window = match WebviewWindowBuilder::new(
             app,
             &label,
@@ -1140,14 +1170,6 @@ impl TerminalWindows {
         .shadow(false)
         .resizable(true)
         .visible(false)
-        .on_page_load(move |window, payload| {
-            let ready_event = matches!(payload.event(), PageLoadEvent::Finished)
-                || (cfg!(target_os = "windows")
-                    && matches!(payload.event(), PageLoadEvent::Started));
-            if ready_event && ready_registry.mark_ready(&ready_label) {
-                ready_registry.present_if_ready(&window, &ready_label);
-            }
-        })
         .build()
         {
             Ok(window) => window,
@@ -1166,6 +1188,8 @@ impl TerminalWindows {
                 overlay::forget_window(&cleanup_label);
                 registry
                     .restore_fullscreen_group_for_member(event_window.app_handle(), &cleanup_label);
+                registry
+                    .close_workflow_bridges_for_terminal(event_window.app_handle(), &cleanup_label);
                 registry.remove(&cleanup_label);
             }
             WindowEvent::Resized(size) => {
@@ -1327,6 +1351,37 @@ impl TerminalWindows {
             }
         }
         emit_windows_changed(app);
+        Ok(())
+    }
+
+    pub fn suspend_for_workspace(&self, app: &AppHandle) -> Result<(), String> {
+        let current = *self
+            .visible
+            .lock()
+            .map_err(|_| "Could not read terminal visibility".to_string())?;
+        let mut restore = self
+            .workspace_restore_visible
+            .lock()
+            .map_err(|_| "Could not preserve terminal visibility".to_string())?;
+        if restore.is_none() {
+            *restore = Some(current);
+        }
+        drop(restore);
+        if current {
+            self.set_visible(app, false)?;
+        }
+        Ok(())
+    }
+
+    pub fn restore_after_workspace(&self, app: &AppHandle) -> Result<(), String> {
+        let restore = self
+            .workspace_restore_visible
+            .lock()
+            .map_err(|_| "Could not restore terminal visibility".to_string())?
+            .take();
+        if restore == Some(true) {
+            self.set_visible(app, true)?;
+        }
         Ok(())
     }
 

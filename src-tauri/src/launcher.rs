@@ -2,17 +2,18 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::state::now_millis;
 use crate::{domain::AccessMode, integrations::IntegrationKind};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchRequest {
     pub agent: IntegrationKind,
@@ -43,6 +44,7 @@ struct TerminalPayload {
 
 const QUICK_RESUME_MAX_ATTEMPTS: usize = 4;
 const QUICK_RESUME_EXIT_WINDOW: Duration = Duration::from_secs(8);
+static LAUNCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn launch(
     request: LaunchRequest,
@@ -292,16 +294,13 @@ fn launch_terminal(
     executable: &Path,
     app_data_dir: &Path,
 ) -> Result<(), String> {
+    let payload_path = persist_terminal_payload(&payload, app_data_dir)?;
+    let id = payload_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("session");
     let launches = app_data_dir.join("launches");
-    fs::create_dir_all(&launches).map_err(|error| error.to_string())?;
-    let id = now_millis();
-    let payload_path = launches.join(format!("{id}.json"));
     let desktop_path = launches.join(format!("{id}.desktop"));
-    fs::write(
-        &payload_path,
-        serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
     let desktop = format!(
         "[Desktop Entry]\nType=Application\nName=Lume session\nExec=\"{}\" terminal-run \"{}\"\nTerminal=true\nNoDisplay=true\n",
         desktop_escape(executable),
@@ -319,12 +318,17 @@ fn launch_terminal(
 #[cfg(target_os = "windows")]
 fn launch_terminal(
     payload: TerminalPayload,
-    _executable: &Path,
-    _app_data_dir: &Path,
+    executable: &Path,
+    app_data_dir: &Path,
 ) -> Result<(), String> {
+    let payload_path = persist_terminal_payload(&payload, app_data_dir)?;
     if command_available("wt.exe") {
         Command::new("wt.exe")
-            .args(windows_terminal_arguments(&payload))
+            .args(windows_terminal_arguments(
+                executable,
+                &payload_path,
+                &payload.working_directory,
+            ))
             .spawn()
             .map_err(|error| error.to_string())?;
     } else {
@@ -332,8 +336,10 @@ fn launch_terminal(
 
         const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
         Command::new("cmd.exe")
-            .args(["/D", "/K", &payload.command])
-            .args(&payload.arguments)
+            .args(["/D", "/K"])
+            .arg(executable)
+            .arg("terminal-run")
+            .arg(&payload_path)
             .current_dir(&payload.working_directory)
             .creation_flags(CREATE_NEW_CONSOLE)
             .spawn()
@@ -343,20 +349,38 @@ fn launch_terminal(
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn windows_terminal_arguments(payload: &TerminalPayload) -> Vec<String> {
-    let mut arguments = vec![
+fn windows_terminal_arguments(
+    executable: &Path,
+    payload_path: &Path,
+    working_directory: &str,
+) -> Vec<String> {
+    vec![
         "-w".into(),
         "-1".into(),
         "new-tab".into(),
         "-d".into(),
-        payload.working_directory.clone(),
-        "cmd.exe".into(),
-        "/D".into(),
-        "/K".into(),
-        payload.command.clone(),
-    ];
-    arguments.extend(payload.arguments.iter().cloned());
-    arguments
+        working_directory.into(),
+        executable.to_string_lossy().into_owned(),
+        "terminal-run".into(),
+        payload_path.to_string_lossy().into_owned(),
+    ]
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn persist_terminal_payload(
+    payload: &TerminalPayload,
+    app_data_dir: &Path,
+) -> Result<PathBuf, String> {
+    let launches = app_data_dir.join("launches");
+    fs::create_dir_all(&launches).map_err(|error| error.to_string())?;
+    let sequence = LAUNCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let payload_path = launches.join(format!("{}-{sequence}.json", now_millis()));
+    fs::write(
+        &payload_path,
+        serde_json::to_vec(payload).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(payload_path)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -531,48 +555,56 @@ mod tests {
     }
 
     #[test]
-    fn windows_terminal_uses_cmd_for_cli_shims_in_the_project() {
-        let payload = payload_for(&request(IntegrationKind::Codex, false, None), None);
+    fn resumed_claude_prompt_preserves_its_permission_mode() {
+        let mut request = request(IntegrationKind::Claude, true, Some("session-id"));
+        request.initial_prompt = Some("Continue".into());
+        request.permission_mode = Some(AccessMode::WorkspaceWrite);
+        request.approval_policy = Some("on-request".into());
+        let payload = payload_for(&request, None);
         assert_eq!(
-            windows_terminal_arguments(&payload),
+            payload.arguments,
             vec![
-                "-w",
-                "-1",
-                "new-tab",
-                "-d",
-                "/work/project",
-                "cmd.exe",
-                "/D",
-                "/K",
-                "codex"
+                "--print",
+                "--permission-mode",
+                "acceptEdits",
+                "--resume",
+                "session-id",
+                "Continue",
             ]
         );
     }
 
     #[test]
-    fn windows_terminal_keeps_resume_arguments_separate_after_cmd() {
-        let payload = payload_for(
-            &request(IntegrationKind::Codex, true, Some("thread-id")),
-            Some("ws://127.0.0.1:43131"),
-        );
+    fn windows_terminal_runs_the_shared_payload_runner() {
         assert_eq!(
-            windows_terminal_arguments(&payload),
+            windows_terminal_arguments(
+                Path::new(r"C:\Program Files\Lume\lume.exe"),
+                Path::new(r"C:\Users\user\AppData\Local\Lume\launches\1.json"),
+                r"C:\work\project",
+            ),
             vec![
                 "-w",
                 "-1",
                 "new-tab",
                 "-d",
-                "/work/project",
-                "cmd.exe",
-                "/D",
-                "/K",
-                "codex",
-                "--remote",
-                "ws://127.0.0.1:43131",
-                "resume",
-                "thread-id"
+                r"C:\work\project",
+                r"C:\Program Files\Lume\lume.exe",
+                "terminal-run",
+                r"C:\Users\user\AppData\Local\Lume\launches\1.json",
             ]
         );
+    }
+
+    #[test]
+    fn windows_terminal_does_not_expose_prompt_or_resume_arguments_to_cmd() {
+        let arguments = windows_terminal_arguments(
+            Path::new(r"C:\Lume\lume.exe"),
+            Path::new(r"C:\Lume\launches\resume.json"),
+            r"C:\work\project",
+        );
+        assert_eq!(arguments.len(), 8);
+        assert!(!arguments.iter().any(|value| value == "cmd.exe"));
+        assert!(!arguments.iter().any(|value| value == "thread-id"));
     }
 
     #[test]

@@ -1,13 +1,16 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     fs::{self, File},
     hash::{DefaultHasher, Hash, Hasher},
-    io::{BufRead, BufReader, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::{
+        mpsc::{self, RecvTimeoutError},
+        Mutex, OnceLock,
+    },
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use notify::{RecursiveMode, Watcher};
@@ -16,17 +19,22 @@ use serde_json::Value;
 use tauri::AppHandle;
 
 use crate::{
+    context_builder,
     domain::{
         AccessMode, AgentKind, HookEvent, HookEventKind, PermissionAction, PermissionProfile,
         SessionActivity, SessionControlOrigin, SessionSource,
     },
-    event_server,
+    event_server, protocol,
     state::{now_millis, AppState},
 };
 
 const RECOVERY_INTERVAL: Duration = Duration::from_secs(2);
 const BOOTSTRAP_LOOKBACK: Duration = Duration::from_secs(5 * 60);
-const BOOTSTRAP_TAIL_BYTES: u64 = 8 * 1024 * 1024;
+// Keep enough recent history to recover long-running GOAL/TODO metadata without
+// ever loading an entire (potentially gigabyte-sized) rollout into memory.
+const BOOTSTRAP_TAIL_BYTES: u64 = 16 * 1024 * 1024;
+static SUBAGENT_PATH_CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), PathBuf>>> = OnceLock::new();
+static SUBAGENT_MISS_CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), Instant>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 struct SessionMetadata {
@@ -42,6 +50,16 @@ struct ObservedFile {
     session: Option<SessionMetadata>,
     profile: Option<PermissionProfile>,
     pending_tools: HashMap<String, PendingTool>,
+    token_totals: Option<TokenTotals>,
+    prompt_token_start: Option<TokenTotals>,
+    prompt_started_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TokenTotals {
+    total: u64,
+    input: u64,
+    output: u64,
 }
 
 #[derive(Debug)]
@@ -54,7 +72,7 @@ struct PendingTool {
     files: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct CodexRecord {
     #[serde(default)]
     timestamp: Option<String>,
@@ -64,7 +82,7 @@ struct CodexRecord {
     payload: RecordPayload,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 struct RecordPayload {
     #[serde(default)]
     r#type: Option<String>,
@@ -122,6 +140,18 @@ struct RecordPayload {
     changes: Option<Value>,
     #[serde(default)]
     success: Option<bool>,
+    #[serde(default)]
+    agent_thread_id: Option<String>,
+    #[serde(default)]
+    agent_path: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    occurred_at_ms: Option<i64>,
+    #[serde(default)]
+    item: Option<Value>,
+    #[serde(default)]
+    info: Option<Value>,
 }
 
 pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
@@ -192,9 +222,18 @@ fn initialize(root: &Path, state: &AppState, app: &AppHandle) -> HashMap<PathBuf
             session: read_session_metadata(&path),
             profile: None,
             pending_tools: HashMap::new(),
+            token_totals: None,
+            prompt_token_start: None,
+            prompt_started_at: None,
         };
-        if was_modified_recently(&file_metadata) && bootstrap_active_session(&path, &mut file) {
-            if let Some(event) = event_for(&file, HookEventKind::Running, "Rodando", None) {
+        if was_modified_recently(&file_metadata) {
+            let (running, recovered_events) = bootstrap_session(&path, &mut file);
+            if running {
+                if let Some(event) = event_for(&file, HookEventKind::Running, "Rodando", None) {
+                    let _ = event_server::publish_event(state, app, event);
+                }
+            }
+            for event in recovered_events {
                 let _ = event_server::publish_event(state, app, event);
             }
         }
@@ -211,12 +250,12 @@ fn was_modified_recently(metadata: &fs::Metadata) -> bool {
         .is_some_and(|age| age <= BOOTSTRAP_LOOKBACK)
 }
 
-fn bootstrap_active_session(path: &Path, file: &mut ObservedFile) -> bool {
+fn bootstrap_session(path: &Path, file: &mut ObservedFile) -> (bool, Vec<HookEvent>) {
     let Ok(records) = read_tail_records(path, BOOTSTRAP_TAIL_BYTES) else {
-        return false;
+        return (false, Vec::new());
     };
     let mut running = false;
-    for record in records {
+    for record in &records {
         if record.kind == "turn_context" {
             if let Some(session) = file.session.as_mut() {
                 if record.payload.cwd.is_some() {
@@ -237,7 +276,80 @@ fn bootstrap_active_session(path: &Path, file: &mut ObservedFile) -> bool {
             _ => {}
         }
     }
-    running
+    let recovery_records = records
+        .into_iter()
+        .filter(|record| {
+            (record.kind == "event_msg"
+                && (matches!(
+                    record.payload.r#type.as_deref(),
+                    Some(
+                        "sub_agent_activity"
+                            | "agent_message"
+                            | "token_count"
+                            | "task_started"
+                            | "task_complete"
+                            | "turn_aborted"
+                            | "stream_error"
+                            | "task_failed"
+                    )
+                ) && (record.payload.r#type.as_deref() != Some("agent_message")
+                    || record
+                        .payload
+                        .message
+                        .as_deref()
+                        .is_some_and(protocol::is_work_tracking_message))
+                    || matches!(
+                        record.payload.r#type.as_deref(),
+                        Some("item_started" | "item_completed")
+                    ) && record.payload.item.as_ref().is_some_and(|item| {
+                        matches!(
+                            item.get("type").and_then(Value::as_str),
+                            Some("SubAgentActivity" | "subAgentActivity")
+                        )
+                    })))
+                || (record.kind == "response_item"
+                    && (matches!(
+                        record.payload.r#type.as_deref(),
+                        Some("function_call_output" | "custom_tool_call_output")
+                    ) || matches!(
+                        record.payload.r#type.as_deref(),
+                        Some("function_call" | "custom_tool_call")
+                    ) && is_work_tracking_tool(&record.payload)))
+        })
+        .collect();
+    let mut recovered = events_from_records(recovery_records, file);
+    recovered.retain(|event| {
+        event.activity.as_ref().is_some_and(|activity| {
+            activity.kind == "subagent"
+                || activity.kind == "token_usage"
+                || activity.kind == "plan"
+                || (activity.kind == "message"
+                    && activity
+                        .detail
+                        .as_deref()
+                        .is_some_and(protocol::is_work_tracking_message))
+                || (activity.kind == "tool"
+                    && ["create_goal", "get_goal", "update_goal", "todo_write"]
+                        .iter()
+                        .any(|tool| activity.title.contains(tool)))
+        })
+    });
+    let mut seen = HashSet::new();
+    let recent_ids = recovered
+        .iter()
+        .rev()
+        .filter_map(|event| event.activity.as_ref())
+        .filter(|activity| seen.insert(activity.id.clone()))
+        .take(96)
+        .map(|activity| activity.id.clone())
+        .collect::<HashSet<_>>();
+    recovered.retain(|event| {
+        event
+            .activity
+            .as_ref()
+            .is_some_and(|activity| recent_ids.contains(&activity.id))
+    });
+    (running, recovered)
 }
 
 fn read_tail_records(path: &Path, max_bytes: u64) -> Result<Vec<CodexRecord>, String> {
@@ -246,17 +358,21 @@ fn read_tail_records(path: &Path, max_bytes: u64) -> Result<Vec<CodexRecord>, St
     let start = length.saturating_sub(max_bytes);
     file.seek(SeekFrom::Start(start))
         .map_err(|error| error.to_string())?;
-    let mut reader = BufReader::new(file);
-    if start > 0 {
-        let mut partial = String::new();
-        reader
-            .read_line(&mut partial)
-            .map_err(|error| error.to_string())?;
-    }
+    let mut bytes = Vec::with_capacity(max_bytes.min(8 * 1024 * 1024) as usize);
+    file.take(max_bytes)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let records_start = if start > 0 {
+        bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |index| index + 1)
+    } else {
+        0
+    };
     let mut records = Vec::new();
-    for line in reader.lines() {
-        let line = line.map_err(|error| error.to_string())?;
-        if let Ok(record) = serde_json::from_str(&line) {
+    for line in bytes[records_start..].split(|byte| *byte == b'\n') {
+        if let Ok(record) = serde_json::from_slice(line) {
             records.push(record);
         }
     }
@@ -290,6 +406,9 @@ fn poll_path(
             session: read_session_metadata(path),
             profile: None,
             pending_tools: HashMap::new(),
+            token_totals: None,
+            prompt_token_start: None,
+            prompt_started_at: None,
         };
         if let Some(event) = session_started_event(&file) {
             let _ = event_server::publish_event(state, app, event);
@@ -307,6 +426,9 @@ fn poll_path(
         file.offset = 0;
         file.profile = None;
         file.pending_tools.clear();
+        file.token_totals = None;
+        file.prompt_token_start = None;
+        file.prompt_started_at = None;
         file.session = read_session_metadata(path);
         if let Some(event) = session_started_event(file) {
             let _ = event_server::publish_event(state, app, event);
@@ -391,6 +513,68 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
         if record.kind != "event_msg" {
             continue;
         }
+        if record.payload.r#type.as_deref() == Some("token_count") {
+            if let Some(totals) = token_totals(&record.payload) {
+                file.token_totals = Some(totals);
+            }
+            continue;
+        }
+        if record.payload.r#type.as_deref() == Some("task_started") {
+            file.prompt_token_start = file.token_totals;
+            file.prompt_started_at = Some(record_timestamp_millis(&record));
+        } else if record.payload.r#type.as_deref() == Some("task_complete") {
+            if let Some(event) =
+                completed_prompt_token_usage_event(file, record_timestamp_millis(&record))
+            {
+                events.push(event);
+            }
+            file.prompt_token_start = None;
+            file.prompt_started_at = None;
+        } else if matches!(
+            record.payload.r#type.as_deref(),
+            Some("turn_aborted" | "stream_error" | "task_failed")
+        ) {
+            file.prompt_token_start = None;
+            file.prompt_started_at = None;
+        }
+        if record.payload.r#type.as_deref() == Some("sub_agent_activity") {
+            if let Some(event) = subagent_activity_event(
+                file,
+                record.payload.agent_thread_id.as_deref(),
+                record.payload.agent_path.as_deref(),
+                record.payload.kind.as_deref(),
+                record.payload.occurred_at_ms,
+            ) {
+                events.push(event);
+            }
+            continue;
+        }
+        if matches!(
+            record.payload.r#type.as_deref(),
+            Some("item_started" | "item_completed")
+        ) {
+            if let Some(item) = record.payload.item.as_ref().filter(|item| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("SubAgentActivity" | "subAgentActivity")
+                )
+            }) {
+                if let Some(event) = subagent_activity_event(
+                    file,
+                    item.get("agent_thread_id")
+                        .or_else(|| item.get("agentThreadId"))
+                        .and_then(Value::as_str),
+                    item.get("agent_path")
+                        .or_else(|| item.get("agentPath"))
+                        .and_then(Value::as_str),
+                    item.get("kind").and_then(Value::as_str),
+                    record.payload.occurred_at_ms,
+                ) {
+                    events.push(event);
+                }
+                continue;
+            }
+        }
         if record.payload.r#type.as_deref() == Some("exec_command_end") {
             if let Some(event) = command_finished_event(&record.payload, file) {
                 events.push(event);
@@ -447,12 +631,112 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
     events
 }
 
+fn token_totals(payload: &RecordPayload) -> Option<TokenTotals> {
+    let usage = payload.info.as_ref()?.get("total_token_usage")?;
+    Some(TokenTotals {
+        total: usage.get("total_tokens")?.as_u64()?,
+        input: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        output: usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    })
+}
+
+fn record_timestamp_millis(record: &CodexRecord) -> i64 {
+    record
+        .timestamp
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.timestamp_millis())
+        .unwrap_or_else(now_millis)
+}
+
+fn completed_prompt_token_usage_event(file: &ObservedFile, completed_at: i64) -> Option<HookEvent> {
+    let start = file.prompt_token_start?;
+    let end = file.token_totals?;
+    let total = end.total.saturating_sub(start.total);
+    if total == 0 {
+        return None;
+    }
+    let started_at = file.prompt_started_at.unwrap_or(completed_at);
+    let turn_id = format!("rollout-{started_at}");
+    let detail = serde_json::json!({
+        "turnId": turn_id,
+        "totalTokens": total,
+        "inputTokens": end.input.saturating_sub(start.input),
+        "outputTokens": end.output.saturating_sub(start.output),
+        "createdAt": completed_at,
+    })
+    .to_string();
+    let mut event = event_for(file, HookEventKind::Activity, "Uso de tokens", None)?;
+    event.activity = Some(SessionActivity {
+        id: format!("codex-token-usage:{turn_id}"),
+        kind: "token_usage".into(),
+        title: "Uso de tokens".into(),
+        detail: Some(detail),
+        status: "completed".into(),
+        created_at: completed_at,
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    });
+    Some(event)
+}
+
+fn subagent_activity_event(
+    file: &ObservedFile,
+    agent_thread_id: Option<&str>,
+    agent_path: Option<&str>,
+    kind: Option<&str>,
+    occurred_at_ms: Option<i64>,
+) -> Option<HookEvent> {
+    let session = file.session.as_ref()?;
+    let agent_thread_id = agent_thread_id.filter(|id| !id.is_empty())?;
+    let status = match kind? {
+        "started" | "interacted" => "running",
+        "completed" => "completed",
+        "failed" | "errored" => "failed",
+        "interrupted" | "shutdown" | "closed" => "interrupted",
+        _ => return None,
+    };
+    let label = agent_path
+        .filter(|path| !path.is_empty())
+        .unwrap_or(agent_thread_id);
+    let mut event = event_for(file, HookEventKind::Activity, "Subagente", None)?;
+    event.activity = Some(SessionActivity {
+        id: format!("codex:{}:subagent:{agent_thread_id}", session.id),
+        kind: "subagent".into(),
+        title: format!("Subagente · {label}"),
+        detail: None,
+        status: status.into(),
+        created_at: occurred_at_ms.unwrap_or_else(now_millis),
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    });
+    Some(event)
+}
+
 fn remember_tool(payload: &RecordPayload, file: &mut ObservedFile) -> Option<HookEvent> {
-    let name = payload.name.as_deref()?;
+    let original_name = payload.name.as_deref()?;
     let call_id = payload.call_id.as_ref()?;
-    let kind = tool_kind(name);
-    let title = tool_title(name);
-    let detail = tool_input_text(payload);
+    let original_detail = tool_input_text(payload);
+    let nested = (normalized_tool_name(original_name) == "exec")
+        .then(|| {
+            original_detail
+                .as_deref()
+                .and_then(nested_work_tracking_tool)
+        })
+        .flatten();
+    let (name, detail) = nested
+        .map(|(name, arguments)| (name.to_string(), response_text(&arguments)))
+        .unwrap_or_else(|| (original_name.to_string(), original_detail));
+    let kind = tool_kind(&name);
+    let title = tool_title(&name);
     let files = detail
         .as_deref()
         .map(files_from_patch_text)
@@ -469,7 +753,7 @@ fn remember_tool(payload: &RecordPayload, file: &mut ObservedFile) -> Option<Hoo
     file.pending_tools.insert(
         call_id.clone(),
         PendingTool {
-            name: name.into(),
+            name: name.clone(),
             activity_id: activity_id.clone(),
             kind: kind.into(),
             title: title.clone(),
@@ -477,7 +761,7 @@ fn remember_tool(payload: &RecordPayload, file: &mut ObservedFile) -> Option<Hoo
             files: files.clone(),
         },
     );
-    if is_goal_tool(name) {
+    if is_goal_tool(&name) {
         return None;
     }
     let mut event = event_for(file, HookEventKind::Activity, &title, None)?;
@@ -497,8 +781,23 @@ fn remember_tool(payload: &RecordPayload, file: &mut ObservedFile) -> Option<Hoo
 
 fn tool_output_event(payload: &RecordPayload, file: &mut ObservedFile) -> Option<HookEvent> {
     let tool = file.pending_tools.remove(payload.call_id.as_deref()?)?;
-    let output = payload.output.as_ref().and_then(record_value_text);
-    let detail = combine_activity_detail(tool.detail.as_deref(), output.as_deref());
+    let output = payload.output.as_ref().and_then(|value| {
+        if is_goal_tool(&tool.name) {
+            structured_goal_output_text(value)
+        } else {
+            record_value_text(value)
+        }
+    });
+    let detail = if is_goal_tool(&tool.name) {
+        output.or(tool.detail)
+    } else if matches!(
+        normalized_tool_name(&tool.name),
+        "update_plan" | "todo_write"
+    ) {
+        tool.detail.or(output)
+    } else {
+        combine_activity_detail(tool.detail.as_deref(), output.as_deref())
+    };
     let label = if is_goal_tool(&tool.name) {
         "GOAL atualizada"
     } else {
@@ -636,6 +935,18 @@ fn tool_input_value_text(value: &Value) -> Option<String> {
         .get("cmd")
         .and_then(Value::as_str)
         .and_then(response_text)
+        .or_else(|| {
+            value
+                .get("patch")
+                .and_then(Value::as_str)
+                .and_then(response_text)
+        })
+        .or_else(|| {
+            value
+                .get("source")
+                .and_then(Value::as_str)
+                .and_then(response_text)
+        })
         .or_else(|| value.as_str().and_then(response_text))
         .or_else(|| record_value_text(value))
 }
@@ -702,7 +1013,11 @@ fn value_text(value: &Value) -> Option<String> {
 
 fn files_from_patch_text(value: &str) -> Vec<String> {
     let mut files = Vec::new();
-    for line in value.lines() {
+    // Code-mode tool calls often carry a patch inside a JS string using literal
+    // `\\n` escapes; normalize those without inspecting unrelated tool output.
+    let normalized = value.replace("\\\\n", "\n").replace("\\n", "\n");
+    for line in normalized.lines() {
+        let line = line.trim_start();
         let path = ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
             .iter()
             .find_map(|prefix| line.strip_prefix(prefix));
@@ -722,11 +1037,160 @@ fn is_goal_tool(name: &str) -> bool {
     )
 }
 
+fn is_work_tracking_tool(payload: &RecordPayload) -> bool {
+    let Some(name) = payload.name.as_deref() else {
+        return false;
+    };
+    let normalized = normalized_tool_name(name);
+    matches!(normalized, "update_plan" | "todo_write")
+        || is_goal_tool(normalized)
+        || (normalized == "exec"
+            && tool_input_text(payload)
+                .as_deref()
+                .and_then(nested_work_tracking_tool)
+                .is_some())
+}
+
+pub(crate) fn nested_work_tracking_tool(source: &str) -> Option<(&'static str, String)> {
+    const TOOLS: [&str; 5] = [
+        "create_goal",
+        "get_goal",
+        "update_goal",
+        "update_plan",
+        "todo_write",
+    ];
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+
+    while index < bytes.len() {
+        let current = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if line_comment {
+            if current == b'\n' {
+                line_comment = false;
+            }
+            index += 1;
+            continue;
+        }
+        if block_comment {
+            if current == b'*' && next == Some(b'/') {
+                block_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if current == b'\\' {
+                escaped = true;
+            } else if current == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(current, b'\'' | b'"' | b'`') {
+            quote = Some(current);
+            index += 1;
+            continue;
+        }
+        if current == b'/' && next == Some(b'/') {
+            line_comment = true;
+            index += 2;
+            continue;
+        }
+        if current == b'/' && next == Some(b'*') {
+            block_comment = true;
+            index += 2;
+            continue;
+        }
+        if source[index..].starts_with("tools.") {
+            let name_start = index + "tools.".len();
+            for tool in TOOLS {
+                let name_end = name_start + tool.len();
+                if source.get(name_start..name_end) != Some(tool) {
+                    continue;
+                }
+                let mut open = name_end;
+                while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
+                    open += 1;
+                }
+                if bytes.get(open) == Some(&b'(') {
+                    return extract_javascript_call_argument(source, open)
+                        .map(|arguments| (tool, arguments));
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn extract_javascript_call_argument(source: &str, open: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    let mut quote = None;
+    let mut escaped = false;
+
+    while index < bytes.len() {
+        let current = bytes[index];
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if current == b'\\' {
+                escaped = true;
+            } else if current == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match current {
+            b'\'' | b'"' | b'`' => quote = Some(current),
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(source[open + 1..index].trim().to_string());
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 fn record_value_text(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => response_text(value),
         Value::Null => None,
         value => response_text(&value.to_string()),
+    }
+}
+
+fn structured_goal_output_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|_| response_text(text)),
+        Value::Array(values) => values.iter().find_map(structured_goal_output_text),
+        Value::Object(object) => {
+            if let Some(text) = object.get("text") {
+                structured_goal_output_text(text)
+            } else {
+                response_text(&value.to_string())
+            }
+        }
+        _ => None,
     }
 }
 
@@ -911,6 +1375,248 @@ fn sessions_root() -> Option<PathBuf> {
     Some(codex_home.join("sessions"))
 }
 
+pub fn load_subagent_timeline(
+    parent_thread_id: &str,
+    child_thread_id: &str,
+) -> Result<Vec<SessionActivity>, String> {
+    let root =
+        sessions_root().ok_or_else(|| "Codex sessions directory is unavailable".to_string())?;
+    load_subagent_timeline_from_root(&root, parent_thread_id, child_thread_id)
+}
+
+fn load_subagent_timeline_from_root(
+    root: &Path,
+    parent_thread_id: &str,
+    child_thread_id: &str,
+) -> Result<Vec<SessionActivity>, String> {
+    let bytes = child_thread_id.as_bytes();
+    if bytes.len() != 36
+        || !bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Err("Invalid subagent thread ID".into());
+    }
+    let cache = SUBAGENT_PATH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let miss_cache = SUBAGENT_MISS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache_key = (root.to_path_buf(), child_thread_id.to_string());
+    let cached = cache
+        .lock()
+        .ok()
+        .and_then(|paths| paths.get(&cache_key).cloned())
+        .filter(|path| path.is_file());
+    let path = if let Some(path) = cached {
+        path
+    } else {
+        if miss_cache
+            .lock()
+            .ok()
+            .and_then(|misses| misses.get(&cache_key).copied())
+            .is_some_and(|checked| checked.elapsed() < Duration::from_secs(12))
+        {
+            return Err("Subagent timeline is not available yet".into());
+        }
+        let suffix = format!("-{child_thread_id}.jsonl");
+        let Some(path) = session_files(root).into_iter().find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&suffix))
+        }) else {
+            if let Ok(mut misses) = miss_cache.lock() {
+                if misses.len() >= 128 {
+                    misses.clear();
+                }
+                misses.insert(cache_key, Instant::now());
+            }
+            return Err("Subagent timeline is not available yet".into());
+        };
+        if let Ok(mut misses) = miss_cache.lock() {
+            misses.remove(&cache_key);
+        }
+        if let Ok(mut paths) = cache.lock() {
+            if paths.len() >= 128 {
+                paths.clear();
+            }
+            paths.insert(cache_key, path.clone());
+        }
+        path
+    };
+    let first = BufReader::new(File::open(&path).map_err(|error| error.to_string())?)
+        .lines()
+        .next()
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Subagent session is empty".to_string())?;
+    let metadata: CodexRecord = serde_json::from_str(&first).map_err(|error| error.to_string())?;
+    if metadata.kind != "session_meta"
+        || metadata.payload.id.as_deref() != Some(child_thread_id)
+        || metadata.payload.parent_thread_id.as_deref() != Some(parent_thread_id)
+    {
+        return Err("Subagent does not belong to this thread".into());
+    }
+
+    // Subagent rollouts may inherit a very large parent history. Read only the
+    // recent tail, then skip any inherited records before the branch marker.
+    let records = read_tail_records(&path, 384 * 1024)?;
+    let start = records
+        .iter()
+        .rposition(|record| record.kind == "inter_agent_communication_metadata")
+        .map_or(0, |index| index + 1);
+    let working_directory = metadata.payload.cwd.clone();
+    let mut observed = ObservedFile {
+        offset: 0,
+        session: Some(SessionMetadata {
+            id: child_thread_id.to_string(),
+            cwd: working_directory.clone(),
+            started_at: None,
+            source: SessionSource::Cli,
+        }),
+        profile: None,
+        pending_tools: HashMap::new(),
+        token_totals: None,
+        prompt_token_start: None,
+        prompt_started_at: None,
+    };
+    let mut activities: Vec<SessionActivity> = Vec::new();
+    let mut indices: HashMap<String, usize> = HashMap::new();
+    let mut latest_turn_started = i64::MIN;
+    let mut latest_public_message: Option<String> = None;
+    for record in records.into_iter().skip(start) {
+        let created_at = record
+            .timestamp
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.timestamp_millis())
+            .unwrap_or_else(now_millis);
+        let event_type = record.payload.r#type.as_deref();
+        if record.kind == "event_msg" && event_type == Some("task_started") {
+            latest_turn_started = created_at;
+            latest_public_message = None;
+        }
+        if record.kind == "event_msg" && event_type == Some("agent_message") {
+            latest_public_message = record.payload.message.clone();
+        }
+        let completed_response =
+            if record.kind == "event_msg" && event_type == Some("task_complete") {
+                record
+                    .payload
+                    .last_agent_message
+                    .clone()
+                    .or_else(|| latest_public_message.take())
+            } else {
+                None
+            };
+        for event in events_from_records(vec![record], &mut observed) {
+            let Some(mut activity) = event.activity else {
+                continue;
+            };
+            activity.created_at = created_at;
+            activity.detail = match activity.kind.as_str() {
+                "message" => activity
+                    .detail
+                    .take()
+                    .and_then(|detail| response_text(&detail)),
+                "analysis" | "plan" | "prompt" => activity
+                    .detail
+                    .take()
+                    .map(|detail| detail.chars().take(2_000).collect()),
+                "file" if activity.status == "completed" => {
+                    activity.detail.take().and_then(|detail| {
+                        context_builder::sanitize_subagent_patch_detail(
+                            &detail,
+                            working_directory.as_deref(),
+                        )
+                    })
+                }
+                _ => None,
+            };
+            activity.files = context_builder::sanitize_subagent_file_paths(
+                activity.files,
+                working_directory.as_deref(),
+            );
+            activity.files.truncate(64);
+            activity.attachments.clear();
+            if let Some(index) = indices.get(&activity.id).copied() {
+                activity.created_at = activities[index].created_at;
+                activities[index] = activity;
+            } else {
+                indices.insert(activity.id.clone(), activities.len());
+                activities.push(activity);
+            }
+        }
+        if let Some(response) = completed_response
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            if let Some(activity) = activities.iter_mut().rev().find(|activity| {
+                activity.kind == "message" && activity.created_at >= latest_turn_started
+            }) {
+                activity.title = "Resposta final".into();
+                activity.detail = Some(response);
+                activity.status = "completed".into();
+            } else {
+                activities.push(SessionActivity {
+                    id: format!("codex:{child_thread_id}:final:{created_at}"),
+                    kind: "message".into(),
+                    title: "Resposta final".into(),
+                    detail: Some(response),
+                    status: "completed".into(),
+                    created_at,
+                    files: Vec::new(),
+                    attachments: Vec::new(),
+                    append_detail: false,
+                });
+            }
+        }
+    }
+    let mut all_changed_files = Vec::new();
+    for file in activities
+        .iter()
+        .filter(|activity| activity.status == "completed")
+        .flat_map(|activity| &activity.files)
+    {
+        if all_changed_files.len() >= 64 {
+            break;
+        }
+        if !all_changed_files.contains(file) {
+            all_changed_files.push(file.clone());
+        }
+    }
+    let excess = activities.len().saturating_sub(48);
+    activities.drain(..excess);
+    let visible_files = activities
+        .iter()
+        .flat_map(|activity| activity.files.iter())
+        .collect::<HashSet<_>>();
+    let older_files = all_changed_files
+        .into_iter()
+        .filter(|file| !visible_files.contains(file))
+        .collect::<Vec<_>>();
+    if !older_files.is_empty() {
+        activities.insert(
+            0,
+            SessionActivity {
+                id: format!("codex:{child_thread_id}:older-file-changes"),
+                kind: "file".into(),
+                title: "Arquivos alterados anteriormente".into(),
+                detail: None,
+                status: "completed".into(),
+                created_at: activities
+                    .first()
+                    .map_or_else(now_millis, |activity| activity.created_at),
+                files: older_files,
+                attachments: Vec::new(),
+                append_detail: false,
+            },
+        );
+    }
+    Ok(activities)
+}
+
 fn session_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_session_files(root, &mut files);
@@ -950,6 +1656,9 @@ mod tests {
             }),
             profile: None,
             pending_tools: HashMap::new(),
+            token_totals: None,
+            prompt_token_start: None,
+            prompt_started_at: None,
         }
     }
 
@@ -1010,6 +1719,40 @@ mod tests {
         assert_eq!(events[0].source, Some(SessionSource::Vscode));
         assert_eq!(events[0].native_session_id.as_deref(), Some("chat-1"));
         assert_eq!(events[1].last_response.as_deref(), Some("Resposta pronta"));
+    }
+
+    #[test]
+    fn cumulative_rollout_tokens_become_per_prompt_usage() {
+        let mut file = observed_file(SessionSource::Cli);
+        let events = events_from_records(
+            vec![
+                record(
+                    r#"{"timestamp":"2026-09-21T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":100,"input_tokens":80,"output_tokens":20}}}}"#,
+                ),
+                record(
+                    r#"{"timestamp":"2026-09-21T12:01:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
+                ),
+                record(
+                    r#"{"timestamp":"2026-09-21T12:01:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":160,"input_tokens":125,"output_tokens":35}}}}"#,
+                ),
+                record(
+                    r#"{"timestamp":"2026-09-21T12:01:12Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+                ),
+            ],
+            &mut file,
+        );
+
+        let activity = events
+            .iter()
+            .find_map(|event| event.activity.as_ref())
+            .expect("token usage activity");
+        assert_eq!(activity.kind, "token_usage");
+        let usage: crate::domain::PromptTokenUsage =
+            serde_json::from_str(activity.detail.as_deref().expect("token usage detail"))
+                .expect("valid token usage");
+        assert_eq!(usage.total_tokens, 60);
+        assert_eq!(usage.input_tokens, 45);
+        assert_eq!(usage.output_tokens, 15);
     }
 
     #[test]
@@ -1094,6 +1837,75 @@ mod tests {
     }
 
     #[test]
+    fn nested_goal_tool_inside_exec_becomes_work_activity() {
+        let mut file = observed_file(SessionSource::Cli);
+        let records = vec![
+            record(
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call","id":"fc-exec-goal","name":"exec","input":"const result = await tools.create_goal({objective:\"Harden takeover\"}); text(JSON.stringify(result));","call_id":"call-exec-goal"}}"#,
+            ),
+            record(
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-exec-goal","output":[{"type":"input_text","text":"Script completed\n"},{"type":"input_text","text":"{\"goal\":{\"objective\":\"Harden takeover\",\"status\":\"active\",\"createdAt\":1785190621}}"}]}}"#,
+            ),
+        ];
+
+        let events = events_from_records(records, &mut file);
+
+        assert_eq!(events.len(), 1);
+        let activity = events[0].activity.as_ref().expect("nested goal activity");
+        assert_eq!(activity.kind, "tool");
+        assert_eq!(activity.title, "functions · create_goal");
+        let detail = activity.detail.as_deref().expect("structured goal detail");
+        let parsed: Value = serde_json::from_str(detail).expect("valid goal JSON");
+        assert_eq!(
+            parsed
+                .get("goal")
+                .and_then(|goal| goal.get("objective"))
+                .and_then(Value::as_str),
+            Some("Harden takeover")
+        );
+    }
+
+    #[test]
+    fn quoted_goal_tool_name_does_not_reclassify_an_exec_command() {
+        let mut file = observed_file(SessionSource::Cli);
+        let records = vec![record(
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","id":"fc-search","name":"exec","input":"const result = await tools.exec_command({cmd:\"rg 'tools.create_goal(' src\"}); text(result.output);","call_id":"call-search"}}"#,
+        )];
+
+        let events = events_from_records(records, &mut file);
+
+        let activity = events[0].activity.as_ref().expect("command activity");
+        assert_eq!(activity.kind, "command");
+        assert_eq!(activity.title, "Comando");
+    }
+
+    #[test]
+    fn nested_todo_tool_inside_exec_becomes_work_activity() {
+        let mut file = observed_file(SessionSource::Cli);
+        let records = vec![
+            record(
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call","id":"fc-exec-todo","name":"exec","input":"const result = await tools.todo_write({todos:[{content:\"Inspect\",status:\"in_progress\"}]}); text(JSON.stringify(result));","call_id":"call-exec-todo"}}"#,
+            ),
+            record(
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-exec-todo","output":"saved"}}"#,
+            ),
+        ];
+
+        let events = events_from_records(records, &mut file);
+
+        let activity = events
+            .last()
+            .and_then(|event| event.activity.as_ref())
+            .expect("todo activity");
+        assert_eq!(activity.kind, "tool");
+        assert_eq!(activity.title, "functions · todo_write");
+        assert!(activity
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("Inspect")));
+    }
+
+    #[test]
     fn command_and_patch_records_become_detailed_activities() {
         let mut file = observed_file(SessionSource::Vscode);
         let records = vec![
@@ -1157,12 +1969,210 @@ mod tests {
     }
 
     #[test]
+    fn external_cli_subagent_lifecycle_uses_one_sidebar_identity() {
+        let mut file = observed_file(SessionSource::Cli);
+        let events = events_from_records(
+            vec![
+                record(
+                    r#"{"type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"child-1","agent_path":"/root/prompt_index_frontend_test","kind":"started","occurred_at_ms":1234}}"#,
+                ),
+                record(
+                    r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"SubAgentActivity","agent_thread_id":"child-1","agent_path":"/root/prompt_index_frontend_test","kind":"completed"}}}"#,
+                ),
+                record(
+                    r#"{"type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"child-2","agent_path":"/root/prompt_index_backend_test","kind":"started"}}"#,
+                ),
+            ],
+            &mut file,
+        );
+        let started = events[0].activity.as_ref().expect("subagent started");
+        let completed = events[1].activity.as_ref().expect("subagent completed");
+        assert_eq!(started.kind, "subagent");
+        assert_eq!(
+            started.title,
+            "Subagente · /root/prompt_index_frontend_test"
+        );
+        assert_eq!(started.status, "running");
+        assert_eq!(started.created_at, 1234);
+        assert_eq!(completed.id, started.id);
+        assert_eq!(completed.status, "completed");
+        assert_ne!(
+            events[2].activity.as_ref().expect("second subagent").id,
+            started.id
+        );
+    }
+
+    #[test]
+    fn subagent_timeline_reads_only_its_branch_and_hides_tool_payloads() {
+        let child_id = "01a0b0f7-8139-7403-b5f4-ab1b273ed7ba";
+        let root = std::env::temp_dir().join(format!(
+            "lume-subagent-timeline-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&root).expect("test directory");
+        let path = root.join(format!("rollout-test-{child_id}.jsonl"));
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"01a0b0f7-8139-7403-b5f4-ab1b273ed7ba\",\"parent_thread_id\":\"parent-1\",\"thread_source\":\"subagent\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Inherited parent message\"}}\n",
+                "{\"type\":\"inter_agent_communication_metadata\",\"payload\":{}}\n",
+                "{\"timestamp\":\"2026-09-17T20:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Checking the frontend\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"encrypted_content\":\"private data\",\"summary\":[]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"id\":\"command-1\",\"name\":\"exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"echo secret\\\"}\",\"call_id\":\"call-1\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":\"secret-output\"}}\n"
+            ),
+        )
+        .expect("test rollout");
+
+        let timeline = load_subagent_timeline_from_root(&root, "parent-1", child_id)
+            .expect("subagent timeline");
+        assert_eq!(timeline.len(), 2);
+        assert_eq!(timeline[0].detail.as_deref(), Some("Checking the frontend"));
+        assert_eq!(timeline[1].kind, "command");
+        assert_eq!(timeline[1].status, "completed");
+        assert!(timeline[1].detail.is_none());
+        assert!(load_subagent_timeline_from_root(&root, "another-parent", child_id).is_err());
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir(root);
+    }
+
+    #[test]
+    fn subagent_timeline_keeps_full_final_response_and_changed_files() {
+        let child_id = "01a0b0f7-8139-7403-b5f4-ab1b273ed7bb";
+        let root = std::env::temp_dir().join(format!(
+            "lume-subagent-final-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&root).expect("test directory");
+        let path = root.join(format!("rollout-test-{child_id}.jsonl"));
+        let final_response = "Complete response. ".repeat(2_000).trim().to_string();
+        let patch = "*** Add File: /work/child-created.rs\n+fn main() {}\n";
+        let mut records = vec![
+            serde_json::json!({"type":"session_meta","payload":{"id":child_id,"parent_thread_id":"parent-1","thread_source":"subagent","cwd":"/work"}}),
+            serde_json::json!({"type":"inter_agent_communication_metadata","payload":{}}),
+            serde_json::json!({"timestamp":"2026-09-17T20:00:00Z","type":"event_msg","payload":{"type":"task_started"}}),
+            serde_json::json!({"timestamp":"2026-09-17T20:00:01Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":serde_json::json!({"patch":patch}).to_string(),"call_id":"patch-1"}}),
+            serde_json::json!({"timestamp":"2026-09-17T20:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"patch-1","output":"Success"}}),
+            serde_json::json!({"timestamp":"2026-09-17T20:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Mid-turn update. ".repeat(160)}}),
+            serde_json::json!({"timestamp":"2026-09-17T20:00:03Z","type":"event_msg","payload":{"type":"agent_message","message":final_response.clone()}}),
+            serde_json::json!({"timestamp":"2026-09-17T20:00:04Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":final_response}}),
+        ];
+        records.splice(
+            5..5,
+            (0..60).map(|index| serde_json::json!({
+                "timestamp":"2026-09-17T20:00:02Z",
+                "type":"response_item",
+                "payload":{"type":"reasoning","summary":[{"type":"summary_text","text":format!("Step {index}")}]}
+            })),
+        );
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                records
+                    .into_iter()
+                    .map(|record| record.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        )
+        .expect("test rollout");
+
+        let timeline = load_subagent_timeline_from_root(&root, "parent-1", child_id)
+            .expect("subagent timeline");
+        assert_eq!(timeline[0].title, "Arquivos alterados anteriormente");
+        let change = timeline
+            .iter()
+            .find(|activity| activity.kind == "file")
+            .expect("file change");
+        assert_eq!(change.files, vec!["child-created.rs"]);
+        assert!(timeline.iter().any(|activity| activity.kind == "message"
+            && activity.title != "Resposta final"
+            && activity
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.len() > 960)));
+        let final_message = timeline.last().expect("final response");
+        assert_eq!(final_message.title, "Resposta final");
+        assert_eq!(
+            final_message.detail.as_deref(),
+            Some(final_response.as_str())
+        );
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir(root);
+    }
+
+    #[test]
+    fn subagent_timeline_exposes_only_safe_recorded_diff() {
+        let child_id = "01a0b0f7-8139-7403-b5f4-ab1b273ed7bc";
+        let root = std::env::temp_dir().join(format!(
+            "lume-subagent-diff-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&root).expect("test directory");
+        let path = root.join(format!("rollout-test-{child_id}.jsonl"));
+        let patch = "*** Begin Patch\n*** Add File: /work/src/main.rs\n+fn main() {}\n*** Add File: /work/.env\n+TOKEN=private-value\n*** End Patch";
+        let records = [
+            serde_json::json!({"type":"session_meta","payload":{"id":child_id,"parent_thread_id":"parent-1","thread_source":"subagent","cwd":"/work"}}),
+            serde_json::json!({"type":"inter_agent_communication_metadata","payload":{}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":serde_json::json!({"patch":patch}).to_string(),"call_id":"patch-1"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"patch-1","output":"Success"}}),
+        ];
+        fs::write(
+            &path,
+            format!("{}\n", records.map(|record| record.to_string()).join("\n")),
+        )
+        .expect("test rollout");
+
+        let timeline = load_subagent_timeline_from_root(&root, "parent-1", child_id)
+            .expect("subagent timeline");
+        let change = timeline
+            .iter()
+            .find(|activity| activity.kind == "file")
+            .expect("file change");
+        assert_eq!(change.files, vec!["src/main.rs"]);
+        let diff = change.detail.as_deref().expect("recorded diff");
+        assert!(diff.contains("diff --git a/src/main.rs b/src/main.rs"));
+        assert!(diff.contains("+fn main() {}"));
+        assert!(!diff.contains(".env"));
+        assert!(!diff.contains("private-value"));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir(root);
+    }
+
+    #[test]
     fn namespaced_exec_and_plan_tools_get_semantic_activity_kinds() {
         assert_eq!(tool_kind("functions.exec"), "command");
         assert_eq!(tool_title("functions.exec"), "Comando");
         assert_eq!(tool_kind("functions.update_plan"), "plan");
         assert_eq!(tool_title("functions.update_plan"), "Plano atualizado");
+        assert!(is_work_tracking_tool(&RecordPayload {
+            name: Some("functions.todo_write".into()),
+            ..RecordPayload::default()
+        }));
         assert!(is_goal_tool("functions.get_goal"));
+        assert_eq!(
+            files_from_patch_text(
+                "const patch = \\\"\\n*** Add File: /work/child.rs\\n+new\\n\\\";"
+            ),
+            vec!["/work/child.rs"]
+        );
+        let wrapped = RecordPayload {
+            arguments: Some(
+                serde_json::json!({"source":"const patch = \"\\n*** Add File: /work/wrapped.rs\\n+new\\n\";"}).to_string(),
+            ),
+            ..RecordPayload::default()
+        };
+        assert_eq!(
+            tool_input_text(&wrapped)
+                .as_deref()
+                .map(files_from_patch_text),
+            Some(vec!["/work/wrapped.rs".to_string()])
+        );
     }
 
     #[test]
@@ -1189,12 +2199,30 @@ mod tests {
             concat!(
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"chat-1\",\"originator\":\"codex_vscode\",\"source\":\"vscode\",\"cwd\":\"/work/lume\"}}\n",
                 "{\"type\":\"turn_context\",\"payload\":{\"cwd\":\"/work/lume\",\"approval_policy\":\"on-request\",\"sandbox_policy\":{\"type\":\"workspace-write\"}}}\n",
-                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n"
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"sub_agent_activity\",\"agent_thread_id\":\"child-1\",\"agent_path\":\"/root/reviewer\",\"kind\":\"started\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"sub_agent_activity\",\"agent_thread_id\":\"child-1\",\"agent_path\":\"/root/reviewer\",\"kind\":\"completed\"}}\n"
             ),
         )
         .expect("write active rollout");
         let mut file = observed_file(SessionSource::Vscode);
-        assert!(bootstrap_active_session(&path, &mut file));
+        let (running, subagents) = bootstrap_session(&path, &mut file);
+        assert!(running);
+        assert_eq!(subagents.len(), 2);
+        assert_eq!(
+            subagents[0]
+                .activity
+                .as_ref()
+                .map(|activity| activity.status.as_str()),
+            Some("running")
+        );
+        assert_eq!(
+            subagents[1]
+                .activity
+                .as_ref()
+                .map(|activity| activity.status.as_str()),
+            Some("completed")
+        );
         assert_eq!(
             file.profile.as_ref().map(|profile| &profile.mode),
             Some(&AccessMode::WorkspaceWrite)
@@ -1209,7 +2237,42 @@ mod tests {
             ),
         )
         .expect("write completed rollout");
-        assert!(!bootstrap_active_session(&path, &mut file));
+        assert!(!bootstrap_session(&path, &mut file).0);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn startup_recovers_nested_goal_and_explicit_todo() {
+        let path = temporary_rollout("bootstrap-work");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"chat-1\",\"originator\":\"codex_cli_rs\",\"source\":\"cli\",\"cwd\":\"/work/lume\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"id\":\"fc-goal\",\"name\":\"exec\",\"input\":\"const result = await tools.create_goal({objective:\\\"Fix bookmarks\\\"}); text(JSON.stringify(result));\",\"call_id\":\"call-goal\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"call_id\":\"call-goal\",\"output\":[{\"type\":\"input_text\",\"text\":\"{\\\"goal\\\":{\\\"objective\\\":\\\"Fix bookmarks\\\",\\\"status\\\":\\\"active\\\"}}\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Goal criada. TO DO ativo:\\n\\n1. Corrigir GOAL.\\n2. Corrigir TODO.\"}}\n"
+            ),
+        )
+        .expect("write work rollout");
+        let mut file = observed_file(SessionSource::Cli);
+
+        let (_, work) = bootstrap_session(&path, &mut file);
+
+        assert_eq!(work.len(), 2);
+        assert_eq!(
+            work[0]
+                .activity
+                .as_ref()
+                .map(|activity| activity.title.as_str()),
+            Some("functions · create_goal")
+        );
+        assert_eq!(
+            work[1]
+                .activity
+                .as_ref()
+                .map(|activity| activity.kind.as_str()),
+            Some("message")
+        );
         let _ = fs::remove_file(path);
     }
 

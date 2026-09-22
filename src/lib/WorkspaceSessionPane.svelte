@@ -1,27 +1,39 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
+  import { slide } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import type { SessionActivity } from "$lib/domain";
+  import { openPath } from "@tauri-apps/plugin-opener";
+  import type { SessionActivity, SessionResult } from "$lib/domain";
   import type { PromptAttachmentInput } from "$lib/domain";
-  import type { HubSession, WorkItem } from "$lib/hubProtocol";
+  import type { HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
   import StreamedMessage from "$lib/StreamedMessage.svelte";
   import ThinkingOrb from "$lib/ThinkingOrb.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
+  import SubagentPortals from "$lib/SubagentPortals.svelte";
+  import WorkspaceWorkBookmarks from "$lib/WorkspaceWorkBookmarks.svelte";
+  import CollapsibleUserMessage from "$lib/CollapsibleUserMessage.svelte";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
+  import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
+  import { renderFileTypeIconHtml } from "$lib/fileTypeIcons";
   import ResponseAttachments from "$lib/ResponseAttachments.svelte";
   import { displayText } from "$lib/i18n";
   import { displayFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
   import { activityThinkingLabel, activityThinkingState, formatAgentDuration, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
-  import { renderSafeMarkdown } from "$lib/markdown.js";
+  import { collectAgentAlerts } from "$lib/agentAlerts";
+  import { renderWorkspaceMarkdownWithFileBadges } from "$lib/workspaceFileReferences.js";
+  import { parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { BoundedRenderCache } from "$lib/boundedRenderCache";
-  import { buildConversationEntries, buildConversationFeed } from "$lib/sessionConversation";
+  import { buildConversationEntries, buildConversationFeed, fileChangesForFinalResponses } from "$lib/sessionConversation";
+  import { cleanPromptTransport } from "$lib/chatAttachments";
   import {
     clipboardHasFile,
     clipboardHasImage,
@@ -41,7 +53,9 @@
     forkSessionFromMessage,
     interruptPrompt,
     loadWorkspaceConversationPage,
+    loadWorkspacePromptIndexPage,
     readLocalImageDataUrl,
+    setNativeFileDialogActive,
     setClaudeSessionModelSettings,
     setSessionCollaborationMode,
     setSessionFastMode,
@@ -51,6 +65,7 @@
     takeControlSession,
     type CodexThreadModelSettings,
     type CollaborationMode,
+    type WorkspacePromptIndexEntry,
   } from "$lib/lume";
 
   let {
@@ -79,6 +94,12 @@
     onToggleMaximize?: () => void;
   }>();
 
+  const subagents = $derived(subagentsForSession(session));
+  const waitingForSubagents = $derived(parentWaitingForSubagents(session, subagents));
+  const presentedStatus = $derived(waitingForSubagents
+    ? (language === "pt-BR" ? "Aguardando subagentes" : "Waiting for subagents")
+    : displayText(language, session.statusLabel));
+
   type ResponseSource = {
     id: string;
     kind: "web" | "file" | "search";
@@ -87,19 +108,40 @@
     href?: string;
   };
 
+  type OutgoingPrompt = {
+    id: number;
+    text: string;
+    createdAt: number;
+    knownPromptIds: string[];
+    flightComplete: boolean;
+    accepted: boolean;
+  };
+
   const markdownCache = new BoundedRenderCache(64, 5 * 1024 * 1024);
   const paneOpenedAt = Date.now();
   let prompt = $state("");
   let sending = $state(false);
+  let outgoingPrompts = $state<OutgoingPrompt[]>([]);
+  let outgoingSequence = 0;
+  const outgoingFlights = new Map<number, { animation: Animation; element: HTMLElement }>();
+  let planeLaunching = $state(false);
+  let planeLaunchId = $state(0);
+  let planeLaunchTimer: number | null = null;
   let takingControl = $state(false);
   let takeoverConfirm = $state(false);
+  let takeoverAcceptButton = $state<HTMLButtonElement | null>(null);
   let sendError = $state("");
   let promptAttachments = $state<PromptAttachmentInput[]>([]);
+  let paneElement = $state<HTMLElement | null>(null);
   let conversationElement = $state<HTMLDivElement | null>(null);
+  let conversationContentElement = $state<HTMLDivElement | null>(null);
   let composerElement = $state<HTMLFormElement | null>(null);
   let introDismissed = $state(false);
   let controlsRoot = $state<HTMLDivElement | null>(null);
   let controlsOpen = $state(false);
+  let alertsRoot = $state<HTMLDivElement | null>(null);
+  let alertMenuOpen = $state(false);
+  let dismissedAgentAlertIds = $state<string[]>([]);
   let zoomRoot = $state<HTMLDivElement | null>(null);
   let zoomOpen = $state(false);
   const textZoomMin = 0.8;
@@ -120,12 +162,35 @@
   let interrupting = $state(false);
   let steeringQueued = $state(false);
   let followingTail = $state(true);
+  let activeSessionId: string | null = null;
+  let expandedFileSummaries = $state<string[]>([]);
+  let userScrolledAway = false;
+  let reattachOnScroll = false;
+  let touchStartY = 0;
+  let draggingScrollbar = false;
   let olderActivities = $state<SessionActivity[]>([]);
   let olderCursor = $state<{ createdAt: number; id: string } | null>(null);
   let historyHasMore = $state<boolean | null>(null);
   let historyLoading = $state(false);
   let historyError = $state("");
   let visibleFeedLimit = $state(120);
+  let promptIndexOpen = $state(false);
+  let indexedPrompts = $state<WorkspacePromptIndexEntry[]>([]);
+  let promptIndexCursor = $state<{ createdAt: number; id: string } | null>(null);
+  let promptIndexInitialized = $state(false);
+  let promptIndexHasMore = $state(false);
+  let promptIndexLoading = $state(false);
+  let promptIndexError = $state("");
+  let promptSearchQuery = $state("");
+  let promptSearchResults = $state<WorkspacePromptIndexEntry[]>([]);
+  let promptSearchCursor = $state<{ createdAt: number; id: string } | null>(null);
+  let promptSearchHasMore = $state(false);
+  let promptSearchLoading = $state(false);
+  let promptSearchInputElement = $state<HTMLInputElement | null>(null);
+  let promptSearchTimer: number | null = null;
+  let promptSearchGeneration = 0;
+  let jumpingToPromptId = $state<string | null>(null);
+  let activePromptId = $state<string | null>(null);
   const conversationActivities = $derived.by<SessionActivity[]>(() => {
     if (!olderActivities.length) return session.activities;
     const byId = new Map(olderActivities.map((activity) => [activity.id, activity]));
@@ -133,6 +198,8 @@
     return [...byId.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
   });
   const chatActivities = $derived(conversationActivities.filter((activity: SessionActivity) =>
+    activity.kind !== "warning"
+    &&
     !/^functions\s*[·:]\s*(?:create_goal|get_goal|update_goal)$/i.test(activity.title.trim())
     && !isGenericAnalysisPlaceholder(activity)
   ));
@@ -145,16 +212,72 @@
       session.workingDirectory,
     ),
   ));
+  const outgoingMatches = $derived.by(() => {
+    const matches = new Map<number, string>();
+    const usedPromptIds = new Set<string>();
+    const promptEntries = entries.filter((entry) => entry.activity.kind === "prompt");
+    for (const outgoing of outgoingPrompts) {
+      const match = promptEntries.find((entry) =>
+        !usedPromptIds.has(entry.activity.id)
+        && !outgoing.knownPromptIds.includes(entry.activity.id)
+        && cleanPromptTransport(entry.activity.detail) === outgoing.text
+      );
+      if (match) {
+        matches.set(outgoing.id, match.activity.id);
+        usedPromptIds.add(match.activity.id);
+      }
+    }
+    return matches;
+  });
+  $effect(() => {
+    const matchedIds = outgoingPrompts
+      .filter((outgoing) => outgoing.accepted && outgoing.flightComplete && outgoingMatches.has(outgoing.id))
+      .map((outgoing) => outgoing.id);
+    if (!matchedIds.length) return;
+    queueMicrotask(() => {
+      outgoingPrompts = outgoingPrompts.filter((outgoing) => !matchedIds.includes(outgoing.id));
+    });
+  });
   const feed = $derived(buildConversationFeed(entries, { includeAnalysisInTrace: true }));
+  const filesByFinalResponse = $derived(fileChangesForFinalResponses(feed));
   const hasConversationMessage = $derived(entries.some((entry) =>
     entry.activity.kind === "prompt" || entry.activity.kind === "message"
   ));
   const hiddenCount = $derived(Math.max(0, feed.length - visibleFeedLimit));
   const visibleFeed = $derived(hiddenCount ? feed.slice(-visibleFeedLimit) : feed);
+  const promptIndexItems = $derived.by(() => {
+    const byId = new Map(indexedPrompts.map((item) => [item.id, item]));
+    for (const entry of entries) {
+      if (entry.activity.kind !== "prompt") continue;
+      byId.set(entry.activity.id, {
+        id: entry.activity.id,
+        createdAt: entry.activity.createdAt,
+        detail: entry.activity.detail ?? "",
+      });
+    }
+    return [...byId.values()].sort((left, right) =>
+      right.createdAt - left.createdAt || right.id.localeCompare(left.id)
+    );
+  });
+  const normalizedPromptSearch = $derived(promptSearchQuery.trim());
+  const visiblePromptIndexItems = $derived.by(() => {
+    if (!normalizedPromptSearch) return promptIndexItems;
+    const query = normalizedPromptSearch.toLocaleLowerCase(language);
+    const byId = new Map(promptSearchResults.map((item) => [item.id, item]));
+    for (const item of promptIndexItems) {
+      if (cleanPromptTransport(item.detail).toLocaleLowerCase(language).includes(query)) {
+        byId.set(item.id, item);
+      }
+    }
+    return [...byId.values()].sort((left, right) =>
+      right.createdAt - left.createdAt || right.id.localeCompare(left.id)
+    );
+  });
   const canLoadEarlier = $derived(Boolean(
     hiddenCount > 0 || (historyHasMore ?? (session.nativeSessionId && session.activities.length >= 60))
   ));
   const activeTraceId = $derived.by(() => {
+    if (waitingForSubagents) return null;
     if (!["running", "permission_required"].includes(session.status)) return null;
     const traceIndex = feed.findLastIndex((item) => item.kind === "trace");
     const promptIndex = feed.findLastIndex((item) =>
@@ -163,10 +286,15 @@
     return traceIndex >= promptIndex && traceIndex >= 0 ? feed[traceIndex].id : null;
   });
   const activeThinkingState = $derived.by(() => {
-    const activity = chatActivities.at(-1);
+    const activity = chatActivities.findLast((item) => item.kind !== "subagent");
     return activity ? activityThinkingState(activity) : "breathing";
   });
   const promptIsRunning = $derived(session.status === "running");
+  const activePromptStartedAt = $derived.by(() => {
+    const latestResultAt = session.results.reduce((latest: number, result: SessionResult) => Math.max(latest, result.createdAt), 0);
+    const latestFinalAt = entries.reduce((latest, entry) => entry.isFinalResponse ? Math.max(latest, entry.activity.createdAt) : latest, latestResultAt);
+    return chatActivities.findLast((activity) => activity.kind === "prompt" && activity.createdAt > latestFinalAt)?.createdAt ?? null;
+  });
   const freshChat = $derived(!hasConversationMessage && !promptIsRunning && !introDismissed);
   const canQueue = $derived(session.capabilities.promptDeliveries.includes("queue"));
   const canCompose = $derived(Boolean(
@@ -189,19 +317,26 @@
     && session.capabilities.promptDeliveries.includes("steer")
   ));
   const supportsAgentControls = $derived(["codex", "claude_code"].includes(session.agent));
-  const workItems = $derived(session.workSummary.plan?.items?.length
-    ? session.workSummary.plan.items : session.workSummary.todo?.items ?? []);
-  const workPlanContent = $derived(session.workSummary.plan?.content?.trim() ?? "");
-  const workGoal = $derived(session.workSummary.goal ?? null);
-  const completedWorkItems = $derived(workItems.filter((item: WorkItem) => item.status === "completed").length);
-  let workOpen = $state(false);
   let sourceEntryId = $state<string | null>(null);
   let actionNotice = $state("");
   let forkingEntryId = $state<string | null>(null);
-  let workClock = $state(Date.now());
-  const controlsDisabled = $derived(
-    ["running", "permission_required"].includes(session.status)
-      || session.controlOrigin !== "lume" || controlsLoading || controlsSaving || fastSaving || modeSaving
+  let typingClock = $state(Date.now());
+  let observedRunningSince = $state<number | null>(null);
+  let observedRunningSessionId = "";
+  const promptBlocksSettings = $derived(["running", "permission_required"].includes(session.status));
+  const modelControlsDisabled = $derived(
+    session.controlOrigin !== "lume"
+      || controlsLoading
+      || controlsSaving
+      || (session.agent === "claude_code" && promptBlocksSettings)
+  );
+  const runtimeControlsDisabled = $derived(
+    session.controlOrigin !== "lume"
+      || controlsLoading
+      || controlsSaving
+      || fastSaving
+      || modeSaving
+      || promptBlocksSettings
   );
   const sourceEntry = $derived(sourceEntryId
     ? entries.find((entry) => entry.id === sourceEntryId) ?? null
@@ -209,37 +344,65 @@
   const responseSources = $derived.by(() => sourceEntry ? sourcesForEntry(sourceEntry) : []);
 
   $effect(() => {
-    const refreshKey = `${session.id}:${session.updatedAt}:${visibleFeed.length}`;
-    if (!refreshKey || !followingTail) return;
-    void tick().then(() => {
-      if (conversationElement && followingTail) {
-        conversationElement.scrollTop = conversationElement.scrollHeight;
-      }
-    });
-  });
-
-  $effect(() => {
-    session.id;
+    const currentSessionId = session.id;
+    // Snapshot updates replace the session object while a response streams.
+    // Reset only when this pane actually switches to another session.
+    if (activeSessionId === currentSessionId) return;
+    activeSessionId = currentSessionId;
+    followingTail = true;
+    expandedFileSummaries = [];
+    userScrolledAway = false;
+    reattachOnScroll = false;
     olderActivities = [];
     olderCursor = null;
     historyHasMore = null;
     historyLoading = false;
     historyError = "";
     visibleFeedLimit = 120;
+    promptIndexOpen = false;
+    indexedPrompts = [];
+    promptIndexCursor = null;
+    promptIndexInitialized = false;
+    promptIndexHasMore = false;
+    promptIndexLoading = false;
+    promptIndexError = "";
+    promptSearchQuery = "";
+    promptSearchResults = [];
+    promptSearchCursor = null;
+    promptSearchHasMore = false;
+    promptSearchLoading = false;
+    promptSearchGeneration += 1;
+    if (promptSearchTimer) window.clearTimeout(promptSearchTimer);
+    promptSearchTimer = null;
+    jumpingToPromptId = null;
+    activePromptId = null;
     controlsOpen = false;
+    alertMenuOpen = false;
+    dismissedAgentAlertIds = [];
     zoomOpen = false;
     controlsError = "";
     modelSettings = null;
     fastMode = false;
-    workOpen = false;
     sourceEntryId = null;
     actionNotice = "";
     forkingEntryId = null;
+    void tick().then(() => {
+      if (session.id === currentSessionId) pinToTail();
+    });
   });
 
   $effect(() => {
-    if (workGoal?.status !== "active") return;
-    const timer = window.setInterval(() => (workClock = Date.now()), 60_000);
+    if (!promptIsRunning || waitingForSubagents) {
+      observedRunningSince = null;
+      observedRunningSessionId = "";
+      return;
+    }
+    if (observedRunningSessionId !== session.id || observedRunningSince === null) {
+      observedRunningSessionId = session.id;
+      observedRunningSince = Date.now();
+    }
+    typingClock = Date.now();
+    const timer = window.setInterval(() => (typingClock = Date.now()), 1_000);
     return () => window.clearInterval(timer);
   });
 
@@ -257,15 +420,70 @@
       if (zoomOpen && zoomRoot && !zoomRoot.contains(event.target as Node)) {
         zoomOpen = false;
       }
+      if (alertMenuOpen && alertsRoot && !alertsRoot.contains(event.target as Node)) {
+        alertMenuOpen = false;
+      }
     };
-    const closeSources = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && sourceEntryId) sourceEntryId = null;
+    const closeSidebars = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      sourceEntryId = null;
+      promptIndexOpen = false;
+      alertMenuOpen = false;
+    };
+    const paneRoot = paneElement;
+    const openInlineFile = (event: MouseEvent) => {
+      const badge = event.target instanceof Element
+        ? event.target.closest<HTMLButtonElement>("button.inline-file-badge[data-local-file]")
+        : null;
+      if (!badge || !paneRoot?.contains(badge)) return;
+      const path = badge.dataset.localFile;
+      if (path) void openPath(path).catch((error) => (sendError = String(error).replace(/^Error:\s*/, "")));
     };
     document.addEventListener("pointerdown", closeControls);
-    window.addEventListener("keydown", closeSources);
+    window.addEventListener("keydown", closeSidebars);
+    paneRoot?.addEventListener("click", openInlineFile);
+    const chat = conversationElement;
+    const content = conversationContentElement;
+    let lastContentHeight = content?.getBoundingClientRect().height ?? 0;
+    const stopScrollbarDrag = () => (draggingScrollbar = false);
+    // The reversed scroll container keeps its bottom at scrollTop 0 without
+    // writes during streaming. Compensate only while reading older content.
+    const resizeObserver = new ResizeObserver(() => {
+      if (!chat || !content) return;
+      const nextHeight = content.getBoundingClientRect().height;
+      const growth = nextHeight - lastContentHeight;
+      lastContentHeight = nextHeight;
+      if (userScrolledAway && Math.abs(growth) > 0.5) chat.scrollTop -= growth;
+    });
+    if (content) resizeObserver.observe(content);
+    chat?.addEventListener("wheel", handleConversationWheel, { passive: true });
+    chat?.addEventListener("touchstart", handleConversationTouchStart, { passive: true });
+    chat?.addEventListener("touchmove", handleConversationTouchMove, { passive: true });
+    chat?.addEventListener("keydown", handleConversationKeydown);
+    chat?.addEventListener("pointerdown", handleConversationPointerDown);
+    chat?.addEventListener("pointermove", handleConversationPointerMove);
+    window.addEventListener("pointerup", stopScrollbarDrag);
+    window.addEventListener("pointercancel", stopScrollbarDrag);
     return () => {
+      if (planeLaunchTimer) window.clearTimeout(planeLaunchTimer);
+      if (promptSearchTimer) window.clearTimeout(promptSearchTimer);
+      for (const flight of outgoingFlights.values()) {
+        flight.animation.cancel();
+        flight.element.remove();
+      }
+      outgoingFlights.clear();
       document.removeEventListener("pointerdown", closeControls);
-      window.removeEventListener("keydown", closeSources);
+      window.removeEventListener("keydown", closeSidebars);
+      paneRoot?.removeEventListener("click", openInlineFile);
+      chat?.removeEventListener("wheel", handleConversationWheel);
+      chat?.removeEventListener("touchstart", handleConversationTouchStart);
+      chat?.removeEventListener("touchmove", handleConversationTouchMove);
+      chat?.removeEventListener("keydown", handleConversationKeydown);
+      chat?.removeEventListener("pointerdown", handleConversationPointerDown);
+      chat?.removeEventListener("pointermove", handleConversationPointerMove);
+      window.removeEventListener("pointerup", stopScrollbarDrag);
+      window.removeEventListener("pointercancel", stopScrollbarDrag);
+      resizeObserver.disconnect();
     };
   });
 
@@ -273,14 +491,49 @@
     return language === "pt-BR" ? portuguese : english;
   }
 
+  async function withNativeDialog<T>(open: () => Promise<T>): Promise<T> {
+    let overlaysLowered = false;
+    try {
+      await setNativeFileDialogActive(true);
+      overlaysLowered = true;
+    } catch {
+      // The picker remains usable on platforms without native z-order control.
+    }
+    try {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      return await open();
+    } finally {
+      if (overlaysLowered) await setNativeFileDialogActive(false).catch(() => undefined);
+    }
+  }
+
+  const agentAlerts = $derived(collectAgentAlerts([session], language));
+  const archivedAgentAlerts = $derived(
+    agentAlerts.filter((alert) => dismissedAgentAlertIds.includes(alert.id)),
+  );
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
     const items: SystemBannerItem[] = [];
     if (sendError) items.push({ id: "send-error", message: sendError, tone: "error", onDismiss: () => { sendError = ""; } });
     if (controlsError) items.push({ id: "controls-error", message: controlsError, tone: "error", onDismiss: () => { controlsError = ""; } });
     if (historyError) items.push({ id: "history-error", message: historyError, tone: "error", onDismiss: () => { historyError = ""; } });
     if (actionNotice) items.push({ id: "message-action", message: actionNotice, tone: "success", onDismiss: () => { actionNotice = ""; } });
+    for (const alert of agentAlerts) {
+      if (dismissedAgentAlertIds.includes(alert.id)) continue;
+      items.push({
+        id: alert.id,
+        message: alert.message,
+        tone: alert.tone,
+        duration: alert.tone === "error" ? 7_600 : 6_000,
+        onDismiss: () => archiveAgentAlert(alert.id),
+      });
+    }
     return items;
   });
+
+  function archiveAgentAlert(id: string) {
+    if (dismissedAgentAlertIds.includes(id)) return;
+    dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-120);
+  }
 
   function setTextZoom(value: number) {
     textZoom = Math.round(Math.max(textZoomMin, Math.min(textZoomMax, value)) * 10) / 10;
@@ -321,8 +574,17 @@
     return new Intl.DateTimeFormat(language, { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
   }
 
+  function promptTime(value: number) {
+    return new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  }
+
+  function promptExcerpt(value: string) {
+    return cleanPromptTransport(value).replace(/\s+/g, " ").trim().slice(0, 180)
+      || tr("Prompt with attachments", "Prompt com anexos");
+  }
+
   function renderMarkdown(key: string, value: string) {
-    return markdownCache.render(key, value, renderSafeMarkdown);
+    return markdownCache.render(key, value, (source) => renderWorkspaceMarkdownWithFileBadges(source, renderFileTypeIconHtml, session.workingDirectory));
   }
 
   function promptForEntry(target: (typeof entries)[number]): SessionActivity | null {
@@ -431,32 +693,147 @@
     return tr(`Message ${sessionName()}…`, `Mensagem para ${sessionName()}…`);
   }
 
-  async function sendPrompt() {
-    const value = prompt.trim();
-    if (!value || !canSend || sending || takingControl) return;
-    if (!session.capabilities.canPrompt && session.capabilities.canTakeControl) {
-      takeoverConfirm = true;
+  function updateOutgoingPrompt(id: number, changes: Partial<OutgoingPrompt>) {
+    outgoingPrompts = outgoingPrompts.map((outgoing) => outgoing.id === id ? { ...outgoing, ...changes } : outgoing);
+  }
+
+  function cancelOutgoingFlight(id: number) {
+    const flight = outgoingFlights.get(id);
+    flight?.animation.cancel();
+    flight?.element.remove();
+    outgoingFlights.delete(id);
+  }
+
+  async function animateOutgoingPrompt(outgoing: OutgoingPrompt, sourceRect: DOMRect | null) {
+    if (!outgoingPrompts.some((item) => item.id === outgoing.id)) return;
+    if (conversationElement) conversationElement.scrollTop = 0;
+    const target = conversationContentElement?.querySelector<HTMLElement>(`[data-outgoing-id="${outgoing.id}"] .user-message`);
+    const targetRect = target?.getBoundingClientRect();
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!target || !targetRect || !sourceRect || reducedMotion
+      || targetRect.height > Math.max(260, (conversationElement?.clientHeight ?? 0) * .65)) {
+      updateOutgoingPrompt(outgoing.id, { flightComplete: true });
       return;
     }
-    if (freshChat) {
-      const previousTop = composerElement?.getBoundingClientRect().top;
-      introDismissed = true;
-      await tick();
-      if (previousTop !== undefined && composerElement && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        const distance = previousTop - composerElement.getBoundingClientRect().top;
-        composerElement.animate(
-          [{ transform: `translateY(${distance}px)` }, { transform: "translateY(0)" }],
-          { duration: 420, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
-        );
-      }
+
+    const appearance = getComputedStyle(target);
+    const ghost = target.cloneNode(true) as HTMLElement;
+    ghost.style.position = "fixed";
+    ghost.style.left = `${targetRect.left}px`;
+    ghost.style.top = `${targetRect.top}px`;
+    ghost.style.width = `${targetRect.width}px`;
+    ghost.style.height = `${targetRect.height}px`;
+    ghost.style.maxWidth = "none";
+    ghost.style.margin = "0";
+    ghost.style.boxSizing = "border-box";
+    ghost.style.pointerEvents = "none";
+    ghost.style.zIndex = "2147483646";
+    ghost.style.visibility = "visible";
+    ghost.style.color = appearance.color;
+    ghost.style.backgroundColor = appearance.backgroundColor;
+    ghost.style.border = appearance.border;
+    ghost.style.borderRadius = appearance.borderRadius;
+    ghost.style.fontFamily = appearance.fontFamily;
+    ghost.style.fontSize = appearance.fontSize;
+    ghost.style.lineHeight = appearance.lineHeight;
+    ghost.setAttribute("aria-hidden", "true");
+    document.body.append(ghost);
+    const dx = sourceRect.left - targetRect.left;
+    const dy = sourceRect.top - targetRect.top;
+    const duration = Math.min(420, Math.max(290, Math.hypot(dx, dy) * .85));
+    let animation: Animation;
+    try {
+      animation = ghost.animate([
+        { transform: `translate3d(${dx}px, ${dy}px, 0)`, backgroundColor: "transparent", borderColor: "transparent", opacity: .94 },
+        { transform: "translate3d(0, 0, 0)", backgroundColor: appearance.backgroundColor, borderColor: appearance.borderColor, opacity: 1 },
+      ], { duration, easing: "cubic-bezier(.16, 1, .3, 1)", fill: "forwards" });
+    } catch {
+      ghost.remove();
+      updateOutgoingPrompt(outgoing.id, { flightComplete: true });
+      return;
     }
+    outgoingFlights.set(outgoing.id, { animation, element: ghost });
+    try {
+      await animation.finished;
+    } catch {
+      // A failed send or a closed pane cancels the flight.
+    } finally {
+      outgoingFlights.delete(outgoing.id);
+      ghost.remove();
+      updateOutgoingPrompt(outgoing.id, { flightComplete: true });
+    }
+  }
+
+  async function sendPrompt() {
+    const value = prompt.trim();
+    const attachments = promptAttachments;
+    if ((!value && attachments.length === 0) || !canSend || sending || takingControl) return;
+    if (!session.capabilities.canPrompt && session.capabilities.canTakeControl) {
+      takeoverConfirm = true;
+      await tick();
+      takeoverAcceptButton?.focus();
+      return;
+    }
+    const delivery = promptIsRunning ? "queue" : "new_turn";
+    const sourceRect = composerElement?.querySelector("textarea")?.getBoundingClientRect() ?? null;
+    const previousTop = freshChat ? composerElement?.getBoundingClientRect().top : undefined;
     sending = true;
     sendError = "";
-    try {
-      await submitPrompt(session.id, value, promptAttachments, promptIsRunning ? "queue" : "new_turn");
+    if (freshChat) {
+      introDismissed = true;
+    }
+    let outgoing: OutgoingPrompt | null = null;
+    if (delivery === "new_turn") {
+      outgoing = {
+        id: ++outgoingSequence,
+        text: value,
+        createdAt: Date.now(),
+        knownPromptIds: entries.filter((entry) => entry.activity.kind === "prompt").map((entry) => entry.activity.id),
+        flightComplete: false,
+        accepted: false,
+      };
+      outgoingPrompts = [...outgoingPrompts, outgoing];
       prompt = "";
       promptAttachments = [];
+      userScrolledAway = false;
+      reattachOnScroll = false;
+      followingTail = true;
+    }
+    await tick();
+    if (previousTop !== undefined && composerElement && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      const distance = previousTop - composerElement.getBoundingClientRect().top;
+      composerElement.animate(
+        [{ transform: `translateY(${distance}px)` }, { transform: "translateY(0)" }],
+        { duration: 420, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
+      );
+    }
+    if (outgoing) void animateOutgoingPrompt(outgoing, sourceRect);
+    if (planeLaunchTimer) window.clearTimeout(planeLaunchTimer);
+    planeLaunching = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (planeLaunching) {
+      planeLaunchId += 1;
+      planeLaunchTimer = window.setTimeout(() => {
+        planeLaunching = false;
+        planeLaunchTimer = null;
+      }, 450);
+    }
+    try {
+      await submitPrompt(session.id, value, attachments, delivery);
+      if (outgoing) updateOutgoingPrompt(outgoing.id, { accepted: true });
+      else {
+        prompt = "";
+        promptAttachments = [];
+      }
     } catch (error) {
+      if (planeLaunchTimer) window.clearTimeout(planeLaunchTimer);
+      planeLaunchTimer = null;
+      planeLaunching = false;
+      if (outgoing) {
+        cancelOutgoingFlight(outgoing.id);
+        outgoingPrompts = outgoingPrompts.filter((item) => item.id !== outgoing.id);
+        if (!prompt.trim()) prompt = value;
+        if (!promptAttachments.length) promptAttachments = attachments;
+      }
       sendError = String(error).replace(/^Error:\s*/, "");
     } finally {
       sending = false;
@@ -535,12 +912,6 @@
     else selectedEffort = effort;
   }
 
-  function chooseEffort(effort: string) {
-    if (session.agent === "claude_code") claudeEffort = effort;
-    else selectedEffort = effort;
-    void saveAgentControls();
-  }
-
   function chooseModel(model: string) {
     selectedModel = model;
     const option = modelSettings?.models.find((candidate) => candidate.model === model);
@@ -561,7 +932,7 @@
         ]);
         collaborationMode = mode;
         modelSettings = settings;
-        fastMode = settings.serviceTier === "fast";
+        if (!promptIsRunning) fastMode = settings.serviceTier === "fast";
         selectedModel = settings.model;
         const option = settings.models.find((candidate) => candidate.model === settings.model);
         selectedEffort = settings.reasoningEffort
@@ -587,7 +958,7 @@
   }
 
   async function toggleFastMode() {
-    if (session.agent !== "codex" || controlsDisabled || fastSaving) return;
+    if (session.agent !== "codex" || runtimeControlsDisabled || fastSaving) return;
     fastSaving = true;
     sendError = "";
     try {
@@ -604,7 +975,7 @@
   }
 
   async function toggleCollaborationMode() {
-    if (session.agent !== "codex" || controlsDisabled || modeSaving) return;
+    if (session.agent !== "codex" || runtimeControlsDisabled || modeSaving) return;
     modeSaving = true;
     sendError = "";
     try {
@@ -620,14 +991,14 @@
   }
 
   async function saveAgentControls() {
-    if (controlsDisabled) return;
+    if (modelControlsDisabled) return;
     controlsSaving = true;
     controlsError = "";
     try {
       if (session.agent === "codex") {
         if (!selectedModel || !selectedEffort) return;
         modelSettings = await setSessionModelSettings(session.id, selectedModel, selectedEffort);
-        fastMode = modelSettings.serviceTier === "fast";
+        if (!promptIsRunning) fastMode = modelSettings.serviceTier === "fast";
       } else if (session.agent === "claude_code") {
         await setClaudeSessionModelSettings(
           session.id,
@@ -644,7 +1015,11 @@
 
   async function confirmTakeover() {
     const value = prompt.trim();
-    if (!value || !session.capabilities.canTakeControl || takingControl) return;
+    if (
+      (!value && promptAttachments.length === 0)
+      || !session.capabilities.canTakeControl
+      || takingControl
+    ) return;
     takingControl = true;
     sendError = "";
     try {
@@ -673,7 +1048,7 @@
     if (!canAttach || sending || takingControl || promptAttachments.length >= 4) return;
     sendError = "";
     try {
-      const selected = await openDialog({ multiple: true, directory: false });
+      const selected = await withNativeDialog(() => openDialog({ multiple: true, directory: false }));
       const paths = (Array.isArray(selected) ? selected : selected ? [selected] : [])
         .filter((path): path is string => typeof path === "string")
         .slice(0, 4 - promptAttachments.length);
@@ -728,16 +1103,73 @@
     promptAttachments = promptAttachments.filter((_, current) => current !== index);
   }
 
+  function pinToTail() {
+    if (!followingTail || !conversationElement) return;
+    conversationElement.scrollTop = 0;
+  }
+
   function trackConversationScroll() {
     if (!conversationElement) return;
-    followingTail = conversationElement.scrollHeight - conversationElement.scrollTop - conversationElement.clientHeight < 72;
+    if (!userScrolledAway) return;
+    if (reattachOnScroll && conversationElement.scrollTop >= -2) {
+      userScrolledAway = false;
+      reattachOnScroll = false;
+      followingTail = true;
+    }
+  }
+
+  function stopFollowingTail() {
+    userScrolledAway = true;
+    reattachOnScroll = false;
+    followingTail = false;
+  }
+
+  function handleConversationWheel(event: WheelEvent) {
+    if (event.deltaY < 0) stopFollowingTail();
+    else if (event.deltaY > 0 && userScrolledAway) reattachOnScroll = true;
+  }
+
+  function handleConversationTouchStart(event: TouchEvent) {
+    touchStartY = event.touches[0]?.clientY ?? 0;
+  }
+
+  function handleConversationTouchMove(event: TouchEvent) {
+    const currentY = event.touches[0]?.clientY ?? touchStartY;
+    if (currentY > touchStartY + 4) stopFollowingTail();
+    else if (currentY < touchStartY - 4 && userScrolledAway) reattachOnScroll = true;
+    touchStartY = currentY;
+  }
+
+  function handleConversationKeydown(event: KeyboardEvent) {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+    if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) stopFollowingTail();
+    if (["ArrowDown", "PageDown"].includes(event.key) || event.key === " ") reattachOnScroll = true;
+    if (event.key === "End") {
+      userScrolledAway = false;
+      reattachOnScroll = false;
+      followingTail = true;
+      pinToTail();
+    }
+  }
+
+  function handleConversationPointerDown(event: PointerEvent) {
+    if (!conversationElement) return;
+    const bounds = conversationElement.getBoundingClientRect();
+    draggingScrollbar = event.clientX >= bounds.right - 20 && event.clientX <= bounds.right
+      && event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+    if (draggingScrollbar) {
+      stopFollowingTail();
+      reattachOnScroll = true;
+    }
+  }
+
+  function handleConversationPointerMove(event: PointerEvent) {
+    if (draggingScrollbar && event.buttons === 1) trackConversationScroll();
   }
 
   async function revealEarlierMessages() {
     if (historyLoading) return;
-    const previousHeight = conversationElement?.scrollHeight ?? 0;
-    const previousTop = conversationElement?.scrollTop ?? 0;
-    followingTail = false;
+    stopFollowingTail();
     historyError = "";
     if (hiddenCount > 0) {
       visibleFeedLimit += 60;
@@ -768,19 +1200,197 @@
         historyLoading = false;
       }
     }
-    await tick();
-    if (conversationElement) conversationElement.scrollTop = previousTop + conversationElement.scrollHeight - previousHeight;
+  }
+
+  async function loadOlderPromptIndex() {
+    if (promptIndexLoading || !session.nativeSessionId || (promptIndexInitialized && !promptIndexHasMore)) return;
+    const requestedSessionId = session.id;
+    promptIndexLoading = true;
+    promptIndexError = "";
+    try {
+      const page = await loadWorkspacePromptIndexPage(
+        requestedSessionId,
+        promptIndexCursor?.createdAt,
+        promptIndexCursor?.id,
+      );
+      if (session.id !== requestedSessionId) return;
+      indexedPrompts = [...indexedPrompts, ...page.prompts];
+      const oldest = page.prompts.at(-1);
+      if (oldest) promptIndexCursor = { createdAt: oldest.createdAt, id: oldest.id };
+      promptIndexHasMore = page.hasMore && Boolean(oldest);
+      promptIndexInitialized = true;
+    } catch (error) {
+      if (session.id === requestedSessionId) promptIndexError = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      if (session.id === requestedSessionId) promptIndexLoading = false;
+    }
+  }
+
+  async function loadPromptSearch(reset = false, generation = promptSearchGeneration) {
+    const query = normalizedPromptSearch;
+    if (!query || (!reset && (promptSearchLoading || !promptSearchHasMore))) return;
+    const requestedSessionId = session.id;
+    const requestedQuery = query;
+    const cursor = reset ? null : promptSearchCursor;
+    promptSearchLoading = true;
+    promptIndexError = "";
+    try {
+      const page = await loadWorkspacePromptIndexPage(
+        requestedSessionId,
+        cursor?.createdAt,
+        cursor?.id,
+        requestedQuery,
+      );
+      if (session.id !== requestedSessionId || normalizedPromptSearch !== requestedQuery || generation !== promptSearchGeneration) return;
+      promptSearchResults = reset ? page.prompts : [...promptSearchResults, ...page.prompts];
+      const oldest = page.prompts.at(-1);
+      promptSearchCursor = oldest ? { createdAt: oldest.createdAt, id: oldest.id } : cursor;
+      promptSearchHasMore = page.hasMore && Boolean(oldest);
+    } catch (error) {
+      if (session.id === requestedSessionId && normalizedPromptSearch === requestedQuery && generation === promptSearchGeneration) {
+        promptIndexError = String(error).replace(/^Error:\s*/, "");
+      }
+    } finally {
+      if (session.id === requestedSessionId && normalizedPromptSearch === requestedQuery && generation === promptSearchGeneration) {
+        promptSearchLoading = false;
+      }
+    }
+  }
+
+  function schedulePromptSearch() {
+    if (promptSearchTimer) window.clearTimeout(promptSearchTimer);
+    const generation = ++promptSearchGeneration;
+    promptSearchResults = [];
+    promptSearchCursor = null;
+    promptSearchHasMore = false;
+    promptIndexError = "";
+    if (!normalizedPromptSearch) {
+      promptSearchLoading = false;
+      return;
+    }
+    promptSearchTimer = window.setTimeout(() => {
+      promptSearchTimer = null;
+      void loadPromptSearch(true, generation);
+    }, 240);
+  }
+
+  function clearPromptSearch() {
+    promptSearchQuery = "";
+    schedulePromptSearch();
+    promptSearchInputElement?.focus();
+  }
+
+  function togglePromptIndex() {
+    promptIndexOpen = !promptIndexOpen;
+    if (!promptIndexOpen) return;
+    sourceEntryId = null;
+    if (!promptIndexInitialized) void loadOlderPromptIndex();
+    void tick().then(() => promptSearchInputElement?.focus());
+  }
+
+  function matchesIndexedPrompt(activity: SessionActivity, target: WorkspacePromptIndexEntry) {
+    if (activity.kind !== "prompt") return false;
+    if (activity.id === target.id) return true;
+    const preview = cleanPromptTransport(target.detail);
+    return Boolean(preview)
+      && Math.abs(activity.createdAt - target.createdAt) < 60_000
+      && cleanPromptTransport(activity.detail).startsWith(preview);
+  }
+
+  async function loadHistoryThroughPrompt(target: WorkspacePromptIndexEntry, requestedSessionId: string) {
+    const earliest = olderCursor ?? (
+      conversationActivities
+        .filter((activity) => activity.kind === "prompt" || (activity.kind === "message" && activity.status !== "running"))
+        .at(0) ?? conversationActivities.at(0)
+    );
+    if (!earliest || !session.nativeSessionId || historyHasMore === false) return;
+    let cursor = { createdAt: earliest.createdAt, id: earliest.id };
+    let collected: SessionActivity[] = [];
+    let more = true;
+    historyLoading = true;
+    try {
+      while (more && session.id === requestedSessionId) {
+        const page = await loadWorkspaceConversationPage(requestedSessionId, cursor.createdAt, cursor.id);
+        if (session.id !== requestedSessionId) return;
+        more = page.hasMore && page.activities.length > 0;
+        if (!page.activities.length) break;
+        collected = [...page.activities, ...collected];
+        cursor = { createdAt: page.activities[0].createdAt, id: page.activities[0].id };
+        if (page.activities.some((activity) => matchesIndexedPrompt(activity, target))) break;
+      }
+      if (session.id !== requestedSessionId) return;
+      if (collected.length) {
+        olderActivities = [...collected, ...olderActivities];
+        olderCursor = cursor;
+      }
+      historyHasMore = more;
+    } finally {
+      if (session.id === requestedSessionId) historyLoading = false;
+    }
+  }
+
+  async function jumpToPrompt(target: WorkspacePromptIndexEntry) {
+    if (jumpingToPromptId || historyLoading) return;
+    const requestedSessionId = session.id;
+    jumpingToPromptId = target.id;
+    promptIndexError = "";
+    stopFollowingTail();
+    try {
+      let match = feed.findIndex((item) => item.kind === "entry" && matchesIndexedPrompt(item.entry.activity, target));
+      if (match < 0) {
+        await loadHistoryThroughPrompt(target, requestedSessionId);
+        await tick();
+        match = feed.findIndex((item) => item.kind === "entry" && matchesIndexedPrompt(item.entry.activity, target));
+      }
+      if (session.id !== requestedSessionId) return;
+      if (match >= 0) {
+        visibleFeedLimit = Math.max(visibleFeedLimit, feed.length - match);
+        await tick();
+        const matchingItem = feed[match];
+        const activityId = matchingItem.kind === "entry" ? matchingItem.entry.activity.id : target.id;
+        const row = [...(conversationContentElement?.querySelectorAll<HTMLElement>("[data-prompt-id]") ?? [])]
+          .find((element) => element.dataset.promptId === activityId);
+        if (row && conversationElement) {
+          const top = row.getBoundingClientRect().top - conversationElement.getBoundingClientRect().top;
+          conversationElement.scrollTop += top - 24;
+          activePromptId = activityId;
+          row.focus({ preventScroll: true });
+          promptIndexOpen = false;
+          return;
+        }
+      }
+      if (session.id === requestedSessionId) {
+        promptIndexError = tr("This prompt could not be found in the available history.", "Este prompt não foi encontrado no histórico disponível.");
+      }
+    } catch (error) {
+      if (session.id === requestedSessionId) promptIndexError = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      if (session.id === requestedSessionId) jumpingToPromptId = null;
+    }
   }
 
   function scrollToLatest() {
+    userScrolledAway = false;
+    reattachOnScroll = false;
     followingTail = true;
-    conversationElement?.scrollTo({ top: conversationElement.scrollHeight, behavior: "smooth" });
+    pinToTail();
+  }
+
+  function toggleFileSummary(id: string) {
+    expandedFileSummaries = expandedFileSummaries.includes(id)
+      ? expandedFileSummaries.filter((value) => value !== id)
+      : [...expandedFileSummaries, id];
+  }
+
+  function motionDuration(duration: number) {
+    return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration;
   }
 </script>
 
 <article
+  bind:this={paneElement}
   class:focused
-  class="session-pane"
+  class="session-pane status-{session.status}"
   data-workspace-pane={session.id}
   style:--workspace-chat-font-adjust={`${(textZoom - 1) * 9}px`}
   style:--workspace-chat-small-adjust={`${(textZoom - 1) * 8}px`}
@@ -801,14 +1411,51 @@
       <small title={session.workingDirectory}><BrandIcon name={session.agent} size={10} />{session.agentLabel} · {session.project}</small>
     </span>
     {#if session.controlOrigin === "external"}
-      <span class="source-badge" title={sourceLabel()}>
+      <span class="source-badge" title={sourceLabel()} aria-label={sourceLabel()}>
         <BrandIcon name={sourceIcon()} size={11} />
-        {sourceLabel()}
+        <span class="badge-label">{sourceLabel()}</span>
       </span>
     {/if}
-    <span class="status-badge status-{session.status}"><i></i>{displayText(language, session.statusLabel)}</span>
-    {#if supportsAgentControls || onToggleMaximize || closable}
+    <span class="status-badge status-{waitingForSubagents ? 'subagents' : session.status}" title={presentedStatus} aria-label={presentedStatus}><i></i><span class="badge-label">{presentedStatus}</span></span>
       <div class="pane-actions">
+        {#if archivedAgentAlerts.length}
+          <div class="agent-alerts" bind:this={alertsRoot}>
+            <button
+              class:active={alertMenuOpen}
+              class="agent-alert-trigger"
+              type="button"
+              title={tr("Session alerts", "Alertas da sessão")}
+              aria-label={tr(`${agentAlerts.length} session alerts`, `${agentAlerts.length} alertas da sessão`)}
+              aria-expanded={alertMenuOpen}
+              onclick={() => (alertMenuOpen = !alertMenuOpen)}
+            >
+              <LumeIcon name="warning" size={17} strokeWidth={1.8} />
+              <span>{agentAlerts.length}</span>
+            </button>
+            {#if alertMenuOpen}
+              <section class="agent-alert-menu" aria-label={tr("Session alerts", "Alertas da sessão")}>
+                <header><strong>{tr("Session alerts", "Alertas da sessão")}</strong><small>{agentAlerts.length}</small></header>
+                <div>
+                  {#each agentAlerts as alert (alert.id)}
+                    <article class="tone-{alert.tone}">
+                      <span><LumeIcon name="warning" size={13} strokeWidth={1.9} /></span>
+                      <p>{alert.message}</p>
+                    </article>
+                  {/each}
+                </div>
+              </section>
+            {/if}
+          </div>
+        {/if}
+        <button
+          class:active={promptIndexOpen}
+          type="button"
+          title={tr("Browse prompts", "Navegar pelos prompts")}
+          aria-label={tr("Browse prompts", "Navegar pelos prompts")}
+          aria-expanded={promptIndexOpen}
+          aria-controls={`workspace-prompt-index-${session.id}`}
+          onclick={togglePromptIndex}
+        ><WorkspaceChatIcon name="prompts" size={18} active={promptIndexOpen} /></button>
         <div class="text-zoom" bind:this={zoomRoot}>
           <button
             class:active={zoomOpen}
@@ -817,7 +1464,7 @@
             aria-label={tr("Chat text size", "Tamanho do texto do chat")}
             aria-expanded={zoomOpen}
             onclick={() => (zoomOpen = !zoomOpen)}
-          >Aa</button>
+          ><WorkspaceChatIcon name="text-size" size={18} active={zoomOpen} /></button>
           {#if zoomOpen}
             <div class="text-zoom-popover" role="group" aria-label={tr("Chat text size", "Tamanho do texto do chat")}>
               <button type="button" disabled={textZoom <= textZoomMin} aria-label={tr("Decrease text size", "Diminuir textos")} onclick={() => setTextZoom(textZoom - 0.1)}>−</button>
@@ -835,51 +1482,29 @@
             onclick={onToggleMaximize}
           >
             {#if maximized}
-              <LumeIcon name="restore" size={16} />
+              <WorkspaceChatIcon name="restore" size={18} active />
             {:else}
-              <LumeIcon name="maximize" size={16} />
+              <WorkspaceChatIcon name="maximize" size={18} />
             {/if}
           </button>
         {/if}
         {#if closable}
         <button type="button" title={tr("Close pane", "Fechar painel")} aria-label={tr("Close pane", "Fechar painel")} onclick={onClose}>
-          <LumeIcon name="close" size={16} />
+          <WorkspaceChatIcon name="close" size={18} />
         </button>
         {/if}
       </div>
-    {/if}
   </header>
 
-  {#if workItems.length || workPlanContent || workGoal}
-    <section class="work-overview" aria-label={tr("Agent plan and goal", "Plano e objetivo do agente")}>
-      <button class="work-toggle" type="button" aria-expanded={workOpen} onclick={() => (workOpen = !workOpen)}>
-        <LumeIcon name="mode-plan" size={15} />
-        <strong>{workGoal ? "GOAL" : "TO DO"}</strong>
-        {#if workItems.length}<span class="work-count">{workGoal ? "TO DO · " : ""}{completedWorkItems}/{workItems.length}</span>{/if}
-        {#if workGoal}<span class="work-objective">{workGoal.objective}</span>{/if}
-        {#if workGoal?.status === "active"}<small>{Math.max(0, Math.floor((workClock - workGoal.startedAt) / 60_000))}m</small>{/if}
-        <LumeIcon name="chevron-down" size={13} />
-      </button>
-      {#if workItems.length}<div class="work-progress" role="progressbar" aria-label={tr("Plan progress", "Progresso do plano")} aria-valuemin="0" aria-valuemax={workItems.length} aria-valuenow={completedWorkItems}><span style={`width:${completedWorkItems / workItems.length * 100}%`}></span></div>{/if}
-      {#if workOpen}
-        <div class="work-detail">
-          {#if workGoal}<p class="goal-line"><b class:complete={workGoal.status === "complete"} class:blocked={workGoal.status === "blocked"}>{workGoal.status === "active" ? tr("In progress", "Em andamento") : workGoal.status === "complete" ? tr("Completed", "Concluído") : tr("Blocked", "Bloqueado")}</b>{workGoal.objective}</p>{/if}
-          {#if workItems.length}
-            <ol>
-              {#each workItems as item}
-                <li class:done={item.status === "completed"} class:doing={item.status === "in_progress"}><i>{item.status === "completed" ? "✓" : item.status === "in_progress" ? "·" : ""}</i><span>{item.label}</span></li>
-              {/each}
-            </ol>
-          {:else if workPlanContent}
-            <p class="work-plan-content">{workPlanContent}</p>
-          {/if}
-        </div>
-      {/if}
-    </section>
+  {#if subagents.length}
+    <SubagentPortals {session} children={subagents} {language} />
   {/if}
 
+  <WorkspaceWorkBookmarks {session} {language} hasSubagents={subagents.length > 0} />
+
   <div class="conversation-shell">
-  <div class="conversation" bind:this={conversationElement} onscroll={trackConversationScroll}>
+  <div class="conversation" role="region" aria-label={tr("Conversation", "Conversa")} bind:this={conversationElement} onscroll={trackConversationScroll}>
+    <div class="conversation-content" bind:this={conversationContentElement}>
     {#if canLoadEarlier}
       <button class="load-earlier-chat" type="button" disabled={historyLoading} onclick={() => void revealEarlierMessages()}>
         <span class:loading={historyLoading} class="load-earlier-icon"><LumeIcon name="chevron-down" size={14} /></span>
@@ -896,28 +1521,16 @@
             {language}
           />
         </div>
-        {#if feedItem.files.length}
-          <div class="changed-files">
-            <strong>{tr("Files changed", "Arquivos alterados")}</strong>
-            {#each feedItem.files as file}
-              <button class="changed-file" type="button" title={tr(`Review ${file.path}`, `Revisar ${file.path}`)} onclick={() => onOpenReview?.(file.path)}>
-                <FileTypeIcon path={file.path} />
-                <span>{displayFileChangePath(file.path)}</span>
-                <b class="added">+{file.added}</b><b class="removed">-{file.removed}</b>
-                <LumeIcon name="chevron-down" size={12} />
-              </button>
-            {/each}
-          </div>
-        {/if}
       {:else}
         {@const entry = feedItem.entry}
         {@const item = entry.activity}
+        {@const changedFiles = filesByFinalResponse.get(entry.id) ?? []}
         {#if item.kind === "prompt" && (item.detail || item.attachments?.length)}
-          <div class="conversation-row user-row">
+          <div class:targeted={activePromptId === item.id} class:outgoing-replacement={outgoingPrompts.some((outgoing) => !outgoing.flightComplete && outgoingMatches.get(outgoing.id) === item.id)} class="conversation-row user-row" data-prompt-id={item.id} tabindex="-1">
             <span class="time-gutter"><time>{time(item.createdAt)}</time></span>
             <div class="conversation-entry">
               <section class="message user-message">
-                {#if item.detail}<pre>{item.detail}</pre>{/if}
+                {#if item.detail}<CollapsibleUserMessage text={item.detail} {language} />{/if}
                 {#if item.attachments?.length}
                   <div class="attachments">
                     {#each item.attachments as attachment}
@@ -943,17 +1556,16 @@
                   attachments={item.attachments ?? []}
                   workingDirectory={session.workingDirectory}
                   {language}
-                  includeCitations
                   onError={(error) => (sendError = error)}
                 />
                 {#if entry.isFinalResponse}
                   <footer class="response-footer">
-                    {#if entry.durationMs !== undefined}
-                      <span class="response-duration">{tr("Worked for", "Trabalhou por")} {formatAgentDuration(entry.durationMs)}</span>
-                    {/if}
+                    <span class="response-duration">{entry.durationMs !== undefined
+                      ? `${tr("Worked for", "Trabalhou por")} ${formatAgentDuration(entry.durationMs)}`
+                      : tr("Work time unavailable", "Tempo de trabalho indisponível")}</span>
                     <div class="final-actions" aria-label={tr("Response actions", "Ações da resposta")}>
                       <button type="button" title={tr("Copy response", "Copiar resposta")} aria-label={tr("Copy response", "Copiar resposta")} onclick={() => void copyResponse(item.detail ?? "")}><LumeIcon name="copy" size={14} /></button>
-                      <button class:active={sourceEntryId === entry.id} type="button" title={tr("View sources", "Visualizar fontes")} aria-label={tr("View sources", "Visualizar fontes")} aria-expanded={sourceEntryId === entry.id} onclick={() => (sourceEntryId = sourceEntryId === entry.id ? null : entry.id)}><LumeIcon name="sources" size={14} /></button>
+                      <button class:active={sourceEntryId === entry.id} type="button" title={tr("View sources", "Visualizar fontes")} aria-label={tr("View sources", "Visualizar fontes")} aria-expanded={sourceEntryId === entry.id} onclick={() => { promptIndexOpen = false; sourceEntryId = sourceEntryId === entry.id ? null : entry.id; }}><LumeIcon name="sources" size={14} /></button>
                       {#if session.agent === "codex" && session.nativeSessionId && promptForEntry(entry)}
                         <button class:loading={forkingEntryId === entry.id} type="button" disabled={Boolean(forkingEntryId)} title={tr("Fork from this prompt", "Criar fork a partir deste prompt")} aria-label={tr("Fork from this prompt", "Criar fork a partir deste prompt")} onclick={() => void forkFromEntry(entry)}><LumeIcon name="fork" size={14} /></button>
                       {/if}
@@ -961,17 +1573,30 @@
                   </footer>
                 {/if}
               </section>
-              {#if entry.files.length}
-                <div class="changed-files">
-                  <strong>{tr("Files changed", "Arquivos alterados")}</strong>
-                  {#each entry.files as file}
-                    <button class="changed-file" type="button" title={tr(`Review ${file.path}`, `Revisar ${file.path}`)} onclick={() => onOpenReview?.(file.path)}>
-                      <FileTypeIcon path={file.path} />
-                      <span>{displayFileChangePath(file.path)}</span>
-                      <b class="added">+{file.added}</b><b class="removed">-{file.removed}</b>
-                      <LumeIcon name="chevron-down" size={12} />
-                    </button>
-                  {/each}
+              {#if entry.isFinalResponse && changedFiles.length}
+                {@const totalAdded = changedFiles.reduce((total, file) => total + file.added, 0)}
+                {@const totalRemoved = changedFiles.reduce((total, file) => total + file.removed, 0)}
+                <div class:open={expandedFileSummaries.includes(entry.id)} class="changed-files">
+                  <button class="changed-files-toggle" type="button" aria-expanded={expandedFileSummaries.includes(entry.id)} onclick={() => toggleFileSummary(entry.id)}>
+                    <LumeIcon name="file" size={14} />
+                    <span>{tr(`${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"} changed`, `${changedFiles.length} arquivo${changedFiles.length === 1 ? "" : "s"} alterado${changedFiles.length === 1 ? "" : "s"}`)}</span>
+                    {#if !expandedFileSummaries.includes(entry.id)}
+                      <b class="added">+{totalAdded}</b><b class="removed">-{totalRemoved}</b>
+                    {/if}
+                    <LumeIcon name="chevron-down" size={13} />
+                  </button>
+                  {#if expandedFileSummaries.includes(entry.id)}
+                    <div class="changed-files-list" in:slide={{ duration: motionDuration(170), easing: cubicOut }} out:slide={{ duration: motionDuration(120), easing: cubicOut }}>
+                      {#each changedFiles as file}
+                        <button class="changed-file" type="button" title={tr(`Review ${file.path}`, `Revisar ${file.path}`)} onclick={() => onOpenReview?.(file.path)}>
+                          <FileTypeIcon path={file.path} />
+                          <span>{displayFileChangePath(file.path)}</span>
+                          <b class="added">+{file.added}</b><b class="removed">-{file.removed}</b>
+                          <LumeIcon name="chevron-down" size={12} />
+                        </button>
+                      {/each}
+                    </div>
+                  {/if}
                 </div>
               {/if}
             </div>
@@ -987,22 +1612,9 @@
             </div>
           </div>
         {/if}
-        {#if entry.files.length && item.kind !== "message"}
-          <div class="changed-files">
-            <strong>{tr("Files changed", "Arquivos alterados")}</strong>
-            {#each entry.files as file}
-              <button class="changed-file" type="button" title={tr(`Review ${file.path}`, `Revisar ${file.path}`)} onclick={() => onOpenReview?.(file.path)}>
-                <FileTypeIcon path={file.path} />
-                <span>{displayFileChangePath(file.path)}</span>
-                <b class="added">+{file.added}</b><b class="removed">-{file.removed}</b>
-                <LumeIcon name="chevron-down" size={12} />
-              </button>
-            {/each}
-          </div>
-        {/if}
       {/if}
     {:else}
-      {#if !freshChat}
+      {#if !freshChat && !outgoingPrompts.length}
         <div class="empty-chat">
           <BrandIcon name={session.agent} size={26} />
           <strong>{tr("No conversation yet", "Nenhuma conversa ainda")}</strong>
@@ -1010,7 +1622,15 @@
         </div>
       {/if}
     {/each}
-    {#if session.status === "running"}
+    {#each outgoingPrompts as outgoing (outgoing.id)}
+      {#if !outgoingMatches.has(outgoing.id) || !outgoing.flightComplete}
+        <div class:in-flight={!outgoing.flightComplete} class="conversation-row user-row outgoing-row" data-outgoing-id={outgoing.id} aria-hidden={!outgoing.flightComplete}>
+          <span class="time-gutter"><time>{time(outgoing.createdAt)}</time></span>
+          <div class="conversation-entry"><section class="message user-message"><CollapsibleUserMessage text={outgoing.text} {language} /></section></div>
+        </div>
+      {/if}
+    {/each}
+    {#if session.status === "running" && !waitingForSubagents}
       <div class="agent-typing">
         <ThinkingOrb
           state={activeThinkingState}
@@ -1018,9 +1638,11 @@
           speed={0.92}
           label={tr(`${sessionName()} is working`, `${sessionName()} está trabalhando`)}
         />
-        <span>{activityThinkingLabel(activeThinkingState, language)}</span>
+        <span class="typing-label">{activityThinkingLabel(activeThinkingState, language)}</span>
+        <span class="typing-elapsed" aria-label={tr("Elapsed time", "Tempo decorrido")}>{formatAgentDuration(Math.max(0, typingClock - (activePromptStartedAt ?? observedRunningSince ?? typingClock)))}</span>
       </div>
     {/if}
+    </div>
   </div>
 
   {#if !followingTail}
@@ -1057,6 +1679,58 @@
     </aside>
   {/if}
 
+  {#if promptIndexOpen}
+    <button class="sources-scrim" type="button" aria-label={tr("Close prompt list", "Fechar lista de prompts")} onclick={() => (promptIndexOpen = false)}></button>
+    <aside id={`workspace-prompt-index-${session.id}`} class="sources-sidebar prompt-sidebar" aria-label={tr("Conversation prompts", "Prompts da conversa")}>
+      <header>
+        <span><strong>{tr("Prompts", "Prompts")}</strong><small>{tr("Jump to a message", "Ir para uma mensagem")}</small></span>
+        <button type="button" title={tr("Close prompt list", "Fechar lista de prompts")} aria-label={tr("Close prompt list", "Fechar lista de prompts")} onclick={() => (promptIndexOpen = false)}><LumeIcon name="close" size={15} /></button>
+      </header>
+      <label class="prompt-index-search">
+        <LumeIcon name="search" size={14} />
+        <input
+          bind:this={promptSearchInputElement}
+          bind:value={promptSearchQuery}
+          type="search"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder={tr("Search prompts", "Pesquisar prompts")}
+          aria-label={tr("Search conversation prompts", "Pesquisar prompts da conversa")}
+          oninput={schedulePromptSearch}
+        />
+        {#if promptSearchQuery}
+          <button type="button" title={tr("Clear search", "Limpar pesquisa")} aria-label={tr("Clear prompt search", "Limpar pesquisa de prompts")} onclick={clearPromptSearch}><LumeIcon name="close" size={12} /></button>
+        {/if}
+      </label>
+      <div class="prompt-index-list">
+        {#each visiblePromptIndexItems as item (item.id)}
+          <button class:locating={jumpingToPromptId === item.id} type="button" disabled={Boolean(jumpingToPromptId) || historyLoading} title={promptExcerpt(item.detail)} onclick={() => void jumpToPrompt(item)}>
+            <time>{promptTime(item.createdAt)}</time>
+            <span>{promptExcerpt(item.detail)}</span>
+          </button>
+        {:else}
+          {#if !(promptIndexLoading || promptSearchLoading)}
+            <p class="prompt-index-empty">{normalizedPromptSearch
+              ? tr("No prompts match this search.", "Nenhum prompt corresponde à pesquisa.")
+              : tr("No prompts in this conversation yet.", "Ainda não há prompts nesta conversa.")}</p>
+          {/if}
+        {/each}
+        {#if promptIndexError}<p class="prompt-index-error" role="alert">{promptIndexError}</p>{/if}
+        {#if promptIndexLoading || promptSearchLoading || jumpingToPromptId}
+          <p class="prompt-index-loading" role="status">{jumpingToPromptId
+            ? tr("Finding prompt in history…", "Buscando prompt no histórico…")
+            : normalizedPromptSearch
+              ? tr("Searching prompts…", "Pesquisando prompts…")
+              : tr("Loading prompts…", "Carregando prompts…")}</p>
+        {:else if normalizedPromptSearch ? promptSearchHasMore : promptIndexHasMore}
+          <button class="prompt-index-more" type="button" onclick={() => void (normalizedPromptSearch ? loadPromptSearch() : loadOlderPromptIndex())}>{normalizedPromptSearch
+            ? tr("More results", "Mais resultados")
+            : tr("Load older prompts", "Carregar prompts anteriores")}</button>
+        {/if}
+      </div>
+    </aside>
+  {/if}
+
   {#if takeoverConfirm}
     <div class="takeover-backdrop" role="presentation" onclick={(event) => {
       if (event.currentTarget === event.target && !takingControl) takeoverConfirm = false;
@@ -1077,7 +1751,7 @@
         </div>
         <footer>
           <button type="button" disabled={takingControl} onclick={() => (takeoverConfirm = false)}>{tr("Cancel", "Cancelar")}</button>
-          <button class="takeover-primary" type="button" disabled={takingControl} onclick={() => void confirmTakeover()}>
+          <button bind:this={takeoverAcceptButton} class="takeover-primary" type="button" disabled={takingControl} onclick={() => void confirmTakeover()}>
             {takingControl ? tr("Taking control…", "Assumindo controle…") : tr("Take control & send", "Assumir e enviar")}
           </button>
         </footer>
@@ -1137,16 +1811,18 @@
         onkeydown={handleComposerKeydown}
       ></textarea>
       {#if promptIsRunning && canQueue}<span class="queue-label">{tr("Next", "Próximo")}</span>{/if}
-      {#if promptIsRunning && session.capabilities.canInterrupt}
+      {#if promptIsRunning && session.capabilities.canInterrupt && !planeLaunching}
         <button class="stop-button" type="button" disabled={interrupting} onclick={() => void interruptAgentPrompt()} aria-label={tr("Interrupt prompt", "Interromper prompt")} title={tr("Interrupt prompt · Enter queues", "Interromper prompt · Enter adiciona à fila")}>
           {#if interrupting}<i class="send-spinner"></i>{:else}<LumeIcon name="stop" size={15} />{/if}
         </button>
       {:else}
-        <button type="submit" disabled={!prompt.trim() || !canSend || sending || takingControl} aria-label={promptIsRunning ? tr("Add to queue", "Adicionar à fila") : tr("Send prompt", "Enviar prompt")}>
-          {#if sending || takingControl}
+        <button class:launching={planeLaunching} class="send-button" type="submit" disabled={!prompt.trim() || !canSend || sending || takingControl} aria-label={promptIsRunning ? tr("Add to queue", "Adicionar à fila") : tr("Send prompt", "Enviar prompt")}>
+          {#if planeLaunching}
+            {#key planeLaunchId}<span class="plane-launch"><SendPlaneIcon size={16} /></span>{/key}
+          {:else if sending || takingControl}
             <i class="send-spinner"></i>
           {:else}
-            <LumeIcon name="send" size={16} />
+            <SendPlaneIcon size={16} />
           {/if}
         </button>
       {/if}
@@ -1180,7 +1856,7 @@
                     </label>
                   {/if}
                 {:else}
-                  <label class="controls-field"><span>{tr("Model", "Modelo")}</span><input bind:value={claudeModel} disabled={controlsDisabled} maxlength="128" placeholder={tr("Session default", "Padrão da sessão")} onchange={() => void saveAgentControls()} /></label>
+                  <label class="controls-field"><span>{tr("Model", "Modelo")}</span><input bind:value={claudeModel} disabled={modelControlsDisabled} maxlength="128" placeholder={tr("Session default", "Padrão da sessão")} onchange={() => void saveAgentControls()} /></label>
                 {/if}
                 {#if effortValues().length}
                   <div class:max={currentEffort().toLowerCase() === "max"} class:ultra={currentEffort().toLowerCase() === "ultra"} class="controls-field effort-field"
@@ -1190,13 +1866,15 @@
                       <span class="effort-progress" aria-hidden="true"></span>
                       <span class="effort-thumb" aria-hidden="true"></span>
                       <input type="range" min="0" max={Math.max(0, effortValues().length - 1)} step="1"
-                        value={currentEffortIndex()} disabled={controlsDisabled}
-                        aria-label={tr("Reasoning effort", "Nível de raciocínio")} oninput={chooseEffortIndex} onchange={() => void saveAgentControls()} />
+                        value={currentEffortIndex()} disabled={modelControlsDisabled}
+                        aria-label={tr("Reasoning effort", "Nível de raciocínio")} aria-valuetext={effortLabel()}
+                        oninput={chooseEffortIndex} onchange={() => void saveAgentControls()} />
                     </div>
-                    <div class="effort-scale">{#each effortValues() as effort (effort || "default")}<button type="button" class:active={currentEffort() === effort} disabled={controlsDisabled} aria-label={`${tr("Set effort to", "Definir esforço como")} ${effortLabel(effort)}`} onclick={() => chooseEffort(effort)}><span>{effortLabel(effort)}</span></button>{/each}</div>
                   </div>
                 {/if}
-                {#if promptIsRunning}<p class="controls-note">{tr("Finish or interrupt the current prompt to apply changes.", "Finalize ou interrompa o prompt atual para aplicar mudanças.")}</p>{/if}
+                {#if promptIsRunning}<p class="controls-note">{session.agent === "codex"
+                  ? tr("Changes made now will apply when this prompt finishes.", "Mudanças feitas agora serão aplicadas ao final deste prompt.")
+                  : tr("Finish or interrupt the current prompt to apply changes.", "Finalize ou interrompa o prompt atual para aplicar mudanças.")}</p>{/if}
                 {#if controlsSaving}<p class="controls-saving" role="status">{tr("Saving…", "Salvando…")}</p>{/if}
               {/if}
             </section>
@@ -1204,18 +1882,18 @@
         </div>
         {#if session.agent === "codex"}
           <button class="tool-icon fast-toggle" class:enabled={fastMode} type="button"
-            disabled={controlsDisabled || fastSaving || !modelSettings} aria-pressed={fastMode}
+            disabled={runtimeControlsDisabled || fastSaving || !modelSettings} aria-pressed={fastMode}
             aria-label={fastMode ? tr("Disable Fast mode", "Desativar modo Fast") : tr("Enable Fast mode", "Ativar modo Fast")}
             title={tr("Fast mode · higher credit usage", "Modo Fast · maior consumo de créditos")}
             onclick={() => void toggleFastMode()}>
-            {#key fastMode}<LumeIcon name={fastMode ? "bolt-filled" : "bolt"} size={16} />{/key}
+            {#key fastMode}<WorkspaceChatIcon name="fast" size={18} active={fastMode} />{/key}
           </button>
           <button class="tool-icon mode-toggle" class:enabled={collaborationMode === "plan"} type="button"
-            disabled={controlsDisabled || modeSaving || !modelSettings} aria-pressed={collaborationMode === "plan"}
+            disabled={runtimeControlsDisabled || modeSaving || !modelSettings} aria-pressed={collaborationMode === "plan"}
             aria-label={collaborationMode === "plan" ? tr("Switch to Default mode", "Mudar para modo padrão") : tr("Switch to Plan mode", "Mudar para modo planejamento")}
             title={collaborationMode === "plan" ? "Plan" : tr("Default", "Padrão")}
             onclick={() => void toggleCollaborationMode()}>
-            {#key collaborationMode}<LumeIcon name={collaborationMode === "plan" ? "mode-plan" : "mode-default"} size={16} />{/key}
+            {#key collaborationMode}<WorkspaceChatIcon name={collaborationMode === "plan" ? "mode-plan" : "mode-default"} size={18} active={collaborationMode === "plan"} />{/key}
           </button>
         {/if}
       </div>
@@ -1224,8 +1902,13 @@
 </article>
 
 <style>
-  .session-pane { --workspace-chat-font-size: calc(12px + var(--workspace-chat-font-adjust)); --workspace-chat-small-size: calc(10px + var(--workspace-chat-small-adjust)); --workspace-chat-tiny-size: calc(8px + var(--workspace-chat-tiny-adjust)); --chat-small-font-size: var(--workspace-chat-small-size); --chat-tiny-font-size: var(--workspace-chat-tiny-size); --activity-summary-height: calc(44px + var(--workspace-chat-font-adjust)); --activity-row-height: calc(42px + var(--workspace-chat-font-adjust)); --activity-title-size: calc(11px + var(--workspace-chat-small-adjust)); --activity-detail-size: calc(9px + var(--workspace-chat-tiny-adjust)); position: relative; min-width: 0; min-height: 0; height: 100%; container-type: inline-size; display: flex; flex-direction: column; overflow: hidden; background: transparent; animation: pane-arrive 280ms cubic-bezier(.16, 1, .3, 1) both; }
-  .pane-header { position: relative; z-index: 2; min-width: 0; min-height: 64px; padding: 10px 14px 10px 17px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); background: var(--workspace-pane); }
+  .session-pane { --pane-status-color: #84948c; --workspace-chat-font-size: calc(12px + var(--workspace-chat-font-adjust)); --workspace-chat-small-size: calc(10px + var(--workspace-chat-small-adjust)); --workspace-chat-tiny-size: calc(8px + var(--workspace-chat-tiny-adjust)); --chat-small-font-size: var(--workspace-chat-small-size); --chat-tiny-font-size: var(--workspace-chat-tiny-size); --activity-summary-height: calc(44px + var(--workspace-chat-font-adjust)); --activity-row-height: calc(42px + var(--workspace-chat-font-adjust)); --activity-title-size: calc(11px + var(--workspace-chat-small-adjust)); --activity-detail-size: calc(9px + var(--workspace-chat-tiny-adjust)); position: relative; min-width: 0; min-height: 0; height: 100%; container-type: inline-size; display: flex; flex-direction: column; overflow: hidden; background: transparent; animation: pane-arrive 280ms cubic-bezier(.16, 1, .3, 1) both; }
+  .session-pane.status-running { --pane-status-color: #4e98ca; }
+  .session-pane.status-completed { --pane-status-color: #50aa79; }
+  .session-pane.status-permission_required { --pane-status-color: #d0a142; }
+  .session-pane.status-failed { --pane-status-color: #c66762; }
+  .pane-header { position: relative; z-index: 2; min-width: 0; min-height: 64px; padding: 10px 14px 10px 17px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); background: radial-gradient(ellipse 250px 115px at 100% 0%, color-mix(in srgb, var(--pane-status-color) 18%, transparent), transparent 85%), var(--workspace-pane); cursor: grab; user-select: none; }
+  .pane-header:active { cursor: grabbing; }
   .pane-header::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 1px; background: color-mix(in srgb, var(--workspace-accent) 20%, transparent); content: ""; transform: scaleX(.18); transform-origin: left; transition: transform 320ms cubic-bezier(.16, 1, .3, 1); }
   .session-pane:hover .pane-header::after,
   .session-pane.focused .pane-header::after { transform: scaleX(1); }
@@ -1237,16 +1920,28 @@
   .pane-identity small { display: flex; align-items: center; gap: 4px; color: var(--workspace-muted); font-size: 9px; }
   .source-badge, .status-badge { min-height: 23px; padding: 0 7px; display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 740; }
   .status-badge { border-color: transparent; background: var(--workspace-subtle); }
-  .status-badge i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #84948c; }
-  .status-badge.status-running i { background: #4e98ca; animation: status-pulse 1.8s ease-out infinite; }
-  .status-badge.status-completed i { background: #50aa79; }
-  .status-badge.status-permission_required i { background: #d0a142; }
-  .status-badge.status-failed i { background: #c66762; }
+  .status-badge i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--pane-status-color); }
+  .status-badge.status-running i { animation: status-pulse 1.8s ease-out infinite; }
+  .status-badge.status-subagents i { background: var(--workspace-accent); }
   .pane-actions { display: flex; align-items: center; gap: 2px; }
+  .agent-alerts { position: relative; flex: 0 0 auto; }
+  .agent-alert-trigger { position: relative; width: 29px; height: 29px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 8px; color: #c99535; background: color-mix(in srgb, #c99535 9%, transparent); cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .agent-alert-trigger:hover, .agent-alert-trigger.active { color: #dcaa48; background: color-mix(in srgb, #c99535 16%, var(--workspace-subtle)); transform: translateY(-1px); }
+  .agent-alert-trigger > span { position: absolute; top: -3px; right: -3px; min-width: 14px; height: 14px; padding: 0 3px; display: grid; place-items: center; border: 2px solid var(--workspace-pane); border-radius: 8px; color: #fff8e5; background: #b77b25; font-size: 7px; font-weight: 820; line-height: 1; font-variant-numeric: tabular-nums; }
+  .agent-alert-menu { position: absolute; z-index: 24; top: 36px; right: 0; width: min(310px, calc(100cqw - 20px)); max-height: min(330px, calc(100vh - 105px)); overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 18px 48px rgba(7, 20, 13, .22); animation: controls-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
+  .agent-alert-menu > header { min-height: 39px; padding: 0 11px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--workspace-line); }
+  .agent-alert-menu > header strong { flex: 1; color: var(--workspace-strong); font-size: 10px; }
+  .agent-alert-menu > header small { min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 6px; color: #ba842f; background: color-mix(in srgb, #c99535 12%, transparent); font-size: 8px; font-weight: 790; }
+  .agent-alert-menu > div { max-height: 286px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .agent-alert-menu article { min-height: 44px; padding: 9px 11px; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: start; gap: 8px; }
+  .agent-alert-menu article + article { border-top: 1px solid color-mix(in srgb, var(--workspace-line) 68%, transparent); }
+  .agent-alert-menu article > span { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 7px; color: #c28b31; background: color-mix(in srgb, #c99535 11%, transparent); }
+  .agent-alert-menu article.tone-error > span { color: #c96761; background: color-mix(in srgb, #c96761 11%, transparent); }
+  .agent-alert-menu p { margin: 1px 0 0; overflow-wrap: anywhere; color: var(--workspace-text); font-size: 9px; line-height: 1.45; }
   .pane-actions > button, .agent-controls > button, .text-zoom > button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 120ms ease, background 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .pane-actions > button:hover, .agent-controls > button:hover, .agent-controls > button.active, .text-zoom > button:hover, .text-zoom > button.active { color: var(--workspace-accent); background: var(--workspace-subtle); transform: translateY(-1px); }
+  .pane-actions > button.active { color: var(--workspace-accent); background: var(--workspace-accent-soft); }
   .text-zoom { position: relative; }
-  .text-zoom > button { font-size: 11px; font-weight: 760; letter-spacing: -.06em; }
   .text-zoom-popover { position: absolute; z-index: 12; top: 36px; right: 0; width: 136px; min-height: 40px; padding: 5px; display: grid; grid-template-columns: 30px 1fr 30px; align-items: center; gap: 3px; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 12px 30px rgba(8, 18, 13, .16); animation: controls-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
   .text-zoom-popover button { width: 30px; height: 28px; border: 0; border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-subtle); font-size: 16px; cursor: pointer; }
   .text-zoom-popover button:disabled { opacity: .35; cursor: default; }
@@ -1256,49 +1951,37 @@
   .controls-field { margin-top: 11px; display: grid; gap: 7px; }
   .agent-controls-popover .controls-field:first-child { margin-top: 0; }
   .controls-field > span { display: flex; align-items: center; justify-content: space-between; color: var(--workspace-muted); font-size: 8px; font-weight: 760; }
-  .controls-field > span b { color: var(--effort-tone, var(--workspace-accent)); font-size: 8px; text-transform: capitalize; transition: color 180ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1); }
+  .controls-field > span b { color: var(--effort-tone, var(--workspace-accent)); font-size: 9px; text-transform: capitalize; transition: color 180ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1); }
   .controls-field > input:not([type="range"]) { min-width: 0; height: 32px; padding: 0 10px; border: 1px solid var(--workspace-line); border-radius: 9px; outline: 0; color: var(--workspace-strong); background: var(--workspace-pane); font-size: 9px; }
   .controls-field > input:not([type="range"]):focus { border-color: color-mix(in srgb, var(--workspace-accent) 52%, transparent); }
   .controls-field :global(.lume-select) { width: 100%; }
-  .effort-track { position: relative; height: 22px; margin: 1px 6px 0; display: flex; align-items: center; }
-  .effort-track::before, .effort-progress { position: absolute; right: 0; left: 0; height: 4px; border-radius: 999px; content: ""; }
-  .effort-track::before { background: color-mix(in srgb, var(--workspace-muted) 18%, transparent); box-shadow: inset 0 1px 1px color-mix(in srgb, var(--workspace-strong) 7%, transparent); }
-  .effort-progress { background: var(--effort-tone); transform: scaleX(var(--effort-ratio)); transform-origin: left; transition: transform 220ms cubic-bezier(.16, 1, .3, 1), background 180ms ease; }
-  .effort-thumb { position: absolute; z-index: 1; left: var(--effort-progress); width: 15px; height: 15px; border: 3px solid var(--workspace-raised); border-radius: 50%; background: var(--effort-tone); box-shadow: 0 0 0 1px color-mix(in srgb, var(--effort-tone) 76%, transparent), 0 3px 8px rgba(0, 0, 0, .18); pointer-events: none; transform: translateX(-50%); transition: left 220ms cubic-bezier(.16, 1, .3, 1), background 180ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1), box-shadow 180ms ease; }
+  .effort-field { gap: 5px; }
+  .effort-track { position: relative; height: 34px; margin: 0 12px 1px; display: flex; align-items: center; isolation: isolate; }
+  .effort-track::before, .effort-progress { position: absolute; right: 0; left: 0; height: 12px; border-radius: 999px; content: ""; }
+  .effort-track::before { border: 1px solid color-mix(in srgb, var(--workspace-muted) 16%, var(--workspace-line)); background: color-mix(in srgb, var(--workspace-muted) 14%, transparent); box-shadow: inset 0 1px 2px color-mix(in srgb, var(--workspace-strong) 8%, transparent); }
+  .effort-progress { z-index: 0; background: linear-gradient(90deg, #4e98ca, var(--effort-tone)); box-shadow: 0 2px 7px color-mix(in srgb, var(--effort-tone) 18%, transparent); transform: scaleX(var(--effort-ratio)); transform-origin: left; transition: transform 240ms cubic-bezier(.16, 1, .3, 1), background 180ms ease, box-shadow 180ms ease; }
+  .effort-thumb { position: absolute; z-index: 1; left: var(--effort-progress); box-sizing: border-box; width: 24px; height: 24px; border: 4px solid var(--workspace-raised); border-radius: 48% 52% 46% 54%; background: var(--effort-tone); box-shadow: 0 0 0 1px color-mix(in srgb, var(--effort-tone) 76%, transparent), 0 4px 10px rgba(0, 0, 0, .2); pointer-events: none; transform: translateX(-50%); transition: left 240ms cubic-bezier(.16, 1, .3, 1), border-radius 180ms ease, background 180ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1), box-shadow 180ms ease; }
+  .effort-thumb::before { position: absolute; z-index: -1; top: 3px; right: calc(100% - 5px); width: 12px; height: 10px; border-radius: 999px 4px 4px 999px; background: var(--effort-tone); content: ""; opacity: var(--effort-ratio); transform: scaleX(.86); transform-origin: right; transition: opacity 180ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .effort-track input { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; margin: 0; appearance: none; opacity: 0; cursor: pointer; }
-  .effort-track:hover .effort-thumb { transform: translateX(-50%) scale(1.14); }
-  .effort-track:active .effort-thumb { transform: translateX(-50%) scale(.9); }
-  .effort-track:focus-within { border-radius: 999px; outline: 2px solid color-mix(in srgb, var(--workspace-accent) 68%, transparent); outline-offset: 3px; }
+  .effort-track:hover .effort-thumb { border-radius: 56% 44% 52% 48%; transform: translateX(-50%) scale(1.06); }
+  .effort-track:hover .effort-thumb::before { transform: scaleX(1.08); }
+  .effort-track:has(input:active) .effort-thumb { border-radius: 42% 58% 45% 55%; transform: translateX(-50%) scale(1.16, .88); }
+  .effort-track:has(input:active) .effort-thumb::before { transform: scaleX(1.32); }
+  .effort-track:focus-within { border-radius: 999px; outline: 2px solid color-mix(in srgb, var(--workspace-accent) 68%, transparent); outline-offset: 2px; }
+  .effort-track:has(input:disabled) { opacity: .46; }
+  .effort-track:has(input:disabled) input { cursor: default; }
   .effort-field.max .effort-thumb { animation: max-thumb-pulse 1.8s ease-in-out infinite alternate; }
-  .effort-field.ultra .effort-track::before { background: linear-gradient(90deg, #7652c6, #b48aff, #7652c6); background-size: 220% 100%; box-shadow: 0 0 10px rgba(154, 112, 232, .34); animation: ultra-slider-flow 2.1s linear infinite; }
-  .effort-field.ultra .effort-progress { background: rgba(207, 183, 255, .82); box-shadow: 0 0 9px rgba(154, 112, 232, .44); }
+  .effort-field.ultra .effort-track::before { background: linear-gradient(90deg, color-mix(in srgb, #7652c6 32%, transparent), color-mix(in srgb, #b48aff 54%, transparent), color-mix(in srgb, #7652c6 32%, transparent)); background-size: 220% 100%; box-shadow: inset 0 1px 2px rgba(50, 31, 83, .18), 0 3px 12px rgba(154, 112, 232, .2); animation: ultra-slider-flow 2.4s linear infinite; }
+  .effort-field.ultra .effort-progress { background: linear-gradient(90deg, #7652c6, #c6a9ff, #8d62df); background-size: 180% 100%; box-shadow: 0 3px 12px rgba(154, 112, 232, .35); animation: ultra-slider-flow 2.4s linear infinite; }
   .effort-field.ultra .effort-thumb { box-shadow: 0 0 0 1px #9a70e8, 0 0 12px rgba(154, 112, 232, .48); }
-  .effort-scale { display: flex; justify-content: space-between; gap: 1px; }
-  .effort-scale button { min-width: 0; padding: 3px 0 1px; display: grid; justify-items: center; flex: 1; border: 0; color: var(--workspace-faint); background: transparent; font-size: 7px; text-transform: capitalize; cursor: pointer; transition: color 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
-  .effort-scale button:hover:not(:disabled) { color: var(--workspace-muted); transform: translateY(-1px); }
-  .effort-scale button.active { color: var(--effort-tone); font-weight: 760; }
-  .effort-scale button:disabled { cursor: default; }
   .controls-note { margin: 10px 0 0; color: var(--workspace-muted); font-size: 8px; line-height: 1.5; }
   .controls-loading { min-height: 68px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--workspace-muted); font-size: 9px; }
   .controls-loading i { width: 12px; height: 12px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 650ms linear infinite; }
   .controls-saving { margin: 10px 0 0; color: var(--workspace-muted); font-size: 8px; }
   .agent-controls-popover input:disabled { opacity: .45; cursor: default; }
-  .work-overview { min-width: 0; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); background: var(--workspace-pane); }
-  .work-toggle { width: 100%; min-width: 0; min-height: 34px; padding: 5px clamp(20px, 5cqw, 54px); display: flex; align-items: center; gap: 7px; border: 0; color: var(--workspace-muted); background: transparent; cursor: pointer; text-align: left; }
-  .work-toggle:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
-  .work-toggle strong { color: var(--workspace-accent); font-size: 8px; letter-spacing: .07em; }
-  .work-count, .work-toggle small { color: var(--workspace-muted); font-size: 9px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .work-objective { min-width: 0; flex: 1; overflow: hidden; color: var(--workspace-strong); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-  .work-toggle :global(.lume-icon:last-child) { margin-left: auto; transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }
-  .work-toggle[aria-expanded="true"] :global(.lume-icon:last-child) { transform: rotate(180deg); }
-  .work-progress { height: 2px; background: var(--workspace-subtle); }.work-progress span { height: 100%; display: block; background: var(--workspace-accent); transition: width 260ms cubic-bezier(.16, 1, .3, 1); }
-  .work-detail { max-height: min(180px, 30vh); padding: 5px clamp(20px, 5cqw, 54px) 12px; overflow: auto; scrollbar-width: thin; color: var(--workspace-text); font-size: 10px; line-height: 1.5; }
-  .work-detail ol { margin: 0; padding: 0; display: grid; gap: 7px; list-style: none; }
-  .work-detail li { min-width: 0; display: flex; gap: 8px; overflow-wrap: anywhere; }.work-detail li i { width: 14px; height: 14px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 50%; color: var(--workspace-faint); font-size: 9px; font-style: normal; }.work-detail li.done i, .work-detail li.doing i { border-color: var(--workspace-accent); color: var(--workspace-accent); }
-  .goal-line { margin: 0 0 9px; display: flex; align-items: baseline; gap: 8px; overflow-wrap: anywhere; }.goal-line b { flex: 0 0 auto; color: #4e91bf; font-size: 8px; }.goal-line b.complete { color: var(--workspace-accent); }.goal-line b.blocked { color: #b96862; }
-  .work-plan-content { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   .conversation-shell { position: relative; min-width: 0; min-height: 0; display: flex; flex: 1 1 auto; overflow: hidden; }
-  .conversation { --chat-edge-gutter: clamp(28px, 5cqw, 54px); min-width: 0; min-height: 0; width: 100%; padding: 25px var(--chat-edge-gutter) 26px; display: flex; flex-direction: column; gap: 15px; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .conversation { --chat-edge-gutter: clamp(28px, 5cqw, 54px); min-width: 0; min-height: 0; width: 100%; padding: 25px var(--chat-edge-gutter) 26px; display: flex; flex-direction: column-reverse; flex: 1 1 auto; overflow: auto; overflow-anchor: none; overscroll-behavior: none; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .conversation-content { min-width: 0; display: flex; flex-direction: column; gap: 15px; flex: 1 0 auto; }
   .conversation::-webkit-scrollbar { width: 9px; height: 9px; }.conversation::-webkit-scrollbar-track { background: transparent; }.conversation::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: var(--workspace-scroll-thumb); background-clip: content-box; }
   .load-earlier-chat { max-width: min(240px, 100%); min-height: 30px; margin: 0 auto 7px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: var(--workspace-chat-tiny-size); font-weight: 700; cursor: pointer; }
   .load-earlier-chat:hover:not(:disabled) { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 32%, var(--workspace-line)); }
@@ -1313,7 +1996,10 @@
   .time-gutter time { opacity: 0; transform: translateX(3px); transition: opacity 120ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
   .time-gutter:hover time, .conversation-row:focus-within .time-gutter time { opacity: 1; transform: translateX(0); }
   .message { width: min(88%, 720px); min-width: 0; color: var(--workspace-text); font-size: var(--workspace-chat-font-size); }
-  .user-message { width: fit-content; max-width: min(88%, 720px); align-self: flex-end; padding: 9px 12px; border: 1px solid var(--workspace-user-line); border-radius: 14px 14px 4px 14px; background: var(--workspace-user); }
+  .user-message { --message-collapse-surface: var(--workspace-user); --user-message-font: inherit; --user-message-muted: var(--workspace-muted); --user-message-accent: var(--workspace-accent); width: fit-content; max-width: min(88%, 720px); align-self: flex-end; padding: 9px 12px; border: 1px solid var(--workspace-user-line); border-radius: 14px 14px 4px 14px; background: var(--workspace-user); }
+  .outgoing-row.in-flight .user-message { visibility: hidden; }
+  .user-row.outgoing-replacement { display: none; }
+  .user-row.targeted .user-message { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
   .agent-message { align-self: flex-start; padding: 3px 0 7px; }
   .analysis-message header { margin-bottom: 7px; display: flex; align-items: center; gap: 8px; }
   .analysis-message header strong { min-width: 0; flex: 1; color: var(--workspace-strong); font-size: var(--workspace-chat-small-size); font-weight: 750; }
@@ -1326,18 +2012,33 @@
   .final-actions button:active { transform: scale(.92); }
   .final-actions button:disabled { cursor: wait; opacity: .55; }
   .final-actions button.loading :global(.lume-icon) { animation: history-loading 800ms linear infinite; }
-  pre { max-width: 100%; margin: 0; overflow-wrap: anywhere; color: inherit; font: inherit; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
   .markdown-content { min-width: 0; overflow-wrap: anywhere; font-size: var(--workspace-chat-font-size); line-height: 1.68; word-break: break-word; }
   .markdown-content :global(p) { margin: 0 0 .75em; }.markdown-content :global(p:last-child) { margin-bottom: 0; }
   .markdown-content :global(strong) { color: var(--workspace-strong); font-weight: 790; }
   .markdown-content :global(em) { font-style: italic; }
   .markdown-content :global(del) { color: var(--workspace-faint); }
-  .markdown-content :global(a) { color: var(--workspace-accent); font-weight: 650; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--workspace-accent) 42%, transparent); text-underline-offset: 2px; }
-  .markdown-content :global(ul), .markdown-content :global(ol) { margin: .4em 0 .7em; padding-left: 1.5em; }
-  .markdown-content :global(li) { margin: .2em 0; }
+  .markdown-content :global(a) { border-radius: 3px; color: var(--workspace-accent); font-weight: 650; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--workspace-accent) 42%, transparent); text-underline-offset: 2px; box-decoration-break: clone; transition: background-color 140ms ease, text-decoration-color 140ms ease; }
+  .markdown-content :global(a:hover), .markdown-content :global(a:focus-visible) { background-color: color-mix(in srgb, var(--workspace-accent) 10%, transparent); text-decoration-color: currentColor; }
+  .markdown-content :global(.inline-file-badge) { max-width: min(100%, 250px); min-height: 19px; padding: 1px 5px 1px 4px; display: inline-flex; align-items: center; gap: 4px; vertical-align: -.24em; border: 1px solid var(--workspace-line); border-radius: 6px; color: var(--workspace-strong); background: var(--workspace-subtle); font-size: .9em; line-height: 1.3; white-space: nowrap; }
+  .markdown-content :global(button.inline-file-badge) { font-family: inherit; cursor: pointer; }
+  .markdown-content :global(button.inline-file-badge:hover), .markdown-content :global(button.inline-file-badge:focus-visible) { border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); color: var(--workspace-accent); }
+  .markdown-content :global(.inline-file-name) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .markdown-content :global(.inline-file-icon) { width: 13px; height: 13px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
+  .markdown-content :global(.inline-file-icon.brand) { stroke: none; opacity: .9; }
+  .markdown-content :global(.inline-file-icon.brand.monochrome) { filter: var(--file-monochrome-filter, grayscale(1) brightness(0) contrast(.88)); opacity: var(--file-monochrome-opacity, .72); }
+  .markdown-content :global(.inline-file-icon.brand.multicolor) { filter: none; opacity: .94; }
+  .markdown-content :global(.inline-file-icon.brand *) { stroke: none !important; }
+  .markdown-content :global(.inline-file-icon.maintained) { fill: currentColor; stroke: none; }
+  .markdown-content :global(ul), .markdown-content :global(ol) { margin: .65em 0 .95em; padding-left: 1.6em; }
+  .markdown-content :global(li) { margin: .35em 0; padding-left: .12em; }
+  .markdown-content :global(ol > li::marker) { color: var(--workspace-accent); font-weight: 800; font-variant-numeric: tabular-nums; }
   .markdown-content :global(blockquote) { margin: .6em 0; padding: .3em .75em; border-left: 2px solid var(--workspace-accent); color: var(--workspace-muted); background: var(--workspace-subtle); }
   .markdown-content :global(:not(pre) > code) { padding: .08em .3em; border-radius: 4px; color: var(--workspace-accent); background: var(--workspace-subtle); font-size: .92em; }
-  .markdown-content :global(h1), .markdown-content :global(h2), .markdown-content :global(h3) { margin: 1.2em 0 .45em; color: var(--workspace-strong); line-height: 1.25; letter-spacing: -.02em; }
+  .markdown-content :global(h1), .markdown-content :global(h2), .markdown-content :global(h3) { margin: 1.5em 0 .58em; color: var(--workspace-strong); line-height: 1.25; letter-spacing: -.02em; }
+  .markdown-content :global(h1) { font-size: 1.42em; font-weight: 790; }
+  .markdown-content :global(h2) { font-size: 1.24em; font-weight: 770; }
+  .markdown-content :global(h3) { font-size: 1.1em; font-weight: 750; }
+  .markdown-content :global(h1 + p), .markdown-content :global(h2 + p), .markdown-content :global(h3 + p) { margin-top: .1em; }
   .markdown-content :global(pre) { max-width: 100%; padding: 11px 12px; overflow: auto; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-code); font: var(--workspace-chat-small-size)/1.6 "SFMono-Regular", Consolas, monospace; }
   .markdown-content :global(pre code) { padding: 0; color: inherit; background: transparent; white-space: pre-wrap; word-break: break-word; }
   .markdown-content :global(code) { overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; }
@@ -1350,8 +2051,14 @@
   .response-duration { width: max-content; display: block; color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); font-variant-numeric: tabular-nums; }
   .analysis-message { min-width: 0; padding: 5px 0 7px; color: var(--workspace-muted); }
   .analysis-message .markdown-content { font-size: calc(11px + var(--workspace-chat-small-adjust)); line-height: 1.62; }
-  .changed-files { min-width: 0; padding: 10px 0; display: grid; gap: 2px; border-top: 1px solid var(--workspace-line); border-bottom: 1px solid var(--workspace-line); }
-  .changed-files > strong { margin: 0 4px 4px; color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 760; }
+  .changed-files { width: fit-content; max-width: 100%; min-width: 0; margin-top: 2px; }
+  .changed-files.open { width: min(100%, 560px); }
+  .changed-files-toggle { min-height: 29px; max-width: 100%; padding: 5px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font: 720 var(--workspace-chat-tiny-size)/1.3 Inter, sans-serif; cursor: pointer; }
+  .changed-files-toggle:hover, .changed-files-toggle:focus-visible { color: var(--workspace-strong); border-color: var(--workspace-accent); }
+  .changed-files-toggle > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .changed-files-toggle > :global(.lume-icon:last-child) { margin-left: 3px; transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }
+  .changed-files.open .changed-files-toggle > :global(.lume-icon:last-child) { transform: rotate(180deg); }
+  .changed-files-list { min-width: 0; margin: 4px 0 0 2px; display: grid; gap: 2px; }
   .changed-file { min-width: 0; min-height: 28px; padding: 3px 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font: calc(9px + var(--workspace-chat-tiny-adjust))/1.4 "SFMono-Regular", Consolas, monospace; text-align: left; cursor: pointer; transition: color 120ms ease, background 120ms ease; }
   .changed-file:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
   .changed-file > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1364,7 +2071,8 @@
   .empty-chat { margin: auto; display: grid; justify-items: center; gap: 7px; color: var(--workspace-faint); text-align: center; }
   .empty-chat strong { color: var(--workspace-muted); font-size: 12px; }.empty-chat span { max-width: 270px; font-size: 10px; line-height: 1.5; }
   .agent-typing { width: fit-content; min-height: 46px; padding: 0 3px; display: flex; align-items: center; gap: 10px; color: #4e98ca; }
-  .agent-typing > span { color: transparent; background: linear-gradient(90deg, #67837a 10%, #5aa1ce 44%, #a3d2ef 53%, #5aa1ce 62%, #67837a 90%); background-size: 240% 100%; background-clip: text; font-size: 12px; font-weight: 720; letter-spacing: -.01em; animation: thinking-label-shimmer 1.75s linear infinite; }
+  .agent-typing .typing-label { color: transparent; background: linear-gradient(90deg, #67837a 10%, #5aa1ce 44%, #a3d2ef 53%, #5aa1ce 62%, #67837a 90%); background-size: 240% 100%; background-clip: text; font-size: 12px; font-weight: 720; letter-spacing: -.01em; animation: thinking-label-shimmer 1.75s linear infinite; }
+  .typing-elapsed { padding-left: 9px; border-left: 1px solid var(--workspace-line); color: var(--workspace-muted); font-size: 10px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .latest-button { position: absolute; right: 18px; bottom: 30px; z-index: 3; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 5px 16px rgba(17, 35, 27, .09); cursor: pointer; animation: latest-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
   .latest-button:hover { transform: translateY(-1px); }
   .sources-scrim { position: absolute; z-index: 5; inset: 64px 0 0; padding: 0; border: 0; background: color-mix(in srgb, var(--workspace-pane) 28%, transparent); backdrop-filter: blur(1px); cursor: default; animation: sources-fade 150ms ease-out both; }
@@ -1385,6 +2093,25 @@
   .sources-list small { color: var(--workspace-muted); font-size: 8px; }
   .sources-empty { min-height: 190px; padding: 28px 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--workspace-faint); text-align: center; }
   .sources-empty strong { color: var(--workspace-muted); font-size: 11px; }.sources-empty span { max-width: 220px; font-size: 9px; line-height: 1.5; }
+  .prompt-index-search { min-height: 38px; margin: 9px 11px 3px; padding: 0 8px 0 10px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-muted); background: var(--workspace-pane); transition: border-color 140ms ease, background 140ms ease, box-shadow 180ms cubic-bezier(.16, 1, .3, 1); }
+  .prompt-index-search:focus-within { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 56%, var(--workspace-line)); background: var(--workspace-raised); box-shadow: 0 5px 16px color-mix(in srgb, var(--workspace-accent) 10%, transparent); }
+  .prompt-index-search input { width: 100%; min-width: 0; padding: 9px 0; border: 0; outline: 0; color: var(--workspace-strong); background: transparent; font: inherit; font-size: 10px; line-height: 1.2; caret-color: var(--workspace-accent); }
+  .prompt-index-search input::placeholder { color: var(--workspace-faint); opacity: 1; }
+  .prompt-index-search input::-webkit-search-cancel-button { display: none; }
+  .prompt-index-search button { width: 24px; height: 24px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .prompt-index-search button:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
+  .prompt-index-search button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 1px; }
+  .prompt-index-list { min-height: 0; padding: 8px; display: flex; flex-direction: column; gap: 3px; overflow-y: auto; scrollbar-width: thin; }
+  .prompt-index-list > button:not(.prompt-index-more) { min-width: 0; padding: 10px 11px; display: grid; gap: 5px; border: 0; border-radius: 9px; color: var(--workspace-text); background: transparent; text-align: left; cursor: pointer; }
+  .prompt-index-list > button:not(.prompt-index-more):hover, .prompt-index-list > button.locating { background: var(--workspace-subtle); }
+  .prompt-index-list > button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
+  .prompt-index-list > button:disabled { cursor: wait; }
+  .prompt-index-list time { color: var(--workspace-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+  .prompt-index-list button > span { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; color: var(--workspace-strong); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+  .prompt-index-empty, .prompt-index-error, .prompt-index-loading { margin: 12px; color: var(--workspace-muted); font-size: 10px; line-height: 1.5; }
+  .prompt-index-error { color: var(--workspace-danger, #b96862); }
+  .prompt-index-more { min-height: 32px; margin: 7px 4px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-accent); background: var(--workspace-subtle); font-size: 10px; font-weight: 700; cursor: pointer; }
+  .prompt-index-more:hover { border-color: var(--workspace-accent); }
   @keyframes history-loading { to { transform: rotate(540deg); } }
   @keyframes sources-fade { from { opacity: 0; } }
   @keyframes sources-arrive { from { opacity: 0; transform: translateX(18px); } }
@@ -1480,6 +2207,7 @@
   .composer.unavailable .composer-field { background: var(--workspace-subtle); box-shadow: none; }
   .queue-label { margin-bottom: 8px; padding: 3px 6px; border-radius: 5px; color: #4d8cb8; background: rgba(78, 152, 202, .1); font-size: 7px; font-weight: 800; text-transform: uppercase; }
   .composer button { width: 33px; height: 33px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 10px; color: #f5fbf7; background: var(--workspace-accent); cursor: pointer; transition: transform 180ms cubic-bezier(.16, 1, .3, 1), opacity 120ms ease; }
+  .composer .send-button { position: relative; overflow: hidden; isolation: isolate; }
   .composer .attach-button { color: var(--workspace-muted); background: transparent; }
   .composer .attach-button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .composer .stop-button { color: #fff7f6; background: #b96862; }
@@ -1490,13 +2218,17 @@
   .composer-tools .model-trigger:hover:not(:disabled), .composer-tools .tool-icon:hover:not(:disabled), .composer-tools .model-trigger.active, .composer-tools .tool-icon.enabled { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .composer-tools .tool-icon { width: 30px; padding: 0; }
   .composer-tools .tool-icon:focus-visible, .composer-tools .model-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
-  .composer-tools .tool-icon :global(.lume-icon) { animation: control-icon-arrive 210ms cubic-bezier(.16, 1, .3, 1) both; }
+  .composer-tools .tool-icon :global(.workspace-chat-icon) { animation: control-icon-arrive 210ms cubic-bezier(.16, 1, .3, 1) both; }
   .composer button:hover:not(:disabled) { transform: translateY(-1px) scale(1.03); }.composer button:disabled { opacity: .28; cursor: default; }
+  .composer button.launching:disabled { opacity: 1; }
+  .plane-launch { width: 16px; height: 16px; display: grid; place-items: center; pointer-events: none; animation: plane-takeoff 450ms cubic-bezier(.22, .72, .26, 1) both; }
   .composer button:hover:not(:disabled) :global(.lume-icon) { transform: translate(1px, -1px); }.composer button :global(.lume-icon) { transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .composer button:hover:not(:disabled) :global(.send-plane-icon) { transform: translate(1px, -1px); }.composer button :global(.send-plane-icon) { transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .send-spinner { width: 13px; height: 13px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 650ms linear infinite; }
   @keyframes pane-arrive { from { opacity: .4; transform: translateY(5px); } }
   @keyframes latest-arrive { from { opacity: 0; transform: translateY(5px); } }
   @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes plane-takeoff { 0% { opacity: 1; transform: translate(0, 0) rotate(0); } 20% { opacity: 1; transform: translate(-2px, 2px) rotate(-5deg); } 68% { opacity: 1; transform: translate(12px, -12px) rotate(3deg); } 100% { opacity: 0; transform: translate(26px, -26px) rotate(7deg); } }
   @keyframes status-pulse { 0%, 45% { box-shadow: 0 0 0 0 rgba(78, 152, 202, .28); } 80%, 100% { box-shadow: 0 0 0 4px rgba(78, 152, 202, 0); } }
   @keyframes thinking-label-shimmer { to { background-position: -240% 0; } }
   @keyframes takeover-fade { from { opacity: 0; } }
@@ -1507,11 +2239,14 @@
   @keyframes ultra-slider-flow { to { background-position: -220% 0; } }
   @container (max-width: 500px) {
     .pane-header { padding-right: 9px; padding-left: 12px; gap: 7px; }
-    .source-badge, .status-badge { width: 23px; padding: 0; justify-content: center; overflow: hidden; color: transparent; }
+    .source-badge { width: 23px; padding: 0; justify-content: center; }
+    .source-badge .badge-label { display: none; }
+    .status-badge.status-permission_required, .status-badge.status-failed { width: auto; max-width: 45cqw; padding: 0 7px; }
+    .status-badge.status-permission_required .badge-label, .status-badge.status-failed .badge-label { min-width: 0; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .source-badge :global(.brand-icon), .status-badge i { flex: 0 0 auto; }
     .conversation { --chat-edge-gutter: 28px; }.message { width: 94%; }.user-message { width: fit-content; max-width: 94%; }.composer { padding-right: 10px; padding-left: 10px; }
   }
   @media (max-height: 640px) { .conversation { padding-top: 17px; padding-bottom: 18px; }.pane-header { min-height: 56px; }.composer { padding-top: 9px; padding-bottom: 10px; } }
-  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .takeover-backdrop, .takeover-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing > span, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing > span { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .changed-file, .changed-file > :global(.lume-icon:last-child), .composer-field, .composer button, .composer button :global(.lume-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
-  @media (prefers-reduced-motion: reduce) { .composer-tools .tool-icon :global(.lume-icon), .effort-field.max .effort-thumb, .effort-field.ultra .effort-track::before { animation: none; }.work-progress span, .work-toggle :global(.lume-icon:last-child), .effort-field input[type="range"]::-webkit-slider-thumb { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .composer-tools .tool-icon :global(.workspace-chat-icon), .effort-field.max .effort-thumb, .effort-field.ultra .effort-track::before, .effort-field.ultra .effort-progress { animation: none; }.effort-thumb, .effort-thumb::before, .effort-progress { transition: none; } }
 </style>

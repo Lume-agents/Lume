@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
 
   let { text, animate = false, live = false, startFromBeginning = false, render }: {
     text: string;
@@ -11,47 +11,114 @@
 
   let visible = $state("");
   let streaming = $state(false);
+  let fading = $state(false);
   let started = $state(false);
+  let streamElement = $state<HTMLDivElement | null>(null);
   let frame = 0;
   let lastFrame = 0;
-  const maxAnimatedLength = 48_000;
+  let finishTimer = 0;
+  let lastWrappedText = "";
+  let revealedWords = 0;
+  const maxAnimatedLength = 6_000;
+
+  function fadeNewestWords(root: HTMLElement, count: number) {
+    if (!count || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes: Text[] = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode as Text);
+    for (const node of nodes.reverse()) {
+      const words = [...node.data.matchAll(/\S+/gu)];
+      for (const word of words.reverse()) {
+        if (count <= 0) return;
+        const range = document.createRange();
+        range.setStart(node, word.index);
+        range.setEnd(node, word.index + word[0].length);
+        const span = document.createElement("span");
+        span.className = "stream-word";
+        range.surroundContents(span);
+        count -= 1;
+      }
+    }
+  }
 
   function advance(now: number) {
     if (!streaming) return;
-    if (lastFrame && now - lastFrame < 72) {
+    if (lastFrame && now - lastFrame < 90) {
       frame = requestAnimationFrame(advance);
       return;
     }
-    const elapsed = Math.min(100, now - (lastFrame || now - 34));
     lastFrame = now;
-    const speed = Math.max(260, text.length / 2);
-    const next = Math.min(text.length, visible.length + Math.max(1, Math.ceil(speed * elapsed / 1000)));
+    const backlog = text.length - visible.length;
+    const batch = backlog > 3_000 ? 5 : backlog > 1_500 ? 3 : backlog > 500 ? 2 : 1;
+    let next = visible.length;
+    revealedWords = 0;
+    for (let index = 0; index < batch && next < text.length; index += 1) {
+      const segment = text.slice(next).match(/^\s*\S+\s*/u);
+      next += segment?.[0].length ?? text.length - next;
+      revealedWords += 1;
+    }
     visible = text.slice(0, next);
-    if (next < text.length) frame = requestAnimationFrame(advance);
-    else { streaming = false; lastFrame = 0; }
+    if (next < text.length) {
+      frame = requestAnimationFrame(advance);
+    } else {
+      streaming = false;
+      fading = true;
+      lastFrame = 0;
+      finishTimer = window.setTimeout(() => (fading = false), 240);
+    }
   }
 
   $effect(() => {
     const current = text;
-    const enabled = animate && current.length <= maxAnimatedLength;
-    if (!started || !enabled) {
+    const enabled = animate && current.length <= maxAnimatedLength && document.visibilityState === "visible"
+      && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!started && enabled) return;
+    if (!enabled) {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(finishTimer);
       visible = current;
       streaming = false;
+      fading = false;
       return;
     }
     if (!current.startsWith(visible)) {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(finishTimer);
       visible = current;
       streaming = false;
+      fading = false;
       return;
     }
     if (visible.length < current.length && !streaming) {
+      window.clearTimeout(finishTimer);
+      fading = false;
       streaming = true;
       frame = requestAnimationFrame(advance);
     }
   });
 
+  $effect(() => {
+    const current = visible;
+    if (!current || !(streaming || fading || live)) return;
+    void tick().then(() => {
+      if (current === visible && current !== lastWrappedText && streamElement) {
+        fadeNewestWords(streamElement, revealedWords);
+        lastWrappedText = current;
+      }
+    });
+  });
+
   onMount(() => {
-    if (animate && text.length <= maxAnimatedLength && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const settleWhenHidden = () => {
+      if (document.visibilityState !== "hidden") return;
+      cancelAnimationFrame(frame);
+      visible = text;
+      streaming = false;
+      fading = false;
+      lastFrame = 0;
+    };
+    document.addEventListener("visibilitychange", settleWhenHidden);
+    if (animate && text.length <= maxAnimatedLength && document.visibilityState === "visible" && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       started = true;
       visible = startFromBeginning ? "" : text;
       if (visible.length < text.length) {
@@ -59,18 +126,25 @@
         frame = requestAnimationFrame(advance);
       }
     }
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      document.removeEventListener("visibilitychange", settleWhenHidden);
+      cancelAnimationFrame(frame);
+      window.clearTimeout(finishTimer);
+    };
   });
 </script>
 
-{#if animate && text.length <= maxAnimatedLength && (streaming || (started && live))}
-  <div class="streaming-markdown" aria-hidden="true">{@html render(visible)}</div>
-  <span class="sr-only">{text}</span>
+{#if animate && text.length <= maxAnimatedLength && (started || startFromBeginning || live)}
+  <div bind:this={streamElement} class="streaming-markdown" aria-hidden={streaming || fading || live}>{@html render(!started && !startFromBeginning ? text : visible)}</div>
+  {#if streaming || fading || live}<span class="sr-only">{text}</span>{/if}
 {:else}
   {@html render(text)}
 {/if}
 
 <style>
   .streaming-markdown { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+  .streaming-markdown :global(.stream-word) { animation: stream-word-fade 220ms cubic-bezier(.16, 1, .3, 1) both; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  @keyframes stream-word-fade { from { opacity: .08; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .streaming-markdown :global(.stream-word) { animation: none; } }
 </style>

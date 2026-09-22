@@ -25,6 +25,16 @@ assert.deepEqual(files.map(({ path, added, removed }) => ({ path, added, removed
 ]);
 assert.equal(files[0].diff, detail);
 
+const subagentPatch = `diff --git a/src/new.ts b/src/new.ts\n+export const ready = true;`;
+const subagentFiles = collectReviewFiles([{
+  id: "subagent-patch", kind: "file", title: "File changed", detail: subagentPatch,
+  status: "completed", createdAt: 21, files: ["src/new.ts"],
+}], "/work/project");
+assert.deepEqual(subagentFiles.map(({ path, added, removed }) => ({ path, added, removed })), [
+  { path: "src/new.ts", added: 1, removed: 0 },
+]);
+assert.equal(subagentFiles[0].diff, subagentPatch);
+
 const lines = parseReviewDiff(detail);
 assert.ok(lines.some((line) => line.kind === "removed" && line.oldLine === 1));
 assert.ok(lines.some((line) => line.kind === "added" && line.newLine === 1));

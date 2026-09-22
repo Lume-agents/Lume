@@ -1073,6 +1073,7 @@ body.mobile-action-modal-open { overflow: hidden; }
 .mobile-markdown em { font-style: italic; }
 .mobile-markdown del { color: #718078; }
 .mobile-markdown a { color: #75c89b; font-weight: 700; text-decoration: underline; text-decoration-color: rgba(117, 200, 155, 0.42); text-underline-offset: 2px; }
+.mobile-markdown a:is(:hover, :focus-visible) { border-radius: 3px; background-color: rgba(117, 200, 155, 0.1); text-decoration-color: currentColor; }
 .mobile-markdown ul,
 .mobile-markdown ol { margin: 7px 0 10px; padding-left: 21px; }
 .mobile-markdown li { margin: 3px 0; padding-left: 1px; }

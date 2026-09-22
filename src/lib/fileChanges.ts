@@ -72,7 +72,7 @@ export function summarizeFileChanges(
         patchHeader?.[1] ?? gitHeader?.[2] ?? nextFile?.[1] ?? "",
         workingDirectory,
       );
-      counting = Boolean(patchHeader);
+      counting = Boolean(patchHeader || gitHeader);
       continue;
     }
     if (line.startsWith("@@")) {

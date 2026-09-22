@@ -75,7 +75,13 @@
   }
 
   function show(target: HTMLElement, delay: number) {
-    if ((target === anchor && visible) || target === pendingAnchor) return;
+    if (target === anchor && visible) {
+      // Re-entering during the short hide delay must keep the current tooltip.
+      if (hideTimer) clearTimeout(hideTimer);
+      hideTimer = undefined;
+      return;
+    }
+    if (target === pendingAnchor) return;
     const nextText = tooltipText(target);
     if (!nextText) return;
     clearTimers();
@@ -113,14 +119,16 @@
   }
 
   onMount(() => {
+    const hoverDelay = 600;
+    const focusDelay = 190;
     const pointerOver = (event: PointerEvent) => {
       const target = tooltipAnchor(event.target);
-      if (!target || target === anchor) return;
-      show(target, 360);
+      if (!target) return;
+      show(target, hoverDelay);
     };
     const pointerMove = (event: PointerEvent) => {
       const target = tooltipAnchor(event.target);
-      if (target) show(target, 360);
+      if (target) show(target, hoverDelay);
     };
     const pointerOut = (event: PointerEvent) => {
       const target = tooltipAnchor(event.target);
@@ -131,7 +139,7 @@
     };
     const focusIn = (event: FocusEvent) => {
       const target = tooltipAnchor(event.target);
-      if (target) show(target, 140);
+      if (target) show(target, focusDelay);
     };
     const focusOut = (event: FocusEvent) => {
       const target = tooltipAnchor(event.target);
@@ -141,9 +149,10 @@
     };
     const dismiss = () => hide(0);
 
-    document.addEventListener("pointerover", pointerOver);
-    document.addEventListener("pointermove", pointerMove);
-    document.addEventListener("pointerout", pointerOut);
+    // Capture hover before controls with their own pointer handlers can stop bubbling.
+    document.addEventListener("pointerover", pointerOver, true);
+    document.addEventListener("pointermove", pointerMove, true);
+    document.addEventListener("pointerout", pointerOut, true);
     document.addEventListener("pointerdown", dismiss);
     document.addEventListener("focusin", focusIn);
     document.addEventListener("focusout", focusOut);
@@ -151,9 +160,9 @@
     document.addEventListener("scroll", dismiss, true);
     return () => {
       clearTimers();
-      document.removeEventListener("pointerover", pointerOver);
-      document.removeEventListener("pointermove", pointerMove);
-      document.removeEventListener("pointerout", pointerOut);
+      document.removeEventListener("pointerover", pointerOver, true);
+      document.removeEventListener("pointermove", pointerMove, true);
+      document.removeEventListener("pointerout", pointerOut, true);
       document.removeEventListener("pointerdown", dismiss);
       document.removeEventListener("focusin", focusIn);
       document.removeEventListener("focusout", focusOut);

@@ -260,9 +260,23 @@ export function buildConversationEntries(
     }
   }
 
-  return entries.sort((left, right) =>
+  const sortedEntries = entries.sort((left, right) =>
     left.activity.createdAt - right.activity.createdAt || left.sequence - right.sequence
   );
+  let observedTurnStart: number | undefined;
+  for (const entry of sortedEntries) {
+    if (entry.activity.kind === "prompt") {
+      observedTurnStart = entry.activity.createdAt;
+    } else if (observedTurnStart === undefined && !entry.isFinalResponse) {
+      observedTurnStart = entry.activity.createdAt;
+    }
+    if (!entry.isFinalResponse) continue;
+    if (entry.durationMs === undefined && observedTurnStart !== undefined && entry.activity.createdAt >= observedTurnStart) {
+      entry.durationMs = entry.activity.createdAt - observedTurnStart;
+    }
+    observedTurnStart = undefined;
+  }
+  return sortedEntries;
 }
 
 export function buildConversationFeed(
@@ -290,4 +304,25 @@ export function buildConversationFeed(
     feed.push({ kind: "entry", id: entry.id, entry });
   }
   return feed;
+}
+
+export function fileChangesForFinalResponses(feed: ConversationFeedItem[]): Map<string, FileChangeSummary[]> {
+  const byResponse = new Map<string, FileChangeSummary[]>();
+  let turnFiles: FileChangeSummary[] = [];
+  for (const item of feed) {
+    if (item.kind === "trace") {
+      mergeFileChanges(turnFiles, item.files);
+      continue;
+    }
+    if (item.entry.activity.kind === "prompt") {
+      turnFiles = [];
+      continue;
+    }
+    mergeFileChanges(turnFiles, item.entry.files);
+    if (item.entry.isFinalResponse) {
+      byResponse.set(item.entry.id, turnFiles);
+      turnFiles = [];
+    }
+  }
+  return byResponse;
 }

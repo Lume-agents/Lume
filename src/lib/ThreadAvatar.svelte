@@ -48,6 +48,16 @@
       <circle cx="33" cy="33" r="19" fill={avatar.shade} />
       <circle cx="29" cy="31" r="18" fill={avatar.base} />
       <path d="M17 25c5-10 18-13 27-5-10-2-17 1-24 8-2 2-5 0-3-3Z" fill={avatar.light} opacity="0.88" />
+    {:else if avatar.body === "triangle"}
+      <path d="M34 13 54 43 46 49 11 47Z" fill={avatar.shade} />
+      <path d="M34 13 11 47 46 49Z" fill={avatar.base} />
+      <path d="M34 13 11 47 23 48Z" fill={avatar.light} opacity="0.76" />
+      <path d="M34 13 46 49 54 43Z" fill={avatar.shade} />
+    {:else if avatar.body === "pentagon"}
+      <path d="M36 12 55 23 50 46 43 50 20 50 10 27Z" fill={avatar.shade} />
+      <path d="M32 15 48 25 43 48 20 48 13 25Z" fill={avatar.base} />
+      <path d="M32 15 39 12 55 23 48 25Z" fill={avatar.light} />
+      <path d="M48 25 55 23 50 46 43 48Z" fill={avatar.shade} />
     {:else}
       <path d="M18 17h25l7 7v23H18Z" fill={avatar.shade} />
       <rect x="11" y="24" width="34" height="25" rx="7" fill={avatar.base} />

@@ -1,4 +1,4 @@
-export type ThreadAvatarBody = "cube" | "capsule" | "gem" | "arch" | "sphere" | "stack";
+export type ThreadAvatarBody = "cube" | "capsule" | "gem" | "arch" | "sphere" | "stack" | "triangle" | "pentagon";
 
 export type ThreadAvatarEye = {
   cx: number;
@@ -56,7 +56,10 @@ function eyeExpression(index: number): [ThreadAvatarEye, ThreadAvatarEye] {
 export function createThreadAvatarConfig(seed: string): ThreadAvatarConfig {
   const hash = hashThreadAvatarSeed(seed || "lume-thread");
   const palette = palettes[hash % palettes.length] ?? palettes[0];
-  const body = bodies[(hash >>> 4) % bodies.length] ?? "cube";
+  // Keep the established shape for most seeds; reserve two hash slots for the
+  // new silhouettes without reshuffling every existing avatar.
+  const shapeSlot = (hash >>> 20) % 12;
+  const body = shapeSlot === 0 ? "triangle" : shapeSlot === 1 ? "pentagon" : bodies[(hash >>> 4) % bodies.length] ?? "cube";
   return {
     body,
     ...palette,

@@ -7,6 +7,7 @@ import type {
 import type {
   AgentSession,
   CompanionStatus,
+  DiscoveredLumeNode,
   DockSide,
   HistoryEntry,
   IntegrationDiagnostic,
@@ -15,6 +16,8 @@ import type {
   MobilePairingOffer,
   MobileScope,
   PairedDevice,
+  RemoteLumeNode,
+  RemoteLumeNodeHealth,
   PermissionAction,
   Preferences,
   PromptAttachmentInput,
@@ -49,6 +52,10 @@ export const defaultPreferences: Preferences = {
   accentOpacity: 100,
   workspaceBackgroundColor: undefined,
   workspaceBackgroundOpacity: 96,
+  workspaceLightBackgroundColor: undefined,
+  workspaceLightBackgroundOpacity: 96,
+  workspaceDarkBackgroundColor: undefined,
+  workspaceDarkBackgroundOpacity: 96,
   soundEnabled: true,
   soundVolume: 55,
   popupNotificationsEnabled: true,
@@ -113,6 +120,28 @@ export async function loadWorkspaceConversationPage(
   return invoke("get_workspace_conversation_page", { sessionId, beforeCreatedAt, beforeActivityId });
 }
 
+export interface WorkspacePromptIndexEntry {
+  id: string;
+  createdAt: number;
+  detail: string;
+}
+
+export async function loadWorkspacePromptIndexPage(
+  sessionId: string,
+  beforeCreatedAt?: number,
+  beforeActivityId?: string,
+  query?: string,
+): Promise<{ prompts: WorkspacePromptIndexEntry[]; hasMore: boolean }> {
+  return invoke("get_workspace_prompt_index_page", { sessionId, beforeCreatedAt, beforeActivityId, query });
+}
+
+export async function loadSubagentTimeline(
+  sessionId: string,
+  activityId: string,
+): Promise<SessionActivity[]> {
+  return invoke("get_subagent_timeline", { sessionId, activityId });
+}
+
 export async function loadTerminalHubSnapshot(label: string, activityLimit = 60): Promise<HubSnapshot> {
   return invoke<HubSnapshot>("get_terminal_hub_snapshot", { label, activityLimit });
 }
@@ -146,6 +175,26 @@ export async function setPairedDeviceScopes(
   scopes: MobileScope[],
 ): Promise<boolean> {
   return invoke<boolean>("set_paired_device_scopes", { id, scopes });
+}
+
+export async function discoverLumeNodes(): Promise<DiscoveredLumeNode[]> {
+  return invoke<DiscoveredLumeNode[]>("discover_lume_nodes");
+}
+
+export async function pairLumeNode(pairingUri: string): Promise<RemoteLumeNode> {
+  return invoke<RemoteLumeNode>("pair_lume_node", { pairingUri });
+}
+
+export async function loadRemoteLumeNodes(): Promise<RemoteLumeNode[]> {
+  return invoke<RemoteLumeNode[]>("list_remote_lume_nodes");
+}
+
+export async function loadRemoteLumeNodeHealth(nodeId: string): Promise<RemoteLumeNodeHealth> {
+  return invoke<RemoteLumeNodeHealth>("get_remote_lume_node_health", { nodeId });
+}
+
+export async function forgetRemoteLumeNode(nodeId: string): Promise<boolean> {
+  return invoke<boolean>("forget_remote_lume_node", { nodeId });
 }
 
 export async function executeHubCommand(
@@ -220,6 +269,10 @@ export async function setTerminalFileDialogActive(
   active: boolean,
 ): Promise<void> {
   await invoke("set_terminal_file_dialog_active", { label, active });
+}
+
+export async function setNativeFileDialogActive(active: boolean): Promise<void> {
+  await invoke("set_native_file_dialog_active", { active });
 }
 
 export async function refreshAgentRateLimits(agent: AgentSession["agent"]): Promise<void> {

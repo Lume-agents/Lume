@@ -11,14 +11,17 @@
   import BrandIcon from "$lib/BrandIcon.svelte";
   import { colorWithOpacity, normalizeAccentColor, normalizeAppearanceTheme, type AppearanceTheme } from "$lib/appearance";
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
+  import CollapsibleUserMessage from "$lib/CollapsibleUserMessage.svelte";
   import ThinkingOrb from "$lib/ThinkingOrb.svelte";
   import LumeLogo from "$lib/LumeLogo.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
+  import LumeIcon from "$lib/LumeIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import ResponseAttachments from "$lib/ResponseAttachments.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
-  import { activityThinkingLabel, activityThinkingState, formatAgentDuration, isHiddenAgentActivity, needsUserAuthorization } from "$lib/activityPresentation";
+  import { collectAgentAlerts } from "$lib/agentAlerts";
+  import { activityThinkingLabel, activityThinkingState, formatAgentDuration, isGenericAnalysisPlaceholder, isHiddenAgentActivity, needsUserAuthorization } from "$lib/activityPresentation";
   import { displayText, localize, type Language } from "$lib/i18n";
   import {
     clipboardHasFile,
@@ -234,6 +237,8 @@
   } | null>(null);
   let workTrayExpanded = $state(true);
   let rateLimitRefreshRequested = false;
+  let dismissedAgentAlertIds = $state<string[]>([]);
+  let agentAlertsOpen = $state(false);
   let outputElement = $state<HTMLDivElement | null>(null);
   let visibleChatItemLimit = $state(60);
   let outputFollowingTail = true;
@@ -356,14 +361,33 @@
     return localize(language, english, portuguese);
   }
 
+  const agentAlerts = $derived(collectAgentAlerts(session ? [session] : [], language));
+  const archivedAgentAlerts = $derived(
+    agentAlerts.filter((alert) => dismissedAgentAlertIds.includes(alert.id)),
+  );
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
     const items: SystemBannerItem[] = [];
     if (workflowDraftError) items.push({ id: "workflow-error", message: workflowDraftError, tone: "error", onDismiss: () => { workflowDraftError = null; } });
     if (handoffError) items.push({ id: "handoff-error", message: handoffError, tone: "error", onDismiss: () => { handoffError = null; } });
     if (modelError) items.push({ id: "model-error", message: modelError, tone: "error", onDismiss: () => { modelError = null; } });
+    for (const alert of agentAlerts) {
+      if (dismissedAgentAlertIds.includes(alert.id)) continue;
+      items.push({
+        id: alert.id,
+        message: alert.message,
+        tone: alert.tone,
+        duration: alert.tone === "error" ? 7_600 : 6_000,
+        onDismiss: () => dismissAgentAlert(alert.id),
+      });
+    }
     if (message) items.push({ id: "terminal-message", message, onDismiss: () => { message = null; } });
     return items;
   });
+
+  function dismissAgentAlert(id: string) {
+    if (dismissedAgentAlertIds.includes(id)) return;
+    dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-120);
+  }
 
   function workflowStepRoleLabel(step: WorkflowStepDefinition) {
     if (step.role === "custom") return step.customRoleLabel.trim() || tr("Custom", "Personalizado");
@@ -1144,7 +1168,7 @@
   function isInternalGoalActivity(activity: SessionActivity): boolean {
     return /^functions\s*[·:]\s*(?:create_goal|get_goal|update_goal)$/i.test(activity.title.trim());
   }
-  const chatActivities = $derived(activities.filter((activity) => !isInternalGoalActivity(activity)));
+  const chatActivities = $derived(activities.filter((activity) => !isInternalGoalActivity(activity) && !isGenericAnalysisPlaceholder(activity)));
   function activityReportedFiles(activity: SessionActivity): string[] {
     const files = [...activity.files];
     const title = activity.title.trim();
@@ -1287,6 +1311,7 @@
     const closeHeaderPopovers = (event: PointerEvent) => {
       if (!(event.target instanceof Element)) return;
       if (!event.target.closest(".header-overflow")) headerActionsOpen = false;
+      if (!event.target.closest(".agent-alerts")) agentAlertsOpen = false;
       if (!event.target.closest(".composer-tools")) composerToolsOpen = false;
       if (!event.target.closest(".workflow-role-control")) {
         workflowDraft = null;
@@ -2412,7 +2437,7 @@
       );
       return true;
     }
-    if (promptIsRunning) {
+    if (promptIsRunning && session.agent !== "codex") {
       message = tr(
         "The model can be changed after the current task finishes.",
         "O modelo pode ser alterado depois que a tarefa atual terminar.",
@@ -2450,6 +2475,7 @@
     if (session.agent === "codex" && (!selectedModel || !selectedEffort)) return;
     modelSaving = true;
     modelError = null;
+    const deferredUntilPromptEnds = session.agent === "codex" && promptIsRunning;
     try {
       if (session.agent === "codex") {
         modelSettings = await setSessionModelSettings(
@@ -2469,10 +2495,15 @@
         return;
       }
       modelDialogOpen = false;
-      message = tr(
-        "Model settings will apply to the next prompt.",
-        "As configurações de modelo serão aplicadas ao próximo prompt.",
-      );
+      message = deferredUntilPromptEnds
+        ? tr(
+            "Model settings were queued and will apply when the current prompt finishes.",
+            "As configurações foram enfileiradas e serão aplicadas ao final do prompt atual.",
+          )
+        : tr(
+            "Model settings will apply to the next prompt.",
+            "As configurações de modelo serão aplicadas ao próximo prompt.",
+          );
     } catch (error) {
       modelError = String(error).replace(/^Error:\s*/, "");
     } finally {
@@ -2938,6 +2969,37 @@
             <i><em style={`width: ${rateLimitRemaining}%`}></em></i>
           </div>
         {/if}
+        {#if archivedAgentAlerts.length}
+          <span class="agent-alerts">
+            <button
+              class:active={agentAlertsOpen}
+              class="agent-alert-trigger"
+              type="button"
+              aria-label={tr(`${agentAlerts.length} session alerts`, `${agentAlerts.length} alertas da sessão`)}
+              aria-expanded={agentAlertsOpen}
+              title={tr("Session alerts", "Alertas da sessão")}
+              onclick={() => (agentAlertsOpen = !agentAlertsOpen)}
+            >
+              <LumeIcon name="warning" size={15} strokeWidth={1.9} />
+              <small>{agentAlerts.length}</small>
+            </button>
+            {#if agentAlertsOpen}
+              <span class="agent-alert-menu" role="menu" aria-label={tr("Session alerts", "Alertas da sessão")}
+                in:fly={{ y: reducedMotion ? 0 : -5, duration: reducedMotion ? 70 : 160, easing: cubicOut }}
+                out:fade={{ duration: reducedMotion ? 60 : 100 }}>
+                <strong>{tr("Session alerts", "Alertas da sessão")}<small>{agentAlerts.length}</small></strong>
+                <span>
+                  {#each agentAlerts as alert (alert.id)}
+                    <span class="agent-alert-item tone-{alert.tone}" role="menuitem">
+                      <i><LumeIcon name="warning" size={12} strokeWidth={1.9} /></i>
+                      <span>{alert.message}</span>
+                    </span>
+                  {/each}
+                </span>
+              </span>
+            {/if}
+          </span>
+        {/if}
         <span class="header-actions">
           {#if windowState?.docked}
             <button class="dock-button" type="button" onclick={detach} aria-label={tr("Undock terminal", "Desacoplar terminal")} title={tr("Undock", "Desacoplar")}>
@@ -3328,7 +3390,7 @@
                     {#if receivedHandoff}
                       <div class="markdown-content">{@html renderCachedMarkdown(`handoff:${entry.id}`, receivedHandoff.body)}</div>
                     {:else if item.detail}
-                      <pre>{item.detail}</pre>
+                      <CollapsibleUserMessage text={item.detail} {language} />
                     {/if}
                     {#if item.attachments?.length}
                       <div class="message-images">
@@ -3380,10 +3442,12 @@
                       {language}
                       onError={(error) => (message = error)}
                     />
-                    {#if entry.durationMs !== undefined}
+                    {#if entry.isFinalResponse}
                       <footer class="agent-response-duration" title={tr("Time from prompt to final response", "Tempo entre o prompt e a resposta final")}>
                         <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" /><path d="M10 6.5v4l2.7 1.6" /></svg>
-                        <span>{tr("Worked for", "Trabalhou por")} {formatAgentDuration(entry.durationMs)}</span>
+                        <span>{entry.durationMs !== undefined
+                          ? `${tr("Worked for", "Trabalhou por")} ${formatAgentDuration(entry.durationMs)}`
+                          : tr("Work time unavailable", "Tempo de trabalho indisponível")}</span>
                       </footer>
                     {/if}
                   </div>
@@ -3692,6 +3756,9 @@
                 </div>
               </section>
             {:else if modelSettings}
+              {#if promptIsRunning}
+                <p class="model-pending-note">{tr("Changes will be applied when this prompt finishes.", "As mudanças serão aplicadas quando este prompt terminar.")}</p>
+              {/if}
               <section class="model-settings-section">
                 <span class="model-settings-label">{tr("Model", "Modelo")}</span>
                 <div class="model-options">
@@ -4108,6 +4175,19 @@
   header button { position: relative; z-index: 25; width: 25px; height: 25px; display: grid; flex: 0 0 auto; place-items: center; border: 0; border-radius: 7px; color: #73817b; background: transparent; cursor: pointer; }
   header button:hover { color: #43574e; background: rgba(72, 99, 87, 0.07); }
   header button.active { color: #347b5b; background: rgba(52, 139, 94, 0.09); }
+  .agent-alerts { position: relative; z-index: 72; display: inline-flex; flex: 0 0 auto; }
+  .agent-alert-trigger { position: relative; width: 25px; height: 25px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: #ae7928; background: rgba(187, 132, 43, .09); cursor: pointer; }
+  .agent-alert-trigger:hover, .agent-alert-trigger.active { color: #96651f; background: rgba(187, 132, 43, .16); }
+  .agent-alert-trigger > small { position: absolute; top: -4px; right: -4px; min-width: 13px; height: 13px; padding: 0 3px; display: grid; place-items: center; border: 1.5px solid #f4f8f5; border-radius: 7px; color: #fff8e9; background: #b47c26; font: 800 7px/1 Inter, sans-serif; }
+  .agent-alert-menu { position: absolute; z-index: 74; top: 31px; right: 0; width: min(290px, calc(100vw - 18px)); max-height: min(310px, calc(100vh - 84px)); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border: 1px solid rgba(95, 111, 102, .16); border-radius: 11px; color: #4a5e54; background: rgba(248, 251, 249, .99); box-shadow: 0 15px 38px rgba(24, 49, 37, .2); cursor: default; }
+  .agent-alert-menu > strong { min-height: 36px; padding: 0 10px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid rgba(95, 111, 102, .12); color: #34483e; font: 780 9px Inter, sans-serif; }
+  .agent-alert-menu > strong small { margin-left: auto; min-width: 18px; height: 18px; display: grid; place-items: center; border-radius: 6px; color: #9d6e25; background: rgba(187, 132, 43, .11); font: 800 7px Inter, sans-serif; }
+  .agent-alert-menu > span { min-height: 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(75, 105, 90, .24) transparent; }
+  .agent-alert-item { min-height: 42px; padding: 8px 10px; display: grid; grid-template-columns: 21px minmax(0, 1fr); align-items: start; gap: 7px; }
+  .agent-alert-item + .agent-alert-item { border-top: 1px solid rgba(95, 111, 102, .1); }
+  .agent-alert-item > i { width: 21px; height: 21px; display: grid; place-items: center; border-radius: 6px; color: #ae7928; background: rgba(187, 132, 43, .1); }
+  .agent-alert-item.tone-error > i { color: #b85f59; background: rgba(184, 95, 89, .1); }
+  .agent-alert-item > span { margin-top: 1px; overflow-wrap: anywhere; font: 620 8px/1.45 Inter, sans-serif; }
   .header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; }
   .header-overflow { position: relative; z-index: 60; display: flex; flex: 0 0 auto; }
   .header-actions-menu { position: absolute; z-index: 70; top: 30px; right: 0; width: 190px; padding: 5px; display: grid; gap: 2px; border: 1px solid rgba(80, 105, 94, 0.14); border-radius: 10px; color: #53665d; background: rgba(248, 251, 249, 0.98); box-shadow: 0 10px 28px rgba(30, 55, 43, 0.17); cursor: default; }
@@ -4219,7 +4299,7 @@
   .chat-feed { min-width: 0; max-width: 100%; margin: 9px 0 7px; display: grid; gap: 7px; overflow-x: hidden; }
   .chat-feed > * { min-width: 0; max-width: 100%; }
   .chat-message { box-sizing: border-box; width: fit-content; min-width: 0; max-width: 94%; padding: 7px 8px; overflow: clip; overflow-clip-margin: 1px; border: 1px solid rgba(77, 104, 91, 0.09); border-radius: 9px; background: rgba(69, 99, 84, 0.035); }
-  .chat-message.user-message { margin-left: auto; border-bottom-right-radius: 3px; background: rgba(50, 145, 99, 0.075); }
+  .chat-message.user-message { --message-collapse-surface: rgba(50, 145, 99, 0.075); --user-message-content-margin-top: 5px; --user-message-font: var(--chat-font-size)/1.5 "SFMono-Regular", Consolas, "Liberation Mono", monospace; --user-message-text: #4b5c54; --user-message-muted: #71837a; --user-message-accent: #2f8560; --user-message-summary-font: Inter, sans-serif; --user-message-action-font: Inter, sans-serif; margin-left: auto; border-bottom-right-radius: 3px; background: rgba(50, 145, 99, 0.075); }
   .chat-message.agent-message { margin-right: auto; border-bottom-left-radius: 3px; }
   .chat-message.agent-message.intervention-required { width: min(94%, 460px); border-color: rgba(190, 132, 42, 0.18); background: rgba(196, 139, 47, 0.025); }
   .chat-message header { display: flex; align-items: center; gap: 6px; }
@@ -4238,7 +4318,6 @@
   .handoff-button:hover:not(:disabled) { color: #2f8b63; background: rgba(47, 139, 99, 0.09); }
   .handoff-button:disabled { opacity: 0.4; cursor: default; }
   .handoff-button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-  .chat-message.user-message > pre { min-width: 0; max-width: 100%; margin: 5px 0 0; overflow-x: hidden; color: #4b5c54; font: var(--chat-font-size)/1.5 "SFMono-Regular", Consolas, "Liberation Mono", monospace; overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
   .markdown-content { min-width: 0; max-width: 100%; margin-top: 5px; overflow: hidden; color: #4b5c54; font: var(--chat-font-size)/1.55 Inter, sans-serif; overflow-wrap: anywhere; word-break: break-word; }
   .markdown-content :global(> :first-child) { margin-top: 0; }
   .markdown-content :global(> :last-child) { margin-bottom: 0; }
@@ -4246,19 +4325,22 @@
   .markdown-content :global(strong) { color: #40564b; font-weight: 800; }
   .markdown-content :global(em) { font-style: italic; }
   .markdown-content :global(del) { color: #87948e; }
-  .markdown-content :global(a) { color: #2f8560; font-weight: 650; text-decoration: underline; text-decoration-color: rgba(47, 133, 96, 0.38); text-underline-offset: 2px; }
-  .markdown-content :global(a:hover) { color: #216b4b; text-decoration-color: currentColor; }
+  .markdown-content :global(a) { border-radius: 3px; color: #2f8560; font-weight: 650; text-decoration: underline; text-decoration-color: rgba(47, 133, 96, 0.38); text-underline-offset: 2px; box-decoration-break: clone; transition: background-color 140ms ease, text-decoration-color 140ms ease; }
+  .markdown-content :global(a:hover), .markdown-content :global(a:focus-visible) { color: #216b4b; background-color: color-mix(in srgb, currentColor 10%, transparent); text-decoration-color: currentColor; }
+  .markdown-content :global(a:hover code), .markdown-content :global(a:focus-visible code) { background-color: color-mix(in srgb, currentColor 14%, transparent); }
   .markdown-content :global(ul),
-  .markdown-content :global(ol) { margin: 5px 0 7px; padding-left: 18px; }
-  .markdown-content :global(li) { margin: 2px 0; padding-left: 1px; }
+  .markdown-content :global(ol) { margin: 7px 0 10px; padding-left: 20px; }
+  .markdown-content :global(li) { margin: 4px 0; padding-left: 2px; }
+  .markdown-content :global(ol > li::marker) { color: #2f8560; font-weight: 800; font-variant-numeric: tabular-nums; }
   .markdown-content :global(h1),
   .markdown-content :global(h2),
   .markdown-content :global(h3),
-  .markdown-content :global(h4) { margin: 8px 0 4px; color: #40564b; font-family: Inter, sans-serif; line-height: 1.3; }
-  .markdown-content :global(h1) { font-size: calc(var(--chat-font-size) + 3px); }
-  .markdown-content :global(h2) { font-size: calc(var(--chat-font-size) + 2px); }
-  .markdown-content :global(h3),
-  .markdown-content :global(h4) { font-size: calc(var(--chat-font-size) + 1px); }
+  .markdown-content :global(h4) { margin: 10px 0 6px; color: #40564b; font-family: Inter, sans-serif; line-height: 1.28; letter-spacing: -.012em; }
+  .markdown-content :global(h1) { margin-top: 14px; font-size: calc(var(--chat-font-size) + 5px); }
+  .markdown-content :global(h2) { margin-top: 12px; font-size: calc(var(--chat-font-size) + 3px); }
+  .markdown-content :global(h3) { margin-top: 10px; font-size: calc(var(--chat-font-size) + 2px); }
+  .markdown-content :global(h4) { margin-top: 9px; font-size: calc(var(--chat-font-size) + 1px); }
+  .markdown-content :global(h1 + p), .markdown-content :global(h2 + p), .markdown-content :global(h3 + p), .markdown-content :global(h4 + p) { margin-top: 1px; }
   .markdown-content :global(blockquote) { margin: 6px 0; padding: 4px 8px; border-left: 2px solid #58a37d; color: #687970; background: rgba(62, 143, 101, 0.05); }
   .markdown-content :global(code) { max-width: 100%; padding: 1px 4px; border-radius: 4px; color: #3f6553; background: rgba(53, 116, 84, 0.08); font: 0.92em/1.45 "SFMono-Regular", Consolas, "Liberation Mono", monospace; overflow-wrap: anywhere; white-space: break-spaces; }
   .markdown-content :global(pre) { max-width: 100%; max-height: 220px; margin: 6px 0; padding: 7px 8px; overflow: auto; border: 1px solid rgba(77, 104, 91, 0.09); border-radius: 6px; background: rgba(42, 63, 53, 0.055); }
@@ -4448,6 +4530,7 @@
   .effort-scale span.active { color: #397d5d; font-weight: 820; transform: translateY(-1px); }
   .model-settings-loading { min-height: 110px; place-content: center; color: #718078; font: 650 var(--chat-small-font-size) Inter, sans-serif; }
   .model-settings-loading span { width: 16px; height: 16px; margin: 0 auto 4px; border: 2px solid rgba(61, 128, 99, 0.18); border-top-color: #3d8063; border-radius: 50%; animation: model-spin 0.8s linear infinite; }
+  .model-pending-note { margin: 0; padding: 7px 9px; border-radius: 8px; color: #7b673e; background: rgba(190, 143, 62, .1); font: 650 var(--chat-tiny-font-size)/1.4 Inter, sans-serif; }
   @keyframes model-spin { to { transform: rotate(360deg); } }
   .terminal-composer { position: relative; box-sizing: border-box; min-height: 63px; padding: 7px 8px 8px 10px; display: flex; flex: 0 0 auto; flex-direction: column; align-items: stretch; gap: 6px; border-top: 1px solid rgba(97, 119, 109, 0.11); }
   .composer-controls { min-width: 0; min-height: 0; display: flex; flex: 1; align-items: flex-end; gap: 6px; }
@@ -4558,6 +4641,7 @@
     box-shadow: 0 1px 3px rgba(39, 66, 53, 0.04);
   }
   .terminal-window:not(.dark) .chat-message.user-message {
+    --message-collapse-surface: #c7dfce;
     border-color: rgba(46, 132, 88, 0.2);
     background: #c7dfce;
   }
@@ -4590,7 +4674,7 @@
   .terminal-window:not(.dark) .terminate-dialog { background: #e9e6d4; }
   .terminal-window:not(.dark) .hub-tabs button.active { color: #246b47; border-bottom-color: #32915e; }
 
-  .terminal-window.dark { --terminal-scroll-thumb: #50665b; --terminal-scroll-thumb-hover: #6f8c7d; color-scheme: dark; }
+  .terminal-window.dark { --terminal-scroll-thumb: #50665b; --terminal-scroll-thumb-hover: #6f8c7d; --file-monochrome-filter: grayscale(1) brightness(0) invert(.92) contrast(.9); --file-monochrome-opacity: .86; color-scheme: dark; }
   .handoff-backdrop { position: absolute; z-index: 60; inset: 0; padding: 14px; display: grid; place-items: center; background: rgba(19, 29, 24, 0.38); backdrop-filter: blur(3px); }
   .handoff-dialog { width: min(430px, 100%); max-height: 100%; padding: 12px; display: grid; gap: 10px; overflow-y: auto; border: 1px solid rgba(81, 112, 97, 0.18); border-radius: 13px; color: #34463d; background: #f8fbf9; box-shadow: 0 16px 44px rgba(20, 35, 28, 0.2); }
   .handoff-dialog > header { min-height: auto; padding: 0; display: flex; align-items: flex-start; border: 0; }
@@ -4716,6 +4800,10 @@
   .terminal-window.dark .access-badge.full-access { color: #e4b88f; background: #543b29; }
   .terminal-window.dark .terminal-name-editor input { color: #d9e5df; border-color: rgba(195, 218, 207, 0.14); background: rgba(219, 233, 226, 0.055); }
   .terminal-window.dark .header-actions-menu { color: #b7c8bf; border-color: rgba(205, 222, 213, 0.12); background: rgba(24, 35, 30, 0.98); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3); }
+  .terminal-window.dark .agent-alert-trigger > small { border-color: #17211c; }
+  .terminal-window.dark .agent-alert-menu { color: #bacac1; border-color: rgba(205, 222, 213, .12); background: rgba(24, 35, 30, .99); box-shadow: 0 15px 38px rgba(0, 0, 0, .34); }
+  .terminal-window.dark .agent-alert-menu > strong { color: #d8e5de; border-bottom-color: rgba(205, 222, 213, .1); }
+  .terminal-window.dark .agent-alert-item + .agent-alert-item { border-top-color: rgba(205, 222, 213, .08); }
   .terminal-window.dark header .header-actions-menu > button,
   .terminal-window.dark .header-menu-zoom { color: #b7c8bf; }
   .terminal-window.dark header .header-actions-menu > button:hover { color: #8bd3b0; background: rgba(96, 187, 144, 0.08); }
@@ -4739,6 +4827,7 @@
   .terminal-window.dark .effort-scale span.active { color: #8fd0af; }
   .terminal-window.dark .claude-model-settings input { color: #d0e1d8; border-color: rgba(205, 222, 213, 0.1); background: rgba(213, 233, 223, 0.035); }
   .terminal-window.dark .claude-model-settings > small { color: #91a299; }
+  .terminal-window.dark .model-pending-note { color: #d5ba83; background: rgba(195, 145, 61, .11); }
   .terminal-window.dark .terminate-dialog .model-options > button { border-color: rgba(205, 222, 213, 0.08); background: rgba(213, 233, 223, 0.025); }
   .terminal-window.dark .terminate-dialog .model-options > button:hover { border-color: rgba(117, 194, 155, 0.2); background: rgba(94, 176, 135, 0.07); }
   .terminal-window.dark .terminate-dialog .model-options > button.active { border-color: rgba(112, 203, 157, 0.42); background: rgba(84, 171, 127, 0.11); box-shadow: inset 2px 0 #64b98f; }
@@ -4822,9 +4911,8 @@
   .terminal-window.dark .workflow-top,
   .terminal-window.dark .workflow-bottom { background: linear-gradient(90deg, rgba(70, 182, 127, 0.15), #59c58b 45%, rgba(70, 182, 127, 0.15)); }
   .terminal-window.dark .agent-typing > span { color: transparent; background-image: linear-gradient(90deg, #7f948a 10%, #74acd2 44%, #c2e4f6 53%, #74acd2 62%, #7f948a 90%); }
-  .terminal-window.dark .chat-message.user-message { background: rgba(76, 169, 124, 0.09); }
+  .terminal-window.dark .chat-message.user-message { --message-collapse-surface: rgba(76, 169, 124, 0.09); --user-message-text: #bdcbc4; --user-message-muted: #8fa198; --user-message-accent: #69c992; background: rgba(76, 169, 124, 0.09); }
   .terminal-window.dark .chat-message header strong,
-  .terminal-window.dark .chat-message.user-message > pre,
   .terminal-window.dark .markdown-content,
   .terminal-window.dark .turn-files code { color: #bdcbc4; }
   .terminal-window.dark .markdown-content :global(strong),
@@ -4833,6 +4921,9 @@
   .terminal-window.dark .markdown-content :global(h3),
   .terminal-window.dark .markdown-content :global(h4) { color: #d1ddd7; }
   .terminal-window.dark .markdown-content :global(a) { color: #76c49d; text-decoration-color: rgba(118, 196, 157, 0.42); }
+  .terminal-window.dark .markdown-content :global(a:hover), .terminal-window.dark .markdown-content :global(a:focus-visible) { color: #91d9b2; }
+  .terminal-window.dark .markdown-content :global(a:hover code), .terminal-window.dark .markdown-content :global(a:focus-visible code) { background-color: color-mix(in srgb, currentColor 14%, transparent); }
+  .terminal-window.dark .markdown-content :global(ol > li::marker) { color: #76c49d; }
   .terminal-window.dark .markdown-content :global(blockquote) { color: #a5b6ad; background: rgba(91, 177, 137, 0.055); }
   .terminal-window.dark .markdown-content :global(code) { color: #b9d9c9; background: rgba(157, 205, 181, 0.075); }
   .terminal-window.dark .markdown-content :global(pre) { border-color: rgba(205, 222, 213, 0.08); background: rgba(7, 16, 12, 0.2); }
@@ -4932,11 +5023,9 @@
   }
   .terminal-window[data-appearance]:not(.dark) .terminal-card { background: var(--lume-surface-light); }
   .terminal-window.dark[data-appearance] .terminal-card { background: var(--lume-surface-dark); }
-  .terminal-window[data-appearance]:not(.dark) .chat-message.user-message { border-color: var(--lume-user-line-light); background: var(--lume-user-light); }
-  .terminal-window[data-appearance]:not(.dark) .chat-message.user-message > pre { color: var(--lume-ink-light); }
+  .terminal-window[data-appearance]:not(.dark) .chat-message.user-message { --message-collapse-surface: var(--lume-user-light); --user-message-text: var(--lume-ink-light); --user-message-muted: var(--lume-ink-muted-light); border-color: var(--lume-user-line-light); background: var(--lume-user-light); }
   .terminal-window[data-appearance]:not(.dark) .chat-message.agent-message:not(.intervention-required) { border-color: var(--lume-line-light); background: var(--lume-message-light); }
-  .terminal-window.dark[data-appearance] .chat-message.user-message { border-color: var(--lume-user-line-dark); background: var(--lume-user-dark); }
-  .terminal-window.dark[data-appearance] .chat-message.user-message > pre { color: var(--lume-ink-dark); }
+  .terminal-window.dark[data-appearance] .chat-message.user-message { --message-collapse-surface: var(--lume-user-dark); --user-message-text: var(--lume-ink-dark); --user-message-muted: var(--lume-ink-muted-dark); border-color: var(--lume-user-line-dark); background: var(--lume-user-dark); }
   .terminal-window.dark[data-appearance] .chat-message.agent-message:not(.intervention-required) { border-color: var(--lume-line-dark); background: var(--lume-message-dark); }
   .terminal-window[data-appearance] { --dropdown-surface: var(--lume-raised-light); --dropdown-line: var(--lume-line-light); --dropdown-text: var(--lume-ink-light); --dropdown-strong: var(--lume-ink-strong-light); --dropdown-muted: var(--lume-ink-muted-light); --dropdown-accent: var(--lume-accent-strong); --dropdown-hover: var(--lume-subtle-light); }
   .terminal-window.dark[data-appearance] { --dropdown-surface: var(--lume-raised-dark); --dropdown-line: var(--lume-line-dark); --dropdown-text: var(--lume-ink-dark); --dropdown-strong: var(--lume-ink-strong-dark); --dropdown-muted: var(--lume-ink-muted-dark); --dropdown-accent: var(--lume-accent); --dropdown-hover: var(--lume-subtle-dark); }

@@ -31,14 +31,14 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
   } else if (session.source !== "web") {
     if (session.agent === "unknown") {
       promptUnavailableReason = "unsupported_agent";
-    } else if (!session.nativeSessionId) {
+    } else if (!session.nativeSessionId?.trim()) {
       promptUnavailableReason = "session_not_connected";
     } else if (
       session.controlOrigin === "external"
       && ["codex", "claude_code"].includes(session.agent)
     ) {
       promptUnavailableReason = "external_session";
-    } else if (session.agent !== "codex" && !session.workingDirectory) {
+    } else if (session.agent !== "codex" && !session.workingDirectory?.trim()) {
       promptUnavailableReason = "working_directory_missing";
     }
   }
@@ -50,7 +50,14 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
       session.pendingPermission && session.permissionProfile.canRespondFromLume,
     ),
     canAnswerQuestion: Boolean(session.pendingQuestion),
-    canTerminate: session.source === "cli" && Boolean(session.processId),
+    canTerminate:
+      (session.source === "cli" && Boolean(session.processId))
+      || (
+        session.agent === "codex"
+        && session.source === "desktop"
+        && session.controlOrigin === "lume"
+        && Boolean(session.nativeSessionId?.trim())
+      ),
     canOpenSource: session.source === "web" || session.source === "vscode",
     canReadResults: session.results.length > 0 || Boolean(session.lastResponse),
     canAttachImages: session.source !== "web" && session.agent !== "unknown",
@@ -59,12 +66,13 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
       && session.controlOrigin === "lume"
       && session.source !== "web"
       && session.agent === "codex"
-      && Boolean(session.nativeSessionId),
+      && Boolean(session.nativeSessionId?.trim()),
     canTakeControl:
       session.controlOrigin === "external"
       && session.source === "cli"
-      && ["codex", "claude_code"].includes(session.agent)
-      && Boolean(session.nativeSessionId)
+      && session.agent === "codex"
+      && Boolean(session.nativeSessionId?.trim())
+      && Boolean(session.workingDirectory?.trim())
       && Boolean(session.processId),
     promptDeliveries:
       session.agent === "codex"

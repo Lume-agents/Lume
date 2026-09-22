@@ -5,10 +5,12 @@
 </script>
 
 <svg
+  xmlns="http://www.w3.org/2000/svg"
   class="workflow-role-icon role-{role}"
   viewBox="0 0 24 24"
   fill="none"
   aria-hidden="true"
+  focusable="false"
 >
   {#if role === "planner"}
     <path d="M7 4h10.5A2.5 2.5 0 0 1 20 6.5V20H7a3 3 0 1 1 0-6h1V6a2 2 0 0 0-4 0v11" />

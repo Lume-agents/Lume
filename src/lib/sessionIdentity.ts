@@ -81,3 +81,11 @@ export function resolveLiveResumableSession<T extends AgentSession>(
     session.agent === agent && session.nativeSessionId === stored.id
   );
 }
+
+export function hasOpenWorkspacePane(
+  sessions: Pick<AgentSession, "id">[],
+  paneIds: readonly (string | null)[],
+): boolean {
+  const sessionIds = new Set(sessions.map((session) => session.id));
+  return paneIds.some((id) => id !== null && sessionIds.has(id));
+}

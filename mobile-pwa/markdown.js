@@ -59,7 +59,11 @@ function renderInline(source) {
     );
 
   value = formatEmphasis(escapeHtml(value));
-  return value.replace(/\uE000(\d+)\uE001/g, (_, index) => tokens[Number(index)] ?? "");
+  const tokenPattern = /\uE000(\d+)\uE001/g;
+  for (let index = 0; index < tokens.length; index += 1) {
+    tokens[index] = tokens[index].replace(tokenPattern, (_, nested) => tokens[Number(nested)] ?? "");
+  }
+  return value.replace(tokenPattern, (_, index) => tokens[Number(index)] ?? "");
 }
 
 /** @param {string} line */

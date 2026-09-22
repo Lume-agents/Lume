@@ -804,6 +804,59 @@ fn patch_sections(value: &str, working_directory: Option<&str>) -> Vec<(String, 
     sections
 }
 
+/// Expose only bounded, redacted patch hunks from a subagent rollout to the local timeline.
+/// Tool wrappers and output are deliberately excluded from the diff preview.
+pub(crate) fn sanitize_subagent_patch_detail(
+    detail: &str,
+    working_directory: Option<&str>,
+) -> Option<String> {
+    const MAX_SUBAGENT_DIFF_CHARS: usize = 16_000;
+    let patch = detail.split("*** End Patch").next().unwrap_or(detail);
+    let mut output = String::new();
+    let mut redactions = RedactionCounts::default();
+    for (path, section) in patch_sections(patch, working_directory)
+        .into_iter()
+        .take(12)
+    {
+        if section.trim().is_empty() {
+            continue;
+        }
+        let mut sanitized = Vec::new();
+        for line in section.lines().take(240) {
+            let prefix = line
+                .chars()
+                .next()
+                .filter(|character| matches!(character, '+' | '-' | ' '));
+            let content = if prefix.is_some() { &line[1..] } else { line };
+            let clean = clean_text(content, 800, &mut redactions);
+            sanitized.push(match prefix {
+                Some(marker) => format!("{marker}{clean}"),
+                None => clean,
+            });
+        }
+        let chunk = format!("diff --git a/{path} b/{path}\n{}\n", sanitized.join("\n"));
+        if output.chars().count() + chunk.chars().count() > MAX_SUBAGENT_DIFF_CHARS {
+            break;
+        }
+        output.push_str(&chunk);
+    }
+    (!output.is_empty()).then(|| output.trim_end().to_string())
+}
+
+pub(crate) fn sanitize_subagent_file_paths(
+    paths: Vec<String>,
+    working_directory: Option<&str>,
+) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            safe_path(&path, working_directory)
+                .ok()
+                .map(|(safe, _)| safe)
+        })
+        .collect()
+}
+
 fn safe_path(path: &str, working_directory: Option<&str>) -> Result<(String, bool), PathRejection> {
     let path = path.trim().trim_matches(['`', '"', '\'']);
     if path.is_empty()
@@ -1256,6 +1309,7 @@ mod tests {
                 },
             ],
             rate_limits: Vec::new(),
+            prompt_token_usage: Vec::new(),
         }
     }
 
@@ -1769,5 +1823,27 @@ mod tests {
         assert_eq!(files, vec!["src/lib.rs"]);
         assert_eq!(tests.len(), 2);
         assert!(!tests.join("\n").contains("workflow-history-secret"));
+    }
+
+    #[test]
+    fn subagent_patch_preview_omits_sensitive_files_and_values() {
+        let patch = "tool wrapper\n*** Begin Patch\n*** Add File: /work/src/main.rs\n+fn main() {}\n+api_key=preview-secret\n*** Add File: /work/.env\n+TOKEN=preview-secret\n*** End Patch\ntool output";
+        let diff = sanitize_subagent_patch_detail(patch, Some("/work")).expect("safe diff");
+
+        assert!(diff.contains("diff --git a/src/main.rs b/src/main.rs"));
+        assert!(diff.contains("+fn main() {}"));
+        assert!(diff.contains("[REDACTED]"));
+        assert!(!diff.contains("preview-secret"));
+        assert!(!diff.contains(".env"));
+        assert!(!diff.contains("tool wrapper"));
+        assert!(!diff.contains("tool output"));
+        assert!(!diff.contains("*** Begin Patch"));
+        assert_eq!(
+            sanitize_subagent_file_paths(
+                vec!["/work/src/main.rs".into(), "/work/.env".into()],
+                Some("/work"),
+            ),
+            vec!["src/main.rs"],
+        );
     }
 }

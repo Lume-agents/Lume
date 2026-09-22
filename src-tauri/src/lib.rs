@@ -7,6 +7,7 @@ mod context_builder;
 mod control;
 mod desktop_shortcuts;
 mod discovery;
+pub mod distributed_protocol;
 mod domain;
 mod event_server;
 mod executables;
@@ -15,6 +16,11 @@ mod launcher;
 mod legacy_cli_gateway_cleanup;
 mod mobile_gateway;
 mod mobile_server;
+pub mod node_client;
+pub mod node_identity;
+pub mod node_network;
+pub mod node_pairing;
+pub mod node_service;
 mod overlay;
 mod protocol;
 mod session_filters;
@@ -63,6 +69,8 @@ fn reveal_main_window(app: &AppHandle) {
 
 fn reveal_workspace_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("workspace") {
+        app.state::<terminal_windows::TerminalWindows>()
+            .suspend_for_workspace(app)?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
@@ -79,15 +87,28 @@ fn reveal_workspace_window(app: &AppHandle) -> Result<(), String> {
         .resizable(true)
         .decorations(false)
         .transparent(true)
+        .visible(false)
         .center()
         .build()
         .map_err(|error| error.to_string())?;
     let app_for_close = app.clone();
     window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
+            let _ = app_for_close
+                .state::<terminal_windows::TerminalWindows>()
+                .restore_after_workspace(&app_for_close);
             reveal_main_window(&app_for_close);
         }
     });
+    app.state::<terminal_windows::TerminalWindows>()
+        .suspend_for_workspace(app)?;
+    if let Err(error) = window.show().and_then(|_| window.set_focus()) {
+        let _ = app
+            .state::<terminal_windows::TerminalWindows>()
+            .restore_after_workspace(app);
+        let _ = window.close();
+        return Err(error.to_string());
+    }
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.hide();
     }
@@ -274,6 +295,42 @@ fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSnapshot,
 struct WorkspaceConversationPage {
     activities: Vec<SessionActivity>,
     has_more: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspacePromptIndexPage {
+    prompts: Vec<store::ConversationPromptIndexEntry>,
+    has_more: bool,
+}
+
+#[tauri::command]
+fn get_workspace_prompt_index_page(
+    state: State<'_, AppState>,
+    session_id: String,
+    before_created_at: Option<i64>,
+    before_activity_id: Option<String>,
+    query: Option<String>,
+) -> Result<WorkspacePromptIndexPage, String> {
+    let before = before_created_at.zip(before_activity_id.as_deref());
+    let (prompts, has_more) =
+        state.conversation_prompts_before(&session_id, before, query.as_deref(), 30)?;
+    Ok(WorkspacePromptIndexPage { prompts, has_more })
+}
+
+#[tauri::command]
+async fn get_subagent_timeline(
+    state: State<'_, AppState>,
+    session_id: String,
+    activity_id: String,
+) -> Result<Vec<SessionActivity>, String> {
+    let (parent_thread_id, child_thread_id) =
+        state.codex_subagent_thread(&session_id, &activity_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        codex_sessions::load_subagent_timeline(&parent_thread_id, &child_thread_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -510,14 +567,34 @@ fn set_terminal_file_dialog_active(
     }
     app.get_webview_window(&label)
         .ok_or_else(|| "Mini terminal não encontrado".to_string())?;
+    set_native_file_dialog_windows(&app, state.inner(), active)
+}
+
+#[tauri::command]
+fn set_native_file_dialog_active(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    active: bool,
+) -> Result<(), String> {
+    set_native_file_dialog_windows(&app, state.inner(), active)
+}
+
+fn set_native_file_dialog_windows(
+    app: &AppHandle,
+    state: &AppState,
+    active: bool,
+) -> Result<(), String> {
     let show_over_fullscreen = state.preferences()?.show_over_fullscreen;
-    if active {
-        overlay::set_native_dialog_active(true);
+    if !overlay::set_native_dialog_active(active) {
+        return Ok(());
     }
     let mut updated = 0usize;
     let mut first_error = None;
     for (window_label, window) in app.webview_windows() {
-        if !window_label.starts_with("terminal-") {
+        if window_label != "main"
+            && !window_label.starts_with("terminal-")
+            && !window_label.starts_with("workflow-bridge-")
+        {
             continue;
         }
         match overlay::set_file_dialog_active(&window, active, show_over_fullscreen) {
@@ -526,13 +603,14 @@ fn set_terminal_file_dialog_active(
             Err(_) => {}
         }
     }
-    if !active || updated == 0 {
-        overlay::set_native_dialog_active(false);
-    }
     if updated > 0 {
         Ok(())
+    } else if active {
+        // Balance the reference count when no overlay could be lowered.
+        let _ = overlay::set_native_dialog_active(false);
+        Err(first_error.unwrap_or_else(|| "No Lume overlay window was available".into()))
     } else {
-        Err(first_error.unwrap_or_else(|| "No Lume terminal window was available".into()))
+        Err(first_error.unwrap_or_else(|| "No Lume overlay window was available".into()))
     }
 }
 
@@ -579,7 +657,7 @@ async fn take_control_session(
         let prompt = prompt.unwrap_or_default();
         let attachments = attachments.unwrap_or_default();
         if !prompt.trim().is_empty() || !attachments.is_empty() {
-            control::submit_prompt(
+            if let Err(error) = control::submit_prompt(
                 &app,
                 &state,
                 &bridge,
@@ -589,7 +667,12 @@ async fn take_control_session(
                 attachments,
                 PromptDelivery::NewTurn,
                 true,
-            )?;
+            ) {
+                protocol::emit_sessions_changed(&app);
+                return Err(format!(
+                    "Control was transferred to Lume, but prompt delivery could not be confirmed: {error}. Your draft was kept; check the session activity before resending."
+                ));
+            }
         }
         protocol::emit_sessions_changed(&app);
         Ok(())
@@ -810,6 +893,36 @@ fn delete_session_note(state: State<'_, AppState>, id: String) -> Result<(), Str
 #[tauri::command]
 fn get_preferences(state: State<'_, AppState>) -> Result<Preferences, String> {
     state.preferences()
+}
+
+#[tauri::command]
+fn discover_lume_nodes() -> Result<Vec<node_client::DiscoveredNode>, String> {
+    node_client::discover(std::time::Duration::from_secs(2))
+}
+
+#[tauri::command]
+fn pair_lume_node(pairing_uri: String) -> Result<node_client::RemoteNode, String> {
+    let directory = node_service::default_state_directory()?;
+    node_client::pair(&directory, &pairing_uri, std::time::Duration::from_secs(3))
+}
+
+#[tauri::command]
+fn list_remote_lume_nodes() -> Result<Vec<node_client::RemoteNode>, String> {
+    node_client::remotes(&node_service::default_state_directory()?)
+}
+
+#[tauri::command]
+fn get_remote_lume_node_health(node_id: String) -> Result<node_service::NodeHealth, String> {
+    node_client::remote_health(
+        &node_service::default_state_directory()?,
+        &node_id,
+        std::time::Duration::from_secs(2),
+    )
+}
+
+#[tauri::command]
+fn forget_remote_lume_node(node_id: String) -> Result<bool, String> {
+    node_client::forget(&node_service::default_state_directory()?, &node_id)
 }
 
 #[tauri::command]
@@ -1184,9 +1297,25 @@ fn set_preferences(
                 && color[1..].chars().all(|value| value.is_ascii_hexdigit());
             valid.then(|| color.to_ascii_lowercase())
         });
+    for color in [
+        &mut preferences.workspace_light_background_color,
+        &mut preferences.workspace_dark_background_color,
+    ] {
+        *color = color.take().and_then(|color| {
+            let valid = color.len() == 7
+                && color.starts_with('#')
+                && color[1..].chars().all(|value| value.is_ascii_hexdigit());
+            valid.then(|| color.to_ascii_lowercase())
+        });
+    }
     preferences.accent_opacity = preferences.accent_opacity.clamp(20, 100);
     preferences.workspace_background_opacity =
         preferences.workspace_background_opacity.clamp(35, 100);
+    preferences.workspace_light_background_opacity = preferences
+        .workspace_light_background_opacity
+        .clamp(35, 100);
+    preferences.workspace_dark_background_opacity =
+        preferences.workspace_dark_background_opacity.clamp(35, 100);
     validate_workflow_groups(&preferences)?;
     let previous = state.preferences()?;
     let overlay_configuration_changed = previous.monitor_id != preferences.monitor_id
@@ -1800,11 +1929,11 @@ fn launch_session_impl(
             .app_data_dir()
             .map_err(|error| error.to_string())?;
         let codex_remote = if request.agent == IntegrationKind::Codex {
-            Some(codex_bridge::PROXY_URL)
+            Some(bridge.proxy_url().to_string())
         } else {
             None
         };
-        launcher::launch(request, &executable, &app_data_dir, codex_remote)?;
+        launcher::launch(request, &executable, &app_data_dir, codex_remote.as_deref())?;
         if let Some(thread_id) = codex_thread_id.as_deref() {
             bridge.wait_for_proxy_thread(thread_id, std::time::Duration::from_secs(12))?;
         }
@@ -2096,6 +2225,8 @@ pub fn run() {
             fork_session_from_message,
             get_hub_snapshot,
             get_workspace_conversation_page,
+            get_workspace_prompt_index_page,
+            get_subagent_timeline,
             get_terminal_hub_snapshot,
             execute_hub_command,
             begin_mobile_pairing,
@@ -2112,6 +2243,7 @@ pub fn run() {
             read_local_image_data_url,
             export_local_file,
             set_terminal_file_dialog_active,
+            set_native_file_dialog_active,
             refresh_agent_rate_limits,
             interrupt_prompt,
             get_session_collaboration_mode,
@@ -2136,6 +2268,11 @@ pub fn run() {
             save_session_note,
             delete_session_note,
             get_preferences,
+            discover_lume_nodes,
+            pair_lume_node,
+            list_remote_lume_nodes,
+            get_remote_lume_node_health,
+            forget_remote_lume_node,
             get_workflow_role_contract,
             preview_workflow_context,
             get_workflow_run,
@@ -2224,6 +2361,10 @@ pub fn run_ingest_client() -> i32 {
             1
         }
     }
+}
+
+pub fn run_node_cli(arguments: &[String]) -> i32 {
+    node_service::run_cli(arguments)
 }
 
 pub fn run_hook_client(provider: &str) -> i32 {

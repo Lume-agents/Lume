@@ -204,20 +204,26 @@ pub fn submit_prompt(
                 profile.can_respond_from_lume = true;
                 let activity_id =
                     format!("local:{}:queued:{}", session.id, crate::state::now_millis());
-                bridge.queue_prompt(
+                state.record_queued_prompt_activity(
+                    &session.id,
+                    &activity_id,
+                    prompt,
+                    display_attachments.clone(),
+                )?;
+                state.persist_queued_prompt(&session.id, &activity_id, &thread_id)?;
+                if let Err(error) = bridge.queue_prompt(
                     &session.id,
                     &activity_id,
                     &thread_id,
                     &codex_prompt,
                     &image_paths,
                     profile,
-                )?;
-                state.record_queued_prompt_activity(
-                    &session.id,
-                    &activity_id,
-                    prompt,
-                    display_attachments.clone(),
-                )
+                ) {
+                    let _ = state.clear_queued_prompt(&activity_id);
+                    let _ = state.mark_queued_prompt_needs_attention(&session.id, &activity_id);
+                    return Err(error);
+                }
+                Ok(())
             }
             PromptDelivery::NewTurn => {
                 return Err("Choose Steer now or Queue next while Codex is running".into());
@@ -316,6 +322,7 @@ pub fn submit_prompt(
         } else {
             Default::default()
         };
+        let is_claude = agent == IntegrationKind::Claude;
         launcher::launch(
             LaunchRequest {
                 agent,
@@ -324,8 +331,9 @@ pub fn submit_prompt(
                 resume_id: Some(resume_id),
                 target,
                 initial_prompt: Some(prompt),
-                permission_mode: None,
-                approval_policy: None,
+                permission_mode: is_claude.then(|| session.permission_profile.mode.clone()),
+                approval_policy: is_claude
+                    .then(|| session.permission_profile.approval_policy.clone()),
                 model: model_settings.model,
                 reasoning_effort: model_settings.reasoning_effort,
             },
@@ -469,16 +477,18 @@ pub fn session_model_settings(
     if session.control_origin != SessionControlOrigin::Lume {
         return Err("Take control of this external CLI before changing its model".into());
     }
-    if matches!(
-        session.status,
-        SessionStatus::Running | SessionStatus::PermissionRequired
-    ) {
-        return Err("Wait for the current task to finish before reading model settings".into());
-    }
     let thread_id = session
         .native_session_id
         .as_deref()
         .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
+    if matches!(
+        session.status,
+        SessionStatus::Running | SessionStatus::PermissionRequired
+    ) {
+        let mut settings = bridge.default_model_settings()?;
+        apply_pending_model_override(state, session_id, &mut settings)?;
+        return Ok(settings);
+    }
     match bridge.thread_model_settings(thread_id) {
         Ok(mut settings) => {
             apply_pending_model_override(state, session_id, &mut settings)?;
@@ -512,16 +522,29 @@ pub fn set_session_model_settings(
     if session.control_origin != SessionControlOrigin::Lume {
         return Err("Take control of this external CLI before changing its model".into());
     }
-    if matches!(
-        session.status,
-        SessionStatus::Running | SessionStatus::PermissionRequired
-    ) {
-        return Err("Wait for the current task to finish before changing the model".into());
-    }
     let thread_id = session
         .native_session_id
         .as_deref()
         .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
+    if matches!(
+        session.status,
+        SessionStatus::Running | SessionStatus::PermissionRequired
+    ) {
+        let mut settings = bridge.default_model_settings()?;
+        validate_model_selection(&mut settings, model, effort)?;
+        let pending = SessionModelOverride {
+            model: Some(settings.model.clone()),
+            reasoning_effort: settings.reasoning_effort.clone(),
+        };
+        state.set_session_model_override(session_id, pending.clone())?;
+        state.queue_codex_model_update(
+            thread_id,
+            pending,
+            bridge.collaboration_mode(thread_id)?,
+        )?;
+        protocol::emit_sessions_changed(app);
+        return Ok(settings);
+    }
     let settings = match bridge.set_thread_model_settings(thread_id, model, effort) {
         Ok(settings) => settings,
         Err(error) if is_missing_codex_rollout(&error) => {
@@ -940,6 +963,7 @@ pub fn terminate_session(
             }
         }
         bridge.discard_queued_prompts(thread_id)?;
+        state.clear_queued_prompts_for_thread(thread_id)?;
         state.mark_session_terminated(session_id)?;
         protocol::emit_sessions_changed(app);
         return Ok(());
@@ -969,7 +993,11 @@ pub fn terminate_session(
     let mut terminated = 0usize;
     let mut errors = Vec::new();
     for process_id in process_ids {
-        match discovery::terminate_agent_process(process_id, &session.agent) {
+        match discovery::terminate_agent_process(
+            process_id,
+            &session.agent,
+            session.native_session_id.as_deref(),
+        ) {
             Ok(()) => {
                 state.mark_process_terminated(process_id)?;
                 terminated += 1;
@@ -1006,8 +1034,11 @@ pub fn take_control_session(
     if session.source != SessionSource::Cli {
         return Err("Only external CLI sessions can transfer control to Lume".into());
     }
-    if !matches!(session.agent, AgentKind::Codex | AgentKind::ClaudeCode) {
-        return Err("This agent cannot transfer an existing session to Lume yet".into());
+    if session.agent != AgentKind::Codex {
+        return Err(
+            "Claude Code Take Control is temporarily unavailable until its managed execution can guarantee a single writer and preserve permissions."
+                .into(),
+        );
     }
     session
         .native_session_id
@@ -1017,79 +1048,78 @@ pub fn take_control_session(
     let process_id = session
         .process_id
         .ok_or_else(|| "The external CLI process is no longer available".to_string())?;
+    let working_directory = session
+        .working_directory
+        .as_deref()
+        .filter(|directory| !directory.trim().is_empty())
+        .ok_or_else(|| {
+            "Lume cannot transfer this session safely because its project directory is unknown"
+                .to_string()
+        })?;
 
-    match session.agent {
-        AgentKind::Codex => bridge.ensure_server()?,
-        AgentKind::ClaudeCode if !crate::executables::available("claude") => {
-            return Err("Could not find the official Claude CLI".into());
-        }
-        AgentKind::ClaudeCode => {}
-        _ => unreachable!(),
-    }
+    bridge.ensure_server()?;
+
+    let model_settings = state.session_model_override(session_id)?;
+    let replacement_request = takeover_launch_request(&session, model_settings)?;
+    let executable = integrations::lume_executable()?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
 
     state.set_session_takeover_active(session_id, true)?;
+    if let Err(error) = state.persist_takeover_phase(&session, "reserved") {
+        let _ = state.set_session_takeover_active(session_id, false);
+        return Err(error);
+    }
+    let mut source_released = false;
     let takeover_result = (|| -> Result<String, String> {
-        discovery::release_agent_process_for_takeover(process_id, &session.agent)?;
-        if session.agent == AgentKind::Codex {
-            let thread_id = session.native_session_id.as_deref().ok_or_else(|| {
-                "This external CLI did not provide a resumable session id".to_string()
-            })?;
-            let working_directory = session
-                .working_directory
-                .as_deref()
-                .filter(|directory| !directory.trim().is_empty())
-                .unwrap_or(".");
-            let mut last_writer_error = None;
-            for attempt in 0..25 {
-                match bridge.prepare_thread(
-                    working_directory,
-                    Some(thread_id),
-                    Some(&session.permission_profile.mode),
-                    Some(&session.permission_profile.approval_policy),
-                ) {
-                    Ok(prepared) if prepared.thread_id == thread_id => {
-                        last_writer_error = None;
-                        break;
-                    }
-                    Ok(prepared) => {
-                        return Err(format!(
-                            "Codex resumed a different thread ({}) instead of {thread_id}",
-                            prepared.thread_id
-                        ));
-                    }
-                    Err(error) if is_active_codex_writer(&error) => {
-                        last_writer_error = Some(error);
-                        if attempt < 24 {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                        }
-                    }
-                    Err(error) => return Err(error),
+        discovery::release_agent_process_for_takeover(
+            process_id,
+            &session.agent,
+            session.native_session_id.as_deref(),
+        )?;
+        source_released = true;
+        state.persist_takeover_phase(&session, "source_released")?;
+        let mut provider_thread_name = None;
+        let thread_id = session.native_session_id.as_deref().ok_or_else(|| {
+            "This external CLI did not provide a resumable session id".to_string()
+        })?;
+        let mut last_writer_error = None;
+        for attempt in 0..25 {
+            match bridge.prepare_thread(
+                working_directory,
+                Some(thread_id),
+                Some(&session.permission_profile.mode),
+                Some(&session.permission_profile.approval_policy),
+            ) {
+                Ok(prepared) if prepared.thread_id == thread_id => {
+                    provider_thread_name = prepared.thread_name;
+                    last_writer_error = None;
+                    break;
                 }
+                Ok(prepared) => {
+                    return Err(format!(
+                        "Codex resumed a different thread ({}) instead of {thread_id}",
+                        prepared.thread_id
+                    ));
+                }
+                Err(error) if is_active_codex_writer(&error) => {
+                    last_writer_error = Some(error);
+                    if attempt < 24 {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                }
+                Err(error) => return Err(error),
             }
-            if last_writer_error.is_some() {
-                return Err("The external CLI closed, but Codex has not released this thread yet. Wait a moment and try transferring it again.".into());
-            }
-            // The next direct prompt resumes this thread on a fresh App Server
-            // connection. Give the probe writer a short moment to release first.
-            std::thread::sleep(TAKEOVER_WRITER_SETTLE_DELAY);
         }
-        let controlled_source = if session.agent == AgentKind::Codex {
-            SessionSource::Desktop
-        } else {
-            let model_settings = state.session_model_override(session_id)?;
-            let launch_request = claude_takeover_launch_request(&session, model_settings)?;
-            let executable = integrations::lume_executable()?;
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|error| error.to_string())?;
-            launcher::launch(launch_request, &executable, &app_data_dir, None).map_err(
-                |error| {
-                    format!("Lume took control, but could not open the replacement CLI: {error}")
-                },
-            )?;
-            SessionSource::Cli
-        };
+        if last_writer_error.is_some() {
+            return Err("The external CLI closed, but Codex has not released this thread yet. Wait a moment and try transferring it again.".into());
+        }
+        // The next direct prompt resumes this thread on a fresh App Server
+        // connection. Give the probe writer a short moment to release first.
+        std::thread::sleep(TAKEOVER_WRITER_SETTLE_DELAY);
+        let controlled_source = SessionSource::Desktop;
         let controlled_session_id = session
             .native_session_id
             .as_deref()
@@ -1100,7 +1130,11 @@ pub fn take_control_session(
                 })
             })
             .unwrap_or_else(|| session_id.to_string());
-        state.mark_session_lume_controlled(&controlled_session_id, controlled_source)?;
+        state.mark_session_lume_controlled(
+            &controlled_session_id,
+            controlled_source,
+            provider_thread_name.as_deref(),
+        )?;
         let promptable_session_id = state
             .sessions()?
             .into_iter()
@@ -1111,14 +1145,48 @@ pub fn take_control_session(
             })
             .map(|candidate| candidate.id)
             .unwrap_or(controlled_session_id);
+        state.clear_takeover_operation(session_id)?;
         Ok(promptable_session_id)
     })();
-    let release_result = state.set_session_takeover_active(session_id, false);
-    release_result?;
-    takeover_result
+    if let Err(release_error) = state.set_session_takeover_active(session_id, false) {
+        if source_released {
+            return match launcher::launch(replacement_request, &executable, &app_data_dir, None) {
+                Ok(()) => {
+                    let _ = state.clear_takeover_operation(session_id);
+                    Err(format!(
+                        "{release_error} The original session was reopened in a terminal so you can keep using it."
+                    ))
+                }
+                Err(recovery_error) => Err(format!(
+                    "{release_error} Lume also could not reopen the original session: {recovery_error}"
+                )),
+            };
+        }
+        return Err(release_error);
+    }
+    match takeover_result {
+        Ok(session_id) => Ok(session_id),
+        Err(error) if source_released => {
+            match launcher::launch(replacement_request, &executable, &app_data_dir, None) {
+                Ok(()) => {
+                    let _ = state.clear_takeover_operation(session_id);
+                    Err(format!(
+                        "{error} The original session was reopened in a terminal so you can keep using it."
+                    ))
+                }
+                Err(recovery_error) => Err(format!(
+                    "{error} Lume also could not reopen the original session: {recovery_error}"
+                )),
+            }
+        }
+        Err(error) => {
+            let _ = state.clear_takeover_operation(session_id);
+            Err(error)
+        }
+    }
 }
 
-fn claude_takeover_launch_request(
+fn takeover_launch_request(
     session: &crate::domain::AgentSession,
     model_settings: SessionModelOverride,
 ) -> Result<LaunchRequest, String> {
@@ -1128,12 +1196,15 @@ fn claude_takeover_launch_request(
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| "This external CLI did not provide a resumable session id".to_string())?;
     Ok(LaunchRequest {
-        agent: IntegrationKind::Claude,
+        agent: match session.agent {
+            AgentKind::Codex => IntegrationKind::Codex,
+            _ => return Err("This agent cannot be resumed in a terminal".into()),
+        },
         working_directory: session
             .working_directory
             .clone()
             .filter(|directory| !directory.trim().is_empty())
-            .unwrap_or_else(|| ".".into()),
+            .ok_or_else(|| "This session did not provide its project directory".to_string())?,
         resume: true,
         resume_id: Some(resume_id),
         target: if session.source == SessionSource::Vscode {
@@ -1158,8 +1229,13 @@ pub fn execute_hub_command(
     request: protocol::HubCommandRequest,
 ) -> protocol::HubCommandResponse {
     let request_id = request.request_id.clone();
+    if let Ok(Some(response)) = state.cached_hub_command_response(&request_id) {
+        return response;
+    }
     if let Err(error) = request.validate() {
-        return protocol::HubCommandResponse::failure(request_id, error);
+        let response = protocol::HubCommandResponse::failure(request_id, error);
+        let _ = state.cache_hub_command_response(response.clone());
+        return response;
     }
     let result: Result<Option<serde_json::Value>, String> = match request.command {
         protocol::HubCommand::SubmitPrompt {
@@ -1183,25 +1259,32 @@ pub fn execute_hub_command(
             session_id,
             prompt,
             attachments,
-        } => take_control_session(app, state, bridge, &session_id).and_then(
-            |controlled_session_id| {
-                submit_prompt(
-                    app,
-                    state,
-                    bridge,
-                    browser,
-                    &controlled_session_id,
-                    &prompt,
-                    attachments,
-                    PromptDelivery::NewTurn,
-                    false,
-                )?;
+        } => take_control_session(app, state, bridge, &session_id).and_then(|controlled_session_id| {
+                if !prompt.trim().is_empty() || !attachments.is_empty() {
+                    if let Err(error) = submit_prompt(
+                        app,
+                        state,
+                        bridge,
+                        browser,
+                        &controlled_session_id,
+                        &prompt,
+                        attachments,
+                        PromptDelivery::NewTurn,
+                        false,
+                    ) {
+                        protocol::emit_sessions_changed(app);
+                        return Err(format!(
+                            "Control was transferred to Lume, but prompt delivery could not be confirmed: {error}. Check the session activity before resending."
+                        ));
+                    }
+                }
                 protocol::emit_sessions_changed(app);
                 Ok(Some(serde_json::json!({
                     "sessionId": controlled_session_id,
+                    "ownershipTransferred": true,
+                    "promptAccepted": !prompt.trim().is_empty(),
                 })))
-            },
-        ),
+            }),
         protocol::HubCommand::ResolvePermission {
             session_id,
             permission_id,
@@ -1302,14 +1385,16 @@ pub fn execute_hub_command(
             }
         }
     };
-    match result {
+    let response = match result {
         Ok(Some(data)) => protocol::HubCommandResponse::success_with_data(request_id, data),
         Ok(None) => protocol::HubCommandResponse::success(request_id),
         Err(message) => protocol::HubCommandResponse::failure(
             request_id,
             protocol::ProtocolError::from_control(message),
         ),
-    }
+    };
+    let _ = state.cache_hub_command_response(response.clone());
+    response
 }
 
 #[cfg(test)]
@@ -1363,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_takeover_reopens_the_same_thread_in_a_managed_terminal() {
+    fn claude_takeover_is_disabled_until_single_writer_is_guaranteed() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");
         state
             .ingest(crate::domain::HookEvent {
@@ -1399,19 +1484,9 @@ mod tests {
             .expect("sessão externa");
         let session = state.sessions().expect("sessões").remove(0);
 
-        let request = claude_takeover_launch_request(&session, SessionModelOverride::default())
-            .expect("retomada");
-
-        assert_eq!(request.agent, IntegrationKind::Claude);
-        assert!(request.resume);
-        assert_eq!(request.resume_id.as_deref(), Some("thread-external"));
-        assert_eq!(request.working_directory, "/work/lume");
-        assert_eq!(request.target, "terminal");
-        assert_eq!(
-            request.permission_mode,
-            Some(crate::domain::AccessMode::WorkspaceWrite)
-        );
-        assert_eq!(request.approval_policy.as_deref(), Some("on-request"));
+        let error = takeover_launch_request(&session, SessionModelOverride::default())
+            .expect_err("Claude Take Control must remain disabled");
+        assert!(error.contains("cannot be resumed"));
     }
 
     #[test]

@@ -93,6 +93,9 @@ fn configure_linux_display_backend() {
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
+    if args.get(1).map(String::as_str) == Some("node") {
+        std::process::exit(lume_lib::run_node_cli(&args[2..]));
+    }
     if args.get(1).map(String::as_str) == Some("hook") {
         let provider = args.get(2).map(String::as_str).unwrap_or("");
         std::process::exit(lume_lib::run_hook_client(provider));

@@ -1220,15 +1220,29 @@ pub fn hide_workflow_connectors(label: &str) {
     let _ = label;
 }
 
-static NATIVE_DIALOG_ACTIVE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static NATIVE_DIALOG_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-pub fn set_native_dialog_active(active: bool) {
-    NATIVE_DIALOG_ACTIVE.store(active, std::sync::atomic::Ordering::Release);
+pub fn set_native_dialog_active(active: bool) -> bool {
+    use std::sync::atomic::Ordering;
+    if active {
+        return NATIVE_DIALOG_COUNT.fetch_add(1, Ordering::AcqRel) == 0;
+    }
+    loop {
+        let current = NATIVE_DIALOG_COUNT.load(Ordering::Acquire);
+        if current == 0 {
+            return false;
+        }
+        if NATIVE_DIALOG_COUNT
+            .compare_exchange(current, current - 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return current == 1;
+        }
+    }
 }
 
 fn native_dialog_active() -> bool {
-    NATIVE_DIALOG_ACTIVE.load(std::sync::atomic::Ordering::Acquire)
+    NATIVE_DIALOG_COUNT.load(std::sync::atomic::Ordering::Acquire) > 0
 }
 
 pub fn set_file_dialog_active(
@@ -1240,8 +1254,12 @@ pub fn set_file_dialog_active(
     if linux::set_file_dialog_active(window, active, show_over_fullscreen) {
         return Ok(());
     }
+    #[cfg(target_os = "windows")]
+    let topmost = !active && (show_over_fullscreen || !foreground_is_fullscreen().unwrap_or(false));
+    #[cfg(not(target_os = "windows"))]
+    let topmost = !active;
     window
-        .set_always_on_top(!active)
+        .set_always_on_top(topmost)
         .map_err(|error| error.to_string())
 }
 
@@ -1310,7 +1328,10 @@ pub fn start_fullscreen_guard(
             if let Some(fullscreen) = foreground_is_fullscreen() {
                 let topmost = !native_dialog_active() && (show_over_fullscreen || !fullscreen);
                 for (label, window) in tauri::Manager::webview_windows(&app) {
-                    if label == "main" || label.starts_with("terminal-") {
+                    if label == "main"
+                        || label.starts_with("terminal-")
+                        || label.starts_with("workflow-bridge-")
+                    {
                         let _ = window.set_always_on_top(topmost);
                     }
                 }

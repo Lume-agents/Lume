@@ -1,6 +1,6 @@
 # Distributed execution roadmap
 
-Status: planned. This roadmap extends Lume from a local agent workspace into an optional distributed workspace without removing or weakening its fully local mode.
+Status: Phase 0 implemented locally; Phase 1 in progress. This roadmap extends Lume from a local agent workspace into an optional distributed workspace without removing or weakening its fully local mode.
 
 ## Product outcome
 
@@ -26,6 +26,8 @@ Screen sharing, remote desktop and full IDE streaming remain complementary tools
 
 - Local-only operation remains available and requires no Lume account, Relay or internet connection.
 - Remote access is opt-in per Node and disabled by default until pairing is completed.
+- Remote access must never be presented as risk-free. If zero residual network risk is required, keep Node and Relay disabled and use local-only Lume.
+- Internet connections use an outbound-only, Relay-only privacy mode by default: no router port forwarding, UPnP, public inference port or direct peer-to-peer fallback without a separate explicit choice. The Relay still observes connection IPs and timing, which must be disclosed.
 - The Node never replaces agent binaries, shadows commands in `PATH`, or intercepts an externally owned CLI.
 - Lume controls only sessions it owns or sessions whose ownership was explicitly transferred.
 - Ollama, llama.cpp and other inference ports are never exposed directly to the public internet by Lume.
@@ -36,6 +38,7 @@ Screen sharing, remote desktop and full IDE streaming remain complementary tools
 - Cloud agents receive local source or context only after the existing context and approval policies permit it.
 - Lume clearly shows which device and provider execute each task.
 - Corporate source code must not be transferred to a personal Node without authorization from its owner or employer.
+- Remote execution does not ship until independent security review, adversarial tests and representative performance benchmarks pass. Failure keeps the feature disabled without affecting local Lume.
 
 ## Product components
 
@@ -202,15 +205,21 @@ The current privacy documentation continues to describe the shipped local produc
 
 ### Phase 0 — Protocol and threat-model spike
 
+Status: implemented locally. The typed contract is not connected to a listener and does not enable remote access. An independent security review remains a gate before internet connectivity ships.
+
 - Inventory the existing mobile realtime protocol and session-ownership model.
 - Define Node identity, client identity, scopes and execution ownership.
 - Threat-model pairing theft, replay, malicious clients, compromised Relay, path traversal and duplicate commands.
 - Compare direct-connection transports and define the TLS/443 fallback.
 - Define payload, queue, artifact and event-retention limits.
 
+Artifacts: [distributed protocol v1](./DISTRIBUTED_PROTOCOL_V1.md), [threat model](./DISTRIBUTED_THREAT_MODEL.md) and `src-tauri/src/distributed_protocol.rs`.
+
 Exit criteria: reviewed protocol contract, threat model and transport decision with no dependency on CLI interception or public inference ports.
 
 ### Phase 1 — Local Lume Node
+
+Status: in progress. The backend now includes an opt-in headless process, persistent Ed25519 identities, signed TLS binding, single-use scoped pairing, revocation, authenticated LAN discovery, bounded logs, lifecycle configuration, client-side discovery, verified pairing, reconnection after address changes and authenticated read-only health. Desktop settings can discover, pair, verify and remove remote computers. Local Node setup, startup and update controls are still pending. Development commands are documented in [the Node guide](./LUME_NODE.md).
 
 - Package a Node process that can run with or without the desktop UI.
 - Add enable/disable, startup, health, logs and safe update controls.
@@ -219,6 +228,16 @@ Exit criteria: reviewed protocol contract, threat model and transport decision w
 - Keep resource use bounded while idle.
 
 Exit criteria: another Lume client on the LAN can pair, reconnect and monitor the Node without affecting native CLIs or the desktop UI.
+
+#### Phase 1 hardening TODO — blocking before remote prompts
+
+- [ ] Restrict the Node listener to an explicitly selected local interface; test public-interface and port-forwarding scenarios instead of assuming `0.0.0.0` means LAN-only.
+- [ ] Add a total request deadline, minimum read progress and per-peer connection limits so slow unauthenticated clients cannot occupy all connection slots.
+- [ ] Rate-limit authenticated health requests per device; cache expensive machine/process snapshots and debounce `last_seen` persistence before adding any automatic polling.
+- [ ] Distinguish **Forget on this client** from actual **Revoke access on the Node** in both API and UI; verify revocation immediately blocks an already paired key.
+- [ ] Protect Node private keys and custom state directories with explicit Windows ACL checks; fail closed when permissions are unsafe.
+- [ ] Reconcile every direct/P2P passage in this roadmap with the Relay-only internet default; require a separate explicit opt-in for any direct path.
+- [ ] Benchmark idle Node overhead and model first-token latency/tokens-per-second against Node disabled on representative hardware before enabling remote inference.
 
 ### Phase 2 — Local inference sessions
 
@@ -292,12 +311,15 @@ Exit criteria: a cloud/local multi-device workflow survives client disconnect an
 
 ### Phase 9 — Reliability and performance hardening
 
+Performance baselines and release gates for remote execution start before Phase 2, not only in this phase. Phase 9 broadens that validation to long-running and multi-device workloads.
+
 - Measure idle CPU/RAM and active overhead with multiple sessions.
 - Bound chat history, event rendering, queues and artifact memory.
 - Test large diffs, long turns, slow links, packet loss and reconnect storms.
 - Recover from client, Node and Relay restarts without repeating prompts.
 - Test sleep, wake, model unloading and optional Wake-on-LAN assistance.
 - Validate Windows, Ubuntu, Pop!_OS and Fedora Nodes plus supported clients.
+- Compare model first-token latency, sustained token throughput and peak CPU/RAM/GPU contention with Node disabled versus connected and active. Set measurable budgets from the baseline before release; if exceeded, keep remote inference disabled until redesigned.
 
 Exit criteria: the Node remains lightweight at idle, long sessions stay responsive, and failure recovery is deterministic.
 

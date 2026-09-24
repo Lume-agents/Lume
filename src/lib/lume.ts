@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   HubCommandRequest,
   HubCommandResponse,
+  ExternalWriterConflict,
   HubSnapshot,
 } from "$lib/hubProtocol";
 import type {
@@ -25,6 +26,7 @@ import type {
   QuestionAnswer,
   ResumableSession,
   ResultNote,
+  ReviewDecision,
   ReviewNote,
   SessionActivity,
   SessionNote,
@@ -289,6 +291,22 @@ export async function takeControlSession(
   attachments: PromptAttachmentInput[] = [],
 ): Promise<void> {
   await invoke("take_control_session", { sessionId, prompt, attachments });
+}
+
+export async function listExternalWriterConflicts(): Promise<ExternalWriterConflict[]> {
+  return invoke("list_external_writer_conflicts");
+}
+
+export async function cancelExternalWriterAttempt(conflict: ExternalWriterConflict): Promise<void> {
+  await invoke("cancel_external_writer_attempt", {
+    sessionId: conflict.sessionId,
+    nativeSessionId: conflict.nativeSessionId,
+    processId: conflict.processId,
+  });
+}
+
+export async function forkCodexThread(sessionId: string): Promise<string> {
+  return invoke("fork_codex_thread", { sessionId });
 }
 
 export async function interruptPrompt(sessionId: string): Promise<void> {
@@ -599,6 +617,25 @@ export async function deleteReviewNote(sessionId: string, resultId: string): Pro
   await invoke("delete_review_note", { sessionId, resultId });
 }
 
+export async function loadReviewDecisions(sessionId: string): Promise<ReviewDecision[]> {
+  if (!inDesktop()) return [];
+  return invoke<ReviewDecision[]>("list_review_decisions", { sessionId });
+}
+
+export async function setReviewDecision(
+  sessionId: string,
+  resultId: string,
+  decision: ReviewDecision["decision"],
+  note?: string,
+): Promise<ReviewDecision> {
+  return invoke<ReviewDecision>("set_review_decision", {
+    sessionId,
+    resultId,
+    decision,
+    note,
+  });
+}
+
 export async function loadSessionNotes(sessionId: string): Promise<SessionNote[]> {
   if (!inDesktop()) return [];
   return invoke<SessionNote[]>("list_session_notes", { sessionId });
@@ -737,9 +774,9 @@ export async function loadIntegrationStatuses(): Promise<IntegrationStatus[]> {
     return [
       { kind: "codex", label: "Codex", installed: true, configured: false, canConfigure: true, canLaunch: true, directPermissions: true, detail: "Ready to connect" },
       { kind: "claude", label: "Claude Code", installed: true, configured: true, canConfigure: true, canLaunch: true, directPermissions: true, detail: "Monitoring and decisions connected" },
-      { kind: "antigravity", label: "Antigravity", installed: true, configured: false, canConfigure: true, canLaunch: true, directPermissions: false, detail: "Ready to connect" },
+      { kind: "antigravity", label: "Antigravity CLI", installed: true, configured: false, canConfigure: true, canLaunch: true, directPermissions: false, detail: "CLI only; VS Code Gemini Code Assist is separate" },
       { kind: "deepseek", label: "DeepSeek Harness", installed: false, configured: false, canConfigure: false, canLaunch: true, directPermissions: false, detail: "CLI not found" },
-      { kind: "gemini", label: "Gemini CLI (legacy)", installed: true, configured: false, canConfigure: true, canLaunch: false, directPermissions: false, detail: "Legacy enterprise/API monitoring" },
+      { kind: "gemini", label: "Gemini CLI (legacy)", installed: true, configured: false, canConfigure: false, canLaunch: false, directPermissions: false, detail: "Process monitoring only; shared Gemini settings are untouched" },
     ];
   }
   return invoke<IntegrationStatus[]>("integration_statuses");

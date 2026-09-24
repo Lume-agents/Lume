@@ -4,6 +4,7 @@ node_modules
 /.svelte-kit
 /package
 /landing-dist
+/.impeccable/review/
 .env
 .env.*
 !.env.example

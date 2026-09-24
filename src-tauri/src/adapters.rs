@@ -2,6 +2,9 @@ use std::{
     collections::HashSet,
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use chrono::DateTime;
@@ -19,40 +22,99 @@ use crate::{
     state::now_millis,
 };
 
-pub fn run_hook(provider: &str) -> i32 {
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
-        return 0;
-    }
-    let raw: Value = match serde_json::from_str(&input) {
-        Ok(value) => value,
-        Err(_) => return 0,
-    };
-    let event = match map_event(provider, &raw) {
-        Some(event) => event,
-        None => return 0,
-    };
-    let payload = match serde_json::to_string(&event) {
-        Ok(payload) => payload,
-        Err(_) => return 0,
-    };
-    let response = match event_server::send_event(&payload) {
-        Ok(response) => response,
-        // A origem mantém seu fluxo nativo quando o Lume está fechado.
-        Err(_) => return 0,
-    };
+const MAX_HOOK_STDIN_BYTES: u64 = 2 * 1024 * 1024;
+const HOOK_STDIN_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
-    if provider == "claude" && event.wait_for_decision {
-        let output = if matches!(event.event, HookEventKind::QuestionRequest) {
+pub fn run_hook(provider: &str) -> i32 {
+    let fallback = antigravity_hook_output(provider).or_else(|| gemini_hook_output(provider));
+    let output = read_hook_event(provider)
+        .or(fallback)
+        .and_then(|output| serde_json::to_string(&output).ok());
+    if let Some(output) = output {
+        println!("{output}");
+    }
+    0
+}
+
+fn read_hook_event(provider: &str) -> Option<Value> {
+    let input = read_hook_stdin()?;
+    let raw: Value = serde_json::from_str(&input).ok()?;
+    let event = map_event(provider, &raw)?;
+    let wait_for_decision = event.wait_for_decision;
+    let is_question = matches!(event.event, HookEventKind::QuestionRequest);
+    let payload = serde_json::to_string(&event).ok()?;
+    if !wait_for_decision && matches!(event.agent, AgentKind::Antigravity | AgentKind::Gemini) {
+        event_server::send_observation_event(&payload).ok()?;
+        return None;
+    }
+    let response = event_server::send_event(&payload).ok()?;
+
+    if provider == "claude" && wait_for_decision {
+        if is_question {
             claude_question_output(response.question_answers, &raw)
         } else {
             claude_permission_output(response.action, &raw)
-        };
-        if let Some(output) = output {
-            println!("{output}");
         }
+    } else {
+        None
     }
-    0
+}
+
+fn read_hook_stdin() -> Option<String> {
+    read_hook_input_with_timeout(std::io::stdin(), HOOK_STDIN_READ_TIMEOUT)
+}
+
+fn read_hook_input_with_timeout<R>(reader: R, timeout: Duration) -> Option<String>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("lume-hook-stdin".into())
+        .spawn(move || {
+            let _ = sender.send(read_bounded_hook_input(reader));
+        })
+        .ok()?;
+    receiver.recv_timeout(timeout).ok()?.ok()
+}
+
+fn read_bounded_hook_input<R: Read>(reader: R) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_HOOK_STDIN_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_HOOK_STDIN_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hook input exceeds the size limit",
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+fn antigravity_hook_output(provider: &str) -> Option<Value> {
+    let (agent, event) = provider.split_once(':')?;
+    if agent != "antigravity" {
+        return None;
+    }
+    let event = if event == "PreToolUseAllow" {
+        "PreToolUse"
+    } else {
+        event
+    };
+
+    Some(match event {
+        // Antigravity requires an explicit decision for PreToolUse. Connecting
+        // the CLI integration is opt-in and warns that this permits tool calls.
+        "PreToolUse" => json!({ "decision": "allow" }),
+        "Stop" => json!({ "decision": "allow" }),
+        _ => json!({}),
+    })
+}
+
+fn gemini_hook_output(provider: &str) -> Option<Value> {
+    (provider == "gemini").then(|| json!({}))
 }
 
 fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
@@ -71,7 +133,21 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
     let hook_name = forced_hook_name
         .map(str::to_string)
         .or_else(|| string(raw, "hook_event_name"))?;
-    let (process_id, source, headless_resume) = agent_process_context(provider);
+    let hook_name = if provider == "antigravity" && hook_name == "PreToolUseAllow" {
+        "PreToolUse".to_string()
+    } else {
+        hook_name
+    };
+    // Antigravity and legacy Gemini hooks are observation-only. Their payloads
+    // already contain a provider-native session identity, while traversing all
+    // processes for every tool hook is both expensive and prone to associating
+    // another same-workspace CLI process with this conversation.
+    let (process_id, source, headless_resume) =
+        if matches!(&agent, AgentKind::Antigravity | AgentKind::Gemini) {
+            (None, SessionSource::Cli, false)
+        } else {
+            agent_process_context(provider)
+        };
     let event = match (provider, hook_name.as_str()) {
         (_, "SessionStart") => HookEventKind::SessionStarted,
         ("codex", "UserPromptSubmit") | ("claude", "UserPromptSubmit") => HookEventKind::Running,
@@ -111,10 +187,10 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
                 HookEventKind::Completed
             }
         }
-        ("codex", "Stop")
-        | ("claude", "Stop")
-        | ("antigravity", "Stop")
-        | ("gemini", "AfterAgent") => HookEventKind::Completed,
+        ("antigravity", "Stop") => antigravity_stop_event(raw),
+        ("codex", "Stop") | ("claude", "Stop") | ("gemini", "AfterAgent") => {
+            HookEventKind::Completed
+        }
         (_, "StopFailure") => HookEventKind::Failed,
         ("claude", "SessionEnd") if headless_resume => HookEventKind::Completed,
         (_, "SessionEnd") => HookEventKind::SessionEnded,
@@ -122,13 +198,11 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
     };
 
     let session_id = string(raw, "session_id").or_else(|| string(raw, "conversationId"))?;
-    let cwd = string(raw, "cwd").or_else(|| {
-        raw.get("workspacePaths")
-            .and_then(Value::as_array)
-            .and_then(|paths| paths.first())
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    });
+    let cwd = if provider == "antigravity" {
+        antigravity_working_directory(raw).or_else(|| string(raw, "cwd"))
+    } else {
+        string(raw, "cwd").or_else(|| antigravity_working_directory(raw))
+    };
     let process_id = (!headless_resume).then_some(process_id).flatten();
     let permission_mode = string(raw, "permission_mode");
     let is_permission = matches!(event, HookEventKind::PermissionRequest);
@@ -363,10 +437,17 @@ fn hook_activity(
     } else {
         "tool"
     };
-    let status = match hook_name {
-        "PreToolUse" | "BeforeTool" => "running",
-        "PostToolUseFailure" => "failed",
-        _ => "completed",
+    let antigravity_tool_failed = provider == "antigravity"
+        && hook_name == "PostToolUse"
+        && string(raw, "error").is_some_and(|error| !error.trim().is_empty());
+    let status = if antigravity_tool_failed {
+        "failed"
+    } else {
+        match hook_name {
+            "PreToolUse" | "BeforeTool" => "running",
+            "PostToolUseFailure" => "failed",
+            _ => "completed",
+        }
     };
     let result = raw
         .get("tool_response")
@@ -498,6 +579,23 @@ fn notification_reports_failure(raw: &Value) -> bool {
                 .iter()
                 .any(|needle| value.contains(needle))
         })
+}
+
+fn antigravity_stop_event(raw: &Value) -> HookEventKind {
+    let reason = string(raw, "terminationReason").unwrap_or_default();
+    let fully_idle = raw.get("fullyIdle").and_then(Value::as_bool);
+    let has_error = string(raw, "error").is_some_and(|error| !error.trim().is_empty());
+    if has_error || matches!(reason.as_str(), "error" | "max_steps_exceeded") {
+        HookEventKind::Failed
+    } else {
+        match (fully_idle, reason.as_str()) {
+            (Some(false), _) => HookEventKind::Running,
+            (Some(true), "model_stop") => HookEventKind::Completed,
+            // An incomplete or future Stop payload must not falsely finish a
+            // task. Activity preserves the last known session state.
+            _ => HookEventKind::Activity,
+        }
+    }
 }
 
 fn claude_question_request(raw: &Value, session_id: &str) -> Option<PendingQuestion> {
@@ -717,6 +815,9 @@ fn claude_question_output(answers: Option<Vec<QuestionAnswer>>, raw: &Value) -> 
 
 fn status_label(hook: &str, event: &HookEventKind) -> Option<&'static str> {
     match hook {
+        "Stop" if matches!(event, HookEventKind::Failed) => Some("Encerrado com erro"),
+        "Stop" if matches!(event, HookEventKind::Running) => Some("Executando"),
+        "Stop" if matches!(event, HookEventKind::Completed) => Some("Finalizado"),
         "SessionStart" => Some("Sessão detectada"),
         "UserPromptSubmit" | "BeforeAgent" | "PreInvocation" | "PreToolUse" | "PostToolUse"
         | "PostToolUseFailure" | "PostToolBatch" | "PostInvocation" | "AfterTool" => {
@@ -730,7 +831,7 @@ fn status_label(hook: &str, event: &HookEventKind) -> Option<&'static str> {
         "Notification" if matches!(event, HookEventKind::Completed) => Some("Finalizado"),
         "Notification" if matches!(event, HookEventKind::Failed) => Some("Encerrado com erro"),
         "Notification" => Some("Aguardando sua resposta"),
-        "Stop" | "AfterAgent" | "SessionEnd" => Some("Finalizado"),
+        "AfterAgent" | "SessionEnd" => Some("Finalizado"),
         "StopFailure" => Some("Encerrado com erro"),
         _ => None,
     }
@@ -814,6 +915,72 @@ fn agent_process_context(provider: &str) -> (Option<u32>, SessionSource, bool) {
 
 fn string(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn antigravity_working_directory(raw: &Value) -> Option<String> {
+    let workspaces = raw
+        .get("workspacePaths")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    let args = raw.get("toolCall").and_then(|call| call.get("args"));
+    let target_paths = [
+        "Cwd",
+        "cwd",
+        "DirectoryPath",
+        "AbsolutePath",
+        "TargetFile",
+        "path",
+    ]
+    .into_iter()
+    .filter_map(|key| args.and_then(|args| string(args, key)))
+    .collect::<Vec<_>>();
+
+    let matching_tool_workspace = workspaces
+        .iter()
+        .filter(|workspace| {
+            target_paths
+                .iter()
+                .any(|target| path_is_within(target, workspace))
+        })
+        .max_by_key(|workspace| workspace.len())
+        .copied();
+    let matching_cwd_workspace = string(raw, "cwd").and_then(|cwd| {
+        workspaces
+            .iter()
+            .filter(|workspace| path_is_within(&cwd, workspace))
+            .max_by_key(|workspace| workspace.len())
+            .copied()
+    });
+
+    matching_tool_workspace
+        .or(matching_cwd_workspace)
+        .or_else(|| workspaces.first().copied())
+        .map(str::to_string)
+}
+
+fn path_is_within(path: &str, root: &str) -> bool {
+    let normalize = |value: &str| {
+        let value = value.replace('\\', "/");
+        let value = value.trim_end_matches('/');
+        let bytes = value.as_bytes();
+        let looks_windows = bytes.len() > 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'/';
+        if cfg!(windows) || looks_windows {
+            value.to_ascii_lowercase()
+        } else {
+            value.to_string()
+        }
+    };
+    let path = normalize(path);
+    let root = normalize(root);
+    path == root
+        || path
+            .strip_prefix(&root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn hook_response(value: &Value) -> Option<String> {
@@ -1024,6 +1191,127 @@ fn truncate(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_stdin_reader_is_bounded_and_times_out() {
+        let oversized = vec![b'x'; MAX_HOOK_STDIN_BYTES as usize + 1];
+        assert!(read_bounded_hook_input(std::io::Cursor::new(oversized)).is_err());
+        assert_eq!(
+            read_bounded_hook_input(std::io::Cursor::new(b"{}".to_vec())).unwrap(),
+            "{}"
+        );
+
+        struct SlowReader;
+        impl Read for SlowReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                thread::sleep(Duration::from_millis(40));
+                Ok(0)
+            }
+        }
+
+        assert_eq!(
+            read_hook_input_with_timeout(SlowReader, Duration::from_millis(2)),
+            None,
+            "a stalled hook pipe must use the provider fallback"
+        );
+    }
+
+    #[test]
+    fn antigravity_hooks_return_protocol_safe_defaults() {
+        assert_eq!(
+            antigravity_hook_output("antigravity:PreToolUse"),
+            Some(json!({ "decision": "allow" }))
+        );
+        assert_eq!(
+            antigravity_hook_output("antigravity:PreToolUseAllow"),
+            Some(json!({ "decision": "allow" }))
+        );
+        assert_eq!(
+            antigravity_hook_output("antigravity:PostToolUse"),
+            Some(json!({}))
+        );
+        assert_eq!(
+            antigravity_hook_output("antigravity:Stop"),
+            Some(json!({ "decision": "allow" }))
+        );
+        assert_eq!(antigravity_hook_output("claude:PreToolUse"), None);
+        assert_eq!(gemini_hook_output("gemini"), Some(json!({})));
+        assert_eq!(gemini_hook_output("claude"), None);
+    }
+
+    #[test]
+    fn antigravity_stop_status_does_not_report_errors_or_background_work_as_complete() {
+        assert!(matches!(
+            antigravity_stop_event(&json!({
+                "terminationReason": "error",
+                "error": "tool failed",
+                "fullyIdle": true
+            })),
+            HookEventKind::Failed
+        ));
+        assert!(matches!(
+            antigravity_stop_event(&json!({
+                "terminationReason": "model_stop",
+                "fullyIdle": false
+            })),
+            HookEventKind::Running
+        ));
+        assert!(matches!(
+            antigravity_stop_event(&json!({
+                "terminationReason": "model_stop",
+                "fullyIdle": true
+            })),
+            HookEventKind::Completed
+        ));
+        assert!(matches!(
+            antigravity_stop_event(&json!({
+                "terminationReason": "future_reason",
+                "fullyIdle": true
+            })),
+            HookEventKind::Activity
+        ));
+        assert!(matches!(
+            antigravity_stop_event(&json!({
+                "terminationReason": "model_stop"
+            })),
+            HookEventKind::Activity
+        ));
+    }
+
+    #[test]
+    fn antigravity_stop_label_matches_the_normalized_status() {
+        assert_eq!(
+            status_label("Stop", &HookEventKind::Failed),
+            Some("Encerrado com erro")
+        );
+        assert_eq!(
+            status_label("Stop", &HookEventKind::Running),
+            Some("Executando")
+        );
+        assert_eq!(
+            status_label("Stop", &HookEventKind::Completed),
+            Some("Finalizado")
+        );
+        assert_eq!(status_label("Stop", &HookEventKind::Activity), None);
+    }
+
+    #[test]
+    fn antigravity_post_tool_error_is_visible_as_failed_activity() {
+        let activity = hook_activity(
+            "antigravity",
+            "PostToolUse",
+            &json!({
+                "toolCall": { "name": "run_command", "args": { "CommandLine": "npm test" } },
+                "error": "exit status 1",
+                "stepIdx": 4
+            }),
+            "conversation-1",
+            None,
+        )
+        .expect("atividade de ferramenta");
+
+        assert_eq!(activity.status, "failed");
+    }
 
     #[test]
     fn claude_permission_uses_session_only_suggestion() {
@@ -1458,6 +1746,8 @@ mod tests {
         let running =
             map_event("antigravity:PreInvocation", &raw).expect("evento Antigravity em execução");
         assert_eq!(running.agent, AgentKind::Antigravity);
+        assert_eq!(running.process_id, None);
+        assert_eq!(running.source, Some(SessionSource::Cli));
         assert!(matches!(running.event, HookEventKind::Running));
         assert_eq!(
             running.native_session_id.as_deref(),
@@ -1469,7 +1759,7 @@ mod tests {
         );
 
         let tool = map_event(
-            "antigravity:PreToolUse",
+            "antigravity:PreToolUseAllow",
             &json!({
                 "conversationId": "agy-conversation",
                 "workspacePaths": ["/work/antigravity"],
@@ -1486,7 +1776,67 @@ mod tests {
         assert_eq!(tool.kind, "test");
         assert_eq!(tool.title, "cargo test");
 
-        let completed = map_event("antigravity:Stop", &raw).expect("evento Antigravity finalizado");
+        let completed = map_event(
+            "antigravity:Stop",
+            &json!({
+                "conversationId": "agy-conversation",
+                "workspacePaths": ["/work/antigravity"],
+                "terminationReason": "model_stop",
+                "fullyIdle": true
+            }),
+        )
+        .expect("evento Antigravity finalizado");
         assert!(matches!(completed.event, HookEventKind::Completed));
+    }
+
+    #[test]
+    fn antigravity_multi_root_events_use_the_workspace_from_tool_arguments() {
+        let event = map_event(
+            "antigravity:PostToolUse",
+            &json!({
+            "conversationId": "agy-conversation",
+            "workspacePaths": ["/work/first", "/work/second"],
+            "cwd": "/work/first",
+            "toolCall": {
+                "name": "run_command",
+                "args": { "Cwd": "/work/second/packages/app", "CommandLine": "npm test" }
+                }
+            }),
+        )
+        .expect("evento Antigravity multi-root");
+
+        assert_eq!(event.working_directory.as_deref(), Some("/work/second"));
+        assert!(path_is_within(r"C:\Work\App\src", r"C:\Work\App"));
+        assert!(path_is_within(r"c:\work\app\src", r"C:\Work\App"));
+        assert!(!path_is_within("/work/application", "/work/app"));
+
+        let file_event = map_event(
+            "antigravity:PostToolUse",
+            &json!({
+                "conversationId": "agy-conversation",
+                "workspacePaths": ["/work", "/work/project"],
+                "toolCall": {
+                    "name": "replace_file_content",
+                    "args": { "TargetFile": "/work/project/src/lib.rs" }
+                }
+            }),
+        )
+        .expect("evento Antigravity de alteração de arquivo");
+        assert_eq!(
+            file_event.working_directory.as_deref(),
+            Some("/work/project"),
+            "choose the most specific root containing the changed file"
+        );
+
+        let cwd_event = map_event(
+            "antigravity:PreInvocation",
+            &json!({
+                "conversationId": "agy-conversation",
+                "workspacePaths": ["/work/first", "/work/second"],
+                "cwd": "/work/second/packages/app"
+            }),
+        )
+        .expect("evento que informa só o cwd");
+        assert_eq!(cwd_event.working_directory.as_deref(), Some("/work/second"));
     }
 }

@@ -53,10 +53,14 @@ O conteúdo detalhado da permissão permanece apenas na memória enquanto a deci
 
 - Codex CLI e extensão do VS Code.
 - Claude CLI e extensão do VS Code.
-- Antigravity CLI (`agy`) como integração principal do ecossistema Google.
+- Antigravity CLI (`agy`) como integração principal do ecossistema Google, com status/atividades observáveis por hooks e retomada da conversa mais recente indexada por workspace. O Lume não importa a transcrição completa; para o histórico integral, use a CLI. Os hooks ficam no `settings.json` exclusivo da CLI, sem usar o registro compartilhado com Antigravity IDE/Gemini Code Assist. Ao conectar, o hook `PreToolUse` com matcher curinga responde `allow` e permite automaticamente todas as chamadas de ferramentas da CLI; essa consequência é informada antes da ativação. Se o executável do Lume estiver ausente ou o comando do hook falhar, o fallback também responde `allow` para não bloquear a CLI; as confirmações nativas não voltam até o hook ser desativado/removido. O hook não se aplica à IDE Antigravity nem ao Gemini Code Assist. O Lume ainda não oferece interrupção segura do prompt nem queue/steer para essa integração.
+- Na primeira inicialização após a migração, remover do registro compartilhado apenas os hooks Antigravity antigos do Lume, preservando hooks de terceiros e criando backup. Configurações antigas ficam desconectadas até o usuário reconectar e confirmar a permissão automática das ferramentas. A CLI e a IDE já abertas precisam ser reiniciadas para recarregar a configuração.
 - DeepSeek Web pelo Companion; a CLI oficial `dsh` pode ser aberta pelo Lume quando o perfil TUI opcional estiver configurado.
-- Gemini CLI legado para ambientes empresariais, Google Cloud e uso por API.
+- O Companion web aceita prompts somente quando a página está esperando entrada; a confirmação de envio exige o protocolo v2 do Companion, e versões antigas não consomem nem marcam prompts como enviados. Queue/steer durante uma resposta em execução não está disponível. O Lume bloqueia o envio enquanto ocupado em vez de exibir uma fila que a página não consegue garantir.
+- Gemini CLI legado para ambientes empresariais, Google Cloud e uso por API; monitoramento por processo apenas, sem envio, retomada, encerramento ou hooks globais. Como `~/.gemini/settings.json` também é usado pelo Gemini Code Assist para ferramentas e MCP, a migração remove apenas hooks antigos do Lume desse arquivo, com backup e preservação das demais configurações.
 - VS Code como IDE inicial.
 - Chrome, Edge e Brave por uma extensão Chromium local.
 
 Integrações profundas respondem permissões diretamente. Integrações somente observáveis mostram o pedido e levam o usuário à origem, sem simular suporte inexistente.
+
+Gemini Code Assist no VS Code é distinto da Antigravity CLI e da Gemini CLI legada; o Lume não anuncia controle direto dos chats dessa extensão. O Lume não instala hooks na configuração compartilhada do Gemini Code Assist; a integração legada continua somente por detecção de processo.

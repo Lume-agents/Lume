@@ -146,6 +146,9 @@ pub fn submit_prompt(
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or_else(|| "Sessão não encontrada".to_string())?;
+    if is_legacy_gemini_monitoring_only(&session.agent, &session.source) {
+        return Err("A CLI legada do Gemini é somente monitorada pelo Lume".into());
+    }
     if let Some(question) = session.pending_question.as_ref() {
         if !attachments.is_empty() {
             return Err("Responda à pergunta antes de anexar um arquivo".into());
@@ -343,11 +346,15 @@ pub fn submit_prompt(
         )
     };
     result?;
-    if !queued_for_later {
+    if !queued_for_later && session.source != SessionSource::Web {
         state.record_prompt_activity(&session.id, prompt, display_attachments)?;
     }
     protocol::emit_sessions_changed(app);
     Ok(())
+}
+
+fn is_legacy_gemini_monitoring_only(agent: &AgentKind, source: &SessionSource) -> bool {
+    *agent == AgentKind::Gemini && *source != SessionSource::Web
 }
 
 fn is_missing_codex_rollout(error: &str) -> bool {
@@ -371,11 +378,17 @@ pub fn interrupt_prompt(
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or_else(|| "Session not found".to_string())?;
+    if session.control_origin != SessionControlOrigin::Lume {
+        return Err("Only Lume-controlled sessions can be interrupted safely".into());
+    }
     if !matches!(
         session.status,
         SessionStatus::Running | SessionStatus::PermissionRequired
     ) {
         return Err("This agent does not have a prompt running right now".into());
+    }
+    if !supports_safe_prompt_interrupt(&session.agent, &session.source) {
+        return Err("This agent does not expose safe prompt interruption through Lume yet".into());
     }
     if session.agent == AgentKind::Codex {
         let thread_id = session
@@ -393,15 +406,18 @@ pub fn interrupt_prompt(
             .as_deref()
             .ok_or_else(|| "The Claude session did not provide its session id".to_string())?;
         discovery::interrupt_resumed_prompt_process(native_session_id, &session.agent)?;
-    } else {
-        let process_id = session
-            .process_id
-            .ok_or_else(|| "This session cannot be interrupted safely".to_string())?;
-        discovery::interrupt_agent_process(process_id, &session.agent)?;
     }
     state.mark_prompt_interrupted(session_id)?;
     protocol::emit_sessions_changed(app);
     Ok(())
+}
+
+fn supports_safe_prompt_interrupt(agent: &AgentKind, source: &SessionSource) -> bool {
+    match agent {
+        AgentKind::Codex => source != &SessionSource::Web,
+        AgentKind::ClaudeCode => source == &SessionSource::Cli,
+        _ => false,
+    }
 }
 
 fn is_no_active_prompt(error: &str) -> bool {
@@ -944,6 +960,9 @@ pub fn terminate_session(
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or_else(|| "Sessão não encontrada".to_string())?;
+    if is_legacy_gemini_monitoring_only(&session.agent, &session.source) {
+        return Err("A CLI legada do Gemini é somente monitorada pelo Lume".into());
+    }
     if session.agent == AgentKind::Codex
         && session.source == SessionSource::Desktop
         && session.control_origin == SessionControlOrigin::Lume
@@ -1013,6 +1032,43 @@ pub fn terminate_session(
     }
     protocol::emit_sessions_changed(app);
     Ok(())
+}
+
+pub fn cancel_external_writer_attempt(
+    state: &AppState,
+    session_id: &str,
+    process_id: u32,
+    native_session_id: &str,
+) -> Result<(), String> {
+    state.validate_external_writer_conflict(session_id, process_id, native_session_id)?;
+    match discovery::terminate_external_writer_attempt(process_id, native_session_id) {
+        Ok(()) => state.clear_external_writer_conflict(session_id, process_id, native_session_id),
+        Err(error) if error == "The agent process is no longer open" => {
+            state.clear_external_writer_conflict(session_id, process_id, native_session_id)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub fn fork_codex_thread(
+    state: &AppState,
+    bridge: &CodexBridge,
+    session_id: &str,
+) -> Result<String, String> {
+    let session = state
+        .sessions()?
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| "Sessão não encontrada".to_string())?;
+    if session.agent != AgentKind::Codex || session.control_origin != SessionControlOrigin::Lume {
+        return Err("Only a Lume-controlled Codex conversation can be forked here".into());
+    }
+    let thread_id = session
+        .native_session_id
+        .as_deref()
+        .filter(|thread_id| !thread_id.trim().is_empty())
+        .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
+    bridge.fork_thread_at_latest_turn(thread_id)
 }
 
 pub fn take_control_session(
@@ -1445,6 +1501,46 @@ mod tests {
             "thread thread-1 already has an active writer"
         ));
         assert!(!is_active_codex_writer("Rollout not found"));
+    }
+
+    #[test]
+    fn prompt_interruption_is_limited_to_agents_with_a_safe_protocol() {
+        assert!(supports_safe_prompt_interrupt(
+            &AgentKind::Codex,
+            &SessionSource::Cli
+        ));
+        assert!(supports_safe_prompt_interrupt(
+            &AgentKind::ClaudeCode,
+            &SessionSource::Cli
+        ));
+        assert!(!supports_safe_prompt_interrupt(
+            &AgentKind::ClaudeCode,
+            &SessionSource::Vscode
+        ));
+        assert!(!supports_safe_prompt_interrupt(
+            &AgentKind::Antigravity,
+            &SessionSource::Cli
+        ));
+        assert!(!supports_safe_prompt_interrupt(
+            &AgentKind::Gemini,
+            &SessionSource::Cli
+        ));
+    }
+
+    #[test]
+    fn legacy_gemini_cli_is_monitoring_only_but_gemini_web_is_separate() {
+        assert!(is_legacy_gemini_monitoring_only(
+            &AgentKind::Gemini,
+            &SessionSource::Cli
+        ));
+        assert!(!is_legacy_gemini_monitoring_only(
+            &AgentKind::Gemini,
+            &SessionSource::Web
+        ));
+        assert!(!is_legacy_gemini_monitoring_only(
+            &AgentKind::Antigravity,
+            &SessionSource::Cli
+        ));
     }
 
     #[test]

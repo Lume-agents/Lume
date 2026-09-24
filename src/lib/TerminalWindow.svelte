@@ -1148,14 +1148,20 @@
     }
     if (capabilities?.promptUnavailableReason === "agent_busy") {
       return tr(
-        "Wait for the web agent to finish before sending another prompt",
-        "Aguarde o agente web terminar antes de enviar outro prompt",
+        "Wait for the current prompt to finish before sending another prompt",
+        "Aguarde o prompt atual terminar antes de enviar outro",
       );
     }
     if (capabilities?.promptUnavailableReason === "external_session") {
       return tr(
         "Write a prompt to transfer this session to Lume",
         "Escreva um prompt para transferir esta sessão para o Lume",
+      );
+    }
+    if (capabilities?.promptUnavailableReason === "monitoring_only") {
+      return tr(
+        "Legacy Gemini CLI is monitoring-only in Lume",
+        "A CLI legada do Gemini é somente monitorada pelo Lume",
       );
     }
     return tr(

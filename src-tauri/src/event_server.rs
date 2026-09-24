@@ -1,6 +1,6 @@
 use std::{
-    io::{BufRead, BufReader, Write},
-    net::{Shutdown, TcpListener, TcpStream},
+    io::{BufRead, BufReader, Read, Write},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     thread,
     time::Duration,
 };
@@ -14,6 +14,9 @@ use crate::{
 };
 
 pub const EVENT_SERVER_ADDRESS: &str = "127.0.0.1:43119";
+const HOOK_EVENT_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const OBSERVATION_HOOK_IO_TIMEOUT: Duration = Duration::from_millis(300);
+const MAX_HOOK_EVENT_BYTES: u64 = 2 * 1024 * 1024;
 
 pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
     let listener = TcpListener::bind(EVENT_SERVER_ADDRESS)
@@ -34,6 +37,13 @@ pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
 }
 
 fn handle_connection(mut stream: TcpStream, state: AppState, app: AppHandle) {
+    if stream
+        .set_read_timeout(Some(HOOK_EVENT_IO_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(HOOK_EVENT_IO_TIMEOUT)))
+        .is_err()
+    {
+        return;
+    }
     let response = read_event(&stream).and_then(|mut event| {
         let automatically_approved = permission_is_automatically_approved(&state, &event)?;
         let wait_for_decision = event.wait_for_decision;
@@ -168,16 +178,19 @@ fn notification_for(
     Some((title.into(), format!("{agent} · {project}")))
 }
 
-fn read_event(stream: &TcpStream) -> Result<HookEvent, String> {
+fn read_event<R: Read>(reader: R) -> Result<HookEvent, String> {
     let mut line = String::new();
-    BufReader::new(stream)
+    let bytes_read = BufReader::new(reader.take(MAX_HOOK_EVENT_BYTES + 1))
         .read_line(&mut line)
         .map_err(|error| error.to_string())?;
+    if bytes_read as u64 > MAX_HOOK_EVENT_BYTES {
+        return Err("Evento local excede o limite de tamanho".into());
+    }
     serde_json::from_str(&line).map_err(|error| format!("Evento local inválido: {error}"))
 }
 
 pub fn send_event(event_json: &str) -> Result<HookResponse, String> {
-    let _: HookEvent = serde_json::from_str(event_json)
+    let event: HookEvent = serde_json::from_str(event_json)
         .map_err(|error| format!("Evento local inválido: {error}"))?;
     let mut stream = TcpStream::connect_timeout(
         &EVENT_SERVER_ADDRESS
@@ -186,6 +199,12 @@ pub fn send_event(event_json: &str) -> Result<HookResponse, String> {
         Duration::from_secs(2),
     )
     .map_err(|_| "O Lume não está em execução".to_string())?;
+    if !event.wait_for_decision {
+        stream
+            .set_write_timeout(Some(HOOK_EVENT_IO_TIMEOUT))
+            .and_then(|_| stream.set_read_timeout(Some(HOOK_EVENT_IO_TIMEOUT)))
+            .map_err(|error| format!("Não foi possível limitar a espera do evento: {error}"))?;
+    }
     stream
         .write_all(event_json.trim().as_bytes())
         .and_then(|_| stream.write_all(b"\n"))
@@ -197,6 +216,39 @@ pub fn send_event(event_json: &str) -> Result<HookResponse, String> {
         .read_line(&mut response)
         .map_err(|error| error.to_string())?;
     serde_json::from_str(&response).map_err(|error| error.to_string())
+}
+
+/// Send telemetry-only hooks without waiting for the UI/event handler response.
+/// This keeps Antigravity and Gemini tool execution independent of Lume latency.
+pub fn send_observation_event(event_json: &str) -> Result<(), String> {
+    let event: HookEvent = serde_json::from_str(event_json)
+        .map_err(|error| format!("Evento local inválido: {error}"))?;
+    if event.wait_for_decision
+        || !matches!(
+            event.agent,
+            crate::domain::AgentKind::Antigravity | crate::domain::AgentKind::Gemini
+        )
+    {
+        return Err("Only non-interactive Google agent hooks can be sent asynchronously".into());
+    }
+    let address = EVENT_SERVER_ADDRESS
+        .parse()
+        .map_err(|error| format!("Endereço local inválido: {error}"))?;
+    send_observation_event_to(address, event_json)
+}
+
+fn send_observation_event_to(address: SocketAddr, event_json: &str) -> Result<(), String> {
+    let mut stream = TcpStream::connect_timeout(&address, OBSERVATION_HOOK_IO_TIMEOUT)
+        .map_err(|_| "O Lume não está em execução".to_string())?;
+    stream
+        .set_write_timeout(Some(OBSERVATION_HOOK_IO_TIMEOUT))
+        .map_err(|error| format!("Não foi possível limitar a espera do evento: {error}"))?;
+    stream
+        .write_all(event_json.trim().as_bytes())
+        .and_then(|_| stream.write_all(b"\n"))
+        .map_err(|error| error.to_string())?;
+    let _ = stream.shutdown(Shutdown::Write);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -232,6 +284,35 @@ mod tests {
             activities: Vec::new(),
             wait_for_decision: false,
         }
+    }
+
+    #[test]
+    fn observation_hook_does_not_wait_for_the_event_server_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener local");
+        let address = listener.local_addr().expect("endereço local");
+        let received = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("aceita hook");
+            let mut line = String::new();
+            BufReader::new(stream)
+                .read_line(&mut line)
+                .expect("lê evento");
+            line
+        });
+        let payload = r#"{"event":"Running","session_id":"ag:1"}"#;
+
+        send_observation_event_to(address, payload).expect("envia sem resposta");
+        assert_eq!(
+            received.join().expect("evento recebido"),
+            format!("{payload}\n")
+        );
+    }
+
+    #[test]
+    fn hook_event_reader_rejects_payloads_over_the_size_limit() {
+        let oversized = " ".repeat(MAX_HOOK_EVENT_BYTES as usize + 1);
+        let error = read_event(std::io::Cursor::new(oversized)).expect_err("limite do payload");
+
+        assert!(error.contains("excede o limite"));
     }
 
     #[test]

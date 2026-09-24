@@ -11,10 +11,14 @@ use std::{
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::domain::SessionActivity;
+
+const ANTIGRAVITY_HOOK_NAME: &str = "lume-session-monitor";
+const ANTIGRAVITY_LEGACY_HOOK_NAME: &str = "lume";
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,13 +102,26 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
         .map(|plugin| {
             let kind = plugin.kind();
             let installed = crate::executables::available(plugin.executable());
-            let configured = config_path(&kind)
-                .and_then(|path| fs::read_to_string(path).ok())
-                .is_some_and(|content| configured_content(&content, &kind, executable));
-            let can_configure = config_path(&kind).is_some();
+            let configured = kind != IntegrationKind::Gemini
+                && config_path(&kind)
+                    .and_then(|path| fs::read_to_string(path).ok())
+                    .is_some_and(|content| configured_content(&content, &kind, executable));
+            let can_configure = kind != IntegrationKind::Gemini && config_path(&kind).is_some();
             let can_launch = kind != IntegrationKind::Gemini;
-            let detail = if !installed {
+            let antigravity_hook_warning = (kind == IntegrationKind::Antigravity)
+                .then(antigravity_legacy_hook_warning)
+                .flatten();
+            let gemini_hook_warning = (kind == IntegrationKind::Gemini)
+                .then(gemini_legacy_hook_warning)
+                .flatten();
+            let detail = if let Some(warning) = antigravity_hook_warning {
+                warning
+            } else if let Some(warning) = gemini_hook_warning {
+                warning
+            } else if !installed {
                 "CLI não encontrada".into()
+            } else if kind == IntegrationKind::Gemini {
+                "Somente monitoramento por processo; o Lume não altera as configurações compartilhadas do Gemini".into()
             } else if kind == IntegrationKind::DeepSeek {
                 "CLI detectada; requer o perfil TUI do DeepSeek Harness".into()
             } else if plugin.hook_events().is_empty() {
@@ -112,6 +129,8 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
             } else if configured {
                 if kind == IntegrationKind::Codex {
                     "Hook conectado; /hooks está disponível no Codex CLI".into()
+                } else if kind == IntegrationKind::Antigravity {
+                    "Hook conectado; ferramentas seguem permitidas se o Lume ficar indisponível; desative o hook na CLI para restaurar confirmações nativas".into()
                 } else if plugin.direct_permissions() {
                     "Monitoramento e decisões conectados".into()
                 } else {
@@ -119,6 +138,8 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
                 }
             } else if kind == IntegrationKind::Codex {
                 "Decisões diretas ao abrir uma sessão pelo Lume".into()
+            } else if kind == IntegrationKind::Antigravity {
+                "Somente CLI; conectar permite todas as ferramentas mesmo se o Lume fechar; desative o hook na CLI para restaurar confirmações nativas".into()
             } else {
                 "Pronto para conectar".into()
             };
@@ -150,9 +171,10 @@ pub fn resumable_sessions(kind: &IntegrationKind) -> Result<Vec<ResumableSession
             codex_resumable_sessions(&root)
         }
         IntegrationKind::Claude => claude_resumable_sessions(&home.join(".claude/projects")),
-        IntegrationKind::Antigravity | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {
-            Vec::new()
+        IntegrationKind::Antigravity => {
+            antigravity_resumable_sessions(&home.join(".gemini/antigravity-cli"))
         }
+        IntegrationKind::DeepSeek | IntegrationKind::Gemini => Vec::new(),
     };
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     sessions.truncate(250);
@@ -290,9 +312,10 @@ fn resume_path(kind: &IntegrationKind, session_id: &str) -> Option<PathBuf> {
             .unwrap_or_else(|| home.join(".codex"))
             .join("sessions"),
         IntegrationKind::Claude => home.join(".claude/projects"),
-        IntegrationKind::Antigravity | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {
-            return None
+        IntegrationKind::Antigravity => {
+            return antigravity_transcript_path(&home.join(".gemini/antigravity-cli"), session_id)
         }
+        IntegrationKind::DeepSeek | IntegrationKind::Gemini => return None,
     };
     resume_files(&root).into_iter().find(|path| {
         path.file_stem()
@@ -540,6 +563,75 @@ fn claude_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
             })
         })
         .collect()
+}
+
+/// Antigravity CLI documents a workspace-to-last-conversation cache. Use that
+/// bounded index instead of walking or parsing every conversation transcript.
+/// This intentionally exposes at most one recent conversation per workspace.
+fn antigravity_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
+    let cache = root.join("cache/last_conversations.json");
+    if fs::metadata(&cache)
+        .ok()
+        .is_none_or(|metadata| metadata.len() > 1024 * 1024)
+    {
+        return Vec::new();
+    }
+    let Ok(content) = fs::read_to_string(cache) else {
+        return Vec::new();
+    };
+    let Ok(workspaces) = serde_json::from_str::<HashMap<String, String>>(&content) else {
+        return Vec::new();
+    };
+
+    let mut workspaces = workspaces.into_iter().collect::<Vec<_>>();
+    workspaces.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut sessions_by_id = HashMap::new();
+    for (working_directory, id) in workspaces.into_iter().take(1_000) {
+        let directory = Path::new(&working_directory);
+        if !directory.is_absolute() || !directory.is_dir() || !is_safe_conversation_id(&id) {
+            continue;
+        }
+        let Some(transcript) = antigravity_transcript_path(root, &id) else {
+            continue;
+        };
+        let project = resume_project_name(&working_directory);
+        let session = ResumableSession {
+            id: id.clone(),
+            agent: IntegrationKind::Antigravity,
+            name: project.clone(),
+            project,
+            working_directory,
+            source: "CLI".into(),
+            updated_at: file_updated_at(&transcript),
+        };
+        sessions_by_id.entry(id).or_insert(session);
+    }
+    sessions_by_id.into_values().collect()
+}
+
+fn antigravity_transcript_path(root: &Path, conversation_id: &str) -> Option<PathBuf> {
+    if !is_safe_conversation_id(conversation_id) {
+        return None;
+    }
+    let logs = root
+        .join("brain")
+        .join(conversation_id)
+        .join(".system_generated/logs");
+    ["transcript.jsonl", "transcript_full.jsonl"]
+        .into_iter()
+        .map(|name| logs.join(name))
+        .find(|path| path.is_file())
+}
+
+fn is_safe_conversation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn claude_session_name(value: &Value) -> Option<String> {
@@ -963,6 +1055,16 @@ pub fn diagnose(
             },
         });
     }
+    if kind == &IntegrationKind::Gemini {
+        if let Some(warning) = gemini_legacy_hook_warning() {
+            checks.push(DiagnosticCheck {
+                id: "legacy-hooks".into(),
+                label: "Hooks legados".into(),
+                status: "warning".into(),
+                detail: warning,
+            });
+        }
+    }
     checks.push(DiagnosticCheck {
         id: "activity".into(),
         label: "Último evento".into(),
@@ -987,6 +1089,16 @@ pub fn diagnose(
 }
 
 pub fn configure(kind: &IntegrationKind, executable: &str, enabled: bool) -> Result<(), String> {
+    if *kind == IntegrationKind::Antigravity {
+        return configure_antigravity(executable, enabled);
+    }
+    if *kind == IntegrationKind::Gemini {
+        return configure_legacy_gemini_at_path(
+            &config_path(kind).ok_or_else(|| "Diretório do usuário não encontrado".to_string())?,
+            executable,
+            enabled,
+        );
+    }
     if enabled && *kind == IntegrationKind::Codex {
         ensure_codex_hooks_enabled()?;
     }
@@ -999,23 +1111,19 @@ pub fn configure(kind: &IntegrationKind, executable: &str, enabled: bool) -> Res
             path.display()
         ));
     }
-    if *kind == IntegrationKind::Antigravity {
-        apply_antigravity_hooks(&mut root, executable, enabled)?;
-    } else {
-        let hooks = root
-            .as_object_mut()
-            .expect("validado acima")
-            .entry("hooks")
-            .or_insert_with(|| Value::Object(Map::new()));
-        if !hooks.is_object() {
-            return Err("A chave hooks existente não contém um objeto".into());
-        }
+    let hooks = root
+        .as_object_mut()
+        .expect("validado acima")
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !hooks.is_object() {
+        return Err("A chave hooks existente não contém um objeto".into());
+    }
 
-        for event in events(kind) {
-            remove_lume_handlers(hooks, event, kind, executable);
-            if enabled {
-                add_handler(hooks, event, kind, executable)?;
-            }
+    for event in events(kind) {
+        remove_lume_handlers(hooks, event, kind, executable);
+        if enabled {
+            add_handler(hooks, event, kind, executable)?;
         }
     }
 
@@ -1032,41 +1140,323 @@ pub fn configure(kind: &IntegrationKind, executable: &str, enabled: bool) -> Res
     fs::write(&path, format!("{payload}\n")).map_err(|error| error.to_string())
 }
 
-fn apply_antigravity_hooks(
+fn configure_legacy_gemini_at_path(
+    path: &Path,
+    executable: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    if enabled {
+        return Err(
+            "Gemini CLI legado é somente monitoramento; o Lume não instala hooks nas configurações compartilhadas do Gemini".into(),
+        );
+    }
+    cleanup_legacy_gemini_hooks_at_path(path, executable)
+}
+
+fn cleanup_legacy_gemini_hooks_at_path(path: &Path, executable: &str) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut root = read_config(&path.to_path_buf())?;
+    if !root.is_object() {
+        return Err(format!(
+            "A configuração compartilhada {} não contém um objeto JSON; nada foi alterado",
+            path.display()
+        ));
+    }
+    let original = root.clone();
+    let Some(hooks) = root.get_mut("hooks") else {
+        return Ok(());
+    };
+    if !hooks.is_object() {
+        return Err(format!(
+            "A chave hooks da configuração compartilhada {} não é um objeto; nada foi alterado",
+            path.display()
+        ));
+    }
+    // Older Lume versions could have registered handlers under event names
+    // that are no longer known to this build. Sweep every event in the shared
+    // Gemini settings, but remove only commands that identify themselves as a
+    // Lume Gemini hook; unrelated hooks and tool/MCP settings stay untouched.
+    let events = hooks
+        .as_object()
+        .expect("hooks validado como objeto")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for event in events {
+        remove_lume_handlers(hooks, &event, &IntegrationKind::Gemini, executable);
+        if hooks
+            .get(&event)
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            hooks
+                .as_object_mut()
+                .expect("hooks validado como objeto")
+                .remove(&event);
+        }
+    }
+    if root != original {
+        write_json_config(path, &root)?;
+    }
+    Ok(())
+}
+
+fn configure_antigravity(executable: &str, enabled: bool) -> Result<(), String> {
+    let cli_settings_path = antigravity_cli_settings_path()
+        .ok_or_else(|| "Diretório do usuário não encontrado".to_string())?;
+    let legacy_hooks_path = antigravity_legacy_hooks_path()
+        .ok_or_else(|| "Diretório do usuário não encontrado".to_string())?;
+    configure_antigravity_at_paths(&cli_settings_path, &legacy_hooks_path, executable, enabled)
+}
+
+fn configure_antigravity_at_paths(
+    cli_settings_path: &PathBuf,
+    legacy_hooks_path: &PathBuf,
+    executable: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let legacy_hooks = if legacy_hooks_path.exists() {
+        let content = fs::read_to_string(legacy_hooks_path).map_err(|error| error.to_string())?;
+        let root = serde_json::from_str::<Value>(&content).map_err(|error| {
+            format!(
+                "A configuração compartilhada {} contém JSON inválido: {error}",
+                legacy_hooks_path.display()
+            )
+        })?;
+        if !root.is_object() {
+            return Err(format!(
+                "A configuração compartilhada {} não contém um objeto JSON; nada foi alterado",
+                legacy_hooks_path.display()
+            ));
+        }
+        Some(root)
+    } else {
+        None
+    };
+    let legacy_hooks = legacy_hooks.map(|mut root| {
+        let original = root.clone();
+        apply_named_antigravity_hooks(&mut root, ANTIGRAVITY_LEGACY_HOOK_NAME, executable, false)
+            .map(|()| (root, original))
+    });
+    let legacy_hooks = legacy_hooks.transpose()?;
+
+    if let Some((legacy_hooks, original_legacy_hooks)) = legacy_hooks {
+        if legacy_hooks != original_legacy_hooks {
+            write_json_config(legacy_hooks_path, &legacy_hooks)?;
+        }
+    }
+
+    // Remove the shared IDE/CLI hook before touching CLI settings. If the CLI
+    // profile is malformed or unwritable, the old hook must not remain active
+    // in IDE surfaces as a side effect of a failed migration.
+    let mut cli_settings = read_config(cli_settings_path)?;
+    if !cli_settings.is_object() {
+        return Err(format!(
+            "A configuração {} não contém um objeto JSON",
+            cli_settings_path.display()
+        ));
+    }
+    let original_cli_settings = cli_settings.clone();
+    apply_antigravity_cli_settings(&mut cli_settings, executable, enabled)?;
+    if (enabled || cli_settings_path.exists()) && cli_settings != original_cli_settings {
+        write_json_config(cli_settings_path, &cli_settings)?;
+    }
+
+    Ok(())
+}
+
+fn apply_antigravity_cli_settings(
+    settings: &mut Value,
+    executable: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let Some(root) = settings.as_object_mut() else {
+        return Err("As configurações do Antigravity CLI devem ser um objeto JSON".into());
+    };
+    if enabled {
+        let hooks = root
+            .entry("hooks")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !hooks.is_object() {
+            return Err(
+                "A chave hooks existente nas configurações da CLI não contém um objeto".into(),
+            );
+        }
+        apply_named_antigravity_hooks(hooks, ANTIGRAVITY_HOOK_NAME, executable, true)
+    } else if let Some(hooks) = root.get_mut("hooks") {
+        if hooks.is_object() {
+            apply_named_antigravity_hooks(hooks, ANTIGRAVITY_HOOK_NAME, executable, false)
+        } else {
+            Ok(())
+        }
+    } else {
+        Ok(())
+    }
+}
+
+fn antigravity_cli_settings_path() -> Option<PathBuf> {
+    Some(antigravity_cli_settings_path_for(&antigravity_user_home()?))
+}
+
+fn antigravity_cli_settings_path_for(home: &Path) -> PathBuf {
+    home.join(".gemini/antigravity-cli/settings.json")
+}
+
+fn antigravity_legacy_hooks_path() -> Option<PathBuf> {
+    Some(antigravity_user_home()?.join(".gemini/config/hooks.json"))
+}
+
+fn antigravity_user_home() -> Option<PathBuf> {
+    env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
+fn write_json_config(path: &Path, root: &Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    if path.exists() {
+        let backup = path.with_extension("lume-backup.json");
+        if !backup.exists() {
+            fs::copy(path, &backup).map_err(|error| error.to_string())?;
+        }
+    }
+    let payload = serde_json::to_string_pretty(root).map_err(|error| error.to_string())?;
+    fs::write(path, format!("{payload}\n")).map_err(|error| error.to_string())
+}
+
+fn apply_named_antigravity_hooks(
     root: &mut Value,
+    registry_name: &str,
     executable: &str,
     enabled: bool,
 ) -> Result<(), String> {
     let root = root
         .as_object_mut()
         .ok_or_else(|| "A configuração do Antigravity não contém um objeto JSON".to_string())?;
-    root.remove("lume");
-    if !enabled {
-        return Ok(());
+    let mut lume = match root.remove(registry_name) {
+        Some(Value::Object(lume)) => lume,
+        Some(_) => {
+            return Err(format!(
+                "A entrada de hooks `{registry_name}` existente não contém um objeto"
+            ));
+        }
+        None => Map::new(),
+    };
+    if enabled {
+        lume.insert("enabled".into(), Value::Bool(true));
     }
-
-    let mut lume = Map::new();
-    for event in events(&IntegrationKind::Antigravity) {
-        let provider = format!("antigravity:{event}");
+    let supported_events = events(&IntegrationKind::Antigravity);
+    // Replace only Lume-owned handlers, retaining third-party entries even in
+    // the same registry. The shared registry is cleaned separately below.
+    for event in supported_events.iter().copied() {
+        if let Some(existing) = lume.get_mut(event) {
+            remove_antigravity_lume_handlers(existing);
+        }
+        if lume
+            .get(event)
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            lume.remove(event);
+        }
+        if !enabled || !supported_events.contains(&event) {
+            continue;
+        }
+        // The versioned command marker represents explicit consent to the
+        // wildcard allow policy without adding unsupported keys to Antigravity
+        // settings. Older handler commands do not carry this marker.
+        let provider = if event == "PreToolUse" {
+            "antigravity:PreToolUseAllow".to_string()
+        } else {
+            format!("antigravity:{event}")
+        };
         let handler = json!({
             "type": "command",
-            "command": shell_command(executable, &provider),
-            "timeout": 10
+            "command": fail_open_hook_command(
+                executable,
+                &provider,
+                antigravity_fallback_output(&provider),
+            ),
+            "timeout": 5
         });
-        let handlers = if matches!(*event, "PreToolUse" | "PostToolUse") {
+        let handlers = if matches!(event, "PreToolUse" | "PostToolUse") {
             json!([{ "matcher": "*", "hooks": [handler] }])
         } else {
             Value::Array(vec![handler])
         };
-        lume.insert((*event).into(), handlers);
+        match (
+            event,
+            lume.entry(event)
+                .or_insert_with(|| Value::Array(Vec::new())),
+        ) {
+            ("PreToolUse" | "PostToolUse", Value::Array(groups)) => {
+                groups.extend(handlers.as_array().unwrap().clone())
+            }
+            (_, Value::Array(existing)) => existing.extend(handlers.as_array().unwrap().clone()),
+            (_, _) => {
+                return Err(format!(
+                    "A configuração do evento Antigravity {event} não contém uma lista"
+                ));
+            }
+        }
     }
-    root.insert("lume".into(), Value::Object(lume));
+    if !lume.is_empty() {
+        root.insert(registry_name.into(), Value::Object(lume));
+    }
     Ok(())
+}
+
+fn remove_antigravity_lume_handlers(value: &mut Value) {
+    let Some(groups) = value.as_array_mut() else {
+        return;
+    };
+    groups.retain_mut(|group| {
+        if is_antigravity_lume_handler(group) {
+            return false;
+        }
+        if let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+            handlers.retain(|handler| !is_antigravity_lume_handler(handler));
+            if handlers.is_empty() {
+                return false;
+            }
+        }
+        true
+    });
+}
+
+fn is_antigravity_lume_handler(value: &Value) -> bool {
+    ["command", "commandWindows"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(Value::as_str))
+        .any(|command| command_mentions_lume_hook(command, "antigravity:"))
 }
 
 pub fn refresh_connected(executable: &str) {
     for plugin in crate::agent_plugins::catalog() {
         let kind = plugin.kind();
+        if kind == IntegrationKind::Antigravity {
+            let cli_content = config_path(&kind).and_then(|path| fs::read_to_string(path).ok());
+            let legacy_content =
+                antigravity_legacy_hooks_path().and_then(|path| fs::read_to_string(path).ok());
+            if let Some(enabled) =
+                antigravity_refresh_enabled(cli_content.as_deref(), legacy_content.as_deref())
+            {
+                // A user's explicit disabled flag must survive migration. The
+                // CLI registry is authoritative when both locations exist.
+                let _ = configure(&kind, executable, enabled);
+            }
+            continue;
+        }
+        if kind == IntegrationKind::Gemini {
+            if let Some(path) = config_path(&kind) {
+                if let Err(error) = configure_legacy_gemini_at_path(&path, executable, false) {
+                    eprintln!("Could not remove legacy Lume Gemini hooks: {error}");
+                }
+            }
+            continue;
+        }
         let Some(path) = config_path(&kind) else {
             continue;
         };
@@ -1097,9 +1487,9 @@ pub fn vscode_status() -> CompanionStatus {
         detail: if !installed {
             "VS Code não encontrado".into()
         } else if configured {
-            "Terminal integrado conectado".into()
+            "Extensão do Lume instalada; conexão ativa não verificada".into()
         } else {
-            "Necessário para abrir sessões no editor".into()
+            "Extensão do Lume não instalada; chats do Gemini Code Assist não são controlados".into()
         },
     }
 }
@@ -1157,15 +1547,31 @@ fn add_handler(
             "timeout": timeout,
             "statusMessage": status_message
         }),
-        IntegrationKind::Antigravity | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {
-            json!({
-                "type": "command",
-                "name": "Lume",
-                "command": shell_command(executable, provider),
-                "timeout": timeout * 1_000,
-                "description": "Envia o estado da sessão ao Lume"
-            })
-        }
+        IntegrationKind::Antigravity => json!({
+            "type": "command",
+            "name": "Lume",
+            "command": fail_open_hook_command(
+                executable,
+                provider,
+                antigravity_fallback_output(provider),
+            ),
+            "timeout": timeout * 1_000,
+            "description": "Envia o estado da sessão ao Lume"
+        }),
+        IntegrationKind::Gemini => json!({
+            "type": "command",
+            "name": "Lume",
+            "command": fail_open_hook_command(executable, provider, "{}"),
+            "timeout": timeout * 1_000,
+            "description": "Envia o estado da sessão ao Lume"
+        }),
+        IntegrationKind::DeepSeek => json!({
+            "type": "command",
+            "name": "Lume",
+            "command": shell_command(executable, provider),
+            "timeout": timeout * 1_000,
+            "description": "Envia o estado da sessão ao Lume"
+        }),
         IntegrationKind::Codex => json!({
             "type": "command",
             "command": shell_command(executable, provider),
@@ -1196,19 +1602,11 @@ fn remove_lume_handlers(hooks: &mut Value, event: &str, kind: &IntegrationKind, 
     else {
         return;
     };
-    let provider_marker = marker(kind, executable);
     for group in groups.iter_mut() {
         let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
             continue;
         };
-        handlers.retain(|handler| {
-            handler.get("name").and_then(Value::as_str) != Some("Lume")
-                && handler.get("statusMessage").and_then(Value::as_str) != Some("Lume monitor")
-                && !handler
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|command| command.contains(&provider_marker))
-        });
+        handlers.retain(|handler| !is_lume_hook_handler(handler, kind, executable));
     }
     groups.retain(|group| {
         group
@@ -1245,7 +1643,9 @@ fn config_path(kind: &IntegrationKind) -> Option<PathBuf> {
     let directory = match kind {
         IntegrationKind::Codex => ".codex/hooks.json",
         IntegrationKind::Claude => ".claude/settings.json",
-        IntegrationKind::Antigravity => ".gemini/config/hooks.json",
+        IntegrationKind::Antigravity => {
+            return Some(antigravity_cli_settings_path_for(&PathBuf::from(user_home)))
+        }
         IntegrationKind::DeepSeek => return None,
         IntegrationKind::Gemini => ".gemini/settings.json",
     };
@@ -1327,8 +1727,49 @@ fn provider(kind: &IntegrationKind) -> &'static str {
     }
 }
 
-fn marker(kind: &IntegrationKind, executable: &str) -> String {
-    format!("{} hook {}", executable, provider(kind))
+fn is_lume_hook_handler(handler: &Value, kind: &IntegrationKind, executable: &str) -> bool {
+    if ["command", "commandWindows"]
+        .into_iter()
+        .filter_map(|key| handler.get(key).and_then(Value::as_str))
+        .any(|command| {
+            command_invokes_lume_hook(command, kind)
+                || decode_powershell_command(command)
+                    .as_deref()
+                    .is_some_and(|decoded| command_invokes_lume_hook(decoded, kind))
+        })
+    {
+        return true;
+    }
+
+    let command = handler.get("command").and_then(Value::as_str).unwrap_or("");
+    let executable_name = command
+        .trim_matches(['\"', '\''])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let invokes_lume = command == executable
+        || matches!(executable_name.as_str(), "lume" | "lume.exe" | "lume-cli");
+    invokes_lume
+        && handler
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|args| {
+                args.first().and_then(Value::as_str) == Some("hook")
+                    && args.get(1).and_then(Value::as_str) == Some(provider(kind))
+            })
+}
+
+fn command_invokes_lume_hook(command: &str, kind: &IntegrationKind) -> bool {
+    let normalized = command.to_ascii_lowercase();
+    let tokens = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    tokens.contains(&"lume")
+        && tokens
+            .windows(2)
+            .any(|pair| pair[0] == "hook" && pair[1] == provider(kind))
 }
 
 fn configured_content(content: &str, kind: &IntegrationKind, executable: &str) -> bool {
@@ -1336,9 +1777,10 @@ fn configured_content(content: &str, kind: &IntegrationKind, executable: &str) -
         return false;
     };
     if *kind == IntegrationKind::Antigravity {
-        return root
-            .get("lume")
-            .is_some_and(|value| value_contains_command(value, executable, " hook antigravity:"));
+        return antigravity_hook_registry(&root).is_some_and(|value| {
+            antigravity_auto_approval_enabled(value)
+                && value_contains_command(value, executable, "antigravity:")
+        });
     }
     let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
         return false;
@@ -1383,14 +1825,12 @@ fn has_lume_handler(content: &str, kind: &IntegrationKind) -> bool {
         return false;
     };
     if *kind == IntegrationKind::Antigravity {
-        return root
-            .get("lume")
-            .is_some_and(|value| value_contains_text(value, " hook antigravity:"));
+        return antigravity_hook_registry(&root)
+            .is_some_and(|value| value_contains_lume_hook(value, "antigravity:"));
     }
     let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
         return false;
     };
-    let provider_suffix = format!(" hook {}", provider(kind));
     hooks.values().any(|groups| {
         groups.as_array().is_some_and(|groups| {
             groups.iter().any(|group| {
@@ -1398,19 +1838,135 @@ fn has_lume_handler(content: &str, kind: &IntegrationKind) -> bool {
                     .get("hooks")
                     .and_then(Value::as_array)
                     .is_some_and(|handlers| {
-                        handlers.iter().any(|handler| {
-                            handler.get("name").and_then(Value::as_str) == Some("Lume")
-                                || handler.get("statusMessage").and_then(Value::as_str)
-                                    == Some("Lume monitor")
-                                || handler
-                                    .get("command")
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|command| command.contains(&provider_suffix))
-                        })
+                        handlers
+                            .iter()
+                            .any(|handler| is_lume_hook_handler(handler, kind, ""))
                     })
             })
         })
     })
+}
+
+fn antigravity_hook_registry(root: &Value) -> Option<&Value> {
+    [
+        root.get("hooks")
+            .and_then(|hooks| hooks.get(ANTIGRAVITY_HOOK_NAME)),
+        root.get(ANTIGRAVITY_HOOK_NAME),
+        root.get(ANTIGRAVITY_LEGACY_HOOK_NAME),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|registry| value_contains_lume_hook(registry, "antigravity:"))
+}
+
+fn antigravity_registry_enabled(registry: &Value) -> bool {
+    registry.get("enabled").and_then(Value::as_bool) != Some(false)
+}
+
+fn antigravity_auto_approval_enabled(registry: &Value) -> bool {
+    antigravity_registry_enabled(registry)
+        && value_contains_lume_hook(registry, "antigravity:PreToolUseAllow")
+}
+
+fn antigravity_cli_hook_enabled(content: &str) -> Option<bool> {
+    let root = serde_json::from_str::<Value>(content).ok()?;
+    antigravity_hook_registry(&root).map(antigravity_auto_approval_enabled)
+}
+
+fn legacy_antigravity_hook_enabled(content: &str) -> Option<bool> {
+    let root = serde_json::from_str::<Value>(content).ok()?;
+    root.get(ANTIGRAVITY_LEGACY_HOOK_NAME)
+        .filter(|registry| value_contains_lume_hook(registry, "antigravity:"))
+        .map(antigravity_registry_enabled)
+}
+
+fn gemini_legacy_hook_warning() -> Option<String> {
+    let path = config_path(&IntegrationKind::Gemini)?;
+    gemini_legacy_hook_warning_at_path(&path)
+}
+
+fn gemini_legacy_hook_warning_at_path(path: &Path) -> Option<String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some(format!(
+                "Não foi possível verificar os hooks compartilhados do Gemini ({error}); o Lume preservou {}",
+                path.display()
+            ));
+        }
+    };
+    if !serde_json::from_str::<Value>(&content).is_ok_and(|root| root.is_object()) {
+        return Some(format!(
+            "As configurações compartilhadas do Gemini estão inválidas e foram preservadas: {}",
+            path.display()
+        ));
+    }
+    if has_lume_handler(&content, &IntegrationKind::Gemini) {
+        Some(format!(
+            "Um hook antigo do Lume ainda está nas configurações compartilhadas do Gemini: {}",
+            path.display()
+        ))
+    } else {
+        None
+    }
+}
+
+fn antigravity_legacy_hook_warning() -> Option<String> {
+    let path = antigravity_legacy_hooks_path()?;
+    antigravity_legacy_hook_warning_at_path(&path)
+}
+
+fn antigravity_legacy_hook_warning_at_path(path: &Path) -> Option<String> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some(format!(
+                "Não foi possível verificar os hooks compartilhados ({error}); o Lume não alterou {}",
+                path.display()
+            ));
+        }
+    };
+    let root = match serde_json::from_str::<Value>(&content) {
+        Ok(root) if root.is_object() => root,
+        Ok(_) => {
+            return Some(format!(
+                "A configuração compartilhada não é um objeto JSON e foi preservada: {}",
+                path.display()
+            ));
+        }
+        Err(_) => {
+            return Some(format!(
+                "A configuração compartilhada está com JSON inválido e foi preservada: {}",
+                path.display()
+            ));
+        }
+    };
+    root.get(ANTIGRAVITY_LEGACY_HOOK_NAME)
+        .filter(|registry| {
+            value_contains_lume_hook(registry, "antigravity:")
+                && antigravity_registry_enabled(registry)
+        })
+        .map(|_| {
+            format!(
+                "O hook antigo do Lume ainda está ativo na configuração compartilhada: {}",
+                path.display()
+            )
+        })
+}
+
+fn antigravity_refresh_enabled(
+    cli_content: Option<&str>,
+    legacy_content: Option<&str>,
+) -> Option<bool> {
+    cli_content
+        .and_then(antigravity_cli_hook_enabled)
+        .or_else(|| {
+            legacy_content
+                .and_then(legacy_antigravity_hook_enabled)
+                .map(|_| false)
+        })
 }
 
 fn value_contains_command(value: &Value, executable: &str, marker: &str) -> bool {
@@ -1418,7 +1974,7 @@ fn value_contains_command(value: &Value, executable: &str, marker: &str) -> bool
         Value::Object(object) => object.iter().any(|(key, value)| {
             (key == "command"
                 && value.as_str().is_some_and(|command| {
-                    command.contains(executable) && command.contains(marker)
+                    command_contains_executable_marker(command, executable, marker)
                 }))
                 || value_contains_command(value, executable, marker)
         }),
@@ -1429,21 +1985,123 @@ fn value_contains_command(value: &Value, executable: &str, marker: &str) -> bool
     }
 }
 
-fn value_contains_text(value: &Value, marker: &str) -> bool {
+fn value_contains_lume_hook(value: &Value, marker: &str) -> bool {
     match value {
-        Value::String(text) => text.contains(marker),
+        Value::String(text) => command_mentions_lume_hook(text, marker),
         Value::Object(object) => object
             .values()
-            .any(|value| value_contains_text(value, marker)),
+            .any(|value| value_contains_lume_hook(value, marker)),
         Value::Array(values) => values
             .iter()
-            .any(|value| value_contains_text(value, marker)),
+            .any(|value| value_contains_lume_hook(value, marker)),
         _ => false,
     }
 }
 
+fn command_mentions_lume_hook(command: &str, marker: &str) -> bool {
+    let mentions = |value: &str| {
+        let normalized = value.to_ascii_lowercase();
+        mentions_lume_executable(value)
+            && normalized.contains("hook")
+            && normalized.contains(&marker.to_ascii_lowercase())
+    };
+    mentions(command)
+        || decode_powershell_command(command)
+            .as_deref()
+            .is_some_and(mentions)
+}
+
+fn mentions_lume_executable(command: &str) -> bool {
+    command.split_whitespace().any(|part| {
+        let executable = part.trim_matches(['\"', '\'']);
+        let name = executable
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        matches!(name.as_str(), "lume" | "lume.exe" | "lume-cli")
+            || (name.starts_with("lume") && name.ends_with(".appimage"))
+    })
+}
+
+fn command_contains_executable_marker(command: &str, executable: &str, marker: &str) -> bool {
+    let matches = |value: &str| value.contains(executable) && value.contains(marker);
+    matches(command)
+        || decode_powershell_command(command)
+            .as_deref()
+            .is_some_and(matches)
+}
+
+fn decode_powershell_command(command: &str) -> Option<String> {
+    let mut parts = command.split_whitespace();
+    while let Some(part) = parts.next() {
+        if part.eq_ignore_ascii_case("-EncodedCommand") {
+            let bytes = BASE64_STANDARD
+                .decode(parts.next()?.trim_matches(['\"', '\'']))
+                .ok()?;
+            let words = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>();
+            return String::from_utf16(&words).ok();
+        }
+    }
+    None
+}
+
 fn shell_command(executable: &str, provider: &str) -> String {
     format!("\"{}\" hook {provider}", executable.replace('"', "\\\""))
+}
+
+fn antigravity_fallback_output(provider: &str) -> &'static str {
+    match provider.rsplit_once(':').map(|(_, event)| event) {
+        Some("PreToolUse" | "PreToolUseAllow") => r#"{"decision":"allow"}"#,
+        Some("Stop") => r#"{"decision":"allow"}"#,
+        _ => "{}",
+    }
+}
+
+fn fail_open_hook_command(executable: &str, provider: &str, fallback_json: &str) -> String {
+    if cfg!(windows) {
+        powershell_fail_open_hook_command(executable, provider, fallback_json)
+    } else {
+        posix_fail_open_hook_command(executable, provider, fallback_json)
+    }
+}
+
+fn posix_fail_open_hook_command(executable: &str, provider: &str, fallback_json: &str) -> String {
+    format!(
+        "output=$({} hook {} 2>/dev/null); status=$?; if [ \"$status\" -eq 0 ] && [ -n \"$output\" ]; then printf '%s\\n' \"$output\"; else printf '%s\\n' {}; fi",
+        posix_quote(executable),
+        provider,
+        posix_quote(fallback_json)
+    )
+}
+
+fn posix_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn powershell_fail_open_hook_command(
+    executable: &str,
+    provider: &str,
+    fallback_json: &str,
+) -> String {
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let fallback = quote(fallback_json);
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; try {{ $output = @(& {} {} {}); $status = $LASTEXITCODE; $payload = ($output -join [Environment]::NewLine).Trim(); if ($status -eq 0 -and $payload.Length -gt 0) {{ [Console]::Out.WriteLine($payload) }} else {{ [Console]::Out.WriteLine({fallback}) }} }} catch {{ [Console]::Out.WriteLine({fallback}) }}; exit 0",
+        quote(executable),
+        quote("hook"),
+        quote(provider)
+    );
+    let encoded = BASE64_STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}")
 }
 
 fn powershell_command(executable: &str, provider: &str) -> String {
@@ -1622,6 +2280,65 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_resume_uses_only_workspace_indexed_cli_conversations() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-antigravity-resume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let workspace_a = root.join("workspace-a");
+        let workspace_z = root.join("workspace-z");
+        let id = "019f8061-7032-7521-b333-84f84c744fa8";
+        let transcript = root
+            .join("antigravity-cli/brain")
+            .join(id)
+            .join(".system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(&workspace_a).expect("workspace A");
+        fs::create_dir_all(&workspace_z).expect("workspace Z");
+        fs::create_dir_all(transcript.parent().expect("logs directory")).expect("logs");
+        fs::write(&transcript, "{}\n").expect("transcript");
+        fs::create_dir_all(root.join("antigravity-cli/brain/unindexed/.system_generated/logs"))
+            .expect("unindexed logs");
+        fs::write(
+            root.join("antigravity-cli/brain/unindexed/.system_generated/logs/transcript.jsonl"),
+            "{}\n",
+        )
+        .expect("unindexed transcript");
+        fs::create_dir_all(root.join("antigravity-cli/cache")).expect("cache directory");
+        fs::write(
+            root.join("antigravity-cli/cache/last_conversations.json"),
+            serde_json::to_vec(&json!({
+                workspace_z.to_string_lossy().to_string(): id,
+                workspace_a.to_string_lossy().to_string(): id
+            }))
+            .expect("cache JSON"),
+        )
+        .expect("cache");
+
+        let sessions = antigravity_resumable_sessions(&root.join("antigravity-cli"));
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, id);
+        assert_eq!(sessions[0].agent, IntegrationKind::Antigravity);
+        assert_eq!(sessions[0].name, "workspace-a");
+        assert_eq!(sessions[0].working_directory, workspace_a.to_string_lossy());
+        assert_eq!(sessions[0].source, "CLI");
+        assert!(sessions[0].updated_at > 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn antigravity_resume_rejects_untrusted_ids_and_relative_workspaces() {
+        assert!(antigravity_transcript_path(Path::new("/tmp/agy"), "../outside").is_none());
+        assert!(!is_safe_conversation_id("nested/session"));
+        assert!(!is_safe_conversation_id("."));
+    }
+
+    #[test]
     fn codex_resume_preview_prefers_the_latest_final_answer() {
         let transcript = concat!(
             "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"phase\":\"commentary\",\"message\":\"Analisando\"}}\n",
@@ -1706,7 +2423,10 @@ mod tests {
     fn adding_and_removing_lume_keeps_existing_hooks() {
         let mut hooks = json!({
             "Stop": [{
-                "hooks": [{ "type": "command", "command": "notify-existing" }]
+                "hooks": [
+                    { "type": "command", "command": "notify-existing" },
+                    { "type": "command", "name": "Lume", "command": "third-party-lume-tool" }
+                ]
             }]
         });
         add_handler(
@@ -1730,6 +2450,10 @@ mod tests {
         );
         assert_eq!(hooks["Stop"].as_array().expect("grupos").len(), 1);
         assert_eq!(hooks["Stop"][0]["hooks"][0]["command"], "notify-existing");
+        assert_eq!(
+            hooks["Stop"][0]["hooks"][1]["command"],
+            "third-party-lume-tool"
+        );
     }
 
     #[test]
@@ -1810,20 +2534,191 @@ mod tests {
     }
 
     #[test]
+    fn legacy_gemini_hook_cleanup_preserves_shared_tools_and_other_hooks() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-gemini-hook-cleanup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let settings_path = root.join(".gemini/settings.json");
+        fs::create_dir_all(settings_path.parent().expect("Gemini settings dir"))
+            .expect("create Gemini settings dir");
+        let original = json!({
+            "coreTools": ["run_shell_command"],
+            "mcpServers": { "private-server": { "command": "trusted-tool" } },
+            "hooks": {
+                "BeforeAgent": [{
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "name": "Lume",
+                            "command": "'/old/Lume/lume' hook gemini || printf '{}'"
+                        },
+                        {
+                            "type": "command",
+                            "name": "user-hook",
+                            "command": "user-before-agent-hook"
+                        }
+                    ]
+                }],
+                "BeforeSkillDownload": [{
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "name": "Lume",
+                            "command": "'/old/Lume/lume' hook gemini || printf '{}'"
+                        },
+                        {
+                            "type": "command",
+                            "name": "skill-policy",
+                            "command": "user-skill-policy-hook"
+                        }
+                    ]
+                }],
+                "AfterTool": [{
+                    "hooks": [{ "type": "command", "command": "user-after-tool-hook" }]
+                }]
+            }
+        });
+        fs::write(
+            &settings_path,
+            serde_json::to_vec(&original).expect("settings JSON"),
+        )
+        .expect("write Gemini settings");
+
+        cleanup_legacy_gemini_hooks_at_path(&settings_path, "/opt/Lume/lume")
+            .expect("remove only legacy Lume hooks");
+
+        let updated: Value =
+            serde_json::from_slice(&fs::read(&settings_path).expect("read updated settings"))
+                .expect("updated settings JSON");
+        assert_eq!(updated["coreTools"], original["coreTools"]);
+        assert_eq!(updated["mcpServers"], original["mcpServers"]);
+        assert_eq!(
+            updated["hooks"]["BeforeAgent"][0]["hooks"][0]["command"],
+            "user-before-agent-hook"
+        );
+        assert_eq!(
+            updated["hooks"]["AfterTool"][0]["hooks"][0]["command"],
+            "user-after-tool-hook"
+        );
+        assert_eq!(
+            updated["hooks"]["BeforeSkillDownload"][0]["hooks"][0]["command"],
+            "user-skill-policy-hook"
+        );
+        assert_eq!(
+            updated["hooks"]["BeforeSkillDownload"][0]["hooks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "unrecognized Gemini events still lose only the stale Lume hook"
+        );
+        assert!(!has_lume_handler(
+            &updated.to_string(),
+            &IntegrationKind::Gemini
+        ));
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &fs::read(settings_path.with_extension("lume-backup.json"))
+                    .expect("settings backup"),
+            )
+            .expect("backup JSON"),
+            original
+        );
+
+        let before_enable_attempt = fs::read(&settings_path).expect("settings after cleanup");
+        assert!(configure_legacy_gemini_at_path(&settings_path, "/opt/Lume/lume", true).is_err());
+        assert_eq!(
+            fs::read(&settings_path).expect("settings after rejected enable"),
+            before_enable_attempt
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_gemini_hook_cleanup_recognizes_encoded_windows_commands() {
+        let command =
+            powershell_fail_open_hook_command(r"C:\Program Files\Lume\lume.exe", "gemini", "{}");
+        assert!(is_lume_hook_handler(
+            &json!({ "command": command }),
+            &IntegrationKind::Gemini,
+            ""
+        ));
+    }
+
+    #[test]
+    fn malformed_legacy_gemini_settings_are_preserved() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-gemini-invalid-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create temporary settings directory");
+        let invalid = b"{invalid json";
+        fs::write(&settings_path, invalid).expect("write malformed settings");
+
+        assert!(cleanup_legacy_gemini_hooks_at_path(&settings_path, "/opt/Lume/lume").is_err());
+        assert_eq!(
+            fs::read(&settings_path).expect("read preserved settings"),
+            invalid
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn antigravity_hooks_use_the_named_registry_and_preserve_other_entries() {
         let mut root = json!({
             "existing": {
                 "Stop": [{ "type": "command", "command": "notify-existing" }]
+            },
+            "lume": {
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{ "type": "command", "command": "/old/lume hook antigravity:PreToolUse" }]
+                }],
+                "PostInvocation": [{
+                    "hooks": [{ "type": "command", "command": "custom-tool hook antigravity:PostInvocation" }]
+                }],
+                "custom-event": [{ "type": "command", "command": "user-owned-hook" }]
             }
         });
-        apply_antigravity_hooks(&mut root, "/opt/Lume App/lume", true)
-            .expect("configura hooks Antigravity");
+        apply_named_antigravity_hooks(
+            &mut root,
+            ANTIGRAVITY_LEGACY_HOOK_NAME,
+            "/opt/Lume App/lume",
+            true,
+        )
+        .expect("configura hooks Antigravity");
 
         assert_eq!(root["existing"]["Stop"][0]["command"], "notify-existing");
+        assert_eq!(root["lume"]["enabled"], true);
+        assert_eq!(
+            root["lume"]["PostInvocation"][0]["hooks"][0]["command"],
+            "custom-tool hook antigravity:PostInvocation"
+        );
+        assert_eq!(
+            root["lume"]["custom-event"][0]["command"],
+            "user-owned-hook"
+        );
         assert_eq!(root["lume"]["PreToolUse"][0]["matcher"], "*");
+        assert_eq!(root["lume"]["PreToolUse"][0]["hooks"][0]["timeout"], 5);
         assert!(root["lume"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
             .is_some_and(|command| command.contains("hook antigravity:PreToolUse")));
+        assert_eq!(root["lume"]["PostToolUse"][0]["matcher"], "*");
+        assert_eq!(root["lume"]["PostToolUse"][0]["hooks"][0]["timeout"], 5);
+        assert!(root["lume"]["PostToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .is_some_and(|command| command.contains("hook antigravity:PostToolUse")));
         assert!(root["lume"]["PreInvocation"][0]["command"]
             .as_str()
             .is_some_and(|command| command.contains("hook antigravity:PreInvocation")));
@@ -1833,10 +2728,706 @@ mod tests {
             "/opt/Lume App/lume"
         ));
 
-        apply_antigravity_hooks(&mut root, "/opt/Lume App/lume", false)
-            .expect("remove hooks Antigravity");
-        assert!(root.get("lume").is_none());
+        apply_named_antigravity_hooks(
+            &mut root,
+            ANTIGRAVITY_LEGACY_HOOK_NAME,
+            "/opt/Lume App/lume",
+            false,
+        )
+        .expect("remove hooks Antigravity");
+        assert_eq!(
+            root["lume"]["custom-event"][0]["command"],
+            "user-owned-hook"
+        );
+        assert_eq!(
+            root["lume"]["PostInvocation"][0]["hooks"][0]["command"],
+            "custom-tool hook antigravity:PostInvocation"
+        );
+        assert!(root["lume"].get("PreToolUse").is_none());
+        assert!(root["lume"].get("PostToolUse").is_none());
         assert!(root.get("existing").is_some());
+    }
+
+    #[test]
+    fn antigravity_hooks_are_scoped_to_cli_settings_and_migrate_legacy_hooks() {
+        let home = Path::new("/home/test-user");
+        assert_eq!(
+            antigravity_cli_settings_path_for(home),
+            home.join(".gemini/antigravity-cli/settings.json")
+        );
+
+        let mut cli_settings = json!({
+            "model": "existing-model",
+            "hooks": {
+                "other-hook": {
+                "Stop": [{ "hooks": [{ "type": "command", "command": "other-cli-hook" }] }]
+                },
+                "lume-session-monitor": {
+                    "custom-event": [{ "hooks": [{ "type": "command", "command": "custom-cli-hook" }] }]
+                }
+            }
+        });
+        apply_antigravity_cli_settings(&mut cli_settings, "/opt/Lume/lume", true)
+            .expect("configura hooks exclusivos da CLI");
+        assert!(configured_content(
+            &cli_settings.to_string(),
+            &IntegrationKind::Antigravity,
+            "/opt/Lume/lume"
+        ));
+        assert_eq!(cli_settings["model"], "existing-model");
+        assert_eq!(
+            cli_settings["hooks"]["other-hook"]["Stop"][0]["hooks"][0]["command"],
+            "other-cli-hook"
+        );
+        assert_eq!(
+            cli_settings["hooks"][ANTIGRAVITY_HOOK_NAME]["custom-event"][0]["hooks"][0]["command"],
+            "custom-cli-hook"
+        );
+
+        apply_antigravity_cli_settings(&mut cli_settings, "/opt/Lume/lume", false)
+            .expect("desconecta hooks exclusivos da CLI");
+        assert!(!has_lume_handler(
+            &cli_settings.to_string(),
+            &IntegrationKind::Antigravity
+        ));
+        assert_eq!(
+            cli_settings["hooks"][ANTIGRAVITY_HOOK_NAME]["custom-event"][0]["hooks"][0]["command"],
+            "custom-cli-hook"
+        );
+        assert_eq!(
+            cli_settings["hooks"]["other-hook"]["Stop"][0]["hooks"][0]["command"],
+            "other-cli-hook"
+        );
+
+        let mut malformed_settings = json!({ "hooks": false, "model": "keep" });
+        let original = malformed_settings.clone();
+        assert!(
+            apply_antigravity_cli_settings(&mut malformed_settings, "/opt/Lume/lume", true)
+                .is_err()
+        );
+        assert_eq!(malformed_settings, original);
+
+        let mut shared_ide_hooks = json!({
+            "existing-ide-hook": { "Stop": [{ "type": "command", "command": "notify-existing" }] },
+            "lume": {
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{ "type": "command", "command": "/old/lume hook antigravity:PreToolUse" }]
+                }],
+                "custom-event": [{ "hooks": [{ "type": "command", "command": "user-owned-hook" }] }]
+            }
+        });
+        apply_named_antigravity_hooks(
+            &mut shared_ide_hooks,
+            ANTIGRAVITY_LEGACY_HOOK_NAME,
+            "/opt/Lume/lume",
+            false,
+        )
+        .expect("remove só o hook legado do Lume");
+        assert!(!has_lume_handler(
+            &cli_settings.to_string(),
+            &IntegrationKind::Antigravity
+        ));
+        assert_eq!(
+            legacy_antigravity_hook_enabled(&shared_ide_hooks.to_string()),
+            None
+        );
+        assert_eq!(
+            shared_ide_hooks["existing-ide-hook"]["Stop"][0]["command"],
+            "notify-existing"
+        );
+        assert_eq!(
+            shared_ide_hooks["lume"]["custom-event"][0]["hooks"][0]["command"],
+            "user-owned-hook"
+        );
+    }
+
+    #[test]
+    fn antigravity_refresh_preserves_explicitly_disabled_hooks() {
+        let disabled_cli = json!({
+            "hooks": {
+                "lume-session-monitor": {
+                    "enabled": false,
+                    "PreToolUse": [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/opt/Lume/lume hook antigravity:PreToolUse"
+                        }]
+                    }]
+                }
+            }
+        })
+        .to_string();
+        let active_legacy = json!({
+            "lume": {
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/old/lume hook antigravity:PreToolUse"
+                    }]
+                }]
+            }
+        })
+        .to_string();
+        let disabled_legacy = json!({
+            "lume": {
+                "enabled": false,
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/old/lume hook antigravity:PreToolUse"
+                    }]
+                }]
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            antigravity_refresh_enabled(Some(&disabled_cli), Some(&active_legacy)),
+            Some(false),
+            "the CLI's explicit disabled setting wins during migration"
+        );
+        assert_eq!(
+            antigravity_refresh_enabled(None, Some(&disabled_legacy)),
+            Some(false),
+            "a disabled legacy hook must not become an active CLI hook"
+        );
+        assert_eq!(
+            antigravity_refresh_enabled(None, Some(&active_legacy)),
+            Some(false),
+            "migrating an old shared hook must not silently enable automatic tool approval"
+        );
+        let old_cli = json!({
+            "hooks": {
+                "lume-session-monitor": {
+                    "enabled": true,
+                    "PreToolUse": [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/old/lume hook antigravity:PreToolUse"
+                        }]
+                    }]
+                }
+            }
+        })
+        .to_string();
+        assert_eq!(
+            antigravity_refresh_enabled(Some(&old_cli), None),
+            Some(false),
+            "older CLI hooks also require renewed consent"
+        );
+        let explicitly_approved_cli = json!({
+            "hooks": {
+                "lume-session-monitor": {
+                    "enabled": true,
+                    "PreToolUse": [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/new/lume hook antigravity:PreToolUseAllow"
+                        }]
+                    }]
+                }
+            }
+        })
+        .to_string();
+        assert_eq!(
+            antigravity_refresh_enabled(Some(&explicitly_approved_cli), None),
+            Some(true)
+        );
+        assert!(!configured_content(
+            &disabled_cli,
+            &IntegrationKind::Antigravity,
+            "/opt/Lume/lume"
+        ));
+
+        let mut settings: Value = serde_json::from_str(&disabled_cli).expect("settings JSON");
+        apply_antigravity_cli_settings(&mut settings, "/opt/Lume/lume", true)
+            .expect("explicit connect enables Lume hook");
+        assert_eq!(settings["hooks"][ANTIGRAVITY_HOOK_NAME]["enabled"], true);
+        assert!(configured_content(
+            &settings.to_string(),
+            &IntegrationKind::Antigravity,
+            "/opt/Lume/lume"
+        ));
+    }
+
+    #[test]
+    fn antigravity_file_migration_preserves_user_settings_and_creates_backups() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-antigravity-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let cli_settings_path = root.join(".gemini/antigravity-cli/settings.json");
+        let legacy_hooks_path = root.join(".gemini/config/hooks.json");
+        fs::create_dir_all(cli_settings_path.parent().expect("CLI settings dir"))
+            .expect("create CLI settings dir");
+        fs::create_dir_all(legacy_hooks_path.parent().expect("legacy hooks dir"))
+            .expect("create legacy hooks dir");
+        let original_cli_settings = json!({
+            "model": "user-selected-model",
+            "hooks": {
+                "third-party": {
+                    "Stop": [{ "hooks": [{ "type": "command", "command": "user-hook" }] }]
+                },
+                "lume-session-monitor": {
+                    "PreToolUse": [{
+                        "matcher": "*",
+                        "hooks": [{ "type": "command", "command": "/old/lume hook antigravity:PreToolUse" }]
+                    }],
+                    "custom-event": [{ "hooks": [{ "type": "command", "command": "user-custom-hook" }] }]
+                }
+            }
+        });
+        let original_legacy_hooks = json!({
+            "third-party-ide": {
+                "Stop": [{ "hooks": [{ "type": "command", "command": "ide-hook" }] }]
+            },
+            "third-party-permissions": {
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{ "type": "command", "command": "user-permission-hook" }]
+                }]
+            },
+            "lume": {
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/old/lume hook antigravity:PreToolUse"
+                    }]
+                }],
+                "custom-event": [{ "hooks": [{ "type": "command", "command": "user-lume-hook" }] }]
+            }
+        });
+        fs::write(
+            &cli_settings_path,
+            serde_json::to_vec(&original_cli_settings).expect("CLI settings JSON"),
+        )
+        .expect("write CLI settings");
+        fs::write(
+            &legacy_hooks_path,
+            serde_json::to_vec(&original_legacy_hooks).expect("legacy hooks JSON"),
+        )
+        .expect("write legacy hooks");
+
+        configure_antigravity_at_paths(
+            &cli_settings_path,
+            &legacy_hooks_path,
+            "/opt/Lume/lume",
+            true,
+        )
+        .expect("migrate and configure hooks");
+
+        let migrated_cli: Value =
+            serde_json::from_slice(&fs::read(&cli_settings_path).expect("read CLI settings"))
+                .expect("migrated CLI JSON");
+        let migrated_shared: Value =
+            serde_json::from_slice(&fs::read(&legacy_hooks_path).expect("read legacy hooks"))
+                .expect("migrated shared hooks JSON");
+        assert_eq!(migrated_cli["model"], "user-selected-model");
+        assert_eq!(
+            migrated_cli["hooks"]["third-party"]["Stop"][0]["hooks"][0]["command"],
+            "user-hook"
+        );
+        assert_eq!(
+            migrated_cli["hooks"][ANTIGRAVITY_HOOK_NAME]["PreToolUse"][0]["matcher"],
+            "*"
+        );
+        assert!(
+            migrated_cli["hooks"][ANTIGRAVITY_HOOK_NAME]["PreToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .is_some_and(|command| command.contains(r#"{"decision":"allow"}"#))
+        );
+        assert_eq!(
+            migrated_cli["hooks"][ANTIGRAVITY_HOOK_NAME]["custom-event"][0]["hooks"][0]["command"],
+            "user-custom-hook"
+        );
+        assert_eq!(
+            migrated_cli["hooks"][ANTIGRAVITY_HOOK_NAME]["enabled"],
+            true
+        );
+        assert_eq!(
+            migrated_shared["third-party-ide"]["Stop"][0]["hooks"][0]["command"],
+            "ide-hook"
+        );
+        assert_eq!(
+            migrated_shared["third-party-permissions"]["PreToolUse"][0]["hooks"][0]["command"],
+            "user-permission-hook"
+        );
+        assert_eq!(
+            migrated_shared["lume"]["custom-event"][0]["hooks"][0]["command"],
+            "user-lume-hook"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &fs::read(cli_settings_path.with_extension("lume-backup.json"))
+                    .expect("CLI settings backup"),
+            )
+            .expect("CLI backup JSON"),
+            original_cli_settings
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &fs::read(legacy_hooks_path.with_extension("lume-backup.json"))
+                    .expect("shared hooks backup"),
+            )
+            .expect("shared backup JSON"),
+            original_legacy_hooks
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn antigravity_migration_removes_shared_hook_even_when_cli_settings_are_invalid() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-antigravity-invalid-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let cli_settings_path = root.join(".gemini/antigravity-cli/settings.json");
+        let legacy_hooks_path = root.join(".gemini/config/hooks.json");
+        fs::create_dir_all(cli_settings_path.parent().expect("CLI settings dir"))
+            .expect("create CLI settings dir");
+        fs::create_dir_all(legacy_hooks_path.parent().expect("legacy hooks dir"))
+            .expect("create legacy hooks dir");
+
+        let invalid_cli_settings = b"{invalid json";
+        let original_legacy_hooks = json!({
+            "third-party": {
+                "Stop": [{ "hooks": [{ "type": "command", "command": "user-hook" }] }]
+            },
+            "lume": {
+                "PreToolUse": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "/old/lume hook antigravity:PreToolUse"
+                    }]
+                }]
+            }
+        });
+        fs::write(&cli_settings_path, invalid_cli_settings).expect("write invalid settings");
+        fs::write(
+            &legacy_hooks_path,
+            serde_json::to_vec(&original_legacy_hooks).expect("legacy hooks JSON"),
+        )
+        .expect("write legacy hooks");
+
+        assert!(configure_antigravity_at_paths(
+            &cli_settings_path,
+            &legacy_hooks_path,
+            "/opt/Lume/lume",
+            true,
+        )
+        .is_err());
+
+        assert_eq!(
+            fs::read(&cli_settings_path).expect("invalid settings remain untouched"),
+            invalid_cli_settings
+        );
+        let migrated_shared: Value =
+            serde_json::from_slice(&fs::read(&legacy_hooks_path).expect("read legacy hooks"))
+                .expect("migrated shared hooks JSON");
+        assert!(migrated_shared.get("lume").is_none());
+        assert_eq!(
+            migrated_shared["third-party"]["Stop"][0]["hooks"][0]["command"],
+            "user-hook"
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &fs::read(legacy_hooks_path.with_extension("lume-backup.json"))
+                    .expect("shared hooks backup"),
+            )
+            .expect("shared backup JSON"),
+            original_legacy_hooks
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn antigravity_migration_does_not_overwrite_invalid_shared_hooks() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-antigravity-invalid-shared-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let cli_settings_path = root.join(".gemini/antigravity-cli/settings.json");
+        let legacy_hooks_path = root.join(".gemini/config/hooks.json");
+        fs::create_dir_all(cli_settings_path.parent().expect("CLI settings dir"))
+            .expect("create CLI settings dir");
+        fs::create_dir_all(legacy_hooks_path.parent().expect("legacy hooks dir"))
+            .expect("create legacy hooks dir");
+
+        let cli_settings = br#"{"model":"user-model"}"#;
+        let invalid_shared_hooks = b"{invalid json";
+        fs::write(&cli_settings_path, cli_settings).expect("write CLI settings");
+        fs::write(&legacy_hooks_path, invalid_shared_hooks).expect("write invalid shared hooks");
+
+        let error = configure_antigravity_at_paths(
+            &cli_settings_path,
+            &legacy_hooks_path,
+            "/opt/Lume/lume",
+            true,
+        )
+        .expect_err("invalid shared hooks need an explicit repair");
+
+        assert!(error.contains("JSON inválido"));
+        assert_eq!(
+            fs::read(&legacy_hooks_path).expect("invalid shared hooks remain untouched"),
+            invalid_shared_hooks
+        );
+        assert_eq!(
+            fs::read(&cli_settings_path).expect("CLI settings remain untouched"),
+            cli_settings
+        );
+        assert!(!legacy_hooks_path
+            .with_extension("lume-backup.json")
+            .exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn antigravity_status_warns_about_shared_hook_migration_without_changing_config() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-antigravity-shared-warning-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let legacy_hooks_path = root.join(".gemini/config/hooks.json");
+        fs::create_dir_all(legacy_hooks_path.parent().expect("legacy hooks dir"))
+            .expect("create legacy hooks dir");
+
+        let invalid_json = b"{invalid json";
+        fs::write(&legacy_hooks_path, invalid_json).expect("write invalid shared hooks");
+        let warning = antigravity_legacy_hook_warning_at_path(&legacy_hooks_path)
+            .expect("invalid shared hooks are reported");
+        assert!(warning.contains("JSON inválido"));
+        assert_eq!(
+            fs::read(&legacy_hooks_path).expect("shared hooks remain unchanged"),
+            invalid_json
+        );
+
+        fs::write(
+            &legacy_hooks_path,
+            serde_json::to_vec(&json!({
+                "lume": {
+                    "PreToolUse": [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/old/lume hook antigravity:PreToolUse"
+                        }]
+                    }]
+                }
+            }))
+            .expect("legacy hooks JSON"),
+        )
+        .expect("write legacy hooks");
+        assert!(antigravity_legacy_hook_warning_at_path(&legacy_hooks_path)
+            .expect("active shared hook is reported")
+            .contains("ainda está ativo"));
+
+        fs::write(
+            &legacy_hooks_path,
+            serde_json::to_vec(&json!({
+                "lume": {
+                    "enabled": false,
+                    "PreToolUse": [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/old/lume hook antigravity:PreToolUse"
+                        }]
+                    }]
+                }
+            }))
+            .expect("disabled legacy hooks JSON"),
+        )
+        .expect("write disabled legacy hooks");
+        assert!(antigravity_legacy_hook_warning_at_path(&legacy_hooks_path).is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disabled_legacy_antigravity_hook_is_removed_without_enabling_cli_hook() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-antigravity-disabled-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let cli_settings_path = root.join(".gemini/antigravity-cli/settings.json");
+        let legacy_hooks_path = root.join(".gemini/config/hooks.json");
+        fs::create_dir_all(legacy_hooks_path.parent().expect("legacy hooks dir"))
+            .expect("create legacy hooks dir");
+        fs::write(
+            &legacy_hooks_path,
+            serde_json::to_vec(&json!({
+                "lume": {
+                    "enabled": false,
+                    "PreToolUse": [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "/old/lume hook antigravity:PreToolUse"
+                        }]
+                    }]
+                }
+            }))
+            .expect("legacy hooks JSON"),
+        )
+        .expect("write legacy hooks");
+
+        configure_antigravity_at_paths(
+            &cli_settings_path,
+            &legacy_hooks_path,
+            "/opt/Lume/lume",
+            false,
+        )
+        .expect("migrate disabled hook");
+
+        assert!(!cli_settings_path.exists());
+        let migrated_shared: Value =
+            serde_json::from_slice(&fs::read(&legacy_hooks_path).expect("read migrated hooks"))
+                .expect("migrated shared hooks JSON");
+        assert_eq!(migrated_shared["lume"]["enabled"], false);
+        assert!(migrated_shared["lume"].get("PreToolUse").is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_hook_commands_fail_open_when_lume_is_missing_or_returns_no_output() {
+        for (provider, expected) in [
+            ("antigravity:PreToolUseAllow", r#"{"decision":"allow"}"#),
+            ("antigravity:PostToolUse", "{}"),
+            ("antigravity:PreInvocation", "{}"),
+            ("antigravity:PostInvocation", "{}"),
+            ("antigravity:Stop", r#"{"decision":"allow"}"#),
+        ] {
+            let command = posix_fail_open_hook_command(
+                "/definitely/missing/Lume App/lume",
+                provider,
+                antigravity_fallback_output(provider),
+            );
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+                .expect("executa fallback shell");
+
+            assert!(output.status.success(), "{provider}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                expected,
+                "{provider}"
+            );
+
+            let command = posix_fail_open_hook_command(
+                "/usr/bin/true",
+                provider,
+                antigravity_fallback_output(provider),
+            );
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .output()
+                .expect("executa fallback para saída vazia");
+
+            assert!(output.status.success(), "{provider}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                expected,
+                "{provider} sem stdout"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_hook_command_is_a_fail_open_powershell_script() {
+        let command = powershell_fail_open_hook_command(
+            r"C:\Program Files\Lume\lume.exe",
+            "antigravity:PreToolUseAllow",
+            antigravity_fallback_output("antigravity:PreToolUseAllow"),
+        );
+        let script = decode_powershell_command(&command).expect("script codificado");
+
+        assert!(command.starts_with("powershell.exe -NoLogo -NoProfile -NonInteractive"));
+        assert!(script.contains("C:\\Program Files\\Lume\\lume.exe"));
+        assert!(script.contains("antigravity:PreToolUseAllow"));
+        assert!(script.contains(r#"{"decision":"allow"}"#));
+        assert!(script.contains("$output = @("));
+        assert!(script.contains("$payload.Length -gt 0"));
+        assert!(script.contains("catch"));
+        assert!(script.ends_with("exit 0"));
+        assert!(command_mentions_lume_hook(
+            &command,
+            "antigravity:PreToolUseAllow"
+        ));
+        assert!(command_contains_executable_marker(
+            &command,
+            r"C:\Program Files\Lume\lume.exe",
+            "antigravity:"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_command_falls_back_when_lume_exits_successfully_without_stdout() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-hook-empty-output-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create hook test directory");
+        let executable = root.join("Lume Hook Stub.cmd");
+        fs::write(&executable, "@echo off\r\nexit /b 0\r\n").expect("write hook stub");
+        let command = powershell_fail_open_hook_command(
+            &executable.to_string_lossy(),
+            "antigravity:PreToolUseAllow",
+            antigravity_fallback_output("antigravity:PreToolUseAllow"),
+        );
+        let script = decode_powershell_command(&command).expect("decode PowerShell script");
+        let output = Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .arg(script)
+            .output()
+            .expect("run PowerShell hook wrapper");
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            r#"{"decision":"allow"}"#
+        );
+        fs::remove_dir_all(&root).expect("remove hook test directory");
     }
 
     #[test]

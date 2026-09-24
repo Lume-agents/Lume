@@ -179,6 +179,16 @@ export interface ReviewNote {
   updatedAt: number;
 }
 
+export interface ReviewDecision {
+  id: string;
+  nativeSessionId: string;
+  resultId: string;
+  decision: "approved" | "changes_requested";
+  note?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface SessionNote {
   id: string;
   nativeSessionId: string;

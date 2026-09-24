@@ -6,7 +6,7 @@
   import { openPath } from "@tauri-apps/plugin-opener";
   import type { SessionActivity, SessionResult } from "$lib/domain";
   import type { PromptAttachmentInput } from "$lib/domain";
-  import type { HubSession } from "$lib/hubProtocol";
+  import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
   import StreamedMessage from "$lib/StreamedMessage.svelte";
@@ -70,6 +70,7 @@
 
   let {
     session,
+    externalWriterConflict = null,
     language = "en",
     closable = false,
     focused = false,
@@ -80,8 +81,11 @@
     onOpenReview,
     onFork,
     onToggleMaximize,
+    onDismissExternalWriterConflict,
+    onResolveExternalWriterConflict,
   } = $props<{
     session: HubSession;
+    externalWriterConflict?: ExternalWriterConflict | null;
     language?: Language;
     closable?: boolean;
     focused?: boolean;
@@ -92,6 +96,8 @@
     onOpenReview?: (path: string) => void;
     onFork?: (threadId: string) => void | Promise<void>;
     onToggleMaximize?: () => void;
+    onDismissExternalWriterConflict?: (conflict: ExternalWriterConflict) => void;
+    onResolveExternalWriterConflict?: (action: "keep_lume" | "open_branch") => void | Promise<void>;
   }>();
 
   const subagents = $derived(subagentsForSession(session));
@@ -130,6 +136,9 @@
   let takingControl = $state(false);
   let takeoverConfirm = $state(false);
   let takeoverAcceptButton = $state<HTMLButtonElement | null>(null);
+  let writerConflictBusy = $state<"keep_lume" | "open_branch" | null>(null);
+  let writerConflictError = $state("");
+  let writerConflictPrimaryButton = $state<HTMLButtonElement | null>(null);
   let sendError = $state("");
   let promptAttachments = $state<PromptAttachmentInput[]>([]);
   let paneElement = $state<HTMLElement | null>(null);
@@ -231,7 +240,8 @@
   });
   $effect(() => {
     const matchedIds = outgoingPrompts
-      .filter((outgoing) => outgoing.accepted && outgoing.flightComplete && outgoingMatches.has(outgoing.id))
+      .filter((outgoing) => outgoing.flightComplete && outgoingMatches.has(outgoing.id)
+        && (outgoing.accepted || session.source === "web"))
       .map((outgoing) => outgoing.id);
     if (!matchedIds.length) return;
     queueMicrotask(() => {
@@ -680,6 +690,12 @@
 
   function composerPlaceholder() {
     if (!session.capabilities.canPrompt) {
+      if (session.capabilities.promptUnavailableReason === "monitoring_only") {
+        return tr(
+          "Legacy Gemini CLI is monitoring-only in Lume",
+          "A CLI legada do Gemini é somente monitorada pelo Lume",
+        );
+      }
       if (session.capabilities.canTakeControl) {
         return tr(
           "Write a prompt to take control of this CLI…",
@@ -819,7 +835,7 @@
     }
     try {
       await submitPrompt(session.id, value, attachments, delivery);
-      if (outgoing) updateOutgoingPrompt(outgoing.id, { accepted: true });
+      if (outgoing && session.source !== "web") updateOutgoingPrompt(outgoing.id, { accepted: true });
       else {
         prompt = "";
         promptAttachments = [];
@@ -1033,6 +1049,29 @@
       takingControl = false;
     }
   }
+
+  async function resolveWriterConflict(action: "keep_lume" | "open_branch") {
+    if (!externalWriterConflict || writerConflictBusy) return;
+    writerConflictBusy = action;
+    writerConflictError = "";
+    try {
+      await onResolveExternalWriterConflict?.(action);
+    } catch (reason) {
+      const detail = String(reason).replace(/^Error:\s*/, "");
+      writerConflictError = detail;
+      if (!externalWriterConflict) sendError = detail;
+    } finally {
+      writerConflictBusy = null;
+    }
+  }
+
+  $effect(() => {
+    if (!externalWriterConflict) {
+      writerConflictError = "";
+      return;
+    }
+    void tick().then(() => writerConflictPrimaryButton?.focus());
+  });
 
   function handleComposerKeydown(event: KeyboardEvent) {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
@@ -1624,7 +1663,7 @@
     {/each}
     {#each outgoingPrompts as outgoing (outgoing.id)}
       {#if !outgoingMatches.has(outgoing.id) || !outgoing.flightComplete}
-        <div class:in-flight={!outgoing.flightComplete} class="conversation-row user-row outgoing-row" data-outgoing-id={outgoing.id} aria-hidden={!outgoing.flightComplete}>
+        <div class:in-flight={!outgoing.flightComplete} class:delivery-pending={session.source === "web" && !outgoingMatches.has(outgoing.id)} class="conversation-row user-row outgoing-row" data-outgoing-id={outgoing.id} aria-label={session.source === "web" && !outgoingMatches.has(outgoing.id) ? tr("Waiting for browser confirmation", "Aguardando confirmação do navegador") : undefined} aria-hidden={!outgoing.flightComplete}>
           <span class="time-gutter"><time>{time(outgoing.createdAt)}</time></span>
           <div class="conversation-entry"><section class="message user-message"><CollapsibleUserMessage text={outgoing.text} {language} /></section></div>
         </div>
@@ -1731,7 +1770,37 @@
     </aside>
   {/if}
 
-  {#if takeoverConfirm}
+  {#if externalWriterConflict}
+    <div class="writer-conflict-backdrop" role="presentation" onclick={(event) => {
+      if (event.currentTarget === event.target && !writerConflictBusy) onDismissExternalWriterConflict?.(externalWriterConflict);
+    }}>
+      <dialog open class="writer-conflict-dialog" aria-modal="true" aria-labelledby={`writer-conflict-${session.id}`} aria-describedby={`writer-conflict-copy-${session.id}`} oncancel={(event) => {
+        event.preventDefault();
+        if (!writerConflictBusy) onDismissExternalWriterConflict?.(externalWriterConflict);
+      }}>
+        <span class="writer-conflict-mark" aria-hidden="true"><LumeIcon name="warning" size={17} /></span>
+        <div class="writer-conflict-copy">
+          <strong id={`writer-conflict-${session.id}`}>{tr("This conversation is open in Lume", "Esta conversa já está aberta no Lume")}</strong>
+          <p id={`writer-conflict-copy-${session.id}`}>{tr(
+            "An external Codex CLI tried to resume this same thread. Only one app can write to it at a time.",
+            "Uma CLI externa do Codex tentou retomar esta mesma thread. Só um aplicativo pode gravar nela por vez.",
+          )}</p>
+          <p>{tr(
+            "Keep it here to close only that detected CLI, or open a separate branch in a Lume terminal. The original conversation stays here.",
+            "Mantenha-a aqui para fechar somente essa CLI detectada, ou abra uma ramificação em outro terminal do Lume. A conversa original continua aqui.",
+          )}</p>
+        </div>
+        {#if writerConflictError}
+          <p class="writer-conflict-error" role="alert">{writerConflictError}</p>
+        {/if}
+        <footer>
+          <button type="button" disabled={Boolean(writerConflictBusy)} onclick={() => onDismissExternalWriterConflict?.(externalWriterConflict)}>{tr("Not now", "Agora não")}</button>
+          <button type="button" disabled={Boolean(writerConflictBusy)} onclick={() => void resolveWriterConflict("open_branch")}>{writerConflictBusy === "open_branch" ? tr("Opening branch…", "Abrindo ramificação…") : tr("Open branch in terminal", "Abrir ramificação no terminal")}</button>
+          <button bind:this={writerConflictPrimaryButton} class="writer-conflict-primary" type="button" disabled={Boolean(writerConflictBusy)} onclick={() => void resolveWriterConflict("keep_lume")}>{writerConflictBusy === "keep_lume" ? tr("Keeping in Lume…", "Mantendo no Lume…") : tr("Continue in Lume", "Continuar no Lume")}</button>
+        </footer>
+      </dialog>
+    </div>
+  {:else if takeoverConfirm}
     <div class="takeover-backdrop" role="presentation" onclick={(event) => {
       if (event.currentTarget === event.target && !takingControl) takeoverConfirm = false;
     }}>
@@ -1998,6 +2067,7 @@
   .message { width: min(88%, 720px); min-width: 0; color: var(--workspace-text); font-size: var(--workspace-chat-font-size); }
   .user-message { --message-collapse-surface: var(--workspace-user); --user-message-font: inherit; --user-message-muted: var(--workspace-muted); --user-message-accent: var(--workspace-accent); width: fit-content; max-width: min(88%, 720px); align-self: flex-end; padding: 9px 12px; border: 1px solid var(--workspace-user-line); border-radius: 14px 14px 4px 14px; background: var(--workspace-user); }
   .outgoing-row.in-flight .user-message { visibility: hidden; }
+  .outgoing-row.delivery-pending .user-message { border-style: dashed; opacity: .76; }
   .user-row.outgoing-replacement { display: none; }
   .user-row.targeted .user-message { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
   .agent-message { align-self: flex-start; padding: 3px 0 7px; }
@@ -2125,6 +2195,18 @@
   .takeover-dialog footer button:hover:not(:disabled) { color: var(--workspace-strong); background: var(--workspace-subtle); }
   .takeover-dialog footer .takeover-primary { border-color: transparent; color: #f5fbf7; background: var(--workspace-accent); }
   .takeover-dialog footer button:disabled { opacity: .55; cursor: default; }
+  .writer-conflict-backdrop { position: absolute; z-index: 12; inset: 0; padding: clamp(12px, 3cqw, 24px); display: grid; place-items: center; background: color-mix(in srgb, var(--workspace-pane) 66%, transparent); backdrop-filter: blur(4px); animation: takeover-fade 150ms ease-out both; }
+  .writer-conflict-dialog { position: relative; inset: auto; width: min(420px, 100%); max-height: min(92%, 440px); margin: 0; padding: 19px; overflow: auto; display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 22%, var(--workspace-line)); border-radius: 16px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 22px 72px rgba(8, 18, 13, .26); animation: takeover-arrive 240ms cubic-bezier(.16, 1, .3, 1) both; }
+  .writer-conflict-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-accent-soft); }
+  .writer-conflict-copy { min-width: 0; }
+  .writer-conflict-copy strong { display: block; padding-top: 2px; color: var(--workspace-strong); font-size: 12px; line-height: 1.35; }
+  .writer-conflict-copy p { margin: 8px 0 0; color: var(--workspace-muted); font-size: 10px; line-height: 1.55; }
+  .writer-conflict-error { grid-column: 1 / -1; margin: 0; padding: 8px 10px; border-radius: 8px; color: var(--workspace-danger, #b96862); background: color-mix(in srgb, var(--workspace-danger, #b96862) 9%, transparent); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+  .writer-conflict-dialog footer { grid-column: 1 / -1; margin-top: 5px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+  .writer-conflict-dialog footer button { min-height: 34px; padding: 0 11px; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 720; cursor: pointer; transition: color 130ms ease, background 130ms ease, border-color 130ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
+  .writer-conflict-dialog footer button:hover:not(:disabled) { color: var(--workspace-strong); background: var(--workspace-subtle); transform: translateY(-1px); }
+  .writer-conflict-dialog footer .writer-conflict-primary { border-color: transparent; color: #f5fbf7; background: var(--workspace-accent); }
+  .writer-conflict-dialog footer button:disabled { opacity: .55; cursor: default; }
   .composer { position: relative; z-index: 2; min-width: 0; flex: 0 0 auto; padding: 12px clamp(14px, 4cqw, 28px) 15px; border-top: 1px solid var(--workspace-line); background: var(--workspace-pane); }
   .composer.fresh { position: absolute; top: 50%; right: 0; left: 0; z-index: 3; border-top: 0; background: transparent; transform: translateY(-50%); }
   .composer-welcome { max-width: 760px; margin: 0 auto 24px; display: flex; align-items: center; justify-content: center; gap: 13px; }
@@ -2247,6 +2329,6 @@
     .conversation { --chat-edge-gutter: 28px; }.message { width: 94%; }.user-message { width: fit-content; max-width: 94%; }.composer { padding-right: 10px; padding-left: 10px; }
   }
   @media (max-height: 640px) { .conversation { padding-top: 17px; padding-bottom: 18px; }.pane-header { min-height: 56px; }.composer { padding-top: 9px; padding-bottom: 10px; } }
-  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .writer-conflict-backdrop, .writer-conflict-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .writer-conflict-dialog footer button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
   @media (prefers-reduced-motion: reduce) { .composer-tools .tool-icon :global(.workspace-chat-icon), .effort-field.max .effort-thumb, .effort-field.ultra .effort-track::before, .effort-field.ultra .effort-progress { animation: none; }.effort-thumb, .effort-thumb::before, .effort-progress { transition: none; } }
 </style>

@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -8,13 +9,14 @@ use std::{
 };
 
 use crate::{
-    discovery::DiscoveredProcess,
+    discovery::{DiscoveredProcess, ExternalWriterAttempt},
     domain::{
         AccessMode, AgentKind, AgentRateLimit, AgentSession, HistoryEntry, HookEvent,
         HookEventKind, PairedDevice, PermissionAction, PermissionProfile, PermissionRequest,
-        Preferences, PromptAttachment, PromptTokenUsage, QuestionAnswer, ResultNote, ReviewNote,
-        SessionActivity, SessionControlOrigin, SessionModelOverride, SessionNote, SessionResult,
-        SessionSource, SessionStatus, WorkflowHistoryRecord,
+        Preferences, PromptAttachment, PromptTokenUsage, QuestionAnswer, ResultNote,
+        ReviewDecision, ReviewDecisionKind, ReviewNote, SessionActivity, SessionControlOrigin,
+        SessionModelOverride, SessionNote, SessionResult, SessionSource, SessionStatus,
+        WorkflowHistoryRecord,
     },
     integrations::{self, IntegrationKind},
     store::Store,
@@ -33,6 +35,14 @@ struct WorkspaceSnapshot {
     files: HashMap<String, u64>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalWriterConflict {
+    pub session_id: String,
+    pub native_session_id: String,
+    pub process_id: u32,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PendingCodexModelUpdate {
     pub settings: SessionModelOverride,
@@ -48,6 +58,7 @@ pub struct AppState {
     question_answers: Arc<(Mutex<HashMap<String, Vec<QuestionAnswer>>>, Condvar)>,
     missing_process_scans: Arc<Mutex<HashMap<String, u8>>>,
     sessions_in_takeover: Arc<Mutex<HashSet<String>>>,
+    external_writer_attempts: Arc<Mutex<HashSet<(String, u32, String)>>>,
     workspace_snapshots: Arc<Mutex<HashMap<String, WorkspaceSnapshot>>>,
     agent_rate_limits: Arc<Mutex<HashMap<AgentKind, Vec<AgentRateLimit>>>>,
     session_aliases: Arc<Mutex<HashMap<String, String>>>,
@@ -114,6 +125,7 @@ impl AppState {
             question_answers: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
             missing_process_scans: Arc::new(Mutex::new(HashMap::new())),
             sessions_in_takeover: Arc::new(Mutex::new(HashSet::new())),
+            external_writer_attempts: Arc::new(Mutex::new(HashSet::new())),
             workspace_snapshots: Arc::new(Mutex::new(HashMap::new())),
             agent_rate_limits: Arc::new(Mutex::new(HashMap::new())),
             session_aliases: Arc::new(Mutex::new(preferences.session_aliases)),
@@ -261,6 +273,150 @@ impl AppState {
         self.attach_archived_conversations(&mut sessions)?;
         self.attach_session_plans(&mut sessions)?;
         self.finalize_sessions(sessions)
+    }
+
+    pub fn observe_external_writer_attempts(
+        &self,
+        attempts: &[ExternalWriterAttempt],
+        live_pids: &HashSet<u32>,
+    ) -> Result<Vec<ExternalWriterConflict>, String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Could not inspect Lume-controlled sessions".to_string())?
+            .clone();
+        let mut active = HashSet::new();
+        for attempt in attempts {
+            for session in sessions.iter().filter(|session| {
+                session.agent == AgentKind::Codex
+                    && session.control_origin == SessionControlOrigin::Lume
+                    && session.native_session_id.as_deref()
+                        == Some(attempt.native_session_id.as_str())
+            }) {
+                active.insert((
+                    session.id.clone(),
+                    attempt.process_id,
+                    attempt.native_session_id.clone(),
+                ));
+            }
+        }
+
+        let mut reported = self
+            .external_writer_attempts
+            .lock()
+            .map_err(|_| "Could not track external Codex attempts".to_string())?;
+        reported.retain(|key| live_pids.contains(&key.1) && active.contains(key));
+        let conflicts = active
+            .iter()
+            .filter(|key| !reported.contains(*key))
+            .map(
+                |(session_id, process_id, native_session_id)| ExternalWriterConflict {
+                    session_id: session_id.clone(),
+                    native_session_id: native_session_id.clone(),
+                    process_id: *process_id,
+                },
+            )
+            .collect();
+        reported.extend(active);
+        Ok(conflicts)
+    }
+
+    pub fn validate_external_writer_conflict(
+        &self,
+        session_id: &str,
+        process_id: u32,
+        native_session_id: &str,
+    ) -> Result<(), String> {
+        let session = self
+            .sessions
+            .lock()
+            .map_err(|_| "Could not verify the Codex session".to_string())?
+            .iter()
+            .find(|session| session.id == session_id)
+            .cloned()
+            .ok_or_else(|| "The Lume-controlled conversation is no longer available".to_string())?;
+        if session.agent != AgentKind::Codex
+            || session.control_origin != SessionControlOrigin::Lume
+            || session.native_session_id.as_deref() != Some(native_session_id)
+        {
+            return Err("This conversation is no longer controlled by Lume".into());
+        }
+        let attempts = self
+            .external_writer_attempts
+            .lock()
+            .map_err(|_| "Could not verify the external CLI".to_string())?;
+        if attempts.contains(&(
+            session_id.to_string(),
+            process_id,
+            native_session_id.to_string(),
+        )) {
+            Ok(())
+        } else {
+            Err("The detected external CLI is no longer attached to this conversation".into())
+        }
+    }
+
+    pub fn list_external_writer_conflicts(&self) -> Result<Vec<ExternalWriterConflict>, String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Could not inspect Lume-controlled sessions".to_string())?
+            .clone();
+        let attempts = self
+            .external_writer_attempts
+            .lock()
+            .map_err(|_| "Could not inspect external Codex attempts".to_string())?;
+        Ok(attempts
+            .iter()
+            .filter_map(|(session_id, process_id, native_session_id)| {
+                let still_controlled = sessions.iter().any(|session| {
+                    session.id == *session_id
+                        && session.agent == AgentKind::Codex
+                        && session.control_origin == SessionControlOrigin::Lume
+                        && session.native_session_id.as_deref() == Some(native_session_id)
+                });
+                still_controlled.then(|| ExternalWriterConflict {
+                    session_id: session_id.clone(),
+                    native_session_id: native_session_id.clone(),
+                    process_id: *process_id,
+                })
+            })
+            .collect())
+    }
+
+    pub fn clear_external_writer_conflict(
+        &self,
+        session_id: &str,
+        process_id: u32,
+        native_session_id: &str,
+    ) -> Result<(), String> {
+        self.external_writer_attempts
+            .lock()
+            .map_err(|_| "Could not update external Codex attempts".to_string())?
+            .remove(&(
+                session_id.to_string(),
+                process_id,
+                native_session_id.to_string(),
+            ));
+        Ok(())
+    }
+
+    fn has_registered_external_writer_attempt(
+        &self,
+        session_id: &str,
+        process_id: u32,
+        native_session_id: &str,
+    ) -> Result<bool, String> {
+        self.external_writer_attempts
+            .lock()
+            .map_err(|_| "Could not verify the external Codex process".to_string())
+            .map(|attempts| {
+                attempts.contains(&(
+                    session_id.to_string(),
+                    process_id,
+                    native_session_id.to_string(),
+                ))
+            })
     }
 
     pub fn codex_subagent_thread(
@@ -1311,6 +1467,59 @@ impl AppState {
             .lock()
             .map_err(|_| "Could not delete the review note".to_string())?
             .delete_review_note(&native_session_id, result_id)
+    }
+
+    pub fn review_decisions(&self, session_id: &str) -> Result<Vec<ReviewDecision>, String> {
+        let native_session_id = self.session_native_id(session_id)?;
+        self.store
+            .lock()
+            .map_err(|_| "Could not access review decisions".to_string())?
+            .review_decisions(&native_session_id)
+    }
+
+    pub fn set_review_decision(
+        &self,
+        session_id: &str,
+        result_id: &str,
+        decision: ReviewDecisionKind,
+        note: Option<&str>,
+    ) -> Result<ReviewDecision, String> {
+        let session = self.session_with_history(session_id)?;
+        if !session.results.iter().any(|result| result.id == result_id) {
+            return Err("This result does not belong to the selected session".into());
+        }
+        let native_session_id = session
+            .native_session_id
+            .ok_or_else(|| "This session does not have a persistent conversation id".to_string())?;
+        let existing = self
+            .store
+            .lock()
+            .map_err(|_| "Could not access review decisions".to_string())?
+            .review_decisions(&native_session_id)?
+            .into_iter()
+            .find(|item| item.result_id == result_id);
+        let now = now_millis();
+        let note = note
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(16 * 1024).collect());
+        let value = ReviewDecision {
+            id: existing
+                .as_ref()
+                .map(|item| item.id.clone())
+                .unwrap_or_else(|| format!("review-decision:{native_session_id}:{result_id}")),
+            native_session_id,
+            result_id: result_id.to_string(),
+            decision,
+            note,
+            created_at: existing.as_ref().map(|item| item.created_at).unwrap_or(now),
+            updated_at: now,
+        };
+        self.store
+            .lock()
+            .map_err(|_| "Could not save the review decision".to_string())?
+            .save_review_decision(&value)?;
+        Ok(value)
     }
 
     pub fn session_notes(&self, session_id: &str) -> Result<Vec<SessionNote>, String> {
@@ -2456,6 +2665,30 @@ impl AppState {
                     .iter_mut()
                     .filter(|session| exact_native_chat_ids.contains(&session.id))
                 {
+                    let is_conflicting_external_writer = if session.control_origin
+                        == SessionControlOrigin::Lume
+                        && session.agent == AgentKind::Codex
+                    {
+                        session
+                            .native_session_id
+                            .as_deref()
+                            .map(|native_id| {
+                                self.has_registered_external_writer_attempt(
+                                    &session.id,
+                                    process.process_id,
+                                    native_id,
+                                )
+                            })
+                            .transpose()?
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if is_conflicting_external_writer {
+                        // Keep the process attempting a second resume from taking
+                        // over the live Lume session's identity in the snapshot.
+                        continue;
+                    }
                     let mut refreshed = false;
                     if let Some(identity) = recovered_identities.get(&process.process_id) {
                         refreshed |= apply_recovered_identity(session, identity);
@@ -2528,7 +2761,11 @@ impl AppState {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let contextual_chat_ids = if exact_contextual_chat_ids.is_empty() {
+            let ambiguous_antigravity_context =
+                process.agent == AgentKind::Antigravity && exact_contextual_chat_ids.len() > 1;
+            let contextual_chat_ids = if ambiguous_antigravity_context {
+                Vec::new()
+            } else if exact_contextual_chat_ids.is_empty() {
                 let fallback = sessions
                     .iter()
                     .filter(|session| !is_provisional_process(session))
@@ -2657,6 +2894,13 @@ impl AppState {
                 session.updated_at = now;
                 snapshots.push(session.clone());
                 changed = true;
+                continue;
+            }
+            if ambiguous_antigravity_context {
+                // A workspace can have several Antigravity conversations, but
+                // the CLI process may not expose which one it has selected.
+                // Keep their identities separate instead of binding one PID to
+                // every chat or creating a misleading duplicate session.
                 continue;
             }
             let project = process
@@ -4522,6 +4766,71 @@ mod tests {
     }
 
     #[test]
+    fn external_resume_conflict_is_emitted_once_and_does_not_replace_lume_identity() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        let mut event = started_event("codex:controlled", 4242);
+        event.agent = AgentKind::Codex;
+        event.native_session_id = Some("thread-controlled".into());
+        state.ingest(event).expect("sessão");
+        state
+            .mark_session_lume_controlled("codex:controlled", SessionSource::Desktop, None)
+            .expect("controle do Lume");
+
+        let attempt = ExternalWriterAttempt {
+            process_id: 4343,
+            native_session_id: "thread-controlled".into(),
+        };
+        let live_pids = HashSet::from([4343]);
+        let conflicts = state
+            .observe_external_writer_attempts(std::slice::from_ref(&attempt), &live_pids)
+            .expect("detectar conflito");
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].session_id, "codex:controlled");
+        assert_eq!(conflicts[0].process_id, 4343);
+        assert_eq!(
+            state
+                .list_external_writer_conflicts()
+                .expect("conflitos ativos"),
+            conflicts
+        );
+        assert!(state
+            .observe_external_writer_attempts(std::slice::from_ref(&attempt), &live_pids)
+            .expect("deduplicar conflito")
+            .is_empty());
+        state
+            .validate_external_writer_conflict("codex:controlled", 4343, "thread-controlled")
+            .expect("validar processo detectado");
+
+        let process = DiscoveredProcess {
+            agent: AgentKind::Codex,
+            agent_label: "Codex".into(),
+            process_id: 4343,
+            started_at: 0,
+            native_session_ids: vec!["thread-controlled".into()],
+            working_directory: Some("/work/lume".into()),
+            source: SessionSource::Cli,
+        };
+        state
+            .reconcile_process_snapshot(vec![process], live_pids)
+            .expect("reconciliar processo externo");
+        let session = state.sessions().expect("sessão continua no Lume").remove(0);
+        assert_eq!(session.control_origin, SessionControlOrigin::Lume);
+        assert_eq!(session.source, SessionSource::Desktop);
+        assert_eq!(session.process_id, None);
+
+        state
+            .observe_external_writer_attempts(&[], &HashSet::new())
+            .expect("limpar processo encerrado");
+        assert!(state
+            .list_external_writer_conflicts()
+            .expect("nenhum conflito ativo")
+            .is_empty());
+        assert!(state
+            .validate_external_writer_conflict("codex:controlled", 4343, "thread-controlled",)
+            .is_err());
+    }
+
+    #[test]
     fn transfer_marks_every_alias_of_the_same_native_thread_as_controlled() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");
         let mut event = started_event("codex:external", 4242);
@@ -5977,6 +6286,80 @@ mod tests {
             .iter()
             .any(|session| session.process_id == Some(4343)));
     }
+
+    #[test]
+    fn ambiguous_antigravity_process_is_not_bound_to_multiple_chats_in_one_workspace() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        for chat in ["conversation-1", "conversation-2"] {
+            let mut event = started_event(&format!("antigravity:{chat}"), 0);
+            event.agent = AgentKind::Antigravity;
+            event.agent_label = Some("Antigravity CLI".into());
+            event.process_id = None;
+            event.native_session_id = Some(chat.into());
+            state.ingest(event).expect("conversa detectada pelo hook");
+        }
+
+        state
+            .reconcile_processes(vec![DiscoveredProcess {
+                agent: AgentKind::Antigravity,
+                agent_label: "Antigravity CLI".into(),
+                process_id: 4344,
+                started_at: 0,
+                native_session_ids: Vec::new(),
+                working_directory: Some("/work/lume".into()),
+                source: SessionSource::Cli,
+            }])
+            .expect("processo sem ID de conversa explícito");
+
+        let sessions = state.sessions().expect("sessões");
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|session| {
+            session.agent == AgentKind::Antigravity && session.process_id.is_none()
+        }));
+    }
+
+    #[test]
+    fn explicit_antigravity_conversation_id_binds_only_its_matching_chat() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        for chat in ["conversation-1", "conversation-2"] {
+            let mut event = started_event(&format!("antigravity:{chat}"), 0);
+            event.agent = AgentKind::Antigravity;
+            event.agent_label = Some("Antigravity CLI".into());
+            event.process_id = None;
+            event.native_session_id = Some(chat.into());
+            state.ingest(event).expect("conversa detectada pelo hook");
+        }
+
+        state
+            .reconcile_processes(vec![DiscoveredProcess {
+                agent: AgentKind::Antigravity,
+                agent_label: "Antigravity CLI".into(),
+                process_id: 4344,
+                started_at: 0,
+                native_session_ids: vec!["conversation-2".into()],
+                working_directory: Some("/work/lume".into()),
+                source: SessionSource::Cli,
+            }])
+            .expect("processo com --conversation");
+
+        let sessions = state.sessions().expect("sessões");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|session| session.native_session_id.as_deref() == Some("conversation-2"))
+                .and_then(|session| session.process_id),
+            Some(4344)
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|session| session.native_session_id.as_deref() == Some("conversation-1"))
+                .and_then(|session| session.process_id),
+            None
+        );
+    }
+
     #[test]
     fn vscode_chat_hides_its_host_process_without_hiding_other_chats() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");

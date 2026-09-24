@@ -26,7 +26,7 @@
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, Preferences, ResumableSession } from "$lib/domain";
-  import type { HubSession } from "$lib/hubProtocol";
+  import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
   import {
@@ -40,6 +40,7 @@
     installExternalPlugin,
     loadExternalPlugins,
     loadHubSnapshot,
+    listExternalWriterConflicts,
     loadIntegrationStatuses,
     loadResumableSessions,
     loadMobileGatewayStatus,
@@ -58,6 +59,8 @@
     setNativeFileDialogActive,
     setPairedDeviceScopes,
     takeControlSession,
+    cancelExternalWriterAttempt,
+    forkCodexThread,
     terminateSession,
   } from "$lib/lume";
 
@@ -99,6 +102,7 @@
   };
 
   let sessions = $state<HubSession[]>([]);
+  let externalWriterConflicts = $state<Record<string, ExternalWriterConflict>>({});
   let preferences = $state<Preferences>(structuredClone(defaultPreferences));
   let language = $state<Language>("en");
   let systemDark = $state(false);
@@ -111,6 +115,7 @@
   let integrationDiagnostics = $state<Partial<Record<IntegrationStatus["kind"], IntegrationDiagnostic>>>({});
   let configuringIntegration = $state<IntegrationStatus["kind"] | null>(null);
   let diagnosingIntegration = $state<IntegrationStatus["kind"] | null>(null);
+  let antigravityHookConfirmation = $state(false);
   let vscodeStatus = $state<CompanionStatus>({ installed: false, configured: false, detail: "" });
   let configuringVscode = $state(false);
   let externalPlugins = $state<ExternalAgentPlugin[]>([]);
@@ -867,6 +872,50 @@
     }
   }
 
+  function dismissExternalWriterConflict(conflict: ExternalWriterConflict) {
+    if (externalWriterConflicts[conflict.sessionId]?.processId !== conflict.processId) return;
+    const next = { ...externalWriterConflicts };
+    delete next[conflict.sessionId];
+    externalWriterConflicts = next;
+  }
+
+  async function resolveExternalWriterConflict(
+    session: HubSession,
+    conflict: ExternalWriterConflict,
+    action: "keep_lume" | "open_branch",
+  ) {
+    await cancelExternalWriterAttempt(conflict);
+    dismissExternalWriterConflict(conflict);
+    if (action === "keep_lume") {
+      await refreshSessionsAfterContextAction();
+      return;
+    }
+
+    const threadId = await forkCodexThread(session.id);
+    const workingDirectory = session.workingDirectory?.trim() || ".";
+    const profile = preferences.projectProfiles[projectKey(workingDirectory)];
+    pendingOpenedSession = {
+      nativeId: threadId,
+      agent: "codex",
+      knownIds: new Set(sessions.map((item) => item.id)),
+      startedAt: Date.now(),
+    };
+    try {
+      await launchAgentSession(
+        "codex",
+        workingDirectory,
+        true,
+        threadId,
+        "terminal",
+        profile?.permissionMode,
+        profile?.approvalPolicy,
+      );
+    } catch (reason) {
+      pendingOpenedSession = null;
+      throw reason;
+    }
+  }
+
   function closeSidePane(sessionId: string) {
     if (secondaryId === sessionId) {
       secondaryId = tertiaryId;
@@ -1570,16 +1619,31 @@
 
   async function toggleIntegration(integration: IntegrationStatus) {
     if (!integration.installed || !integration.canConfigure) return;
+    if (integration.kind === "antigravity" && !integration.configured) {
+      antigravityHookConfirmation = true;
+      return;
+    }
+    await setIntegrationConfigured(integration, !integration.configured);
+  }
+
+  async function setIntegrationConfigured(integration: IntegrationStatus, enabled: boolean) {
+    if (!integration.installed || !integration.canConfigure) return;
     configuringIntegration = integration.kind;
     settingsMessage = "";
     try {
-      await configureIntegration(integration.kind, !integration.configured);
+      await configureIntegration(integration.kind, enabled);
       integrations = await loadIntegrationStatuses();
     } catch (reason) {
       settingsError = String(reason).replace(/^Error:\s*/, "");
     } finally {
       configuringIntegration = null;
     }
+  }
+
+  async function confirmAntigravityHooks() {
+    antigravityHookConfirmation = false;
+    const integration = integrations.find((item) => item.kind === "antigravity");
+    if (integration) await setIntegrationConfigured(integration, true);
   }
 
   async function runIntegrationDiagnostic(integration: IntegrationStatus) {
@@ -1898,6 +1962,7 @@
     let refreshAgain = false;
     let stopSessions: UnlistenFn | undefined;
     let stopPreferences: UnlistenFn | undefined;
+    let stopExternalWriterConflicts: UnlistenFn | undefined;
 
     const refresh = async () => {
       if (refreshRunning) {
@@ -1962,6 +2027,15 @@
     };
 
     void (async () => {
+      stopExternalWriterConflicts = await listen<ExternalWriterConflict[]>("lume://external-writer-conflicts-changed", ({ payload }) => {
+        externalWriterConflicts = Object.fromEntries(payload.map((conflict) => [conflict.sessionId, conflict]));
+      });
+      try {
+        const conflicts = await listExternalWriterConflicts();
+        externalWriterConflicts = Object.fromEntries(conflicts.map((conflict) => [conflict.sessionId, conflict]));
+      } catch {
+        // Older app processes may not expose the conflict query yet; live events still work.
+      }
       const loadedPreferences = await loadPreferences();
       if (disposed) return;
       preferences = loadedPreferences;
@@ -1981,6 +2055,7 @@
       if (refreshTimer) clearTimeout(refreshTimer);
       stopSessions?.();
       stopPreferences?.();
+      stopExternalWriterConflicts?.();
       narrowSidebar.removeEventListener("change", syncSidebarWidth);
       colorScheme.removeEventListener("change", syncSystemTheme);
       window.removeEventListener("keydown", handleWorkspaceKeydown);
@@ -2438,8 +2513,8 @@
             <summary>{tr("Companions and detectors", "Companions e detectores")}</summary>
             <div class="integration-row">
               <span class="integration-icon"><BrandIcon name="vscode" size={18} /></span>
-              <span><strong>VS Code Companion</strong><small>{vscodeStatus.detail}</small></span>
-              <button class:active={vscodeStatus.configured} type="button" disabled={!vscodeStatus.installed || configuringVscode} onclick={() => void toggleVscode()}>{configuringVscode ? "…" : vscodeStatus.configured ? tr("Connected", "Conectado") : tr("Connect", "Conectar")}</button>
+              <span><strong>VS Code Companion</strong><small>{vscodeStatus.detail}</small><small>{tr("Does not control Antigravity IDE or Gemini Code Assist chats.", "Não controla chats da IDE Antigravity nem do Gemini Code Assist.")}</small></span>
+              <button class:active={vscodeStatus.configured} type="button" disabled={!vscodeStatus.installed || configuringVscode} onclick={() => void toggleVscode()}>{configuringVscode ? "…" : vscodeStatus.configured ? tr("Uninstall", "Desinstalar") : tr("Install", "Instalar")}</button>
             </div>
             <div class="integration-row">
               <span class="integration-icon"><BrandIcon name="browsers" size={18} /></span>
@@ -2565,6 +2640,20 @@
     </div>
   {/if}
 
+  {#if antigravityHookConfirmation}
+    <div class="shortcut-scrim" role="presentation">
+      <div class="integration-warning-dialog" role="alertdialog" aria-modal="true" aria-labelledby="antigravity-hook-title" aria-describedby="antigravity-hook-description">
+        <span class="integration-warning-icon"><BrandIcon name="antigravity" size={22} /></span>
+        <strong id="antigravity-hook-title">{tr("Connect Antigravity CLI?", "Conectar a CLI Antigravity?")}</strong>
+        <p id="antigravity-hook-description">{tr("Lume installs hooks only for the Antigravity CLI. Its wildcard PreToolUse hook automatically allows every CLI tool call. If Lume is closed or the hook command fails, the fail-open fallback still returns allow, so native approval prompts are not restored. This remains active until you disable or remove Lume’s hook in Antigravity CLI settings; restart open CLI sessions afterward. Enable it only if you accept automatic tool approval. Full history stays in the CLI. This does not configure Antigravity IDE or Gemini Code Assist.", "O Lume instala hooks somente para a CLI Antigravity. O hook PreToolUse com curinga permite automaticamente todas as chamadas de ferramentas. Se o Lume estiver fechado ou o comando do hook falhar, o fallback fail-open também responde allow; as confirmações nativas não são restauradas. Isso continua ativo até você desativar ou remover o hook do Lume nas configurações da CLI Antigravity; depois, reinicie as sessões abertas. Ative somente se aceitar a aprovação automática de ferramentas. O histórico completo continua na CLI. Isso não configura a IDE Antigravity nem o Gemini Code Assist.")}</p>
+        <span>
+          <button type="button" onclick={() => antigravityHookConfirmation = false}>{tr("Cancel", "Cancelar")}</button>
+          <button class="primary" type="button" onclick={() => void confirmAntigravityHooks()}>{tr("Enable CLI hooks", "Ativar hooks da CLI")}</button>
+        </span>
+      </div>
+    </div>
+  {/if}
+
   <section class:inspector-open={inspectorOpen} class:review-open={reviewOpen} class:maximized={Boolean(maximizedSession)} class="workspace-stage">
     <section
       bind:this={workbenchElement}
@@ -2592,6 +2681,7 @@
       {#key maximizedSession.id}
         <WorkspaceSessionPane
           session={maximizedSession}
+          externalWriterConflict={externalWriterConflicts[maximizedSession.id] ?? null}
           {language}
           {streamMessages}
           focused
@@ -2600,12 +2690,15 @@
           onFork={(threadId) => openForkedCodexSession(threadId, maximizedSession)}
           onOpenReview={(path) => openReview(path, maximizedSession.id)}
           onToggleMaximize={() => togglePaneMaximize(maximizedSession.id)}
+          onDismissExternalWriterConflict={dismissExternalWriterConflict}
+          onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(maximizedSession, externalWriterConflicts[maximizedSession.id]!, action)}
         />
       {/key}
     {:else if primary}
       {#key primary.id}
         <WorkspaceSessionPane
           session={primary}
+          externalWriterConflict={externalWriterConflicts[primary.id] ?? null}
           {language}
           {streamMessages}
           focused={focusedPaneId === primary.id}
@@ -2613,6 +2706,8 @@
           onFork={(threadId) => openForkedCodexSession(threadId, primary)}
           onOpenReview={(path) => openReview(path, primary.id)}
           onToggleMaximize={() => togglePaneMaximize(primary.id)}
+          onDismissExternalWriterConflict={dismissExternalWriterConflict}
+          onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(primary, externalWriterConflicts[primary.id]!, action)}
         />
       {/key}
       {#if secondary}
@@ -2637,6 +2732,7 @@
         {#key secondary.id}
         <WorkspaceSessionPane
           session={secondary}
+            externalWriterConflict={externalWriterConflicts[secondary.id] ?? null}
             {language}
             {streamMessages}
             closable
@@ -2646,6 +2742,8 @@
             onFork={(threadId) => openForkedCodexSession(threadId, secondary)}
             onOpenReview={(path) => openReview(path, secondary.id)}
             onToggleMaximize={() => togglePaneMaximize(secondary.id)}
+            onDismissExternalWriterConflict={dismissExternalWriterConflict}
+            onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(secondary, externalWriterConflicts[secondary.id]!, action)}
           />
         {/key}
         {#if tertiary}
@@ -2670,6 +2768,7 @@
           {#key tertiary.id}
             <WorkspaceSessionPane
               session={tertiary}
+              externalWriterConflict={externalWriterConflicts[tertiary.id] ?? null}
               {language}
               {streamMessages}
               closable
@@ -2679,6 +2778,8 @@
               onFork={(threadId) => openForkedCodexSession(threadId, tertiary)}
               onOpenReview={(path) => openReview(path, tertiary.id)}
               onToggleMaximize={() => togglePaneMaximize(tertiary.id)}
+              onDismissExternalWriterConflict={dismissExternalWriterConflict}
+              onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(tertiary, externalWriterConflicts[tertiary.id]!, action)}
             />
           {/key}
         {/if}
@@ -2894,6 +2995,13 @@
   .reset-control { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }.reset-control > span { margin-right: auto; color: var(--workspace-muted); font-size: 8px; }.reset-control .danger { color: #b65d59; border-color: rgba(182, 93, 89, .28); }
   .shortcut-scrim { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; background: rgba(5, 11, 8, .45); backdrop-filter: blur(4px); }
   .shortcut-dialog { width: min(310px, calc(100vw - 36px)); padding: 20px; display: grid; justify-items: center; gap: 15px; border: 1px solid var(--workspace-line); border-radius: 15px; outline: none; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(0, 0, 0, .25); }.shortcut-dialog > strong { color: var(--workspace-strong); font-size: 12px; }.shortcut-dialog > kbd { min-width: 160px; padding: 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-accent); background: var(--workspace-subtle); font: 750 10px ui-monospace, monospace; text-align: center; }.shortcut-dialog > span { display: flex; gap: 7px; }.shortcut-dialog button { min-height: 30px; padding: 0 11px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 730; cursor: pointer; }.shortcut-dialog button.primary { color: var(--workspace-raised); background: var(--workspace-accent); }
+  .integration-warning-dialog { width: min(440px, calc(100vw - 36px)); padding: 22px; display: grid; justify-items: start; gap: 12px; border: 1px solid var(--workspace-line); border-radius: 16px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(0, 0, 0, .28); }
+  .integration-warning-icon { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .integration-warning-dialog > strong { color: var(--workspace-strong); font-size: 14px; }
+  .integration-warning-dialog > p { margin: 0; color: var(--workspace-muted); font-size: 11px; line-height: 1.55; }
+  .integration-warning-dialog > span { width: 100%; display: flex; justify-content: flex-end; gap: 7px; padding-top: 4px; }
+  .integration-warning-dialog button { min-height: 32px; padding: 0 12px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 730; cursor: pointer; }
+  .integration-warning-dialog button.primary { border-color: transparent; color: var(--workspace-raised); background: var(--workspace-accent); }
   .header-selectors { min-width: 0; display: flex; align-items: center; gap: 5px; }
   .header-selectors.expanded { flex-wrap: wrap; }
   .header-utilities { margin-left: auto; display: flex; align-items: center; gap: 5px; }

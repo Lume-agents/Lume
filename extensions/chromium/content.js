@@ -6,6 +6,17 @@
   let lastPath = "";
   let lastResponseSignature = "";
   let submittingPromptId = "";
+  let unconfirmedPromptId = "";
+  let unconfirmedPromptIdentity = null;
+  let unconfirmedPromptSubmitted = false;
+  let unconfirmedPromptText = "";
+  let unconfirmedPromptBaselineMessages = [];
+  let acknowledgingPromptId = "";
+  let retryUnconfirmedPromptAt = 0;
+  let promptRetryDelay = 3_000;
+  let promptRetryTimer;
+  let runningStopMissingSince = 0;
+  let runningStateRecheckTimer;
   let timer;
 
   const visible = (element) => {
@@ -39,29 +50,41 @@
         );
         return explicitPermission || (hasAllow && hasDeny);
       });
-    if (permissionDialog) return "permission_required";
-
     const runningSelectors = [
       'button[data-testid*="stop"]',
       'button[aria-label*="Stop"]',
       'button[aria-label*="Parar"]',
       '[data-testid="stop-button"]',
     ];
-    if (
+    const hasStopControl =
       runningSelectors.some((selector) => [...document.querySelectorAll(selector)].some(visible)) ||
-      buttons.some((text) => text === "stop" || text === "parar")
-    ) {
-      return "running";
-    }
+      buttons.some((text) => text === "stop" || text === "parar");
 
     const alerts = [...document.querySelectorAll('[role="alert"]')]
       .filter(visible)
       .map((alert) => alert.textContent?.toLowerCase() ?? "")
       .join(" ");
-    if (/failed|something went wrong|erro|falhou/.test(alerts)) return "failed";
-    if (previousState === "running" || previousState === "completed") return "completed";
-    if (previousState === "failed") return "failed";
-    return "waiting_for_input";
+    const result = globalThis.LumeWebShared.resolveWebSessionState({
+      previousState,
+      permissionRequired: permissionDialog,
+      hasStopControl,
+      failed: /failed|something went wrong|erro|falhou/.test(alerts),
+      stopMissingSince: runningStopMissingSince,
+      graceMs: 3_000,
+    });
+    runningStopMissingSince = result.stopMissingSince;
+    if (result.recheckAfterMs > 0) {
+      if (!runningStateRecheckTimer) {
+        runningStateRecheckTimer = setTimeout(() => {
+          runningStateRecheckTimer = null;
+          report(true);
+        }, result.recheckAfterMs);
+      }
+    } else if (runningStateRecheckTimer) {
+      clearTimeout(runningStateRecheckTimer);
+      runningStateRecheckTimer = null;
+    }
+    return result.state;
   };
 
   const hash = (value) => {
@@ -95,14 +118,46 @@
     return response?.slice(0, 32768);
   };
 
+  const visibleUserMessages = (composer = null) => {
+    const selectors = {
+      chatgpt: ['[data-message-author-role="user"]'],
+      claude: ['[data-testid*="user-message"]'],
+      deepseek: ['[data-role="user"]', '[class*="user-message"]'],
+      gemini: ["user-query", '[data-testid*="user-query"]'],
+    }[provider] ?? [];
+    const root = document.querySelector("main, [role='main']") ?? document;
+    const candidates = new Set(
+      selectors.flatMap((selector) => [...root.querySelectorAll(selector)]),
+    );
+    const topLevelMessages = [...candidates].filter((element) =>
+      ![...candidates].some((other) =>
+        other !== element && other.contains(element),
+      )
+      && (!composer || (
+        element !== composer
+        && !element.contains(composer)
+        && !composer.contains(element)
+      ))
+      && visible(element),
+    );
+
+    return topLevelMessages
+      .map((element) => (element.innerText ?? element.textContent ?? "").trim())
+      .filter(Boolean)
+      .slice(-20);
+  };
+
   const submitPrompt = async (text) => {
+    const baselineMessages = visibleUserMessages();
     const candidates = [
       ...document.querySelectorAll(
         'textarea, [contenteditable="true"][role="textbox"], [contenteditable="true"].ProseMirror, [contenteditable="true"][data-lexical-editor="true"]',
       ),
     ].filter((element) => visible(element) && !element.disabled);
     const composer = candidates.at(-1);
-    if (!composer) return false;
+    if (!composer) {
+      return { accepted: false, uncertain: false, baselineMessages };
+    }
 
     composer.focus();
     if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) {
@@ -120,6 +175,30 @@
     composer.dispatchEvent(new Event("change", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 90));
 
+    const composerText = () => composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement
+      ? composer.value
+      : composer.innerText ?? composer.textContent ?? "";
+    const waitForSubmission = async () => {
+      let composerChanged = false;
+      for (let attempt = 0; attempt < 15; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        if (globalThis.LumeWebShared.promptWasAccepted(
+          baselineMessages,
+          visibleUserMessages(composer),
+          text,
+        )) {
+          return { accepted: true, uncertain: false, baselineMessages };
+        }
+        composerChanged ||= !composer.isConnected || composerText().trim() !== text.trim();
+      }
+      const state = detectState(lastState);
+      return {
+        accepted: false,
+        uncertain: composerChanged || state === "running" || state === "permission_required",
+        baselineMessages,
+      };
+    };
+
     const scope = composer.closest("form") ?? document;
     const sendButton = [...scope.querySelectorAll("button")]
       .filter((button) => visible(button) && !button.disabled)
@@ -129,19 +208,79 @@
       });
     if (sendButton) {
       sendButton.click();
-      return true;
+      return waitForSubmission();
     }
     if (scope instanceof HTMLFormElement) {
       scope.requestSubmit();
-      return true;
+      return waitForSubmission();
     }
     composer.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }),
     );
-    return true;
+    return waitForSubmission();
+  };
+
+  const acknowledgePrompt = async (promptId, submitted, identity = null) => {
+    const response = await chrome.runtime.sendMessage({
+      type: "lume:prompt-ack",
+      promptId,
+      submitted,
+      provider: identity?.provider,
+      sessionId: identity?.sessionId,
+    }).catch(() => null);
+    return response?.ok === true && response.confirmed === true;
+  };
+
+  const clearUnconfirmedPrompt = () => {
+    unconfirmedPromptId = "";
+    unconfirmedPromptIdentity = null;
+    unconfirmedPromptSubmitted = false;
+    unconfirmedPromptText = "";
+    unconfirmedPromptBaselineMessages = [];
+    retryUnconfirmedPromptAt = 0;
+    promptRetryDelay = 3_000;
+    if (promptRetryTimer) clearTimeout(promptRetryTimer);
+    promptRetryTimer = null;
+  };
+
+  const schedulePromptRetry = () => {
+    if (promptRetryTimer) clearTimeout(promptRetryTimer);
+    retryUnconfirmedPromptAt = Date.now() + promptRetryDelay;
+    promptRetryTimer = setTimeout(() => {
+      promptRetryTimer = null;
+      report(true);
+    }, promptRetryDelay);
+    promptRetryDelay = Math.min(promptRetryDelay * 2, 30_000);
+  };
+
+  const confirmSubmittedPrompt = async (promptId) => {
+    if (acknowledgingPromptId === promptId) return;
+    if (!globalThis.LumeWebShared.promptWasAccepted(
+      unconfirmedPromptBaselineMessages,
+      visibleUserMessages(),
+      unconfirmedPromptText,
+    )) {
+      schedulePromptRetry();
+      return;
+    }
+    acknowledgingPromptId = promptId;
+    try {
+      const confirmed = await acknowledgePrompt(promptId, true, unconfirmedPromptIdentity);
+      if (unconfirmedPromptId !== promptId) return;
+      const retryState = globalThis.LumeWebShared.promptAckRetryState(true, confirmed);
+      if (!retryState.pending) clearUnconfirmedPrompt();
+      else schedulePromptRetry();
+    } finally {
+      if (acknowledgingPromptId === promptId) acknowledgingPromptId = "";
+    }
   };
 
   const report = (force = false) => {
+    if (unconfirmedPromptSubmitted) {
+      if (Date.now() >= retryUnconfirmedPromptAt) {
+        void confirmSubmittedPrompt(unconfirmedPromptId);
+      }
+    }
     const path = location.pathname;
     const state = detectState(path === lastPath ? lastState : "");
     const lastResponse = state === "completed" ? finalResponse() : undefined;
@@ -163,14 +302,31 @@
       },
     }).then(async (response) => {
       if (!response?.prompt || response.promptId === submittingPromptId) return;
+      if (
+        response.promptId === unconfirmedPromptId
+        && (unconfirmedPromptSubmitted || Date.now() < retryUnconfirmedPromptAt)
+      ) return;
       submittingPromptId = response.promptId || "";
-      const submitted = await submitPrompt(response.prompt);
+      const promptIdentity = { provider: response.provider, sessionId: response.sessionId };
+      const submission = await submitPrompt(response.prompt);
       if (response.promptId) {
-        await chrome.runtime.sendMessage({
-          type: "lume:prompt-ack",
-          promptId: response.promptId,
-          submitted,
-        }).catch(() => {});
+        const confirmed = submission.accepted
+          ? await acknowledgePrompt(response.promptId, true, promptIdentity)
+          : (await acknowledgePrompt(response.promptId, false, promptIdentity), false);
+        const retryState = globalThis.LumeWebShared.promptAckRetryState(
+          submission.accepted || submission.uncertain,
+          confirmed,
+        );
+        if (!retryState.pending) {
+          clearUnconfirmedPrompt();
+        } else {
+          unconfirmedPromptId = response.promptId;
+          unconfirmedPromptIdentity = promptIdentity;
+          unconfirmedPromptText = response.prompt;
+          unconfirmedPromptBaselineMessages = submission.baselineMessages;
+          unconfirmedPromptSubmitted = retryState.submitted;
+          schedulePromptRetry();
+        }
       }
       submittingPromptId = "";
     }).catch(() => {});

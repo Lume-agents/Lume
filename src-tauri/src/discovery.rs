@@ -13,7 +13,7 @@ use std::{
 use sysinfo::{
     get_current_pid, Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind,
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use crate::{
     agent_plugins::{self, ExternalAgentPlugin},
@@ -33,8 +33,15 @@ pub struct DiscoveredProcess {
     pub source: SessionSource,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExternalWriterAttempt {
+    pub process_id: u32,
+    pub native_session_id: String,
+}
+
 struct ProcessScan {
     discovered: Vec<DiscoveredProcess>,
+    external_writer_attempts: Vec<ExternalWriterAttempt>,
     internal_services: Vec<InternalService>,
     live_pids: HashSet<u32>,
 }
@@ -44,9 +51,21 @@ pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
         .name("lume-process-discovery".into())
         .spawn(move || {
             let mut system = System::new();
+            let mut last_external_conflicts = HashSet::new();
             loop {
                 let plugins = agent_plugins::external_catalog(&app);
                 let scan = scan(&mut system, &plugins);
+                let _ = state.observe_external_writer_attempts(
+                    &scan.external_writer_attempts,
+                    &scan.live_pids,
+                );
+                if let Ok(conflicts) = state.list_external_writer_conflicts() {
+                    let current = conflicts.iter().cloned().collect::<HashSet<_>>();
+                    if current != last_external_conflicts {
+                        let _ = app.emit("lume://external-writer-conflicts-changed", conflicts);
+                        last_external_conflicts = current;
+                    }
+                }
                 let internal_changed = state
                     .replace_internal_services(scan.internal_services)
                     .unwrap_or(false);
@@ -159,6 +178,20 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
                 .without_tasks(),
         );
     }
+    let codex_candidate_pids = candidates
+        .iter()
+        .filter(|(_, _, agent, _, _)| *agent == AgentKind::Codex)
+        .map(|(pid, _, _, _, _)| *pid)
+        .collect::<Vec<_>>();
+    if !codex_candidate_pids.is_empty() {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&codex_candidate_pids),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_environ(UpdateKind::Always)
+                .without_tasks(),
+        );
+    }
     let agents_by_pid = candidates
         .iter()
         .map(|(pid, _, agent, label, _)| (*pid, (agent.clone(), label.clone())))
@@ -224,10 +257,10 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
             if agent == AgentKind::Codex && internal_pids.contains(&pid) {
                 return None;
             }
-            let native_session_ids = if agent == AgentKind::Codex {
-                native_session_ids_for_process_tree(&system, pid)
-            } else {
-                Vec::new()
+            let native_session_ids = match &agent {
+                AgentKind::Codex => native_session_ids_for_process_tree(&system, pid),
+                AgentKind::Antigravity => antigravity_session_ids_for_process_tree(&system, pid),
+                _ => Vec::new(),
             };
             Some(DiscoveredProcess {
                 agent,
@@ -240,9 +273,33 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
             })
         })
         .collect::<Vec<_>>();
+    let external_writer_attempts = discovered
+        .iter()
+        .filter(|process| {
+            process.agent == AgentKind::Codex
+                && !system
+                    .process(Pid::from_u32(process.process_id))
+                    .is_some_and(|process| {
+                        process
+                            .environ()
+                            .iter()
+                            .any(|value| value == "LUME_MANAGED_SESSION=1")
+                    })
+        })
+        .flat_map(|process| {
+            process
+                .native_session_ids
+                .iter()
+                .map(|native_session_id| ExternalWriterAttempt {
+                    process_id: process.process_id,
+                    native_session_id: native_session_id.clone(),
+                })
+        })
+        .collect();
 
     ProcessScan {
         discovered,
+        external_writer_attempts,
         internal_services,
         live_pids,
     }
@@ -371,6 +428,52 @@ fn native_session_ids_from_command(command: &[std::ffi::OsString]) -> Vec<String
         }
     }
     ids
+}
+
+fn antigravity_session_ids_for_process_tree(system: &System, root: sysinfo::Pid) -> Vec<String> {
+    let ids = system
+        .processes()
+        .keys()
+        .filter(|pid| **pid == root || process_descends_from(system, **pid, root))
+        .filter_map(|pid| system.process(*pid))
+        .flat_map(|process| antigravity_session_ids_from_command(process.cmd()))
+        .collect::<HashSet<_>>();
+    if ids.len() == 1 {
+        ids.into_iter().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn antigravity_session_ids_from_command(command: &[std::ffi::OsString]) -> Vec<String> {
+    let parts = command
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>();
+    let mut ids = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        let candidate = if part == "--conversation" {
+            parts.get(index + 1).map(|value| value.as_ref())
+        } else {
+            part.strip_prefix("--conversation=")
+        };
+        if let Some(candidate) = candidate.filter(|value| is_safe_antigravity_session_id(value)) {
+            if !ids.iter().any(|existing| existing == candidate) {
+                ids.push(candidate.to_string());
+            }
+        }
+    }
+    ids
+}
+
+fn is_safe_antigravity_session_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn is_codex_session_id(value: &str) -> bool {
@@ -591,8 +694,40 @@ pub fn terminate_agent_process(
     expected_agent: &AgentKind,
     expected_native_session_id: Option<&str>,
 ) -> Result<(), String> {
+    terminate_agent_process_with_identity_policy(
+        process_id,
+        expected_agent,
+        expected_native_session_id,
+        false,
+    )
+}
+
+pub fn terminate_external_writer_attempt(
+    process_id: u32,
+    expected_native_session_id: &str,
+) -> Result<(), String> {
+    terminate_agent_process_with_identity_policy(
+        process_id,
+        &AgentKind::Codex,
+        Some(expected_native_session_id),
+        true,
+    )
+}
+
+fn terminate_agent_process_with_identity_policy(
+    process_id: u32,
+    expected_agent: &AgentKind,
+    expected_native_session_id: Option<&str>,
+    require_session_identity: bool,
+) -> Result<(), String> {
     let (system, target_pid, targets) = agent_process_tree(process_id, expected_agent)?;
-    verify_process_session_identity(&system, target_pid, expected_native_session_id, "terminate")?;
+    verify_process_session_identity(
+        &system,
+        target_pid,
+        expected_native_session_id,
+        "terminate",
+        require_session_identity,
+    )?;
     #[cfg(not(target_os = "windows"))]
     if let Some(process) = system.process(target_pid) {
         let _ = process.kill_with(Signal::Interrupt);
@@ -642,7 +777,13 @@ pub fn release_agent_process_for_takeover(
     expected_native_session_id: Option<&str>,
 ) -> Result<(), String> {
     let (system, target_pid, targets) = agent_process_tree(process_id, expected_agent)?;
-    verify_process_session_identity(&system, target_pid, expected_native_session_id, "transfer")?;
+    verify_process_session_identity(
+        &system,
+        target_pid,
+        expected_native_session_id,
+        "transfer",
+        false,
+    )?;
 
     #[cfg(not(target_os = "windows"))]
     if let Some(process) = system.process(target_pid) {
@@ -680,12 +821,15 @@ fn verify_process_session_identity(
     target_pid: Pid,
     expected_native_session_id: Option<&str>,
     operation: &str,
+    require_match: bool,
 ) -> Result<(), String> {
     let Some(expected_native_session_id) = expected_native_session_id else {
         return Ok(());
     };
     let observed = native_session_ids_for_process_tree(system, target_pid);
-    if !observed.is_empty() && !observed.iter().any(|id| id == expected_native_session_id) {
+    if (require_match && observed.is_empty())
+        || (!observed.is_empty() && !observed.iter().any(|id| id == expected_native_session_id))
+    {
         return Err(format!(
             "The detected process no longer owns the session selected to {operation}"
         ));
@@ -754,38 +898,6 @@ fn agent_process_tree(
     Ok((system, target_pid, targets))
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn interrupt_agent_process(process_id: u32, expected_agent: &AgentKind) -> Result<(), String> {
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing()
-            .with_cmd(UpdateKind::Always)
-            .without_tasks(),
-    );
-    let target_pid = Pid::from_u32(process_id);
-    let Some(target) = system.process(target_pid) else {
-        return Err("The agent process is no longer open".into());
-    };
-    let command = target
-        .cmd()
-        .iter()
-        .map(|part| part.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    let name = target.name().to_string_lossy().to_lowercase();
-    if detect_agent(&name, &command).as_ref() != Some(expected_agent) {
-        return Err("The session PID no longer belongs to the expected agent".into());
-    }
-    if target.kill_with(Signal::Interrupt).unwrap_or(false) {
-        Ok(())
-    } else {
-        Err("The operating system could not interrupt this prompt safely".into())
-    }
-}
-
 pub fn interrupt_resumed_prompt_process(
     native_session_id: &str,
     expected_agent: &AgentKind,
@@ -837,14 +949,6 @@ fn resumed_prompt_command_matches(
         && command
             .windows(2)
             .any(|parts| parts[0].as_ref() == "--resume" && parts[1].as_ref() == native_session_id)
-}
-
-#[cfg(target_os = "windows")]
-pub fn interrupt_agent_process(
-    _process_id: u32,
-    _expected_agent: &AgentKind,
-) -> Result<(), String> {
-    Err("Prompt interruption for external CLI agents is not available on Windows yet".into())
 }
 
 fn process_depth(system: &System, mut pid: Pid) -> usize {
@@ -900,6 +1004,21 @@ mod tests {
         let command = ["codex", "explain", "019f8061-7032-7521-b333-84f84c744fa8"]
             .map(std::ffi::OsString::from);
         assert!(native_session_ids_from_command(&command).is_empty());
+    }
+
+    #[test]
+    fn antigravity_conversation_id_is_recovered_only_from_its_flag() {
+        let command = ["agy", "--conversation=conversation_42"].map(std::ffi::OsString::from);
+        assert_eq!(
+            antigravity_session_ids_from_command(&command),
+            vec!["conversation_42"]
+        );
+
+        let unsafe_command = ["agy", "--conversation", "../outside"].map(std::ffi::OsString::from);
+        assert!(antigravity_session_ids_from_command(&unsafe_command).is_empty());
+
+        let unrelated = ["agy", "describe conversation_42"].map(std::ffi::OsString::from);
+        assert!(antigravity_session_ids_from_command(&unrelated).is_empty());
     }
 
     #[cfg(target_os = "linux")]

@@ -4,6 +4,7 @@
   import { cubicOut } from "svelte/easing";
   import type { HubSession, WorkItem } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
+  import GoalTargetIcon from "$lib/GoalTargetIcon.svelte";
   import WorkspaceBookmarkIcon from "$lib/WorkspaceBookmarkIcon.svelte";
 
   type WorkKind = "goal" | "plan" | "todo";
@@ -267,11 +268,11 @@
         {:else if selected === "goal" && goal}
           <div class="goal-detail status-{goal.status}">
             <div class="goal-copy">
-              <span class="goal-target" aria-hidden="true"><i></i></span>
+              <span class="goal-target" aria-hidden="true"><GoalTargetIcon size={40} /></span>
               <p>{goal.objective}</p>
             </div>
             <div class="goal-progress" aria-label={tr(`Goal ${goalProgress}% complete`, `Objetivo ${goalProgress}% concluído`)}>
-              <span><i style={`width:${goalProgress}%`}></i></span>
+              <span><i style={`transform:scaleX(${goalProgress / 100})`}></i></span>
               <strong>{goalProgress}%</strong>
             </div>
           </div>
@@ -312,8 +313,8 @@
   .plan-list em { width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, #718fc8 50%, var(--workspace-line)); border-radius: 9px; color: color-mix(in srgb, #718fc8 86%, var(--workspace-strong)); background: color-mix(in srgb, #718fc8 10%, var(--workspace-raised)); font-size: 9.5px; font-style: normal; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; }
   .plan-list li > span { min-width: 0; padding-top: 4px; overflow-wrap: anywhere; }
   .plan-list li.done { color: var(--workspace-faint); }.plan-list li.done em { opacity: .62; }.plan-list li.done span { text-decoration: line-through; text-decoration-thickness: 1px; }
-  .goal-detail { min-height: 122px; padding: 16px 13px; display: grid; align-content: center; gap: 15px; }.goal-copy { min-width: 0; display: grid; grid-template-columns: 40px minmax(0, 1fr); align-items: center; gap: 12px; }.goal-detail p { margin: 0; color: var(--workspace-strong); font-size: 12px; font-weight: 630; line-height: 1.5; overflow-wrap: anywhere; }.goal-target { position: relative; width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, #c28a48 58%, var(--workspace-line)); border-radius: 50%; box-shadow: inset 0 0 0 6px var(--workspace-raised), inset 0 0 0 7px color-mix(in srgb, #c28a48 34%, transparent); }.goal-target::before { width: 11px; height: 11px; border: 1px solid #c28a48; border-radius: 50%; content: ""; }.goal-target i { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: #c28a48; }.goal-detail.status-complete .goal-target { border-color: var(--workspace-accent); }.goal-detail.status-complete .goal-target::before { border-color: var(--workspace-accent); }.goal-detail.status-complete .goal-target i { background: var(--workspace-accent); }.goal-detail.status-blocked .goal-target { border-color: #c66762; opacity: .75; }
-  .goal-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; }.goal-progress > span { height: 5px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--workspace-line) 72%, transparent); }.goal-progress > span i { height: 100%; display: block; border-radius: inherit; background: var(--workspace-accent); transition: width 420ms cubic-bezier(.22, 1, .36, 1); }.goal-progress strong { min-width: 29px; color: var(--workspace-muted); font-size: 8px; font-variant-numeric: tabular-nums; text-align: right; }
+  .goal-detail { min-height: 122px; padding: 16px 13px; display: grid; align-content: center; gap: 13px; }.goal-copy { min-width: 0; display: grid; justify-items: start; gap: 7px; }.goal-detail p { margin: 0; color: var(--workspace-strong); font-size: 12.5px; font-weight: 650; line-height: 1.48; overflow-wrap: anywhere; }.goal-target { width: 40px; height: 40px; display: grid; place-items: center; color: #c28a48; }.goal-detail.status-complete .goal-target { color: var(--workspace-accent); }.goal-detail.status-blocked .goal-target { color: #c66762; }
+  .goal-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; }.goal-progress > span { height: 5px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--workspace-line) 72%, transparent); }.goal-progress > span i { width: 100%; height: 100%; display: block; border-radius: inherit; background: var(--workspace-accent); transform-origin: left center; transition: transform 420ms cubic-bezier(.22, 1, .36, 1); }.goal-progress strong { min-width: 29px; color: var(--workspace-muted); font-size: 8px; font-variant-numeric: tabular-nums; text-align: right; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
   @keyframes task-pop { 0%, 100% { transform: scale(1); } 40% { transform: scale(1.08); } }

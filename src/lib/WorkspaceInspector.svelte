@@ -4,18 +4,27 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import { displayFileChangePath } from "$lib/fileChanges";
-  import type { HubSession } from "$lib/hubProtocol";
+  import type { AgentSession } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
   import { refreshAgentRateLimits } from "$lib/lume";
   import { buildReviewTurns } from "$lib/reviewDiffs";
   import { subagentsForSession } from "$lib/workspaceAgents";
 
-  let { session, language = "en", onClose, onOpenReview } = $props<{
-    session: HubSession | null;
+  let {
+    session,
+    language = "en",
+    onClose,
+    onOpenReview,
+    variant = "workspace",
+    showCloseButton = true,
+  } = $props<{
+    session: (AgentSession & { activityTotal?: number }) | null;
     language?: Language;
-    onClose: () => void;
-    onOpenReview: (path?: string) => void;
+    onClose?: () => void;
+    onOpenReview?: (path?: string) => void;
+    variant?: "workspace" | "orb";
+    showCloseButton?: boolean;
   }>();
 
   let usageRefreshing = $state(false);
@@ -60,7 +69,12 @@
     return fallback.match(/\b\d+\s*[dhm]\b/i)?.[0]?.replaceAll(" ", "") ?? fallback;
   }
 
-  function tokenGraphGeometry(samples: NonNullable<HubSession["promptTokenUsage"]>) {
+  function sessionSource(session: AgentSession) {
+    if (session.source === "web") return session.sourceApp ?? "Web";
+    return { cli: "CLI", vscode: "VS Code", desktop: "Lume" }[session.source];
+  }
+
+  function tokenGraphGeometry(samples: NonNullable<AgentSession["promptTokenUsage"]>) {
     if (!samples.length) return { points: "", area: "", dots: [] as Array<{ x: number; y: number; tokens: number }> };
     const width = 226;
     const height = 54;
@@ -103,7 +117,7 @@
   }
 </script>
 
-<aside class="workspace-inspector" aria-label={tr("Session inspector", "Inspector da sessão")}>
+<aside class="workspace-inspector" class:orb-inspector={variant === "orb"} aria-label={tr("Session inspector", "Inspector da sessão")}>
   <header>
     {#if session}
       <span class="agent-icon"><BrandIcon name={session.agent} size={21} /></span>
@@ -125,15 +139,17 @@
     {:else}
       <span class="header-copy"><strong>{tr("Inspector", "Inspector")}</strong><small>{tr("No session selected", "Nenhuma sessão selecionada")}</small></span>
     {/if}
-    <button type="button" aria-label={tr("Close inspector", "Fechar inspector")} title={tr("Close inspector", "Fechar inspector")} onclick={onClose}>
-      <LumeIcon name="close" size={16} />
-    </button>
+    {#if showCloseButton}
+      <button type="button" aria-label={tr("Close inspector", "Fechar inspector")} title={tr("Close inspector", "Fechar inspector")} onclick={() => onClose?.()}>
+        <LumeIcon name="close" size={16} />
+      </button>
+    {/if}
   </header>
 
   {#if session}
     <div class="inspector-scroll">
       <section class="session-overview" aria-label={tr("Session overview", "Resumo da sessão")}>
-        <span><strong>{session.activityTotal}</strong><small>{tr("events", "eventos")}</small></span>
+        <span><strong>{session.activityTotal ?? session.activities.length}</strong><small>{tr("events", "eventos")}</small></span>
         <span><strong>{session.results.length}</strong><small>{tr("results", "resultados")}</small></span>
         <span><strong>{subagents.length}</strong><small>{tr("subagents", "subagentes")}</small></span>
       </section>
@@ -188,18 +204,26 @@
         {#if changes.length}
           <div class="files-toolbar">
             <span><strong>{changes.length} {changes.length === 1 ? tr("file", "arquivo") : tr("files", "arquivos")}</strong><small><b>+{totalAdded}</b><i>−{totalRemoved}</i></small></span>
-            <button type="button" onclick={() => onOpenReview()}><LumeIcon name="diff" size={13} /><span>{tr("Review", "Revisar")}</span></button>
+            {#if onOpenReview}<button type="button" onclick={() => onOpenReview?.()}><LumeIcon name="diff" size={13} /><span>{tr("Review", "Revisar")}</span></button>{/if}
           </div>
           <div class="inspector-files">
             {#each visibleChanges as file (file.path)}
-              <button type="button" title={file.path} onclick={() => onOpenReview(file.path)}>
-                <FileTypeIcon path={file.path} size={15} />
-                <span>{displayFileChangePath(file.path)}</span>
-                <small><b>+{file.added}</b><i>−{file.removed}</i></small>
-              </button>
+              {#if onOpenReview}
+                <button type="button" title={file.path} onclick={() => onOpenReview?.(file.path)}>
+                  <FileTypeIcon path={file.path} size={15} />
+                  <span>{displayFileChangePath(file.path)}</span>
+                  <small><b>+{file.added}</b><i>−{file.removed}</i></small>
+                </button>
+              {:else}
+                <div class="inspector-file-entry" title={file.path}>
+                  <FileTypeIcon path={file.path} size={15} />
+                  <span>{displayFileChangePath(file.path)}</span>
+                  <small><b>+{file.added}</b><i>−{file.removed}</i></small>
+                </div>
+              {/if}
             {/each}
           </div>
-          {#if changes.length > visibleChanges.length}<button class="review-more" type="button" onclick={() => onOpenReview()}>{tr(`View all ${changes.length} files`, `Ver todos os ${changes.length} arquivos`)}</button>{/if}
+          {#if changes.length > visibleChanges.length && onOpenReview}<button class="review-more" type="button" onclick={() => onOpenReview?.()}>{tr(`View all ${changes.length} files`, `Ver todos os ${changes.length} arquivos`)}</button>{/if}
         {:else}
           <p class="empty-section">{tr("No changed files in the latest turn.", "Nenhum arquivo alterado no último turno.")}</p>
         {/if}
@@ -218,7 +242,9 @@
       <details class="inspector-section metadata-section">
         <summary>{tr("Session details", "Detalhes da sessão")}</summary>
         <dl>
-          <div><dt>{tr("Source", "Origem")}</dt><dd>{session.source}</dd></div>
+          <div><dt>{tr("Source", "Origem")}</dt><dd>{sessionSource(session)}</dd></div>
+          <div><dt>{tr("Control", "Controle")}</dt><dd>{session.controlOrigin === "lume" ? tr("Managed by Lume", "Gerenciado pelo Lume") : tr("Externally owned", "Controle externo")}</dd></div>
+          <div><dt>{tr("Process ID", "ID do processo")}</dt><dd>{session.processId ?? tr("Not reported by source", "Não informado pela origem")}</dd></div>
           <div><dt>{tr("Directory", "Diretório")}</dt><dd title={session.workingDirectory}>{session.workingDirectory || "—"}</dd></div>
           <div><dt>{tr("Thread", "Thread")}</dt><dd title={session.nativeSessionId}>{session.nativeSessionId || "—"}</dd></div>
         </dl>
@@ -231,6 +257,13 @@
 
 <style>
   .workspace-inspector { min-width: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border-left: 1px solid var(--workspace-line); color: var(--workspace-text); background: var(--workspace-sidebar); }
+  .workspace-inspector.orb-inspector { --workspace-accent: #397b5c; --workspace-accent-soft: rgba(57, 123, 92, .11); --workspace-faint: #87968e; --workspace-line: rgba(92, 114, 103, .15); --workspace-muted: #697a71; --workspace-raised: rgba(255, 255, 255, .44); --workspace-scroll-thumb: #cad2ce; --workspace-sidebar: transparent; --workspace-strong: #34473d; --workspace-subtle: rgba(74, 108, 90, .07); --workspace-text: #526158; border-left: 0; }
+  :global(.overlay-shell.dark) .workspace-inspector.orb-inspector { --workspace-accent: #83c29f; --workspace-accent-soft: rgba(100, 180, 143, .11); --workspace-faint: #8b9a92; --workspace-line: rgba(199, 218, 207, .11); --workspace-muted: #a0b0a7; --workspace-raised: rgba(206, 228, 216, .045); --workspace-scroll-thumb: rgba(199, 218, 207, .32); --workspace-strong: #e0e9e4; --workspace-subtle: rgba(206, 228, 216, .055); --workspace-text: #c5d2cb; }
+  .workspace-inspector.orb-inspector > header { min-height: 50px; padding: 7px 8px; }
+  .workspace-inspector.orb-inspector > header .header-copy strong { font-size: 11px; }
+  .workspace-inspector.orb-inspector > header .header-copy small { font-size: 8px; }
+  .workspace-inspector.orb-inspector .inspector-scroll { padding: 0 9px 14px; }
+  .workspace-inspector.orb-inspector .inspector-section > summary { min-height: 40px; font-size: 9px; }
   .workspace-inspector > header { min-height: 64px; padding: 10px 12px 10px 15px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-line); }
   .header-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }.header-copy strong, .header-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.header-copy strong { color: var(--workspace-strong); font-size: 12px; letter-spacing: -.015em; }.header-copy small { color: var(--workspace-muted); font-size: 9px; }
   .agent-icon { width: 31px; height: 31px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
@@ -246,7 +279,7 @@
   .check-list { margin: 0; padding: 0; display: grid; gap: 7px; list-style: none; }.check-list li { min-width: 0; display: flex; align-items: flex-start; gap: 7px; color: var(--workspace-muted); font-size: 9px; line-height: 1.45; }
   .subagent-list { display: grid; gap: 3px; }.subagent-list > div { min-width: 0; min-height: 36px; padding: 4px 5px; display: flex; align-items: center; gap: 8px; border-radius: 8px; }.subagent-list > div:hover { background: var(--workspace-subtle); }.subagent-list > div > span { min-width: 0; display: grid; gap: 2px; }.subagent-list strong { overflow: hidden; color: var(--workspace-text); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.subagent-list small { color: var(--workspace-faint); font-size: 8px; }.subagent-list small.status-running { color: #4e98ca; }.subagent-list small.status-failed { color: #c66762; }.subagent-list small.status-completed { color: #50aa79; }
   .files-toolbar { min-height: 40px; margin-bottom: 4px; padding-bottom: 8px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 65%, transparent); }.files-toolbar > span { min-width: 0; display: grid; gap: 2px; flex: 1; }.files-toolbar > span > strong { color: var(--workspace-text); font-size: 9px; }.files-toolbar > span small { display: flex; gap: 5px; font-size: 8px; }.files-toolbar b, .inspector-files b { color: #43a873; }.files-toolbar i, .inspector-files i { color: #c16660; font-style: normal; }.files-toolbar button { min-height: 28px; padding: 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 28%, var(--workspace-line)); border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 8px; font-weight: 740; cursor: pointer; }.files-toolbar button:hover { border-color: color-mix(in srgb, var(--workspace-accent) 52%, var(--workspace-line)); }
-  .inspector-files { display: grid; gap: 1px; }.inspector-files > button { width: 100%; min-width: 0; min-height: 31px; padding: 0 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font-size: 9px; text-align: left; cursor: pointer; }.inspector-files > button:hover { background: var(--workspace-subtle); }.inspector-files > button > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.inspector-files > button > small { display: flex; gap: 4px; flex: 0 0 auto; font-size: 7px; }.review-more { margin: 5px 0 0 4px; padding: 3px 0; border: 0; color: var(--workspace-accent); background: transparent; font-size: 8px; font-weight: 720; cursor: pointer; }
+  .inspector-files { display: grid; gap: 1px; }.inspector-files > button, .inspector-files > .inspector-file-entry { width: 100%; min-width: 0; min-height: 31px; padding: 0 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font-size: 9px; text-align: left; }.inspector-files > button { cursor: pointer; }.inspector-files > button:hover { background: var(--workspace-subtle); }.inspector-files > button > span, .inspector-file-entry > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.inspector-files > button > small, .inspector-file-entry > small { display: flex; gap: 4px; flex: 0 0 auto; font-size: 7px; }.review-more { margin: 5px 0 0 4px; padding: 3px 0; border: 0; color: var(--workspace-accent); background: transparent; font-size: 8px; font-weight: 720; cursor: pointer; }
   .section-description { margin: -1px 0 9px; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }.check-list li > i { width: 15px; height: 15px; margin-top: 0; display: grid; place-items: center; flex: 0 0 auto; border-radius: 50%; color: #43a873; background: color-mix(in srgb, #43a873 12%, transparent); }.check-list li span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   .empty-section { margin: 0; padding: 0 0 5px; color: var(--workspace-faint); font-size: 9px; line-height: 1.45; }
   .metadata-section dl { margin: 0; display: grid; gap: 9px; }.metadata-section dl > div { min-width: 0; display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 8px; }.metadata-section dt { color: var(--workspace-faint); font-size: 8px; }.metadata-section dd { margin: 0; overflow: hidden; color: var(--workspace-text); font-size: 9px; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }

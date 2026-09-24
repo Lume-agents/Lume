@@ -36,6 +36,7 @@
     prepareClipboardImage,
   } from "$lib/imageAttachments";
   import { renderSafeMarkdown } from "$lib/markdown.js";
+  import { dialogFocus } from "$lib/dialogFocus";
   import { BoundedRenderCache } from "$lib/boundedRenderCache";
   import {
     buildConversationEntries,
@@ -239,6 +240,7 @@
   let rateLimitRefreshRequested = false;
   let dismissedAgentAlertIds = $state<string[]>([]);
   let agentAlertsOpen = $state(false);
+  const modalOpen = $derived(Boolean(handoffDraft || modelDialogOpen || terminateConfirm || takeoverConfirm));
   let outputElement = $state<HTMLDivElement | null>(null);
   let visibleChatItemLimit = $state(60);
   let outputFollowingTail = true;
@@ -1327,11 +1329,39 @@
     const interruptOnEscape = (event: KeyboardEvent) => {
       if (
         event.key !== "Escape"
+        || event.defaultPrevented
         || event.repeat
         || event.isComposing
-        || !canInterruptRunningPrompt
-        || interrupting
       ) return;
+      // Dismissing a UI layer must never interrupt the agent behind it.
+      if (modalOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (handoffDraft && !handoffSending) handoffDraft = null;
+        else if (modelDialogOpen && !modelSaving) modelDialogOpen = false;
+        else if (terminateConfirm && !terminating) terminateConfirm = false;
+        else if (takeoverConfirm && !takingControl) takeoverConfirm = false;
+        return;
+      }
+      if (headerActionsOpen || composerToolsOpen || agentAlertsOpen || workflowDraft || renamingSession) {
+        event.preventDefault();
+        event.stopPropagation();
+        const trigger = headerActionsOpen ? ".header-overflow-trigger"
+          : composerToolsOpen ? ".composer-tools-trigger"
+          : workflowDraft ? ".workflow-role-fab" : null;
+        headerActionsOpen = false;
+        composerToolsOpen = false;
+        agentAlertsOpen = false;
+        workflowDraft = null;
+        workflowRolePickerOpen = false;
+        renamingSession = false;
+        void tick().then(() => {
+          if (trigger) document.querySelector<HTMLButtonElement>(trigger)?.focus();
+          else promptInput?.focus();
+        });
+        return;
+      }
+      if (!canInterruptRunningPrompt || interrupting) return;
       event.preventDefault();
       event.stopPropagation();
       void interruptAgentPrompt();
@@ -2869,6 +2899,7 @@
       class:normal-preview={!windowState?.workflowEnabled && Boolean(dockPreview)}
       class:bridge-locked={windowState?.workflowBridgeOpen}
       class:header-menu-open={headerActionsOpen}
+      class:modal-open={modalOpen}
       class:dock-ready={Boolean(dockPreview) && (dockPreview?.proximity ?? 0) >= 0.78}
       class:joined-left={windowState?.connectedSides.includes("left") || windowState?.bridgeSides?.includes("left")}
       class:joined-right={windowState?.connectedSides.includes("right") || windowState?.bridgeSides?.includes("right")}
@@ -3150,7 +3181,7 @@
         </aside>
       {/if}
 
-      <nav class="hub-tabs" aria-label={tr("Session details", "Detalhes da sessão")}>
+      <nav class="hub-tabs" inert={modalOpen} aria-label={tr("Session details", "Detalhes da sessão")}>
         <button class:active={activeTab === "chat"} type="button" onclick={() => void selectTab("chat")}>
           {tr("Chat", "Chat")} <span>{chatEntries.length}</span>
         </button>
@@ -3634,7 +3665,7 @@
         {#if handoffDraft}
           {@const selectedHandoffTarget = handoffTargets.find((target) => target.session.id === handoffDraft?.targetSessionId)}
           <div class="handoff-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) handoffDraft = null; }}>
-            <div class="handoff-dialog" role="dialog" aria-modal="true" aria-labelledby="handoff-title">
+            <div class="handoff-dialog" role="dialog" aria-modal="true" aria-labelledby="handoff-title" use:dialogFocus={{ onDismiss: () => { if (!handoffSending) handoffDraft = null; } }}>
               <header>
                 <div>
                   <small>{tr("Context handoff", "Transferência de contexto")}</small>
@@ -3697,7 +3728,7 @@
 
       {#if terminateConfirm}
         <div class="terminate-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget && !terminating) terminateConfirm = false; }}>
-          <div class="terminate-dialog" role="alertdialog" aria-modal="true" aria-labelledby="terminate-title" tabindex="-1" onpointerdown={(event) => event.stopPropagation()}>
+          <div class="terminate-dialog" role="alertdialog" aria-modal="true" aria-labelledby="terminate-title" tabindex="-1" use:dialogFocus={{ onDismiss: () => { if (!terminating) terminateConfirm = false; }, fallbackFocus: () => document.querySelector<HTMLElement>(".header-overflow-trigger") }} onpointerdown={(event) => event.stopPropagation()}>
             <div>
               <strong id="terminate-title">{tr("Stop this agent?", "Encerrar este agente?")}</strong>
               <p>{tr("This will close the original connection and stop the agent.", "Ao encerrar, a conexão original será fechada e o agente será interrompido.")}</p>
@@ -3712,7 +3743,7 @@
 
       {#if takeoverConfirm}
         <div class="terminate-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget && !takingControl) takeoverConfirm = false; }}>
-          <div class="terminate-dialog takeover-dialog" role="alertdialog" aria-modal="true" aria-labelledby="takeover-title" tabindex="-1" onpointerdown={(event) => event.stopPropagation()}>
+          <div class="terminate-dialog takeover-dialog" role="alertdialog" aria-modal="true" aria-labelledby="takeover-title" tabindex="-1" use:dialogFocus={{ onDismiss: () => { if (!takingControl) takeoverConfirm = false; }, fallbackFocus: () => document.querySelector<HTMLTextAreaElement>(".terminal-composer textarea") }} onpointerdown={(event) => event.stopPropagation()}>
             <div>
               <strong id="takeover-title">{tr("Continue this session in Lume?", "Continuar esta sessão no Lume?")}</strong>
               <p>{session.status === "running"
@@ -3729,7 +3760,7 @@
 
       {#if modelDialogOpen}
         <div class="terminate-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget && !modelSaving) modelDialogOpen = false; }}>
-          <div class="terminate-dialog model-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="model-settings-title" tabindex="-1" onpointerdown={(event) => event.stopPropagation()}>
+          <div class="terminate-dialog model-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="model-settings-title" tabindex="-1" use:dialogFocus={{ onDismiss: () => { if (!modelSaving) modelDialogOpen = false; }, fallbackFocus: () => document.querySelector<HTMLElement>(".composer-tools-trigger") }} onpointerdown={(event) => event.stopPropagation()}>
             <header>
               <span class="model-settings-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><path d="M7 7.5 12 4l5 3.5v9L12 20l-5-3.5zM12 4v16m-5-3.5 5-3.5 5 3.5M7 7.5l5 3.5 5-3.5" /></svg>
@@ -3803,6 +3834,7 @@
 
       <form
         class="terminal-composer"
+        inert={modalOpen}
         class:sending
         class:has-attachments={promptAttachments.length > 0}
         aria-busy={sending}
@@ -4020,7 +4052,7 @@
   .terminal-window :global(*::-webkit-scrollbar-corner) { background: transparent; }
   .terminal-window :global(*::-webkit-scrollbar-thumb) { border-radius: 999px; background: var(--terminal-scroll-thumb); }
   .terminal-window :global(*::-webkit-scrollbar-thumb:hover) { background: var(--terminal-scroll-thumb-hover); }
-  .terminal-card { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden; container-type: inline-size; --chat-font-adjust: 0px; --chat-small-font-adjust: 0px; --chat-tiny-font-adjust: 0px; --chat-font-size: calc(9px + var(--chat-font-adjust)); --chat-small-font-size: calc(8px + var(--chat-small-font-adjust)); --chat-tiny-font-size: calc(7px + var(--chat-tiny-font-adjust)); border: 1px solid rgba(103, 126, 116, 0.2); border-radius: 17px; color: #26342e; background: #f8fbf9; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32); transition: border-color 150ms ease, box-shadow 180ms ease, background-color 180ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1); }
+  .terminal-card { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; overflow: clip; container-type: inline-size; --chat-font-adjust: 0px; --chat-small-font-adjust: 0px; --chat-tiny-font-adjust: 0px; --chat-font-size: calc(9px + var(--chat-font-adjust)); --chat-small-font-size: calc(8px + var(--chat-small-font-adjust)); --chat-tiny-font-size: calc(7px + var(--chat-tiny-font-adjust)); border: 1px solid rgba(103, 126, 116, 0.2); border-radius: 17px; color: #26342e; background: #f8fbf9; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32); transition: border-color 150ms ease, box-shadow 180ms ease, background-color 180ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1); }
   @container (min-width: 520px) {
     .terminal-card { --chat-font-size: calc(10px + var(--chat-font-adjust)); --chat-small-font-size: calc(9px + var(--chat-small-font-adjust)); --chat-tiny-font-size: calc(8px + var(--chat-tiny-font-adjust)); }
   }
@@ -4035,6 +4067,7 @@
   .terminal-card.bridge-locked > header { cursor: default; }
   .terminal-card.resizing { user-select: none; }
   .terminal-card.header-menu-open .workflow-role-control { opacity: 0; pointer-events: none; }
+  .terminal-card.modal-open .workflow-role-control { visibility: hidden; pointer-events: none; }
   .terminal-card.dock-moving { border-color: rgba(72, 142, 111, 0.58); box-shadow: inset 0 0 0 2px rgba(75, 157, 120, 0.12); transform: scale(0.992); }
   .terminal-card.dock-target { border-color: rgba(65, 151, 111, 0.78); box-shadow: inset 0 0 0 3px rgba(75, 157, 120, 0.18); }
   .terminal-card.settling { border-color: rgba(69, 139, 108, 0.48); box-shadow: inset 0 0 0 2px rgba(75, 157, 120, 0.11); }
@@ -4416,11 +4449,12 @@
   .change-list code { padding: 5px 6px; display: flex; align-items: flex-start; gap: 6px; border-radius: 6px; color: #4f6158; background: rgba(70, 101, 86, 0.045); font-size: var(--chat-small-font-size); overflow-wrap: anywhere; white-space: normal; }
   .change-list code .file-path { min-width: 0; flex: 1; color: inherit; overflow-wrap: anywhere; word-break: break-word; }
   .plan-panel { margin: 9px 0 10px; display: grid; gap: 9px; }
-  .plan-panel > header { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+  .plan-panel > header { min-width: 0; display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 8px; }
   .plan-panel > header > div { min-width: 0; display: grid; gap: 2px; }
   .plan-panel > header small { color: #8b9791; font: 700 var(--chat-tiny-font-size) Inter, sans-serif; letter-spacing: 0.08em; text-transform: uppercase; }
   .plan-panel > header strong { color: #4d6358; font: 780 var(--chat-font-size) Inter, sans-serif; }
-  .plan-header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+  .plan-panel > header > .plan-header-actions { max-width: 100%; display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+  .plan-header-actions > button { width: auto; height: auto; max-width: 100%; }
   .plan-header-actions > span { color: #4c8b6c; font: 700 var(--chat-small-font-size) Inter, sans-serif; white-space: nowrap; }
   .plan-header-actions button,
   .notes-panel > header > button { min-height: 29px; padding: 0 9px; display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; border: 1px solid rgba(62, 137, 98, 0.14); border-radius: 7px; color: #39795a; background: rgba(61, 145, 100, 0.06); font: 700 var(--chat-small-font-size)/1 Inter, sans-serif; white-space: nowrap; cursor: pointer; }

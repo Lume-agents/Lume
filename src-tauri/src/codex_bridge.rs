@@ -418,11 +418,6 @@ impl CodexBridge {
         thread_model_settings_connection(thread_id)
     }
 
-    pub fn default_model_settings(&self) -> Result<CodexThreadModelSettings, String> {
-        self.ensure_server()?;
-        default_model_settings_connection()
-    }
-
     pub fn set_thread_model_settings(
         &self,
         thread_id: &str,
@@ -430,8 +425,12 @@ impl CodexBridge {
         effort: &str,
     ) -> Result<CodexThreadModelSettings, String> {
         self.ensure_server()?;
-        let collaboration_mode = self.collaboration_mode(thread_id)?;
-        set_thread_model_settings_connection(thread_id, model, effort, &collaboration_mode)
+        set_thread_model_settings_connection(thread_id, model, effort)
+    }
+
+    pub fn default_model_settings(&self) -> Result<CodexThreadModelSettings, String> {
+        self.ensure_server()?;
+        default_model_settings_connection()
     }
 
     pub fn set_thread_fast_mode(&self, thread_id: &str, enabled: bool) -> Result<bool, String> {
@@ -562,7 +561,8 @@ impl CodexBridge {
 
         let monitor_profile = profile.clone();
         let profiles = HashMap::from([(thread_id.clone(), profile)]);
-        let turn = prompt_turn_request(&thread_id, prompt, attachment_paths);
+        let mut turn = prompt_turn_request(&thread_id, prompt, attachment_paths);
+        apply_model_override_to_turn_request(&mut turn, &model_settings);
         send_json(&mut server, turn)?;
         if let Err(error) = wait_for_response(&mut server, 3, &state, &app, &profiles) {
             if state.codex_active_turn(&thread_id)?.is_none() {
@@ -1208,12 +1208,15 @@ fn proxy_connection(
         loop {
             while let Ok(request) = proxy_receiver.try_recv() {
                 profiles.insert(request.thread_id.clone(), request.profile);
-                let turn = prompt_turn_request_with_id(
+                let mut turn = prompt_turn_request_with_id(
                     &request.thread_id,
                     &request.prompt,
                     &request.attachment_paths,
                     Value::String(request.request_id.clone()),
                 );
+                let settings = state
+                    .session_model_override_for_native_id(AgentKind::Codex, &request.thread_id)?;
+                apply_model_override_to_turn_request(&mut turn, &settings);
                 server
                     .send(Message::Text(turn.to_string().into()))
                     .map_err(|error| error.to_string())?;
@@ -1239,6 +1242,7 @@ fn proxy_connection(
                                 },
                             );
                     }
+                    let message = apply_client_model_override(message, &state)?;
                     observe_client_message(&message, &mut profiles);
                     server.send(message).map_err(|error| error.to_string())?;
                     if closing {
@@ -1486,7 +1490,9 @@ fn prompt_connection(
     )?;
     wait_for_response(&mut server, 2, state, app, &profiles)?;
 
-    let turn = prompt_turn_request(thread_id, prompt, attachment_paths);
+    let mut turn = prompt_turn_request(thread_id, prompt, attachment_paths);
+    let model_settings = state.session_model_override_for_native_id(AgentKind::Codex, thread_id)?;
+    apply_model_override_to_turn_request(&mut turn, &model_settings);
     observe_client_message(&Message::Text(turn.to_string().into()), &mut profiles);
     send_json(&mut server, turn)?;
     wait_for_response(&mut server, 3, state, app, &profiles)?;
@@ -1644,6 +1650,45 @@ fn prompt_turn_request_with_id(
     })
 }
 
+fn apply_model_override_to_turn_request(
+    request: &mut Value,
+    settings: &SessionModelOverride,
+) -> bool {
+    let Some(params) = request.get_mut("params").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    if let Some(model) = settings.model.as_deref() {
+        params.insert("model".into(), json!(model));
+        changed = true;
+    }
+    if let Some(effort) = settings.reasoning_effort.as_deref() {
+        params.insert("effort".into(), json!(effort));
+        changed = true;
+    }
+    changed
+}
+
+fn apply_client_model_override(message: Message, state: &AppState) -> Result<Message, String> {
+    let Message::Text(text) = message else {
+        return Ok(message);
+    };
+    let Ok(mut request) = serde_json::from_str::<Value>(&text) else {
+        return Ok(Message::Text(text));
+    };
+    if request.get("method").and_then(Value::as_str) != Some("turn/start") {
+        return Ok(Message::Text(text));
+    }
+    let Some(thread_id) = request.pointer("/params/threadId").and_then(Value::as_str) else {
+        return Ok(Message::Text(text));
+    };
+    let settings = state.session_model_override_for_native_id(AgentKind::Codex, thread_id)?;
+    if !apply_model_override_to_turn_request(&mut request, &settings) {
+        return Ok(Message::Text(text));
+    }
+    Ok(Message::Text(request.to_string().into()))
+}
+
 fn prompt_input(prompt: &str, attachment_paths: &[String]) -> Vec<Value> {
     let mut input = Vec::new();
     if !prompt.is_empty() {
@@ -1684,6 +1729,33 @@ fn thread_model_settings_connection(thread_id: &str) -> Result<CodexThreadModelS
     load_thread_model_settings(&mut server, thread_id).map(|(settings, _)| settings)
 }
 
+fn set_thread_model_settings_connection(
+    thread_id: &str,
+    model: &str,
+    effort: &str,
+) -> Result<CodexThreadModelSettings, String> {
+    let mut server = connect_initialized_plain()?;
+    send_json(
+        &mut server,
+        thread_model_settings_update_request(thread_id, model, effort),
+    )?;
+    let resumed = wait_for_plain_value_response(&mut server, 2)?;
+    send_json(
+        &mut server,
+        json!({
+            "method": "model/list",
+            "id": 3,
+            "params": { "limit": 100, "includeHidden": false }
+        }),
+    )?;
+    let catalog = wait_for_plain_value_response(&mut server, 3)?;
+    let mut settings = model_settings_from_responses(&resumed, &catalog)?;
+    // Reflect the explicit thread overrides in the value returned to the UI.
+    settings.model = model.to_string();
+    settings.reasoning_effort = Some(effort.to_string());
+    Ok(settings)
+}
+
 fn default_model_settings_connection() -> Result<CodexThreadModelSettings, String> {
     let mut server = connect_initialized_plain()?;
     send_json(
@@ -1718,50 +1790,6 @@ fn confirmed_fast_mode(response: &Value, enabled: bool) -> Result<bool, String> 
     }
 }
 
-fn set_thread_model_settings_connection(
-    thread_id: &str,
-    model: &str,
-    effort: &str,
-    collaboration_mode: &str,
-) -> Result<CodexThreadModelSettings, String> {
-    let mut server = connect_initialized_plain()?;
-    let (mut settings, resumed) = load_thread_model_settings(&mut server, thread_id)?;
-    let selected_model = settings
-        .models
-        .iter()
-        .find(|option| option.model == model)
-        .ok_or_else(|| "The selected Codex model is not available for this account".to_string())?;
-    let effort = if effort.trim().is_empty() {
-        selected_model.default_reasoning_effort.as_str()
-    } else {
-        effort
-    };
-    if !selected_model
-        .supported_reasoning_efforts
-        .iter()
-        .any(|option| option.value == effort)
-    {
-        return Err("The selected reasoning effort is not supported by this model".into());
-    }
-    send_json(
-        &mut server,
-        json!({ "method": "collaborationMode/list", "id": 4, "params": {} }),
-    )?;
-    let presets = wait_for_plain_value_response(&mut server, 4)?;
-    let mut collaboration =
-        collaboration_mode_from_responses(collaboration_mode, &resumed, &presets)?;
-    collaboration["settings"]["model"] = json!(model);
-    collaboration["settings"]["reasoning_effort"] = json!(effort);
-    send_json(
-        &mut server,
-        thread_settings_update_request(thread_id, model, effort, collaboration),
-    )?;
-    wait_for_plain_value_response(&mut server, 5)?;
-    settings.model = model.to_string();
-    settings.reasoning_effort = Some(effort.to_string());
-    Ok(settings)
-}
-
 fn load_thread_model_settings(
     server: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     thread_id: &str,
@@ -1784,20 +1812,15 @@ fn load_thread_model_settings(
     Ok((settings, resumed))
 }
 
-fn thread_settings_update_request(
-    thread_id: &str,
-    model: &str,
-    effort: &str,
-    collaboration_mode: Value,
-) -> Value {
+fn thread_model_settings_update_request(thread_id: &str, model: &str, effort: &str) -> Value {
     json!({
-        "method": "thread/settings/update",
-        "id": 5,
+        "method": "thread/resume",
+        "id": 2,
         "params": {
             "threadId": thread_id,
+            "excludeTurns": true,
             "model": model,
-            "effort": effort,
-            "collaborationMode": collaboration_mode
+            "config": { "model_reasoning_effort": effort }
         }
     })
 }
@@ -2569,43 +2592,7 @@ fn intercept_server_message(
     if let Some(event) = notification_event(&value, method, profiles, responses) {
         let _ = event_server::publish_event(state, app, event);
     }
-    if let Some(thread_id) = completed_thread_id {
-        apply_queued_model_update(thread_id, state.clone(), app.clone());
-    }
     Ok(None)
-}
-
-fn apply_queued_model_update(thread_id: String, state: AppState, app: AppHandle) {
-    let Ok(Some(update)) = state.take_codex_model_update(&thread_id) else {
-        return;
-    };
-    let retry = update.clone();
-    let _ = thread::Builder::new()
-        .name("lume-codex-model-update".into())
-        .spawn(move || {
-            let model = update.settings.model.as_deref().unwrap_or_default();
-            let effort = update
-                .settings
-                .reasoning_effort
-                .as_deref()
-                .unwrap_or_default();
-            if let Err(error) = set_thread_model_settings_connection(
-                &thread_id,
-                model,
-                effort,
-                &update.collaboration_mode,
-            ) {
-                let _ = state.restore_codex_model_update(&thread_id, retry);
-                let event = warning_event(
-                    &thread_id,
-                    "Alteração de modelo pendente",
-                    &format!("O Lume aplicará a mudança na próxima oportunidade: {error}"),
-                );
-                let _ = event_server::publish_event(&state, &app, event);
-            } else {
-                crate::protocol::emit_sessions_changed(&app);
-            }
-        });
 }
 
 fn turn_token_usage_from_message(value: &Value) -> Option<(&str, &str, u64, u64, u64)> {
@@ -3128,32 +3115,6 @@ fn warning_activity(thread_id: &str, title: &str, detail: &str) -> SessionActivi
         files: Vec::new(),
         attachments: Vec::new(),
         append_detail: false,
-    }
-}
-
-fn warning_event(thread_id: &str, title: &str, detail: &str) -> HookEvent {
-    HookEvent {
-        event: HookEventKind::Activity,
-        session_id: session_id(thread_id),
-        agent: AgentKind::Codex,
-        agent_label: Some("Codex".into()),
-        session_name: None,
-        project: None,
-        source: None,
-        source_app: None,
-        control_origin: SessionControlOrigin::Lume,
-        status_label: None,
-        started_at: None,
-        process_id: None,
-        native_session_id: Some(thread_id.into()),
-        working_directory: None,
-        permission_profile: None,
-        permission: None,
-        question: None,
-        last_response: None,
-        activity: Some(warning_activity(thread_id, title, detail)),
-        activities: Vec::new(),
-        wait_for_decision: false,
     }
 }
 
@@ -4137,6 +4098,23 @@ mod tests {
     }
 
     #[test]
+    fn model_settings_update_uses_thread_resume_configuration_overrides() {
+        assert_eq!(
+            thread_model_settings_update_request("thread-1", "gpt-test", "high"),
+            json!({
+                "method": "thread/resume",
+                "id": 2,
+                "params": {
+                    "threadId": "thread-1",
+                    "excludeTurns": true,
+                    "model": "gpt-test",
+                    "config": { "model_reasoning_effort": "high" }
+                }
+            })
+        );
+    }
+
+    #[test]
     fn pending_model_settings_are_applied_when_starting_a_recovered_thread() {
         let (_, mut params) = prepare_thread_request_params("/work/lume", None, None, None);
         apply_model_override_to_thread_start(
@@ -4172,33 +4150,34 @@ mod tests {
     }
 
     #[test]
-    fn model_settings_use_the_documented_thread_update_shape() {
-        let collaboration_mode = json!({
-            "mode": "default",
-            "settings": {
-                "model": "gpt-test",
-                "reasoning_effort": "high",
-                "developer_instructions": null
-            }
-        });
-        assert_eq!(
-            thread_settings_update_request(
-                "thread-1",
-                "gpt-test",
-                "high",
-                collaboration_mode.clone(),
-            ),
-            json!({
-                "method": "thread/settings/update",
-                "id": 5,
-                "params": {
-                    "threadId": "thread-1",
-                    "model": "gpt-test",
-                    "effort": "high",
-                    "collaborationMode": collaboration_mode
-                }
-            })
+    fn selected_model_and_effort_are_applied_to_each_turn_start() {
+        let mut request = prompt_turn_request("thread-1", "Continue", &[]);
+        let changed = apply_model_override_to_turn_request(
+            &mut request,
+            &SessionModelOverride {
+                model: Some("gpt-test".into()),
+                reasoning_effort: Some("xhigh".into()),
+            },
         );
+
+        assert!(changed);
+        assert_eq!(request["params"]["model"], "gpt-test");
+        assert_eq!(request["params"]["effort"], "xhigh");
+        assert_eq!(request["params"]["input"][0]["text"], "Continue");
+    }
+
+    #[test]
+    fn turn_without_saved_model_override_keeps_client_selection() {
+        let mut request = json!({
+            "method": "turn/start",
+            "params": {"model": "client-model", "effort": "high"}
+        });
+        assert!(!apply_model_override_to_turn_request(
+            &mut request,
+            &SessionModelOverride::default(),
+        ));
+        assert_eq!(request["params"]["model"], "client-model");
+        assert_eq!(request["params"]["effort"], "high");
     }
 
     #[test]

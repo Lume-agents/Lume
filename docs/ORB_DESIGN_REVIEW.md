@@ -21,7 +21,7 @@ Janelas auxiliares pertencem ao próprio modo Orb. Todos os recursos continuam a
 - Docking nativo, múltiplos monitores, escala do sistema, atalhos globais, retomada de processos e leitores de tela não foram exercitados. O comportamento desses recursos foi analisado pela fonte.
 - Workspace central e landing estão fora do escopo. A referência ao centro de revisão do Workspace serve apenas para identificar uma possibilidade de reutilização no Orb. GitHub/Jira/Relay não têm uma tela implementada neste fluxo para avaliação visual.
 
-As capturas locais ficam em `.impeccable/review/orb-20260924/`. Esta análise não modifica a implementação.
+As capturas locais ficam em `.impeccable/review/orb-20260924/`. O parecer e a pontuação registram o estado anterior ao revamp; o progresso da implementação está ao final.
 
 ## O que já funciona bem
 
@@ -37,7 +37,7 @@ As capturas locais ficam em `.impeccable/review/orb-20260924/`. Esta análise n�
 
 **Impacto provável:** o usuário abre o Orb para destravar um agente e precisa procurar a ação no conteúdo da sessão.
 
-**Proposta:** uma seção “Precisa de você”, com motivo, agente e projeto. Dentro do detalhe, apresentar primeiro a decisão e seu contexto; depois, atividade e última resposta recolhível. Em trabalho normal, manter a lista breve. Busca e filtros podem aparecer quando a quantidade de sessões justificar.
+**Proposta revisada:** manter uma lista contínua na ordem atual, marcar visualmente cada sessão que precisa de atenção e levar a decisão ao topo do detalhe. A separação em grupos acrescenta uma hierarquia que não ajuda quando a pessoa acompanha as sessões como uma única fila de trabalho.
 
 **Critério para a reformulação:** identificar a pendência e chegar à decisão sem atravessar a resposta anterior; permissões continuam específicas da sessão.
 
@@ -194,3 +194,27 @@ Não foi medida conformidade normativa de contraste. A recomendação é conferi
 A primeira entrega recomendada reúne as correções de decisão e leitura com “Mostrar terminal”. Depois, a janela de Ajustes estabelece o padrão das auxiliares. A revisão de Workflow pode seguir usando os papéis, limites e mecanismos de contexto já existentes.
 
 As perguntas de escopo para uma implementação futura são quais auxiliares serão priorizadas e qual densidade deve ser o padrão. Elas não impedem a análise solicitada nem exigem uma decisão antes de registrar estas recomendações.
+
+## Implementação — primeira etapa
+
+Branch `feat/orb-ui-revamp`, iniciada a partir de `30afff6`.
+
+- Sessões mantêm a ordem contínua, com pendências marcadas na própria linha; permissões e perguntas vêm antes das ações e da resposta anterior. As respostas ficam recolhidas quando há uma pendência.
+- Em Sessões e Terminais, a barra de rolagem aparece durante a rolagem e desaparece após uma pausa breve.
+- Respostas em Sessões e Resultados usam o renderizador Markdown seguro existente, com tipografia de leitura, listas, código e tabelas. A lista de sessões deixa de repetir trechos crus da resposta.
+- “Mostrar terminal” recupera janelas já abertas a partir de Sessões, Terminais e paleta, usando o comando nativo existente. A lista de janelas é carregada na inicialização e continua atualizada pelos eventos nativos.
+- Diálogos de modelo, handoff, encerramento e transferência de controle mantêm a navegação por Tab dentro da camada ativa. Escape fecha primeiro essa camada; o foco retorna ao acionador disponível. O controle de papel do workflow fica oculto durante os diálogos.
+- Cabeçalho de Plano acomoda suas ações em larguras menores. A cápsula do terminal não se desloca horizontalmente para alcançar controles de workflow posicionados na borda.
+- O estado vazio oferece abrir uma sessão ou acessar diretamente o grupo de integrações de agentes. A paleta devolve o foco ao fechar.
+
+Conferência local: build de produção e `svelte-check` sem erros ou avisos de diagnóstico. Duas rodadas de inspeção visual e por teclado em Chromium, com componentes reais e bridge Tauri simulada; evidência em `.impeccable/review/orb-revamp-1/` e `.impeccable/review/orb-revamp-2/`. Isso não comprova comportamento das janelas nativas, docking, provedores ou atalhos globais.
+
+## Direção recomendada para Resultados
+
+Troquei a aba principal **Resultados** por um **Inspector de sessão** contextual e reutilizei o painel que já existe no Workspace. Ele permite escolher a sessão e traz eventos, subagentes, arquivos alterados, validações, limites de uso, consumo de tokens, origem, controle, processo e diretório quando os dados existem. Valores não informados continuam explicitamente indisponíveis, sem zeros ou estimativas. A ação de terminal abre ou traz à frente a sessão inspecionada.
+
+Node e Relay entram como estado de conectividade separado do estado do agente. A primeira fase documentada do Node fornece identidade e health autenticados somente para observação. Mostrar esses dados exige um contrato vivo para o estado do Node e dos pares; não inferir presença a partir de sessões locais. A arquitetura do Relay não prova integração operacional: exibi-la como conectada antes de existir sinal de runtime induziria a erro. Consultar [Lume Node](LUME_NODE.md) e a [visão de execução distribuída](DISTRIBUTED_EXECUTION_ROADMAP.md).
+
+Resultados, notas salvas e execuções de workflow continuam acessíveis na subaba **Histórico**. Isso preserva as ações existentes sem ocupar a navegação principal. Node e Relay continuam fora do estado por sessão até a interface receber uma fonte confiável de health e conectividade.
+
+O parecer permanece aberto: janela auxiliar de Ajustes, Inspector, destino de consulta de Resultados/notas/workflows, visão de conjunto de Workflow, revisão de alterações e escala tipográfica dos terminais seguem nas próximas etapas. A pontuação original não foi recalculada.

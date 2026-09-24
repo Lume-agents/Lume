@@ -367,11 +367,13 @@ Current checkpoint:
 - The Inspector opens a large Review Center for the focused session and can jump directly to a changed file.
 - Changes, checks, and final responses are now grouped by prompt/result turn, with a task selector; old results with truncated activity history are shown without falsely attributed files.
 - Latest-turn changes are grouped per file with file-type icons and individual added/removed totals.
-- Captured unified diffs can be reviewed in unified or side-by-side mode without opening the source CLI.
-- Latest-turn checks and the final response remain visible as review context; changed files are not presented as downloadable deliverables.
+- Captured unified diffs can be reviewed in unified or side-by-side mode; recorded Codex patches, raw unified file headers, and structured JSON diffs are also recognized.
+- Dedicated Context view shows the originating prompt, its attachments, checks, and final response. It is a preview of recorded prompt context, not a reconstruction of every hidden/runtime context item sent to the agent.
+- Deliverables are shown separately and only when the final response explicitly offers a file; changed files remain in Changes and are not mislabeled as downloads.
 - Where a persisted workflow run references the exact result ID, the Review Center identifies its role and objective on demand.
 - Review notes are stored locally against the exact session and result, and remain available after reopening the Review Center or restarting Lume.
-- Explicit deliverables, context preview, and richer non-unified diff sources remain pending.
+- Approve result and Request changes decisions are stored locally against the exact result. Request changes submits a prompt (queued after an active prompt when supported); approval records a review decision only and does not automatically advance a workflow handoff.
+- Remaining: live repository diff fallback when an agent did not record a diff, and visual/manual review on Windows and Linux.
 
 ### Phase 5 — Local Git and GitHub context
 

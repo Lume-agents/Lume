@@ -5,7 +5,8 @@ export type PromptUnavailableReason =
   | "session_not_connected"
   | "working_directory_missing"
   | "agent_busy"
-  | "external_session";
+  | "external_session"
+  | "monitoring_only";
 
 export interface SessionCapabilities {
   canPrompt: boolean;
@@ -23,9 +24,13 @@ export interface SessionCapabilities {
 
 export function sessionCapabilities(session: AgentSession): SessionCapabilities {
   let promptUnavailableReason: PromptUnavailableReason | undefined;
-  if (
+  const promptIsRunning = ["running", "permission_required"].includes(session.status);
+  const legacyGeminiCli = session.source !== "web" && session.agent === "gemini";
+  if (legacyGeminiCli) {
+    promptUnavailableReason = "monitoring_only";
+  } else if (
     session.source === "web"
-    && ["running", "permission_required"].includes(session.status)
+    && promptIsRunning
   ) {
     promptUnavailableReason = "agent_busy";
   } else if (session.source !== "web") {
@@ -41,6 +46,13 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
     } else if (session.agent !== "codex" && !session.workingDirectory?.trim()) {
       promptUnavailableReason = "working_directory_missing";
     }
+    if (
+      !promptUnavailableReason
+      && promptIsRunning
+      && !(session.agent === "codex" && session.controlOrigin === "lume")
+    ) {
+      promptUnavailableReason = "agent_busy";
+    }
   }
 
   return {
@@ -51,7 +63,7 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
     ),
     canAnswerQuestion: Boolean(session.pendingQuestion),
     canTerminate:
-      (session.source === "cli" && Boolean(session.processId))
+      (!legacyGeminiCli && session.source === "cli" && Boolean(session.processId))
       || (
         session.agent === "codex"
         && session.source === "desktop"
@@ -64,8 +76,8 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
     canInterrupt:
       ["running", "permission_required"].includes(session.status)
       && session.controlOrigin === "lume"
-      && session.source !== "web"
-      && session.agent === "codex"
+      && ["codex", "claude_code"].includes(session.agent)
+      && (session.agent === "codex" ? session.source !== "web" : session.source === "cli")
       && Boolean(session.nativeSessionId?.trim()),
     canTakeControl:
       session.controlOrigin === "external"
@@ -75,7 +87,9 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
       && Boolean(session.workingDirectory?.trim())
       && Boolean(session.processId),
     promptDeliveries:
-      session.agent === "codex"
+      legacyGeminiCli
+        ? []
+        : session.agent === "codex"
       && session.source !== "web"
       && session.controlOrigin === "lume"
         ? ["new_turn", "steer", "queue"]

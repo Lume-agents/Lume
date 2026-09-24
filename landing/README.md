@@ -1,17 +1,27 @@
-# Lume landing page
+# Lume landing
 
-This directory contains the standalone marketing site for Lume. It is intentionally isolated from the Tauri frontend and the Mobile PWA so visual iterations cannot affect the applications.
+Standalone product presentation using Vite, HTML, CSS and JavaScript.
 
-Build the static site with:
+## Run and build
 
-```bash
-npm run landing:build
-```
+- `npm run landing:dev` → http://127.0.0.1:4174
+- `npm run landing:build` → static output in `landing-dist/`
+- Set `LANDING_SITE_URL` at build time to supply canonical and absolute social-image URLs.
 
-Preview it locally with:
+## Presentation
 
-```bash
-npm run landing:dev
-```
+The page presents two complete modes: Orb with independent floating terminals, and Workspace. Product images are captures of the actual Svelte components with illustrative sessions. The page has no simulated agent controls.
 
-The build is written to the ignored `landing-dist/` directory. Existing project media is copied there at build time, avoiding duplicate binary assets in the repository.
+The opening sculpture uses Three.js, instanced geometry, physical materials and environment lighting. Native scrolling opens the Orb composition; subsequent motion supports the product images and architecture. Rendering stops when settled and pauses offscreen. Reduced-motion, data-saving and unavailable-WebGL visitors receive the static composition. Text and links remain usable without JavaScript.
+
+GitHub/Jira and distributed execution are identified as in development according to the checkout documentation. Node phase one is described as identity, pairing and read-only health.
+
+## Assets and documentation
+
+Fonts are self-hosted. Their licenses and the Three.js license ship under `licenses/`. Product PNGs carry their source provenance. Third-party reference images and review captures do not ship.
+
+- `DIRECTION.md`: user correction, visual direction, references and feature truth.
+- `DESIGN.md` and `.impeccable/design.json`: implemented visual system.
+- `assets/product/`: current Orb, expanded panel, floating terminals and Workspace captures.
+
+Before publishing, confirm feature availability against the linked release. The static build does not include the native app or any capture fixture.

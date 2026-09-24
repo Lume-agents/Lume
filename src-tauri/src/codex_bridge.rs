@@ -391,6 +391,25 @@ impl CodexBridge {
             .ok_or_else(|| "Codex did not return the forked thread id".to_string())
     }
 
+    pub fn fork_thread_at_latest_turn(&self, thread_id: &str) -> Result<String, String> {
+        self.ensure_server()?;
+        let mut server = connect_initialized_plain()?;
+        send_json(
+            &mut server,
+            json!({
+                "method": "thread/fork",
+                "id": 100,
+                "params": { "threadId": thread_id }
+            }),
+        )?;
+        let fork = wait_for_plain_value_response(&mut server, 100)?;
+        fork.pointer("/result/thread/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "Codex App Server did not return the forked thread id".into())
+    }
+
     pub fn thread_model_settings(
         &self,
         thread_id: &str,

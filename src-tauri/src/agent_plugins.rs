@@ -109,7 +109,7 @@ pub fn catalog() -> Vec<Box<dyn AgentPlugin>> {
         }),
         Box::new(BuiltInAgentPlugin {
             kind: IntegrationKind::Antigravity,
-            label: "Antigravity",
+            label: "Antigravity CLI",
             executable: "agy",
             direct_permissions: false,
             hook_events: &[
@@ -132,15 +132,7 @@ pub fn catalog() -> Vec<Box<dyn AgentPlugin>> {
             label: "Gemini CLI (legacy)",
             executable: "gemini",
             direct_permissions: false,
-            hook_events: &[
-                "SessionStart",
-                "BeforeAgent",
-                "BeforeTool",
-                "Notification",
-                "AfterTool",
-                "AfterAgent",
-                "SessionEnd",
-            ],
+            hook_events: &[],
         }),
     ]
 }
@@ -268,6 +260,8 @@ mod tests {
             .expect("plugin Antigravity");
         assert_eq!(antigravity.executable(), "agy");
         assert!(antigravity.hook_events().contains(&"PreInvocation"));
+        assert!(antigravity.hook_events().contains(&"PreToolUse"));
+        assert!(antigravity.hook_events().contains(&"PostToolUse"));
         assert!(antigravity.hook_events().contains(&"Stop"));
         assert!(!antigravity.direct_permissions());
 
@@ -282,7 +276,7 @@ mod tests {
             .iter()
             .find(|plugin| plugin.kind() == IntegrationKind::Gemini)
             .expect("plugin Gemini");
-        assert!(gemini.hook_events().contains(&"AfterTool"));
+        assert!(gemini.hook_events().is_empty());
     }
 
     #[test]

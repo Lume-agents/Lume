@@ -37,8 +37,9 @@ use std::{
 
 use domain::{
     AgentKind, AgentSession, HistoryEntry, HookEvent, HookEventKind, PermissionAction, Preferences,
-    PromptAttachmentInput, PromptDelivery, QuestionAnswer, ResultNote, ReviewNote, SessionActivity,
-    SessionControlOrigin, SessionNote, SessionSource, WorkflowRole, WorkflowRoleContract,
+    PromptAttachmentInput, PromptDelivery, QuestionAnswer, ResultNote, ReviewDecision,
+    ReviewDecisionKind, ReviewNote, SessionActivity, SessionControlOrigin, SessionNote,
+    SessionSource, WorkflowRole, WorkflowRoleContract,
 };
 use integrations::{CompanionStatus, IntegrationDiagnostic, IntegrationKind, IntegrationStatus};
 use launcher::LaunchRequest;
@@ -682,6 +683,43 @@ async fn take_control_session(
 }
 
 #[tauri::command]
+async fn cancel_external_writer_attempt(
+    state: State<'_, AppState>,
+    session_id: String,
+    process_id: u32,
+    native_session_id: String,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::cancel_external_writer_attempt(&state, &session_id, process_id, &native_session_id)
+    })
+    .await
+    .map_err(|error| format!("Could not close the conflicting CLI: {error}"))?
+}
+
+#[tauri::command]
+fn list_external_writer_conflicts(
+    state: State<'_, AppState>,
+) -> Result<Vec<state::ExternalWriterConflict>, String> {
+    state.list_external_writer_conflicts()
+}
+
+#[tauri::command]
+async fn fork_codex_thread(
+    state: State<'_, AppState>,
+    bridge: State<'_, codex_bridge::CodexBridge>,
+    session_id: String,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::fork_codex_thread(&state, &bridge, &session_id)
+    })
+    .await
+    .map_err(|error| format!("Could not fork the Codex conversation: {error}"))?
+}
+
+#[tauri::command]
 fn interrupt_prompt(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -855,6 +893,25 @@ fn delete_review_note(
     result_id: String,
 ) -> Result<(), String> {
     state.delete_review_note(&session_id, &result_id)
+}
+
+#[tauri::command]
+fn list_review_decisions(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<ReviewDecision>, String> {
+    state.review_decisions(&session_id)
+}
+
+#[tauri::command]
+fn set_review_decision(
+    state: State<'_, AppState>,
+    session_id: String,
+    result_id: String,
+    decision: ReviewDecisionKind,
+    note: Option<String>,
+) -> Result<ReviewDecision, String> {
+    state.set_review_decision(&session_id, &result_id, decision, note.as_deref())
 }
 
 #[tauri::command]
@@ -2256,6 +2313,9 @@ pub fn run() {
             steer_queued_prompt,
             terminate_session,
             take_control_session,
+            list_external_writer_conflicts,
+            cancel_external_writer_attempt,
+            fork_codex_thread,
             list_history,
             list_workflow_history,
             list_result_notes,
@@ -2264,6 +2324,8 @@ pub fn run() {
             list_review_notes,
             save_review_note,
             delete_review_note,
+            list_review_decisions,
+            set_review_decision,
             list_session_notes,
             save_session_note,
             delete_session_note,

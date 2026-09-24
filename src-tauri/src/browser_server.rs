@@ -7,6 +7,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use serde::Deserialize;
@@ -23,6 +24,8 @@ use crate::{
 
 const ADDRESS: &str = "127.0.0.1:43120";
 const MAX_BODY_BYTES: usize = 64 * 1024;
+const MAX_CLOSED_PROMPT_ACKS: usize = 128;
+const CLOSED_PROMPT_ACK_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +59,12 @@ struct BrowserPromptRequest {
     prompt: String,
 }
 
+struct ClosedBrowserPromptRequest {
+    session_id: String,
+    request: BrowserPromptRequest,
+    closed_at: Instant,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserPromptAck {
@@ -69,7 +78,16 @@ struct BrowserPromptAck {
 pub struct BrowserControl {
     focus_requests: Arc<Mutex<HashSet<String>>>,
     prompt_requests: Arc<Mutex<HashMap<String, BrowserPromptRequest>>>,
+    closed_prompt_requests: Arc<Mutex<HashMap<String, ClosedBrowserPromptRequest>>>,
+    last_acknowledged_prompt_ids: Arc<Mutex<HashMap<String, String>>>,
     prompt_sequence: Arc<AtomicU64>,
+}
+
+enum BrowserPromptAckResult {
+    NotSubmitted,
+    Confirmed,
+    AlreadyConfirmed,
+    Unmatched,
 }
 
 impl BrowserControl {
@@ -90,10 +108,17 @@ impl BrowserControl {
             ),
             prompt,
         };
-        self.prompt_requests
+        let mut requests = self
+            .prompt_requests
             .lock()
-            .map_err(|_| "Não foi possível acessar o conector web".to_string())?
-            .insert(session_id, request);
+            .map_err(|_| "Não foi possível acessar o conector web".to_string())?;
+        if requests.contains_key(&session_id) {
+            return Err(
+                "Já existe um prompt aguardando confirmação do navegador. Tente novamente em instantes."
+                    .into(),
+            );
+        }
+        requests.insert(session_id, request);
         Ok(())
     }
 
@@ -111,34 +136,118 @@ impl BrowserControl {
             .and_then(|requests| requests.get(session_id).cloned())
     }
 
-    fn take_prompt(&self, session_id: &str) -> Option<BrowserPromptRequest> {
-        self.prompt_requests
-            .lock()
-            .ok()
-            .and_then(|mut requests| requests.remove(session_id))
-    }
-
     fn acknowledge_prompt(
         &self,
         session_id: &str,
         prompt_id: &str,
         submitted: bool,
-    ) -> Result<(), String> {
-        if !submitted {
-            return Ok(());
-        }
+        on_confirm: impl FnOnce(&BrowserPromptRequest) -> Result<(), String>,
+    ) -> Result<BrowserPromptAckResult, String> {
         let mut requests = self
             .prompt_requests
+            .lock()
+            .map_err(|_| "Não foi possível acessar o conector web".to_string())?;
+        let mut acknowledged = self
+            .last_acknowledged_prompt_ids
             .lock()
             .map_err(|_| "Não foi possível acessar o conector web".to_string())?;
         if requests
             .get(session_id)
             .is_some_and(|request| request.id == prompt_id)
         {
+            if !submitted {
+                return Ok(BrowserPromptAckResult::NotSubmitted);
+            }
+            let request = requests[session_id].clone();
+            on_confirm(&request)?;
             requests.remove(session_id);
+            acknowledged.insert(session_id.to_string(), prompt_id.to_string());
+            return Ok(BrowserPromptAckResult::Confirmed);
         }
-        Ok(())
+        let was_confirmed = acknowledged
+            .get(session_id)
+            .is_some_and(|confirmed_id| confirmed_id == prompt_id);
+        if was_confirmed {
+            return Ok(if submitted {
+                BrowserPromptAckResult::AlreadyConfirmed
+            } else {
+                BrowserPromptAckResult::NotSubmitted
+            });
+        }
+
+        let mut closed = self
+            .closed_prompt_requests
+            .lock()
+            .map_err(|_| "Não foi possível acessar o conector web".to_string())?;
+        closed.retain(|_, pending| pending.closed_at.elapsed() < CLOSED_PROMPT_ACK_TTL);
+        if closed
+            .get(prompt_id)
+            .is_some_and(|pending| pending.session_id == session_id)
+        {
+            if !submitted {
+                closed.remove(prompt_id);
+                return Ok(BrowserPromptAckResult::NotSubmitted);
+            }
+            let pending = closed.get(prompt_id).expect("request checked above");
+            on_confirm(&pending.request)?;
+            closed.remove(prompt_id);
+            acknowledged.insert(session_id.to_string(), prompt_id.to_string());
+            return Ok(BrowserPromptAckResult::Confirmed);
+        }
+        Ok(BrowserPromptAckResult::Unmatched)
     }
+
+    fn close_session(&self, session_id: &str) {
+        let request = self
+            .prompt_requests
+            .lock()
+            .ok()
+            .and_then(|mut requests| requests.remove(session_id));
+        if let Some(request) = request {
+            if let Ok(mut closed) = self.closed_prompt_requests.lock() {
+                closed.retain(|_, pending| pending.closed_at.elapsed() < CLOSED_PROMPT_ACK_TTL);
+                if closed.len() >= MAX_CLOSED_PROMPT_ACKS {
+                    if let Some(oldest_id) = closed
+                        .iter()
+                        .min_by_key(|(_, pending)| pending.closed_at)
+                        .map(|(id, _)| id.clone())
+                    {
+                        closed.remove(&oldest_id);
+                    }
+                }
+                closed.insert(
+                    request.id.clone(),
+                    ClosedBrowserPromptRequest {
+                        session_id: session_id.to_string(),
+                        request,
+                        closed_at: Instant::now(),
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn prompt_for_browser_event(
+    control: &BrowserControl,
+    session_id: &str,
+    protocol_version: u8,
+    session_closed: bool,
+    session_busy: bool,
+) -> Option<BrowserPromptRequest> {
+    if session_closed {
+        control.close_session(session_id);
+        return None;
+    }
+    if session_busy {
+        return None;
+    }
+    if protocol_version < 2 {
+        // Older companions cannot confirm that the page accepted a prompt.
+        // Keep it queued instead of showing a false delivery in the chat.
+        return None;
+    }
+    control.pending_prompt(session_id)
 }
 
 pub fn start(state: AppState, app: AppHandle, control: BrowserControl) -> Result<(), String> {
@@ -183,14 +292,20 @@ fn handle(mut stream: TcpStream, state: AppState, app: AppHandle, control: Brows
                 .and_then(|browser_event| {
                     let provider = canonical_provider(&browser_event.provider)?;
                     let session_id = format!("web:{}:{}", provider, browser_event.session_id);
-                    let supports_prompt_ack = browser_event.protocol_version >= 2;
                     let previous_status = state.session_status(&session_id, None)?;
                     let focus = control.take_focus(&session_id);
-                    let prompt_request = if supports_prompt_ack {
-                        control.pending_prompt(&session_id)
-                    } else {
-                        control.take_prompt(&session_id)
-                    };
+                    let session_closed = matches!(&browser_event.state, BrowserState::Closed);
+                    let session_busy = matches!(
+                        &browser_event.state,
+                        BrowserState::Running | BrowserState::PermissionRequired
+                    );
+                    let prompt_request = prompt_for_browser_event(
+                        &control,
+                        &session_id,
+                        browser_event.protocol_version,
+                        session_closed,
+                        session_busy,
+                    );
                     let event = map_event(browser_event)?;
                     let notification =
                         crate::domain::should_notify(&event.event, previous_status.as_ref());
@@ -243,16 +358,50 @@ fn handle(mut stream: TcpStream, state: AppState, app: AppHandle, control: Brows
                 .map_err(|error| error.to_string())
                 .and_then(|ack| {
                     let provider = canonical_provider(&ack.provider)?;
-                    control.acknowledge_prompt(
-                        &format!("web:{provider}:{}", ack.session_id),
-                        &ack.prompt_id,
-                        ack.submitted,
-                    )
+                    let session_id = format!("web:{provider}:{}", ack.session_id);
+                    let prompt_id = ack.prompt_id;
+                    let submitted = ack.submitted;
+                    Ok((
+                        session_id.clone(),
+                        control.acknowledge_prompt(
+                            &session_id,
+                            &prompt_id,
+                            submitted,
+                            |prompt| {
+                                state.record_prompt_activity(
+                                    &session_id,
+                                    &prompt.prompt,
+                                    Vec::new(),
+                                )
+                            },
+                        )?,
+                    ))
                 });
-            if acknowledged.is_ok() {
-                ("200 OK", "{\"ok\":true}".into(), request.origin)
-            } else {
-                ("400 Bad Request", "{\"ok\":false}".into(), request.origin)
+            match acknowledged {
+                Ok((_, BrowserPromptAckResult::NotSubmitted)) => (
+                    "200 OK",
+                    "{\"ok\":true,\"confirmed\":false}".into(),
+                    request.origin,
+                ),
+                Ok((session_id, BrowserPromptAckResult::Confirmed)) => {
+                    crate::protocol::emit_session_changed(&app, &session_id, None);
+                    (
+                        "200 OK",
+                        "{\"ok\":true,\"confirmed\":true}".into(),
+                        request.origin,
+                    )
+                }
+                Ok((_, BrowserPromptAckResult::AlreadyConfirmed)) => (
+                    "200 OK",
+                    "{\"ok\":true,\"confirmed\":true}".into(),
+                    request.origin,
+                ),
+                Ok((_, BrowserPromptAckResult::Unmatched)) => (
+                    "409 Conflict",
+                    "{\"ok\":false,\"confirmed\":false}".into(),
+                    request.origin,
+                ),
+                Err(_) => ("400 Bad Request", "{\"ok\":false}".into(), request.origin),
             }
         }
         Ok(request) => ("403 Forbidden", "{\"ok\":false}".into(), request.origin),
@@ -515,32 +664,204 @@ mod tests {
             .expect("prompt pendente");
         assert_eq!(request.prompt, "Continue");
 
-        control
-            .acknowledge_prompt("web:chatgpt:hash-only", &request.id, false)
-            .expect("falha mantida");
+        assert!(matches!(
+            control
+                .acknowledge_prompt("web:chatgpt:hash-only", &request.id, false, |_| Ok(()))
+                .expect("falha mantida"),
+            BrowserPromptAckResult::NotSubmitted
+        ));
         assert!(control.pending_prompt("web:chatgpt:hash-only").is_some());
 
-        control
-            .acknowledge_prompt("web:chatgpt:hash-only", &request.id, true)
+        let mut recorded_prompt = None;
+        let acknowledged = control
+            .acknowledge_prompt("web:chatgpt:hash-only", &request.id, true, |prompt| {
+                recorded_prompt = Some(prompt.prompt.clone());
+                Ok(())
+            })
             .expect("entrega confirmada");
+        assert!(matches!(acknowledged, BrowserPromptAckResult::Confirmed));
+        assert_eq!(recorded_prompt.as_deref(), Some("Continue"));
+        assert!(matches!(
+            control
+                .acknowledge_prompt("web:chatgpt:hash-only", &request.id, true, |_| Ok(()))
+                .expect("ack repetido é idempotente"),
+            BrowserPromptAckResult::AlreadyConfirmed
+        ));
+        assert!(matches!(
+            control
+                .acknowledge_prompt("web:chatgpt:hash-only", "stale-id", true, |_| Ok(()))
+                .expect("id antigo rejeitado"),
+            BrowserPromptAckResult::Unmatched
+        ));
         assert!(control.pending_prompt("web:chatgpt:hash-only").is_none());
     }
 
     #[test]
-    fn legacy_browser_prompt_is_consumed_once() {
+    fn browser_prompt_ack_preserves_request_when_recording_confirmation_fails() {
+        let control = BrowserControl::default();
+        control
+            .request_prompt("web:chatgpt:hash-only".into(), "Continue".into())
+            .expect("fila local");
+        let request = control
+            .pending_prompt("web:chatgpt:hash-only")
+            .expect("prompt pendente");
+
+        assert!(control
+            .acknowledge_prompt("web:chatgpt:hash-only", &request.id, true, |_| {
+                Err("session record unavailable".into())
+            })
+            .is_err());
+        assert!(control.pending_prompt("web:chatgpt:hash-only").is_some());
+        assert!(matches!(
+            control
+                .acknowledge_prompt("web:chatgpt:hash-only", &request.id, true, |_| Ok(()))
+                .expect("retry depois que o armazenamento voltar"),
+            BrowserPromptAckResult::Confirmed
+        ));
+    }
+
+    #[test]
+    fn browser_prompt_does_not_overwrite_an_unconfirmed_prompt() {
+        let control = BrowserControl::default();
+        control
+            .request_prompt("web:chatgpt:hash-only".into(), "First".into())
+            .expect("primeiro prompt");
+        let first = control
+            .pending_prompt("web:chatgpt:hash-only")
+            .expect("prompt pendente");
+
+        assert!(control
+            .request_prompt("web:chatgpt:hash-only".into(), "Second".into())
+            .is_err());
+        assert_eq!(
+            control
+                .pending_prompt("web:chatgpt:hash-only")
+                .expect("primeiro continua pendente")
+                .id,
+            first.id
+        );
+    }
+
+    #[test]
+    fn closing_a_browser_session_keeps_a_late_ack_without_redelivering_prompt() {
+        let control = BrowserControl::default();
+        control
+            .request_prompt("web:chatgpt:closing".into(), "Leave".into())
+            .expect("prompt de sessão fechada");
+        let closing_request = control
+            .pending_prompt("web:chatgpt:closing")
+            .expect("prompt antes do fechamento");
+        control
+            .request_prompt("web:chatgpt:open".into(), "Stay".into())
+            .expect("prompt de outra sessão");
+
+        control.close_session("web:chatgpt:closing");
+
+        assert!(control.pending_prompt("web:chatgpt:closing").is_none());
+        assert!(matches!(
+            control
+                .acknowledge_prompt("web:chatgpt:closing", &closing_request.id, true, |prompt| {
+                    assert_eq!(prompt.prompt, "Leave");
+                    Ok(())
+                },)
+                .expect("ack de rota que mudou"),
+            BrowserPromptAckResult::Confirmed
+        ));
+        assert!(matches!(
+            control
+                .acknowledge_prompt("web:chatgpt:closing", &closing_request.id, true, |_| {
+                    Ok(())
+                })
+                .expect("repetição idempotente após fechamento"),
+            BrowserPromptAckResult::AlreadyConfirmed
+        ));
+        assert_eq!(
+            control
+                .pending_prompt("web:chatgpt:open")
+                .expect("outra sessão permanece intacta")
+                .prompt,
+            "Stay"
+        );
+    }
+
+    #[test]
+    fn closed_browser_prompt_is_discarded_after_negative_ack() {
+        let control = BrowserControl::default();
+        control
+            .request_prompt("web:chatgpt:closing".into(), "Leave".into())
+            .expect("prompt de sessão fechada");
+        let request = control
+            .pending_prompt("web:chatgpt:closing")
+            .expect("prompt pendente");
+        control.close_session("web:chatgpt:closing");
+
+        assert!(matches!(
+            control
+                .acknowledge_prompt("web:chatgpt:closing", &request.id, false, |_| Ok(()))
+                .expect("prompt não enviado"),
+            BrowserPromptAckResult::NotSubmitted
+        ));
+        assert!(matches!(
+            control
+                .acknowledge_prompt("web:chatgpt:closing", &request.id, true, |_| Ok(()))
+                .expect("request removido após negativo"),
+            BrowserPromptAckResult::Unmatched
+        ));
+    }
+
+    #[test]
+    fn legacy_browser_client_does_not_consume_unacknowledged_prompt() {
         let control = BrowserControl::default();
         control
             .request_prompt("web:chatgpt:legacy".into(), "Continue".into())
             .expect("legacy prompt");
 
+        assert!(
+            prompt_for_browser_event(&control, "web:chatgpt:legacy", 1, false, false).is_none()
+        );
         assert_eq!(
             control
-                .take_prompt("web:chatgpt:legacy")
-                .expect("first delivery")
+                .pending_prompt("web:chatgpt:legacy")
+                .expect("prompt remains queued until confirmed")
                 .prompt,
             "Continue"
         );
-        assert!(control.take_prompt("web:chatgpt:legacy").is_none());
+    }
+
+    #[test]
+    fn current_browser_client_receives_pending_prompt_without_consuming_it_before_ack() {
+        let control = BrowserControl::default();
+        control
+            .request_prompt("web:chatgpt:current".into(), "Continue".into())
+            .expect("prompt");
+
+        let delivered = prompt_for_browser_event(&control, "web:chatgpt:current", 2, false, false)
+            .expect("ack-capable companion receives prompt");
+        assert_eq!(delivered.prompt, "Continue");
+        assert!(control.pending_prompt("web:chatgpt:current").is_some());
+    }
+
+    #[test]
+    fn busy_browser_event_does_not_deliver_or_consume_pending_prompt() {
+        let control = BrowserControl::default();
+        control
+            .request_prompt("web:gemini:busy".into(), "Continue safely".into())
+            .expect("prompt");
+
+        assert!(prompt_for_browser_event(&control, "web:gemini:busy", 2, false, true).is_none());
+        assert_eq!(
+            control
+                .pending_prompt("web:gemini:busy")
+                .expect("prompt remains pending until the page can accept input")
+                .prompt,
+            "Continue safely"
+        );
+        assert_eq!(
+            prompt_for_browser_event(&control, "web:gemini:busy", 2, false, false)
+                .expect("the next idle event can deliver the request")
+                .prompt,
+            "Continue safely"
+        );
     }
 
     #[test]

@@ -266,6 +266,25 @@ pub struct ReviewNote {
     pub updated_at: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecisionKind {
+    Approved,
+    ChangesRequested,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewDecision {
+    pub id: String,
+    pub native_session_id: String,
+    pub result_id: String,
+    pub decision: ReviewDecisionKind,
+    pub note: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionNote {

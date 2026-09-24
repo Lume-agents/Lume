@@ -56,6 +56,12 @@ export interface HubSnapshot {
   workflowHistory: WorkflowHistoryRecord[];
 }
 
+export interface ExternalWriterConflict {
+  sessionId: string;
+  nativeSessionId: string;
+  processId: number;
+}
+
 export type HubCommand =
   | {
       type: "submit_prompt";

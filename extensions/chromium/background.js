@@ -6,6 +6,7 @@ const browserName = (async () => {
   return "chrome";
 })();
 const tabSessions = new Map();
+const pendingPromptEvents = new Map();
 
 const forwardEvent = (event) =>
   browserName.then((browser) => fetch(`${endpoint}/events`, {
@@ -29,7 +30,8 @@ const acknowledgePrompt = (event, promptId, submitted) =>
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "lume:event") {
-    const event = globalThis.LumeWebShared.eventForTab(message.event, sender.tab?.id);
+    const sourceEvent = message.event;
+    const event = globalThis.LumeWebShared.eventForTab(sourceEvent, sender.tab?.id);
     if (Number.isInteger(sender.tab?.id)) {
       const previous = tabSessions.get(sender.tab.id);
       if (previous && previous.sessionId !== event.sessionId) {
@@ -38,6 +40,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           state: "closed",
           lastResponse: undefined,
         }).catch(() => {});
+        for (const [promptId, pending] of pendingPromptEvents) {
+          if (pending.event.sessionId === previous.sessionId) pendingPromptEvents.delete(promptId);
+        }
       }
       tabSessions.set(sender.tab.id, event);
     }
@@ -50,24 +55,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             await chrome.windows.update(sender.tab.windowId, { focused: true });
           }
         }
+        const promptId = typeof result.promptId === "string" ? result.promptId : null;
+        const prompt = typeof result.prompt === "string" ? result.prompt : null;
+        if (promptId && prompt) {
+          const pending = pendingPromptEvents.get(promptId);
+          if (pending) pending.event = event;
+          else pendingPromptEvents.set(promptId, { event, submitted: false });
+        }
+        const pending = promptId ? pendingPromptEvents.get(promptId) : null;
+        let deliveredPrompt = prompt;
+        let deliveredPromptId = promptId;
+        if (pending?.submitted && promptId) {
+          const ackResponse = await acknowledgePrompt(pending.event, promptId, true).catch(() => null);
+          const ackResult = await ackResponse?.json().catch(() => ({ confirmed: false }));
+          if (ackResult?.confirmed) pendingPromptEvents.delete(promptId);
+          deliveredPrompt = null;
+          deliveredPromptId = null;
+        }
         sendResponse({
           ok: response.ok,
           focus: Boolean(result.focus),
-          prompt: typeof result.prompt === "string" ? result.prompt : null,
-          promptId: typeof result.promptId === "string" ? result.promptId : null,
+          prompt: deliveredPrompt,
+          promptId: deliveredPromptId,
+          provider: sourceEvent.provider,
+          sessionId: sourceEvent.sessionId,
         });
       })
       .catch(() => sendResponse({ ok: false }));
     return true;
   }
   if (message?.type === "lume:prompt-ack") {
-    const event = Number.isInteger(sender.tab?.id) ? tabSessions.get(sender.tab.id) : null;
+    const pending = typeof message.promptId === "string"
+      ? pendingPromptEvents.get(message.promptId)
+      : null;
+    const currentEvent = Number.isInteger(sender.tab?.id) ? tabSessions.get(sender.tab.id) : null;
+    const suppliedEvent =
+      typeof message.provider === "string" && typeof message.sessionId === "string"
+        ? globalThis.LumeWebShared.eventForTab(
+          { provider: message.provider, sessionId: message.sessionId },
+          sender.tab?.id,
+        )
+        : null;
+    const event = pending?.event ?? suppliedEvent ?? currentEvent;
     if (!event || typeof message.promptId !== "string") {
       sendResponse({ ok: false });
       return false;
     }
+    if (pending) pending.submitted = Boolean(message.submitted);
     acknowledgePrompt(event, message.promptId, Boolean(message.submitted))
-      .then((response) => sendResponse({ ok: response.ok }))
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({ ok: false, confirmed: false }));
+        if (result.confirmed) pendingPromptEvents.delete(message.promptId);
+        else if (pending && !message.submitted) pending.submitted = false;
+        sendResponse({
+          ok: response.ok && result.ok === true,
+          confirmed: result.confirmed === true,
+        });
+      })
       .catch(() => sendResponse({ ok: false }));
     return true;
   }
@@ -89,4 +133,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     state: "closed",
     lastResponse: undefined,
   }).catch(() => {});
+  for (const [promptId, pending] of pendingPromptEvents) {
+    if (pending.event.sessionId === event.sessionId) pendingPromptEvents.delete(promptId);
+  }
 });

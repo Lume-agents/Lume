@@ -205,7 +205,11 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
         .map(str::trim)
         .filter(|prompt| !prompt.is_empty())
     {
-        arguments.push(prompt.to_string());
+        if request.agent == IntegrationKind::Antigravity {
+            arguments.extend(["-i".into(), prompt.to_string()]);
+        } else {
+            arguments.push(prompt.to_string());
+        }
     }
     TerminalPayload {
         command,
@@ -494,6 +498,36 @@ mod tests {
         assert_eq!(payload.command, "dsh");
         assert_eq!(payload.arguments, vec!["--profile", "tui"]);
         assert!(!payload.retry_quick_resume);
+    }
+
+    #[test]
+    fn antigravity_prompt_uses_interactive_mode_when_resuming() {
+        let mut request = request(IntegrationKind::Antigravity, true, Some("conversation-id"));
+        request.initial_prompt = Some("Continue a tarefa".into());
+
+        let payload = payload_for(&request, None);
+
+        assert_eq!(payload.command, "agy");
+        assert_eq!(
+            payload.arguments,
+            vec![
+                "--conversation",
+                "conversation-id",
+                "-i",
+                "Continue a tarefa"
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravity_initial_prompt_keeps_a_new_cli_interactive() {
+        let mut request = request(IntegrationKind::Antigravity, false, None);
+        request.initial_prompt = Some("Inspecione o projeto".into());
+
+        let payload = payload_for(&request, None);
+
+        assert_eq!(payload.command, "agy");
+        assert_eq!(payload.arguments, vec!["-i", "Inspecione o projeto"]);
     }
 
     #[test]

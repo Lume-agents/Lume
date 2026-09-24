@@ -1,4 +1,4 @@
-import type { SessionActivity, SessionResult } from "$lib/domain";
+import type { PromptAttachment, SessionActivity, SessionResult } from "$lib/domain";
 // Node executes this module directly in the focused parser test; Vite resolves the same source in the app.
 // @ts-expect-error TypeScript's bundler mode disallows the explicit source extension used by Node.
 import { mergeFileChanges, summarizeFileChanges } from "./fileChanges.ts";
@@ -14,6 +14,7 @@ export interface ReviewTurn {
   id: string;
   prompt?: SessionActivity;
   result?: SessionResult;
+  responseAttachments: PromptAttachment[];
   files: ReviewFileChange[];
   checks: string[];
   createdAt: number;
@@ -30,7 +31,10 @@ export interface ReviewDiffLine {
 }
 
 function unifiedDiffChunks(detail: string) {
-  const starts = [...detail.matchAll(/^diff --git /gm)].map((match) => match.index ?? 0);
+  const gitStarts = [...detail.matchAll(/^diff --git /gm)].map((match) => match.index ?? 0);
+  const starts = gitStarts.length
+    ? gitStarts
+    : [...detail.matchAll(/^--- (?:a\/|\/dev\/null)/gm)].map((match) => match.index ?? 0);
   return starts.map((start, index) => detail.slice(start, starts[index + 1] ?? detail.length).trim());
 }
 
@@ -49,6 +53,40 @@ function recordedDiffs(detail: string) {
   return patchDiffChunks(detail);
 }
 
+function structuredDiffChunks(detail: string) {
+  let value: unknown;
+  try {
+    value = JSON.parse(detail);
+  } catch {
+    return [];
+  }
+  const chunks: string[] = [];
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      candidate.forEach(visit);
+      return;
+    }
+    if (!candidate || typeof candidate !== "object") return;
+    const record = candidate as Record<string, unknown>;
+    const path = [record.path, record.filePath, record.filename]
+      .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+    const diff = [record.unifiedDiff, record.diff, record.patch]
+      .find((item): item is string => typeof item === "string" && item.trim().length > 0);
+    if (path && diff) {
+      const normalized = diff.trim();
+      chunks.push(normalized.startsWith("diff --git ") || normalized.startsWith("*** ")
+        ? normalized
+        : `*** Update File: ${path}\n${normalized}`);
+    }
+    for (const [key, nested] of Object.entries(record)) {
+      if (key === "diff" || key === "patch" || key === "unifiedDiff") continue;
+      visit(nested);
+    }
+  };
+  visit(value);
+  return chunks;
+}
+
 export function collectReviewFiles(
   activities: SessionActivity[],
   workingDirectory?: string,
@@ -60,7 +98,8 @@ export function collectReviewFiles(
     const reported = [...activity.files];
     if (activity.kind === "file" && !reported.includes(activity.title)) reported.push(activity.title);
     mergeFileChanges(files, summarizeFileChanges(activity.detail ?? "", reported, workingDirectory));
-    for (const diff of recordedDiffs(activity.detail ?? "")) {
+    const detail = activity.detail ?? "";
+    for (const diff of [...recordedDiffs(detail), ...structuredDiffChunks(detail)]) {
       const [summary] = summarizeFileChanges(diff, [], workingDirectory);
       if (!summary) continue;
       const current = files.find((file) => file.path === summary.path);
@@ -98,6 +137,11 @@ export function buildReviewTurns(
     );
     for (const result of segmentResults) matchedResults.add(result.id);
     const result = segmentResults.at(-1);
+    const responseActivity = result
+      ? [...segment].reverse().find((activity) =>
+        activity.kind === "message" && activity.detail?.trim() === result.response.trim()
+      )
+      : undefined;
     const files = collectReviewFiles(segment, workingDirectory);
     const checks = [...new Set([
       ...(result?.tests ?? []),
@@ -109,6 +153,7 @@ export function buildReviewTurns(
       id: result?.id ?? `prompt:${prompt.id}`,
       prompt,
       result,
+      responseAttachments: responseActivity?.attachments ?? [],
       files,
       checks,
       createdAt: result?.createdAt ?? prompt.createdAt,
@@ -121,6 +166,7 @@ export function buildReviewTurns(
     turns.push({
       id: result.id,
       result,
+      responseAttachments: [],
       files: [],
       checks: [...new Set(result.tests.filter(Boolean))],
       createdAt: result.createdAt,

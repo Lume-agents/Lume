@@ -4,8 +4,8 @@ use rusqlite::{params, Connection};
 
 use crate::domain::{
     AgentKind, AgentSession, HistoryEntry, MobileScope, PairedDevice, Preferences, ResultNote,
-    ReviewNote, SessionActivity, SessionControlOrigin, SessionNote, SessionStatus,
-    WorkflowHistoryRecord,
+    ReviewDecision, ReviewDecisionKind, ReviewNote, SessionActivity, SessionControlOrigin,
+    SessionNote, SessionStatus, WorkflowHistoryRecord,
 };
 
 pub struct Store {
@@ -85,6 +85,18 @@ impl Store {
                  );
                  CREATE INDEX IF NOT EXISTS idx_review_notes_session
                     ON review_notes(native_session_id, updated_at DESC);
+                 CREATE TABLE IF NOT EXISTS review_decisions (
+                    id TEXT PRIMARY KEY,
+                    native_session_id TEXT NOT NULL,
+                    result_id TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    note TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    UNIQUE(native_session_id, result_id)
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_review_decisions_session
+                    ON review_decisions(native_session_id, updated_at DESC);
                  CREATE TABLE IF NOT EXISTS mobile_devices (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -883,6 +895,66 @@ impl Store {
             .execute(
                 "DELETE FROM review_notes WHERE native_session_id = ?1 AND result_id = ?2",
                 params![native_session_id, result_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub fn review_decisions(&self, native_session_id: &str) -> Result<Vec<ReviewDecision>, String> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT id, native_session_id, result_id, decision, note, created_at, updated_at
+                 FROM review_decisions
+                 WHERE native_session_id = ?1
+                 ORDER BY updated_at DESC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([native_session_id], |row| {
+                let decision: String = row.get(3)?;
+                let decision = match decision.as_str() {
+                    "approved" => ReviewDecisionKind::Approved,
+                    _ => ReviewDecisionKind::ChangesRequested,
+                };
+                Ok(ReviewDecision {
+                    id: row.get(0)?,
+                    native_session_id: row.get(1)?,
+                    result_id: row.get(2)?,
+                    decision,
+                    note: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn save_review_decision(&self, decision: &ReviewDecision) -> Result<(), String> {
+        let decision_value = match &decision.decision {
+            ReviewDecisionKind::Approved => "approved",
+            ReviewDecisionKind::ChangesRequested => "changes_requested",
+        };
+        self.connection
+            .execute(
+                "INSERT INTO review_decisions
+                 (id, native_session_id, result_id, decision, note, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(native_session_id, result_id) DO UPDATE SET
+                    decision = excluded.decision,
+                    note = excluded.note,
+                    updated_at = excluded.updated_at",
+                params![
+                    decision.id,
+                    decision.native_session_id,
+                    decision.result_id,
+                    decision_value,
+                    decision.note,
+                    decision.created_at,
+                    decision.updated_at,
+                ],
             )
             .map_err(|error| error.to_string())?;
         Ok(())

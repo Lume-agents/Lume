@@ -497,14 +497,6 @@ pub fn session_model_settings(
         .native_session_id
         .as_deref()
         .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
-    if matches!(
-        session.status,
-        SessionStatus::Running | SessionStatus::PermissionRequired
-    ) {
-        let mut settings = bridge.default_model_settings()?;
-        apply_pending_model_override(state, session_id, &mut settings)?;
-        return Ok(settings);
-    }
     match bridge.thread_model_settings(thread_id) {
         Ok(mut settings) => {
             apply_pending_model_override(state, session_id, &mut settings)?;
@@ -542,34 +534,31 @@ pub fn set_session_model_settings(
         .native_session_id
         .as_deref()
         .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
-    if matches!(
+    let running = matches!(
         session.status,
         SessionStatus::Running | SessionStatus::PermissionRequired
-    ) {
-        let mut settings = bridge.default_model_settings()?;
-        validate_model_selection(&mut settings, model, effort)?;
-        let pending = SessionModelOverride {
-            model: Some(settings.model.clone()),
-            reasoning_effort: settings.reasoning_effort.clone(),
-        };
-        state.set_session_model_override(session_id, pending.clone())?;
-        state.queue_codex_model_update(
-            thread_id,
-            pending,
-            bridge.collaboration_mode(thread_id)?,
-        )?;
-        protocol::emit_sessions_changed(app);
-        return Ok(settings);
-    }
-    let settings = match bridge.set_thread_model_settings(thread_id, model, effort) {
-        Ok(settings) => settings,
-        Err(error) if is_missing_codex_rollout(&error) => {
-            let mut settings = bridge.default_model_settings()?;
-            validate_model_selection(&mut settings, model, effort)?;
-            settings
+    );
+    let mut update_thread = !running;
+    let mut settings = if running {
+        bridge.default_model_settings()?
+    } else {
+        match bridge.thread_model_settings(thread_id) {
+            Ok(settings) => settings,
+            Err(error) if is_missing_codex_rollout(&error) => {
+                update_thread = false;
+                bridge.default_model_settings()?
+            }
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
     };
+    validate_model_selection(&mut settings, model, effort)?;
+    if update_thread {
+        settings = bridge.set_thread_model_settings(
+            thread_id,
+            &settings.model,
+            settings.reasoning_effort.as_deref().unwrap_or_default(),
+        )?;
+    }
     state.set_session_model_override(
         session_id,
         SessionModelOverride {
@@ -586,9 +575,9 @@ fn apply_pending_model_override(
     session_id: &str,
     settings: &mut CodexThreadModelSettings,
 ) -> Result<(), String> {
-    let pending = state.session_model_override(session_id)?;
-    if let Some(model) = pending.model {
-        let effort = pending.reasoning_effort.unwrap_or_default();
+    let selected = state.session_model_override(session_id)?;
+    if let Some(model) = selected.model {
+        let effort = selected.reasoning_effort.unwrap_or_default();
         validate_model_selection(settings, &model, &effort)?;
     }
     Ok(())

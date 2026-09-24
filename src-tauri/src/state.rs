@@ -43,12 +43,6 @@ pub struct ExternalWriterConflict {
     pub process_id: u32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PendingCodexModelUpdate {
-    pub settings: SessionModelOverride,
-    pub collaboration_mode: String,
-}
-
 #[derive(Clone)]
 pub struct AppState {
     sessions: Arc<Mutex<Vec<AgentSession>>>,
@@ -64,7 +58,6 @@ pub struct AppState {
     session_aliases: Arc<Mutex<HashMap<String, String>>>,
     archived_conversations: Arc<Mutex<HashMap<String, Vec<SessionActivity>>>>,
     session_model_overrides: Arc<Mutex<HashMap<(AgentKind, String), SessionModelOverride>>>,
-    pending_codex_model_updates: Arc<Mutex<HashMap<String, PendingCodexModelUpdate>>>,
     active_codex_turns: Arc<Mutex<HashMap<String, String>>>,
     hub_command_responses: Arc<Mutex<HashMap<String, (i64, crate::protocol::HubCommandResponse)>>>,
 }
@@ -131,7 +124,6 @@ impl AppState {
             session_aliases: Arc::new(Mutex::new(preferences.session_aliases)),
             archived_conversations: Arc::new(Mutex::new(HashMap::new())),
             session_model_overrides: Arc::new(Mutex::new(HashMap::new())),
-            pending_codex_model_updates: Arc::new(Mutex::new(HashMap::new())),
             active_codex_turns: Arc::new(Mutex::new(HashMap::new())),
             hub_command_responses: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -1114,6 +1106,22 @@ impl AppState {
             .map(|settings| settings.get(&key).cloned().unwrap_or_default())
     }
 
+    pub(crate) fn session_model_override_for_native_id(
+        &self,
+        agent: AgentKind,
+        native_session_id: &str,
+    ) -> Result<SessionModelOverride, String> {
+        self.session_model_overrides
+            .lock()
+            .map_err(|_| "Could not read the session model settings".to_string())
+            .map(|settings| {
+                settings
+                    .get(&(agent, native_session_id.to_string()))
+                    .cloned()
+                    .unwrap_or_default()
+            })
+    }
+
     pub fn set_session_model_override(
         &self,
         session_id: &str,
@@ -1131,48 +1139,6 @@ impl AppState {
             .map_err(|_| "Could not save the session model settings".to_string())?
             .insert(key, settings.clone());
         Ok(settings)
-    }
-
-    pub(crate) fn queue_codex_model_update(
-        &self,
-        thread_id: &str,
-        settings: SessionModelOverride,
-        collaboration_mode: String,
-    ) -> Result<(), String> {
-        self.pending_codex_model_updates
-            .lock()
-            .map_err(|_| "Could not queue the Codex model change".to_string())?
-            .insert(
-                thread_id.to_string(),
-                PendingCodexModelUpdate {
-                    settings,
-                    collaboration_mode,
-                },
-            );
-        Ok(())
-    }
-
-    pub(crate) fn take_codex_model_update(
-        &self,
-        thread_id: &str,
-    ) -> Result<Option<PendingCodexModelUpdate>, String> {
-        self.pending_codex_model_updates
-            .lock()
-            .map_err(|_| "Could not read the queued Codex model change".to_string())
-            .map(|mut updates| updates.remove(thread_id))
-    }
-
-    pub(crate) fn restore_codex_model_update(
-        &self,
-        thread_id: &str,
-        update: PendingCodexModelUpdate,
-    ) -> Result<(), String> {
-        self.pending_codex_model_updates
-            .lock()
-            .map_err(|_| "Could not restore the queued Codex model change".to_string())?
-            .entry(thread_id.to_string())
-            .or_insert(update);
-        Ok(())
     }
 
     pub fn record_queued_prompt_activity(
@@ -4702,37 +4668,15 @@ mod tests {
                 reasoning_effort: Some("high".into()),
             }
         );
-    }
-
-    #[test]
-    fn queued_codex_model_update_is_taken_once_and_can_be_restored() {
-        let state = AppState::new(Path::new(":memory:")).expect("state");
-        let settings = SessionModelOverride {
-            model: Some("gpt-test".into()),
-            reasoning_effort: Some("high".into()),
-        };
-        state
-            .queue_codex_model_update("thread-1", settings.clone(), "default".into())
-            .expect("queue update");
-
-        let update = state
-            .take_codex_model_update("thread-1")
-            .expect("take update")
-            .expect("queued update");
-        assert_eq!(update.settings, settings);
-        assert_eq!(update.collaboration_mode, "default");
-        assert!(state
-            .take_codex_model_update("thread-1")
-            .expect("empty queue")
-            .is_none());
-
-        state
-            .restore_codex_model_update("thread-1", update)
-            .expect("restore update");
-        assert!(state
-            .take_codex_model_update("thread-1")
-            .expect("restored update")
-            .is_some());
+        assert_eq!(
+            state
+                .session_model_override_for_native_id(AgentKind::Codex, "new-model-thread")
+                .expect("configuração por thread nativa"),
+            SessionModelOverride {
+                model: Some("gpt-test".into()),
+                reasoning_effort: Some("high".into()),
+            }
+        );
     }
 
     #[test]

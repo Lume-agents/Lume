@@ -1013,7 +1013,12 @@
     try {
       if (session.agent === "codex") {
         if (!selectedModel || !selectedEffort) return;
-        modelSettings = await setSessionModelSettings(session.id, selectedModel, selectedEffort);
+        const savedSettings = await setSessionModelSettings(session.id, selectedModel, selectedEffort);
+        modelSettings = savedSettings;
+        selectedModel = savedSettings.model;
+        selectedEffort = savedSettings.reasoningEffort
+          ?? savedSettings.models.find((option) => option.model === savedSettings.model)?.defaultReasoningEffort
+          ?? "";
         if (!promptIsRunning) fastMode = modelSettings.serviceTier === "fast";
       } else if (session.agent === "claude_code") {
         await setClaudeSessionModelSettings(

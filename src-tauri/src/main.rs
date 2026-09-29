@@ -112,6 +112,12 @@ fn main() {
     #[cfg(target_os = "linux")]
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
         && std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("wayland")
+        // COSMIC needs the default renderer to clear animated transparent
+        // contours correctly. Keep explicit user overrides available.
+        && !std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .split([':', ';'])
+            .any(|part| part.trim().eq_ignore_ascii_case("cosmic"))
     {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }

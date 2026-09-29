@@ -172,7 +172,7 @@
           </div>
           <div class="token-chart">
             <span>{tr("Tokens / prompt", "Tokens / prompt")}</span>
-            <svg class:empty={!tokenGraph.points} class="token-graph" viewBox="0 0 226 54" role="img" aria-label={tr("Tokens used per prompt over time", "Tokens usados por prompt ao longo do tempo")}>
+            <svg class:empty={!tokenGraph.points} class="token-graph" viewBox="0 0 226 54" preserveAspectRatio={variant === "orb" ? "none" : "xMidYMid meet"} role="img" aria-label={tr("Tokens used per prompt over time", "Tokens usados por prompt ao longo do tempo")}>
               <path class="graph-grid" d="M4 14H222M4 28H222M4 42H222" />
               <polygon points={tokenGraph.area} />
               <polyline points={tokenGraph.points || "4,42 222,42"} />
@@ -229,26 +229,28 @@
         {/if}
       </details>
 
-      <details class="inspector-section" open={checks.length > 0}>
-        <summary><span>{tr("Validations", "Validações")}</span><em>{checks.length}</em></summary>
-        <p class="section-description">{tr("Tests, builds, and checks reported by the agent in the latest turn.", "Testes, builds e verificações reportados pelo agente no último turno.")}</p>
-        {#if checks.length}
-          <ul class="check-list">{#each checks as check}<li title={check}><i><LumeIcon name="check" size={9} /></i><span>{check}</span></li>{/each}</ul>
-        {:else}
-          <p class="empty-section">{tr("No validation evidence was reported.", "Nenhuma evidência de validação foi reportada.")}</p>
-        {/if}
-      </details>
+      {#if variant === "workspace"}
+        <details class="inspector-section" open={checks.length > 0}>
+          <summary><span>{tr("Validations", "Validações")}</span><em>{checks.length}</em></summary>
+          <p class="section-description">{tr("Tests, builds, and checks reported by the agent in the latest turn.", "Testes, builds e verificações reportados pelo agente no último turno.")}</p>
+          {#if checks.length}
+            <ul class="check-list">{#each checks as check}<li title={check}><i><LumeIcon name="check" size={9} /></i><span>{check}</span></li>{/each}</ul>
+          {:else}
+            <p class="empty-section">{tr("No validation evidence was reported.", "Nenhuma evidência de validação foi reportada.")}</p>
+          {/if}
+        </details>
 
-      <details class="inspector-section metadata-section">
-        <summary>{tr("Session details", "Detalhes da sessão")}</summary>
-        <dl>
-          <div><dt>{tr("Source", "Origem")}</dt><dd>{sessionSource(session)}</dd></div>
-          <div><dt>{tr("Control", "Controle")}</dt><dd>{session.controlOrigin === "lume" ? tr("Managed by Lume", "Gerenciado pelo Lume") : tr("Externally owned", "Controle externo")}</dd></div>
-          <div><dt>{tr("Process ID", "ID do processo")}</dt><dd>{session.processId ?? tr("Not reported by source", "Não informado pela origem")}</dd></div>
-          <div><dt>{tr("Directory", "Diretório")}</dt><dd title={session.workingDirectory}>{session.workingDirectory || "—"}</dd></div>
-          <div><dt>{tr("Thread", "Thread")}</dt><dd title={session.nativeSessionId}>{session.nativeSessionId || "—"}</dd></div>
-        </dl>
-      </details>
+        <details class="inspector-section metadata-section">
+          <summary>{tr("Session details", "Detalhes da sessão")}</summary>
+          <dl>
+            <div><dt>{tr("Source", "Origem")}</dt><dd>{sessionSource(session)}</dd></div>
+            <div><dt>{tr("Control", "Controle")}</dt><dd>{session.controlOrigin === "lume" ? tr("Managed by Lume", "Gerenciado pelo Lume") : tr("Externally owned", "Controle externo")}</dd></div>
+            <div><dt>{tr("Process ID", "ID do processo")}</dt><dd>{session.processId ?? tr("Not reported by source", "Não informado pela origem")}</dd></div>
+            <div><dt>{tr("Directory", "Diretório")}</dt><dd title={session.workingDirectory}>{session.workingDirectory || "—"}</dd></div>
+            <div><dt>{tr("Thread", "Thread")}</dt><dd title={session.nativeSessionId}>{session.nativeSessionId || "—"}</dd></div>
+          </dl>
+        </details>
+      {/if}
     </div>
   {:else}
     <div class="inspector-empty"><BrandIcon name="lume" size={30} /><span>{tr("Select an agent to inspect its work.", "Selecione um agente para inspecionar o trabalho.")}</span></div>
@@ -264,6 +266,8 @@
   .workspace-inspector.orb-inspector > header .header-copy small { font-size: 8px; }
   .workspace-inspector.orb-inspector .inspector-scroll { padding: 0 9px 14px; }
   .workspace-inspector.orb-inspector .inspector-section > summary { min-height: 40px; font-size: 9px; }
+  .orb-inspector .usage-section { grid-template-columns: max-content minmax(0, 1fr); gap: 12px; }
+  .orb-inspector .token-graph :is(path, polyline, circle) { vector-effect: non-scaling-stroke; }
   .workspace-inspector > header { min-height: 64px; padding: 10px 12px 10px 15px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-line); }
   .header-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }.header-copy strong, .header-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.header-copy strong { color: var(--workspace-strong); font-size: 12px; letter-spacing: -.015em; }.header-copy small { color: var(--workspace-muted); font-size: 9px; }
   .agent-icon { width: 31px; height: 31px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }

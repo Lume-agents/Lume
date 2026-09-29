@@ -23,6 +23,20 @@
   import LumeLogo from "$lib/LumeLogo.svelte";
   import OrbResponse from "$lib/OrbResponse.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
+  import {
+    clampOrbPosition,
+    compactPositionForPanel,
+    expandedPositionForOrb,
+    freeOrbDock,
+    orbCornerRadii,
+    orbDockAtPosition,
+    orbDockPressure,
+    orbEdgePressure,
+    pinOrbPosition,
+    snapOrbPosition,
+    type OrbDock,
+    type OrbPosition,
+  } from "$lib/orbDocking";
   import LumeSelect from "$lib/LumeSelect.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
@@ -165,7 +179,6 @@
     scopes: ["monitor", "prompt", "approve"],
   };
   const expandedPanelMaxHeight = 544;
-  const edgeAnchorThreshold = 18;
 
   let expanded = $state(!isTauri);
   let contentVisible = $state(!isTauri);
@@ -253,8 +266,29 @@
   let compactAnchorPosition: { x: number; y: number } | null = null;
   let overlayReady = $state(false);
   let monitorBounds = $state({ x: 0, y: 0, width: 1920, height: 1080, scale: 1 });
+  let overlayWorkArea = $state({ x: 0, y: 0, width: 1920, height: 1080 });
+  let orbDock = $state<OrbDock>(freeOrbDock());
+  let orbSettling = $state(false);
+  let orbSettleRevision = 0;
+  let orbSettleTarget: OrbPosition | null = null;
   let displayBackend = $state<DisplayBackend>("native");
   let dragging = $state(false);
+  const orbPressure = $derived(dragging && !expanded && displayBackend !== "native-gnome"
+    ? orbEdgePressure(overlayPosition, compactSize, overlayWorkArea, monitorBounds.scale)
+    : orbDockPressure(orbDock));
+  const orbRadii = $derived(orbCornerRadii(orbPressure));
+  const orbDockName = $derived([orbDock.vertical, orbDock.horizontal].filter(Boolean).join("-") || "free");
+  const orbSurfaceStyle = $derived([
+    `--orb-radius: ${orbRadii.map((radius) => `${radius}px`).join(" ")}`,
+    `--orb-scale-x: ${1 - (orbPressure.left + orbPressure.right) * 0.08}`,
+    `--orb-scale-y: ${1 - (orbPressure.top + orbPressure.bottom) * 0.10}`,
+    `--orb-origin-x: ${orbPressure.left ? "0%" : orbPressure.right ? "100%" : "50%"}`,
+    `--orb-origin-y: ${orbPressure.top ? "0%" : orbPressure.bottom ? "100%" : "50%"}`,
+    `--orb-content-x: ${(orbPressure.right - orbPressure.left) * compactSize.width * 0.04}px`,
+    `--orb-content-y: ${(orbPressure.bottom - orbPressure.top) * compactSize.height * 0.05}px`,
+  ].join("; "));
+  const panelRadius = $derived(orbRadii
+    .map((radius) => `${radius + (21 - radius) * morphProgress}px`).join(" "));
   let mascotAwake = $state(false);
   let mascotSleepTimer: ReturnType<typeof setTimeout> | undefined;
   let appVersion = $state("0.4.0");
@@ -275,6 +309,7 @@
     scale: number;
     target: HTMLElement;
     compact: boolean;
+    originDock: OrbDock;
   } | null = null;
   let pendingOverlayMove: { x: number; y: number } | null = null;
   let overlayMoveTask: Promise<void> | null = null;
@@ -739,6 +774,7 @@
       if (resumeRefreshTimer) clearTimeout(resumeRefreshTimer);
       if (sessionRefreshTimer) clearTimeout(sessionRefreshTimer);
       if (mascotSleepTimer) clearTimeout(mascotSleepTimer);
+      orbSettleRevision += 1;
       if (pendingUpdate) void pendingUpdate.close();
     };
   });
@@ -938,6 +974,13 @@
         height: monitor.size.height,
         scale,
       };
+      const workArea = monitor.workArea ?? { position: monitor.position, size: monitor.size };
+      overlayWorkArea = {
+        x: workArea.position.x - monitor.position.x,
+        y: workArea.position.y - monitor.position.y,
+        width: workArea.size.width,
+        height: workArea.size.height,
+      };
       if (!overlayReady || resetPosition) {
         overlayPosition = {
           x:
@@ -949,7 +992,23 @@
         };
         overlayReady = true;
       }
-      overlayPosition = clampOverlayPosition(overlayPosition.x, overlayPosition.y, target);
+      if (expanded && compactAnchorPosition) {
+        compactAnchorPosition = pinOrbPosition(
+          compactAnchorPosition, resetPosition ? freeOrbDock() : orbDock,
+          compactSize, overlayWorkArea, scale,
+        );
+        orbDock = orbDockAtPosition(compactAnchorPosition, compactSize, overlayWorkArea, scale);
+        overlayPosition = expandedPositionFromCompact(compactAnchorPosition, target);
+      } else {
+        overlayPosition = clampOverlayPosition(overlayPosition.x, overlayPosition.y, target);
+        if (!expanded) {
+          overlayPosition = pinOrbPosition(
+            overlayPosition, resetPosition ? freeOrbDock() : orbDock,
+            compactSize, overlayWorkArea, scale,
+          );
+          orbDock = orbDockAtPosition(overlayPosition, compactSize, overlayWorkArea, scale);
+        }
+      }
       await moveOverlay(overlayPosition.x, overlayPosition.y, false, preferences.monitorId);
     } catch {
       // Alguns compositores Wayland ignoram posicionamento solicitado pelo cliente.
@@ -966,6 +1025,10 @@
       if (!overlayReady) return;
     }
     if (morphing) return;
+    if (orbSettling) {
+      interruptOrbSettlement();
+      await waitForOverlayMoves();
+    }
     const opening = !expanded;
     let expandedTarget = currentExpandedSize();
 
@@ -1129,50 +1192,25 @@
     y: number,
     target = expanded ? currentExpandedSize() : compactSize,
   ) {
-    return {
-      x: Math.max(0, Math.min(x, monitorBounds.width - target.width * monitorBounds.scale)),
-      y: Math.max(0, Math.min(y, monitorBounds.height - target.height * monitorBounds.scale)),
-    };
+    return clampOrbPosition({ x, y }, target, overlayWorkArea, monitorBounds.scale);
   }
 
   function expandedPositionFromCompact(
     compactPosition: { x: number; y: number },
     target = currentExpandedSize(),
   ) {
-    const compactWidth = compactSize.width * monitorBounds.scale;
-    const compactHeight = compactSize.height * monitorBounds.scale;
-    const targetWidth = target.width * monitorBounds.scale;
-    const targetHeight = target.height * monitorBounds.scale;
-    const rightDistance = monitorBounds.width - compactPosition.x - compactWidth;
-    const bottomDistance = monitorBounds.height - compactPosition.y - compactHeight;
-    const edgeThreshold = edgeAnchorThreshold * monitorBounds.scale;
-    const x = rightDistance <= edgeThreshold
-      ? compactPosition.x - (targetWidth - compactWidth)
-      : compactPosition.x;
-    const y = bottomDistance <= edgeThreshold
-      ? compactPosition.y - (targetHeight - compactHeight)
-      : compactPosition.y;
-    return clampOverlayPosition(x, y, target);
+    return expandedPositionForOrb(
+      compactPosition, compactSize, target, overlayWorkArea, monitorBounds.scale, orbDock,
+    );
   }
 
   function compactPositionFromExpanded(
     expandedPosition: { x: number; y: number },
     source = currentExpandedSize(),
   ) {
-    const compactWidth = compactSize.width * monitorBounds.scale;
-    const compactHeight = compactSize.height * monitorBounds.scale;
-    const sourceWidth = source.width * monitorBounds.scale;
-    const sourceHeight = source.height * monitorBounds.scale;
-    const rightDistance = monitorBounds.width - expandedPosition.x - sourceWidth;
-    const bottomDistance = monitorBounds.height - expandedPosition.y - sourceHeight;
-    const edgeThreshold = edgeAnchorThreshold * monitorBounds.scale;
-    const x = rightDistance <= edgeThreshold
-      ? expandedPosition.x + (sourceWidth - compactWidth)
-      : expandedPosition.x;
-    const y = bottomDistance <= edgeThreshold
-      ? expandedPosition.y + (sourceHeight - compactHeight)
-      : expandedPosition.y;
-    return clampOverlayPosition(x, y, compactSize);
+    return compactPositionForPanel(
+      expandedPosition, source, compactSize, overlayWorkArea, monitorBounds.scale,
+    );
   }
 
   function beginOverlayDrag(event: PointerEvent, compact = false) {
@@ -1187,6 +1225,7 @@
       return;
     }
     if (displayBackend === "native-gnome") {
+      orbDock = freeOrbDock();
       dragging = true;
       void getCurrentWindow()
         .startDragging()
@@ -1198,6 +1237,7 @@
         });
       return;
     }
+    interruptOrbSettlement();
     const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
     dragState = {
@@ -1209,6 +1249,7 @@
       scale: monitorBounds.scale,
       target,
       compact,
+      originDock: { ...orbDock },
     };
     dragging = false;
   }
@@ -1233,6 +1274,7 @@
     const dx = (event.screenX - dragState.startX) * dragState.scale;
     const dy = (event.screenY - dragState.startY) * dragState.scale;
     if (!dragging && Math.hypot(dx, dy) < 3) return;
+    if (!dragging) orbDock = freeOrbDock();
     dragging = true;
     event.preventDefault();
     overlayPosition = clampOverlayPosition(
@@ -1263,26 +1305,87 @@
     while (overlayMoveTask) await overlayMoveTask;
   }
 
+  function interruptOrbSettlement() {
+    if (!orbSettling) return;
+    orbSettleRevision += 1;
+    orbSettling = false;
+    if (orbSettleTarget) {
+      overlayPosition = { ...orbSettleTarget };
+      queueOverlayMove(overlayPosition.x, overlayPosition.y);
+      orbSettleTarget = null;
+    }
+  }
+
+  async function settleOrbPosition(position: OrbPosition) {
+    const origin = { ...overlayPosition };
+    const revision = ++orbSettleRevision;
+    if (origin.x === position.x && origin.y === position.y) {
+      queueOverlayMove(position.x, position.y);
+      await waitForOverlayMoves();
+      return;
+    }
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const duration = reducedMotion ? 0 : 160;
+    const startedAt = performance.now();
+    orbSettleTarget = position;
+    orbSettling = true;
+    await new Promise<void>((resolve) => {
+      const frame = (now: number) => {
+        if (revision !== orbSettleRevision) { resolve(); return; }
+        const progress = duration === 0 ? 1 : Math.min(1, (now - startedAt) / duration);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        overlayPosition = {
+          x: Math.round(origin.x + (position.x - origin.x) * eased),
+          y: Math.round(origin.y + (position.y - origin.y) * eased),
+        };
+        queueOverlayMove(overlayPosition.x, overlayPosition.y);
+        if (progress < 1) requestAnimationFrame(frame);
+        else {
+          orbSettling = false;
+          orbSettleTarget = null;
+          resolve();
+        }
+      };
+      requestAnimationFrame(frame);
+    });
+    await waitForOverlayMoves();
+  }
+
   async function endOverlayDrag(event: PointerEvent, compact = false) {
     if (!dragState || dragState.pointerId !== event.pointerId) return;
-    const target = dragState.target;
-    if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+    const completedDrag = dragState;
     dragState = null;
+    const target = completedDrag.target;
+    if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
     if (!dragging) return;
     dragging = false;
+    if (event.type === "pointercancel" || event.type === "lostpointercapture") {
+      overlayPosition = { x: completedDrag.originX, y: completedDrag.originY };
+      orbDock = completedDrag.originDock;
+      queueOverlayMove(overlayPosition.x, overlayPosition.y);
+      return;
+    }
     if (compact) suppressCompactToggle = true;
+    const drop = snapOrbPosition(overlayPosition, compactSize, overlayWorkArea, monitorBounds.scale);
     const persistedPosition = expanded
       ? compactPositionFromExpanded(overlayPosition)
-      : overlayPosition;
+      : drop.position;
+    orbDock = expanded
+      ? orbDockAtPosition(persistedPosition, compactSize, overlayWorkArea, monitorBounds.scale)
+      : drop.dock;
     compactAnchorPosition = expanded ? persistedPosition : null;
     preferences = {
       ...preferences,
       overlayX: Math.round(persistedPosition.x),
       overlayY: Math.round(persistedPosition.y),
     };
-    queueOverlayMove(overlayPosition.x, overlayPosition.y);
-    await waitForOverlayMoves();
-    await savePreferences(preferences);
+    if (expanded) {
+      queueOverlayMove(overlayPosition.x, overlayPosition.y);
+      await waitForOverlayMoves();
+      await savePreferences(preferences);
+    } else {
+      await Promise.all([settleOrbPosition(drop.position), savePreferences(preferences)]);
+    }
   }
 
   function openSession(session: AgentSession) {
@@ -2880,7 +2983,7 @@
   class:dark={effectiveDark}
   class:morphing={morphing !== null}
   class="overlay-shell"
-  style={`--panel-radius: ${Math.round(23 - 2 * morphProgress)}px; --morph-width: ${morphWidth}px; --morph-height: ${morphHeight}px;${appearance.accentCss ? ` --lume-accent: ${appearance.accentCss}; --lume-accent-strong: ${appearance.accentCss};` : ""}`}
+  style={`--panel-radius: ${panelRadius}; --morph-width: ${morphWidth}px; --morph-height: ${morphHeight}px;${appearance.accentCss ? ` --lume-accent: ${appearance.accentCss}; --lume-accent-strong: ${appearance.accentCss};` : ""}`}
   onpointermove={wakeMascot}
   aria-label={tr("Lume, agent monitor", "Lume, monitor de agentes")}
 >
@@ -2889,16 +2992,31 @@
     <button
       class="lume-orb status-{shellStatus}"
       class:dragging
+      class:docked={orbDockName !== "free"}
+      class:settling={orbSettling}
+      data-orb-dock={orbDockName}
+      style={orbSurfaceStyle}
       type="button"
       onclick={toggleExpanded}
       onpointerdown={(event) => beginOverlayDrag(event, true)}
       onpointermove={moveOverlayDrag}
       onpointerup={(event) => endOverlayDrag(event, true)}
       onpointercancel={(event) => endOverlayDrag(event, true)}
+      onlostpointercapture={(event) => endOverlayDrag(event, true)}
       aria-label={tr(`Open Lume, ${activeCount} active agents`, `Abrir Lume, ${activeCount} agentes ativos`)}
+      aria-describedby={orbDockName === "free" ? undefined : "orb-dock-help"}
     >
-      <LumeMascot status={shellStatus} awake={mascotAwake || dragging} size={32} />
-      <span class="agent-count">{activeCount}</span>
+      <span class="orb-surface" aria-hidden="true"></span>
+      <span class="orb-content">
+        <LumeMascot status={shellStatus} awake={mascotAwake || dragging} size={32} />
+        <span class="agent-count">{activeCount}</span>
+      </span>
+      {#if orbDockName !== "free"}
+        <span id="orb-dock-help" hidden>{tr(
+          "Drag away from the edge to undock. Click to open.",
+          "Arraste para longe da borda para desacoplar. Clique para abrir.",
+        )}</span>
+      {/if}
     </button>
   {:else}
     <section use:observePanelSize class:content-visible={contentVisible} class:morphing class:measuring={measuringPanel} class:palette-open={paletteOpen} class:launcher-open={launcherOpen} class:workflow-settings-open={workflowSettingsOpen} class:onboarding={startupChooserOpen} class="panel">
@@ -2915,6 +3033,7 @@
         onpointermove={moveOverlayDrag}
         onpointerup={endOverlayDrag}
         onpointercancel={endOverlayDrag}
+        onlostpointercapture={endOverlayDrag}
       >
         <div class="brand-lockup">
           <LumeMascot status={shellStatus} awake={mascotAwake || dragging} size={32} />
@@ -3566,14 +3685,16 @@
               <div class="orb-inspector-content">
                 {#if sessions.length}
                   <div class="inspector-session-bar">
-                    <label>
+                    <div class="inspector-session-picker">
                       <span>{tr("Session", "Sessão")}</span>
-                      <select aria-label={tr("Session to inspect", "Sessão para inspecionar")} value={inspectedSession?.id ?? ""} onchange={(event) => (inspectorSessionId = event.currentTarget.value || null)}>
-                        {#each sessions as session (session.id)}
-                          <option value={session.id}>{sessionDisplayName(session)} · {session.agentLabel}</option>
-                        {/each}
-                      </select>
-                    </label>
+                      <LumeSelect
+                        ariaLabel={tr("Session to inspect", "Sessão para inspecionar")}
+                        value={inspectedSession?.id ?? ""}
+                        options={sessions.map((session) => ({ value: session.id, label: `${sessionDisplayName(session)} · ${session.agentLabel}` }))}
+                        minWidth={0}
+                        onValueChange={(value) => (inspectorSessionId = value || null)}
+                      />
+                    </div>
                     {#if inspectedSession}
                       <button class="inspector-terminal-action" disabled={openingTerminal !== null} type="button" onclick={() => void openTerminal(inspectedSession)}>
                         {openingTerminal === inspectedSession.id ? tr("Opening…", "Abrindo…") : terminalIsOpen(inspectedSession) ? tr("Show terminal", "Mostrar terminal") : tr("Open terminal", "Abrir terminal")}
@@ -4476,7 +4597,7 @@
   }
 
   .overlay-shell:not(.expanded) {
-    clip-path: inset(0 calc(100% - 78px) calc(100% - 44px) 0 round 23px);
+    clip-path: inset(0 calc(100% - 78px) calc(100% - 44px) 0);
   }
 
   button,
@@ -4486,28 +4607,59 @@
   }
 
   .lume-orb {
+    --orb-fill: rgba(249, 251, 250, 0.985);
+    --orb-border: rgba(103, 122, 114, 0.2);
+    --orb-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.34), inset 0 -5px 12px rgba(43, 64, 55, 0.035);
+    position: relative;
     width: 78px;
     height: 44px;
+    flex: 0 0 auto;
+    padding: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    border: 1px solid rgba(103, 122, 114, 0.2);
-    border-radius: 999px;
+    border: 0;
+    border-radius: 0;
     color: #4e7567;
-    background: rgba(249, 251, 250, 0.985);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.34), inset 0 -5px 12px rgba(43, 64, 55, 0.035);
+    background: transparent;
+    /* Keep one compositing layer across drag and settle on transparent WebKit windows. */
+    transform: translateZ(0);
+    isolation: isolate;
     cursor: pointer;
     touch-action: none;
-    transition: border-color 160ms ease, background-color 160ms ease;
   }
 
-  .lume-orb:hover {
-    border-color: rgba(79, 116, 99, 0.3);
+  .orb-surface {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border: 1px solid var(--orb-border);
+    border-radius: var(--orb-radius, 22px);
+    background: var(--orb-fill);
+    box-shadow: var(--orb-shadow);
+    transform-origin: var(--orb-origin-x, 50%) var(--orb-origin-y, 50%);
+    transform: scale(var(--orb-scale-x, 1), var(--orb-scale-y, 1));
+    transition: border-radius 180ms cubic-bezier(0.16, 1, 0.3, 1), transform 180ms cubic-bezier(0.16, 1, 0.3, 1), border-color 160ms ease, background-color 160ms ease;
   }
 
-  .lume-orb:active { background: rgba(245, 249, 247, 0.99); }
+  .orb-content {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+    transform: translate(var(--orb-content-x, 0px), var(--orb-content-y, 0px));
+    transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .lume-orb:hover { --orb-border: rgba(79, 116, 99, 0.3); }
+  .lume-orb:active { --orb-fill: rgba(245, 249, 247, 0.99); }
+  .lume-orb.docked { cursor: grab; }
   .lume-orb.dragging { cursor: grabbing; }
+  .lume-orb.dragging .orb-surface,
+  .lume-orb.dragging .orb-content { transition-duration: 60ms; }
+  .lume-orb:focus-visible { outline: none; }
+  .lume-orb:focus-visible .orb-surface { outline: 2px solid currentColor; outline-offset: -3px; }
 
   .status-permission_required { color: #ae6b24; }
   .status-failed { color: #a84d4d; }
@@ -5047,10 +5199,8 @@
   .orb-inspector-content { min-height: 0; padding: 7px 9px 9px; display: flex; flex: 1 1 auto; flex-direction: column; }
   .orb-inspector-content :global(.workspace-inspector.orb-inspector) { height: auto; min-height: 0; flex: 1 1 auto; }
   .inspector-session-bar { min-width: 0; margin-bottom: 5px; display: flex; align-items: flex-end; gap: 7px; }
-  .inspector-session-bar label { min-width: 0; display: grid; flex: 1 1 auto; gap: 3px; color: #7e8a84; font-size: 8px; font-weight: 700; }
-  .inspector-session-bar select { width: 100%; min-width: 0; height: 29px; padding: 0 7px; border: 1px solid rgba(82, 105, 95, .16); border-radius: 7px; outline: 0; color: #4b5e53; background: rgba(255, 255, 255, .5); font: 650 9px Inter, sans-serif; }
-  .inspector-session-bar select:focus-visible { border-color: rgba(57, 123, 92, .55); box-shadow: 0 0 0 2px rgba(57, 123, 92, .1); }
-  .inspector-terminal-action { min-height: 29px; padding: 4px 8px; border: 1px solid rgba(70, 109, 87, .24); border-radius: 7px; color: #52765f; background: rgba(72, 131, 97, .08); font: 650 9px Inter, sans-serif; white-space: nowrap; cursor: pointer; }
+  .inspector-session-picker { min-width: 0; display: grid; flex: 1 1 auto; gap: 3px; color: #7e8a84; font-size: 8px; font-weight: 700; }
+  .inspector-terminal-action { min-height: 30px; padding: 4px 8px; border: 1px solid rgba(70, 109, 87, .24); border-radius: 7px; color: #52765f; background: rgba(72, 131, 97, .08); font: 650 9px Inter, sans-serif; white-space: nowrap; cursor: pointer; }
   .inspector-terminal-action:hover { background: rgba(72, 131, 97, .15); }
   .inspector-terminal-action:disabled { opacity: .55; cursor: wait; }
   .inspector-no-sessions { margin: auto; padding: 16px 12px; display: grid; justify-items: center; gap: 8px; color: #62746a; text-align: center; }
@@ -5370,9 +5520,9 @@
   footer button.has-mobile-device::after { content: ""; position: absolute; top: 5px; right: 14px; width: 5px; height: 5px; border: 2px solid rgba(248, 250, 249, 0.95); border-radius: 50%; background: #58a97d; }
 
   .overlay-shell:not(.dark) .lume-orb {
-    border-color: rgba(54, 92, 70, 0.38);
-    background: #e6ead7;
-    box-shadow: inset 0 0 0 1px rgba(247, 242, 220, 0.62), 0 5px 16px rgba(35, 62, 49, 0.12);
+    --orb-border: rgba(54, 92, 70, 0.38);
+    --orb-fill: #e6ead7;
+    --orb-shadow: inset 0 0 0 1px rgba(247, 242, 220, 0.62), 0 5px 16px rgba(35, 62, 49, 0.12);
   }
   .overlay-shell:not(.dark) .panel {
     border-color: rgba(48, 86, 64, 0.34);
@@ -5442,7 +5592,7 @@
   }
 
   .overlay-shell.dark { color-scheme: dark; }
-  .overlay-shell.dark .lume-orb,
+  .overlay-shell.dark .lume-orb { color: #dfe8e3; --orb-border: rgba(190, 209, 200, 0.13); --orb-fill: #1b221f; }
   .overlay-shell.dark .launcher-popover { color: #dfe8e3; border-color: rgba(190, 209, 200, 0.13); background: #1b221f; }
   .overlay-shell.dark .resume-session { color: #afc0b7; background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .resume-session:hover { background: rgba(101, 180, 141, 0.08); }
@@ -5477,8 +5627,7 @@
   .overlay-shell.dark .inspector-subnav { border-color: rgba(190, 209, 200, .09); }
   .overlay-shell.dark .inspector-subnav button { color: #879890; }
   .overlay-shell.dark .inspector-subnav button.active { border-color: #76ae8b; color: #a5d0b7; }
-  .overlay-shell.dark .inspector-session-bar label { color: #9aa9a1; }
-  .overlay-shell.dark .inspector-session-bar select { border-color: rgba(207, 223, 215, .12); color: #ccd9d2; background: rgba(222, 233, 228, .05); }
+  .overlay-shell.dark .inspector-session-picker { color: #9aa9a1; }
   .overlay-shell.dark .inspector-terminal-action { border-color: rgba(142, 192, 164, .2); color: #a5cbb3; background: rgba(88, 160, 119, .09); }
   .overlay-shell.dark .inspector-no-sessions { color: #a0b0a7; }
   .overlay-shell.dark .inspector-no-sessions button { border-color: rgba(207, 223, 215, .12); color: #b0c3b8; background: rgba(222, 233, 228, .035); }
@@ -5634,9 +5783,9 @@
   .overlay-shell:not(.dark)[data-appearance] .history-list,
   .overlay-shell:not(.dark)[data-appearance] .settings,
   .overlay-shell:not(.dark)[data-appearance] .whiteboard { background: color-mix(in srgb, var(--lume-sidebar-light) 78%, var(--lume-surface-light)); }
-  .overlay-shell:not(.dark)[data-appearance] .lume-orb { color: var(--lume-accent-strong); border-color: color-mix(in srgb, var(--lume-accent-strong) 30%, transparent); background: var(--lume-raised-light); }
-  .overlay-shell.dark[data-appearance] .lume-orb { color: var(--lume-accent); border-color: color-mix(in srgb, var(--lume-accent) 27%, transparent); background: var(--lume-raised-dark); }
-  .overlay-shell[data-appearance] .lume-orb:hover { border-color: color-mix(in srgb, var(--lume-accent) 52%, transparent); }
+  .overlay-shell:not(.dark)[data-appearance] .lume-orb { color: var(--lume-accent-strong); --orb-border: color-mix(in srgb, var(--lume-accent-strong) 30%, transparent); --orb-fill: var(--lume-raised-light); }
+  .overlay-shell.dark[data-appearance] .lume-orb { color: var(--lume-accent); --orb-border: color-mix(in srgb, var(--lume-accent) 27%, transparent); --orb-fill: var(--lume-raised-dark); }
+  .overlay-shell[data-appearance] .lume-orb:hover { --orb-border: color-mix(in srgb, var(--lume-accent) 52%, transparent); }
   .overlay-shell[data-appearance] .agent-count { background: var(--lume-accent-strong); }
   .overlay-shell.dark[data-appearance] .panel { background: var(--lume-raised-dark); }
   .overlay-shell.dark .appearance-theme-setting strong { color: #e3ebe7; }

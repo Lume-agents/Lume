@@ -28,6 +28,7 @@ mod state;
 mod store;
 mod terminal_windows;
 mod workflow_runtime;
+mod workspace_windows;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -47,7 +48,7 @@ use state::AppState;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, State,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -55,7 +56,11 @@ use tauri_plugin_opener::OpenerExt;
 
 fn reveal_main_window(app: &AppHandle) {
     if let Some(workspace) = app.get_webview_window("workspace") {
-        if workspace.is_visible().unwrap_or(false) {
+        if workspace.is_visible().unwrap_or(false)
+            && app
+                .try_state::<workspace_windows::WorkspaceWindows>()
+                .is_some_and(|windows| windows.is_ready())
+        {
             let _ = workspace.unminimize();
             let _ = workspace.set_focus();
             return;
@@ -68,57 +73,38 @@ fn reveal_main_window(app: &AppHandle) {
     }
 }
 
-fn reveal_workspace_window(app: &AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("workspace") {
-        app.state::<terminal_windows::TerminalWindows>()
-            .suspend_for_workspace(app)?;
-        window.unminimize().map_err(|error| error.to_string())?;
-        window.show().map_err(|error| error.to_string())?;
-        window.set_focus().map_err(|error| error.to_string())?;
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.hide();
-        }
-        return Ok(());
-    }
-
-    let window = WebviewWindowBuilder::new(app, "workspace", WebviewUrl::App("workspace/".into()))
-        .title("Lume · Workspace")
-        .inner_size(1280.0, 800.0)
-        .min_inner_size(720.0, 520.0)
-        .resizable(true)
-        .decorations(false)
-        .transparent(true)
-        .visible(false)
-        .center()
-        .build()
-        .map_err(|error| error.to_string())?;
-    let app_for_close = app.clone();
-    window.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            let _ = app_for_close
-                .state::<terminal_windows::TerminalWindows>()
-                .restore_after_workspace(&app_for_close);
-            reveal_main_window(&app_for_close);
-        }
-    });
-    app.state::<terminal_windows::TerminalWindows>()
-        .suspend_for_workspace(app)?;
-    if let Err(error) = window.show().and_then(|_| window.set_focus()) {
-        let _ = app
-            .state::<terminal_windows::TerminalWindows>()
-            .restore_after_workspace(app);
-        let _ = window.close();
-        return Err(error.to_string());
-    }
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.hide();
-    }
-    Ok(())
+#[tauri::command]
+async fn open_workspace_window(app: AppHandle) -> Result<(), String> {
+    let windows = app
+        .state::<workspace_windows::WorkspaceWindows>()
+        .inner()
+        .clone();
+    windows.open(app).await
 }
 
 #[tauri::command]
-fn open_workspace_window(app: AppHandle) -> Result<(), String> {
-    reveal_workspace_window(&app)
+fn workspace_frontend_ready(
+    window: tauri::WebviewWindow,
+    windows: State<'_, workspace_windows::WorkspaceWindows>,
+    boot_id: u64,
+) -> Result<(), String> {
+    if window.label() != "workspace" {
+        return Err("Somente o Workspace pode confirmar seu carregamento".into());
+    }
+    windows.frontend_ready(boot_id)
+}
+
+#[tauri::command]
+fn workspace_frontend_failed(
+    window: tauri::WebviewWindow,
+    windows: State<'_, workspace_windows::WorkspaceWindows>,
+    boot_id: u64,
+    reason: String,
+) -> Result<(), String> {
+    if window.label() != "workspace" {
+        return Err("Somente o Workspace pode informar uma falha de carregamento".into());
+    }
+    windows.frontend_failed(boot_id, reason)
 }
 
 struct PendingShortcutAction(Mutex<Option<String>>);
@@ -205,7 +191,7 @@ fn register_global_shortcuts(app: &AppHandle, preferences: &Preferences) -> Resu
                         return;
                     }
                     if action == "workspace" {
-                        let _ = reveal_workspace_window(app);
+                        workspace_windows::schedule_open(app);
                     } else {
                         reveal_main_window(app);
                         let _ = app.emit("lume://shortcut", action);
@@ -232,8 +218,11 @@ fn apply_global_shortcuts(app: &AppHandle, preferences: &Preferences) -> Result<
 }
 
 #[tauri::command]
-fn list_sessions(state: State<'_, AppState>) -> Result<Vec<AgentSession>, String> {
-    state.bounded_sessions(60)
+async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<AgentSession>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.bounded_sessions(60))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -284,11 +273,16 @@ async fn fork_session_from_message(
 }
 
 #[tauri::command]
-fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSnapshot, String> {
-    Ok(
-        protocol::HubSnapshot::with_activity_limit(state.bounded_sessions(60)?, 60)
-            .with_internal_services(state.internal_services()?),
-    )
+async fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSnapshot, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(
+            protocol::HubSnapshot::with_activity_limit(state.bounded_sessions(60)?, 60)
+                .with_internal_services(state.internal_services()?),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[derive(serde::Serialize)]
@@ -306,17 +300,22 @@ struct WorkspacePromptIndexPage {
 }
 
 #[tauri::command]
-fn get_workspace_prompt_index_page(
+async fn get_workspace_prompt_index_page(
     state: State<'_, AppState>,
     session_id: String,
     before_created_at: Option<i64>,
     before_activity_id: Option<String>,
     query: Option<String>,
 ) -> Result<WorkspacePromptIndexPage, String> {
-    let before = before_created_at.zip(before_activity_id.as_deref());
-    let (prompts, has_more) =
-        state.conversation_prompts_before(&session_id, before, query.as_deref(), 30)?;
-    Ok(WorkspacePromptIndexPage { prompts, has_more })
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let before = before_created_at.zip(before_activity_id.as_deref());
+        let (prompts, has_more) =
+            state.conversation_prompts_before(&session_id, before, query.as_deref(), 30)?;
+        Ok(WorkspacePromptIndexPage { prompts, has_more })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -335,50 +334,61 @@ async fn get_subagent_timeline(
 }
 
 #[tauri::command]
-fn get_workspace_conversation_page(
+async fn get_workspace_conversation_page(
     state: State<'_, AppState>,
     session_id: String,
     before_created_at: i64,
     before_activity_id: String,
 ) -> Result<WorkspaceConversationPage, String> {
-    let (activities, has_more) = state.conversation_activities_before(
-        &session_id,
-        before_created_at,
-        &before_activity_id,
-        60,
-    )?;
-    Ok(WorkspaceConversationPage {
-        activities,
-        has_more,
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (activities, has_more) = state.conversation_activities_before(
+            &session_id,
+            before_created_at,
+            &before_activity_id,
+            60,
+        )?;
+        Ok(WorkspaceConversationPage {
+            activities,
+            has_more,
+        })
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn get_terminal_hub_snapshot(
+async fn get_terminal_hub_snapshot(
     state: State<'_, AppState>,
     terminals: State<'_, terminal_windows::TerminalWindows>,
     label: String,
     activity_limit: Option<usize>,
 ) -> Result<protocol::HubSnapshot, String> {
-    let terminal = terminals.state(&label)?;
-    let activity_limit = activity_limit.unwrap_or(60).max(1);
-    let sessions = state.terminal_sessions(activity_limit, |session| {
-        session.id == terminal.session_id
-            || (terminal.session_native_id.is_some()
-                && terminal.session_native_id == session.native_session_id
-                && terminal.session_agent == session.agent)
-            || (terminal.session_process_id.is_some()
-                && terminal.session_process_id == session.process_id
-                && terminal.session_agent == session.agent)
-            || (terminal.session_agent == session.agent
-                && terminal.session_source == session.source
-                && terminal.session_project == session.project
-                && terminal.session_working_directory == session.working_directory)
-    })?;
-    Ok(protocol::HubSnapshot::with_activity_limit(
-        sessions,
-        activity_limit,
-    ))
+    let state = state.inner().clone();
+    let terminals = terminals.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let terminal = terminals.state(&label)?;
+        let activity_limit = activity_limit.unwrap_or(60).max(1);
+        let sessions = state.terminal_sessions(activity_limit, |session| {
+            session.id == terminal.session_id
+                || (terminal.session_native_id.is_some()
+                    && terminal.session_native_id == session.native_session_id
+                    && terminal.session_agent == session.agent)
+                || (terminal.session_process_id.is_some()
+                    && terminal.session_process_id == session.process_id
+                    && terminal.session_agent == session.agent)
+                || (terminal.session_agent == session.agent
+                    && terminal.session_source == session.source
+                    && terminal.session_project == session.project
+                    && terminal.session_working_directory == session.working_directory)
+        })?;
+        Ok(protocol::HubSnapshot::with_activity_limit(
+            sessions,
+            activity_limit,
+        ))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -948,8 +958,11 @@ fn delete_session_note(state: State<'_, AppState>, id: String) -> Result<(), Str
 }
 
 #[tauri::command]
-fn get_preferences(state: State<'_, AppState>) -> Result<Preferences, String> {
-    state.preferences()
+async fn get_preferences(state: State<'_, AppState>) -> Result<Preferences, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.preferences())
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2125,7 +2138,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             let action = shortcut_action_from_args(&args).unwrap_or("open");
             if action == "workspace" {
-                let _ = reveal_workspace_window(app);
+                workspace_windows::schedule_open(app);
             } else {
                 reveal_main_window(app);
                 let _ = app.emit("lume://shortcut", action);
@@ -2168,6 +2181,7 @@ pub fn run() {
             app.manage(PendingShortcutAction(Mutex::new(
                 startup_shortcut_action.clone(),
             )));
+            app.manage(workspace_windows::WorkspaceWindows::default());
             let _ = apply_global_shortcuts(app.handle(), &state.preferences()?);
             app.manage(state.clone());
             let codex_bridge =
@@ -2264,7 +2278,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => reveal_main_window(app),
                     "workspace" => {
-                        let _ = reveal_workspace_window(app);
+                        workspace_windows::schedule_open(app);
                     }
                     "quit" => app.exit(0),
                     _ => {}
@@ -2354,6 +2368,8 @@ pub fn run() {
             move_overlay,
             resize_overlay_surface,
             open_workspace_window,
+            workspace_frontend_ready,
+            workspace_frontend_failed,
             open_terminal_window,
             terminal_frontend_ready,
             toggle_terminal_group_fullscreen,

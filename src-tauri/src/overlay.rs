@@ -603,7 +603,11 @@ mod linux {
             gtk_window.set_resizable(true);
         }
         gtk_window.resize(width, height);
-        let radius = if window.label().starts_with("terminal-") {
+        let radius = if window.label() == "main" && width <= 78 && height <= 44 {
+            // The compact Orb owns its changing contour in CSS. A fixed native
+            // pill mask would cut off the flat contact edge while it docks.
+            0
+        } else if window.label().starts_with("terminal-") {
             17
         } else if window.label().starts_with("workflow-bridge-") {
             15
@@ -941,10 +945,15 @@ pub fn position(window: &tauri::WebviewWindow) -> Option<(i32, i32)> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        window
-            .outer_position()
+        let position = window.outer_position().ok()?;
+        let origin = window
+            .current_monitor()
             .ok()
-            .map(|position| (position.x, position.y))
+            .flatten()
+            .map(|monitor| *monitor.position())
+            .unwrap_or_default();
+        // Match move_to's monitor-relative coordinates on secondary displays.
+        Some((position.x - origin.x, position.y - origin.y))
     }
 }
 

@@ -55,6 +55,26 @@ fn is_limited_gnome_wayland(
 }
 
 #[cfg(target_os = "linux")]
+fn webkit_dmabuf_renderer_override(
+    session_type: &str,
+    desktop: &str,
+    current: Option<&std::ffi::OsStr>,
+) -> Option<&'static str> {
+    if !session_type.eq_ignore_ascii_case("wayland") {
+        return None;
+    }
+    if desktop
+        .split([':', ';'])
+        .any(|part| part.trim().eq_ignore_ascii_case("cosmic"))
+    {
+        // Desktop launchers can inherit "1" even when the user's shell does not.
+        // COSMIC needs the DMA-BUF renderer to clear transparent Orb contours.
+        return (current != Some(std::ffi::OsStr::new("0"))).then_some("0");
+    }
+    current.is_none().then_some("1")
+}
+
+#[cfg(target_os = "linux")]
 fn configure_linux_display_backend() {
     let force_native_wayland = std::env::var("LUME_FORCE_NATIVE_WAYLAND")
         .ok()
@@ -110,16 +130,15 @@ fn main() {
     #[cfg(target_os = "linux")]
     configure_linux_display_backend();
     #[cfg(target_os = "linux")]
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
-        && std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("wayland")
-        // COSMIC needs the default renderer to clear animated transparent
-        // contours correctly. Keep explicit user overrides available.
-        && !std::env::var("XDG_CURRENT_DESKTOP")
-            .unwrap_or_default()
-            .split([':', ';'])
-            .any(|part| part.trim().eq_ignore_ascii_case("cosmic"))
     {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        let current_renderer = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER");
+        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        if let Some(value) =
+            webkit_dmabuf_renderer_override(&session_type, &desktop, current_renderer.as_deref())
+        {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", value);
+        }
     }
     lume_lib::run()
 }
@@ -128,7 +147,42 @@ fn main() {
 mod tests {
     use super::{
         is_limited_gnome_wayland, should_use_native_gnome_drag, should_use_xwayland_fallback,
+        webkit_dmabuf_renderer_override,
     };
+    use std::ffi::OsStr;
+
+    #[test]
+    fn cosmic_wayland_enables_dmabuf_even_when_the_desktop_inherits_the_old_fallback() {
+        assert_eq!(
+            webkit_dmabuf_renderer_override("wayland", "COSMIC", None),
+            Some("0")
+        );
+        assert_eq!(
+            webkit_dmabuf_renderer_override("wayland", "pop:COSMIC", Some(OsStr::new("1"))),
+            Some("0")
+        );
+        assert_eq!(
+            webkit_dmabuf_renderer_override("wayland", "COSMIC", Some(OsStr::new("0"))),
+            None
+        );
+    }
+
+    #[test]
+    fn other_linux_backends_keep_their_existing_renderer_choice() {
+        assert_eq!(
+            webkit_dmabuf_renderer_override("wayland", "ubuntu:GNOME", None),
+            Some("1")
+        );
+        assert_eq!(
+            webkit_dmabuf_renderer_override("wayland", "ubuntu:GNOME", Some(OsStr::new("0"))),
+            None
+        );
+        assert_eq!(webkit_dmabuf_renderer_override("x11", "COSMIC", None), None);
+        assert_eq!(
+            webkit_dmabuf_renderer_override("x11", "COSMIC", Some(OsStr::new("1"))),
+            None
+        );
+    }
 
     #[test]
     fn uses_xwayland_on_fedora_gnome_wayland() {

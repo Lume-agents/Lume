@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
-  import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { emit, listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { relaunch } from "@tauri-apps/plugin-process";
@@ -25,6 +25,7 @@
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
+  import { WorkspaceStartup } from "$lib/workspaceStartup";
   import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, Preferences, ResumableSession } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
@@ -47,6 +48,8 @@
     loadOverlayPosition,
     loadPairedDevices,
     loadPreferences,
+    markWorkspaceFrontendReady,
+    reportWorkspaceFrontendFailure,
     loadVscodeStatus,
     launchAgentSession,
     refreshAgentRateLimits,
@@ -1958,18 +1961,20 @@
     paneDragHost?.addEventListener("pointerdown", beginPaneHeaderGesture);
     let disposed = false;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-    let refreshRunning = false;
+    let refreshPromise: Promise<boolean> | undefined;
     let refreshAgain = false;
-    let stopSessions: UnlistenFn | undefined;
-    let stopPreferences: UnlistenFn | undefined;
-    let stopExternalWriterConflicts: UnlistenFn | undefined;
+    const startup = new WorkspaceStartup();
 
-    const refresh = async () => {
-      if (refreshRunning) {
+    const refresh = (): Promise<boolean> => {
+      if (refreshPromise) {
         refreshAgain = true;
-        return;
+        return refreshPromise;
       }
-      refreshRunning = true;
+      refreshPromise = fetchSnapshot();
+      return refreshPromise;
+    };
+
+    async function fetchSnapshot(): Promise<boolean> {
       try {
         const snapshot = await loadHubSnapshot();
         if (!disposed) {
@@ -2003,20 +2008,22 @@
             if (selectedNamedLayoutId) applyNamedLayout(selectedNamedLayoutId);
           }
         }
+        return !disposed;
       } catch (reason) {
         if (!disposed) error = String(reason);
+        return false;
       } finally {
-        refreshRunning = false;
+        refreshPromise = undefined;
         if (refreshAgain && !disposed) {
           refreshAgain = false;
           void refresh();
         }
       }
-    };
+    }
 
     const queueRefresh = () => {
       if (refreshTimer) return;
-      if (refreshRunning) {
+      if (refreshPromise) {
         refreshAgain = true;
         return;
       }
@@ -2026,10 +2033,11 @@
       }, 160);
     };
 
-    void (async () => {
-      stopExternalWriterConflicts = await listen<ExternalWriterConflict[]>("lume://external-writer-conflicts-changed", ({ payload }) => {
+    void startup.run(async () => {
+      await startup.subscribe(() => listen<ExternalWriterConflict[]>("lume://external-writer-conflicts-changed", ({ payload }) => {
         externalWriterConflicts = Object.fromEntries(payload.map((conflict) => [conflict.sessionId, conflict]));
-      });
+      }));
+      if (!startup.active) return;
       try {
         const conflicts = await listExternalWriterConflicts();
         externalWriterConflicts = Object.fromEntries(conflicts.map((conflict) => [conflict.sessionId, conflict]));
@@ -2037,25 +2045,28 @@
         // Older app processes may not expose the conflict query yet; live events still work.
       }
       const loadedPreferences = await loadPreferences();
-      if (disposed) return;
+      if (!startup.active) return;
       preferences = loadedPreferences;
       language = loadedPreferences.language;
-      stopSessions = await listen("lume://sessions-changed", queueRefresh);
-      stopPreferences = await listen<Preferences>("lume://preferences-changed", ({ payload }) => {
+      await startup.subscribe(() => listen("lume://sessions-changed", queueRefresh));
+      await startup.subscribe(() => listen<Preferences>("lume://preferences-changed", ({ payload }) => {
         preferences = payload;
         language = payload.language;
-      });
-      await refresh();
-      if (disposed) return;
-      loading = false;
-    })();
+      }));
+      if (!startup.active) return;
+      if (!(await refresh())) throw new Error(error || tr("Could not load your sessions", "Não foi possível carregar suas sessões"));
+    }, {
+      onLoaded: () => { loading = false; },
+      onError: (reason) => { error = reason; },
+      ready: async () => { await tick(); await markWorkspaceFrontendReady(); },
+      failed: reportWorkspaceFrontendFailure,
+      timeoutMessage: tr("Workspace loading timed out. Try opening it again.", "O Workspace demorou demais para carregar. Tente abri-lo novamente."),
+    });
 
     return () => {
       disposed = true;
+      startup.dispose();
       if (refreshTimer) clearTimeout(refreshTimer);
-      stopSessions?.();
-      stopPreferences?.();
-      stopExternalWriterConflicts?.();
       narrowSidebar.removeEventListener("change", syncSidebarWidth);
       colorScheme.removeEventListener("change", syncSystemTheme);
       window.removeEventListener("keydown", handleWorkspaceKeydown);

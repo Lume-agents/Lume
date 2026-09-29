@@ -409,6 +409,21 @@ export async function openWorkspaceWindow(): Promise<void> {
   await invoke("open_workspace_window");
 }
 
+function workspaceBootId(): number | undefined {
+  const id = (window as Window & { __LUME_WORKSPACE_BOOT_ID__?: number }).__LUME_WORKSPACE_BOOT_ID__;
+  return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : undefined;
+}
+
+export async function markWorkspaceFrontendReady(): Promise<void> {
+  const bootId = workspaceBootId();
+  if (bootId !== undefined) await invoke("workspace_frontend_ready", { bootId });
+}
+
+export async function reportWorkspaceFrontendFailure(reason: string): Promise<void> {
+  const bootId = workspaceBootId();
+  if (bootId !== undefined) await invoke("workspace_frontend_failed", { bootId, reason });
+}
+
 export async function markTerminalFrontendReady(label: string): Promise<void> {
   await invoke("terminal_frontend_ready", { label });
 }

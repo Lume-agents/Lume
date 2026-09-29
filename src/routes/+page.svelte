@@ -298,16 +298,39 @@
   let remoteNodeMessageIsError = $state(false);
   const mobileApkUrl = "https://github.com/tulerws/Lume/releases/latest/download/Lume-Mobile.apk";
   const startupRouteKey = "lume:startup-mode-routed:v1";
+  let openingWorkspace = $state(false);
+  let workspaceOpenError = $state<string | null>(null);
 
   function tr(english: string, portuguese: string) {
     return localize(preferences.language, english, portuguese);
+  }
+
+  async function showWorkspaceOpenFailure(reason: unknown) {
+    workspaceOpenError = String(reason).replace(/^Error:\s*/, "");
+    startupChooserOpen = false;
+    if (!expanded) await toggleExpanded().catch(() => undefined);
+  }
+
+  async function showWorkspaceWindow(): Promise<boolean> {
+    if (openingWorkspace) return false;
+    openingWorkspace = true;
+    workspaceOpenError = null;
+    try {
+      await openWorkspaceWindow();
+      return true;
+    } catch (reason) {
+      await showWorkspaceOpenFailure(reason);
+      return false;
+    } finally {
+      openingWorkspace = false;
+    }
   }
 
   async function routeStartupMode() {
     if (!isTauri || sessionStorage.getItem(startupRouteKey)) return;
     sessionStorage.setItem(startupRouteKey, "true");
     if (preferences.startupMode === "workspace") {
-      await openWorkspaceWindow();
+      await showWorkspaceWindow();
       return;
     }
     if (preferences.startupMode === "ask") {
@@ -320,8 +343,7 @@
     try {
       if (remember && !(await updatePreference("startupMode", mode))) return;
       if (mode === "workspace") {
-        await openWorkspaceWindow();
-        startupChooserOpen = false;
+        if (await showWorkspaceWindow()) startupChooserOpen = false;
         return;
       }
       if (expanded) await toggleExpanded();
@@ -352,6 +374,12 @@
               mobileMessage ? { id: "mobile-message", message: mobileMessage, tone: mobileMessageIsError ? "error" : "success", onDismiss: () => (mobileMessage = null) } : null,
             ];
     const visibleItems = items.filter((item): item is SystemBannerItem => item !== null);
+    if (workspaceOpenError) visibleItems.unshift({
+      id: "workspace-open-error",
+      message: workspaceOpenError,
+      tone: "error",
+      onDismiss: () => { workspaceOpenError = null; },
+    });
     for (const alert of collectAgentAlerts(sessions, preferences.language)) {
       if (dismissedAgentAlertIds.includes(alert.id)) continue;
       visibleItems.push({
@@ -567,6 +595,15 @@
     let stopPreferencesListening: (() => void) | undefined;
     let stopCompanionUpdateListening: (() => void) | undefined;
     let stopMobileDeviceListening: (() => void) | undefined;
+    let stopWorkspaceFailureListening: (() => void) | undefined;
+    if (isTauri) {
+      void listen<string>("lume://workspace-open-failed", ({ payload }) => {
+        if (!disposed) void showWorkspaceOpenFailure(payload);
+      }).then((stop) => {
+        if (disposed) stop();
+        else stopWorkspaceFailureListening = stop;
+      }).catch(() => undefined);
+    }
     let pollTimer: ReturnType<typeof setInterval> | undefined;
     let updateTimer: ReturnType<typeof setInterval> | undefined;
     let resumeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -688,6 +725,7 @@
       stopPreferencesListening?.();
       stopCompanionUpdateListening?.();
       stopMobileDeviceListening?.();
+      stopWorkspaceFailureListening?.();
       colorScheme.removeEventListener("change", syncSystemTheme);
       window.removeEventListener("focus", refreshAfterResume);
       window.removeEventListener("pageshow", refreshAfterResume);
@@ -2138,7 +2176,7 @@
 
   function paletteCommands(): PaletteCommand[] {
     const commands: PaletteCommand[] = [
-      { id: "workspace", label: "Workspace", detail: tr("Open the multi-agent workbench", "Abrir a bancada de múltiplos agentes"), run: openWorkspaceWindow },
+      { id: "workspace", label: "Workspace", detail: tr("Open the multi-agent workbench", "Abrir a bancada de múltiplos agentes"), run: async () => { await showWorkspaceWindow(); } },
       { id: "sessions", label: tr("Sessions", "Sessões"), detail: tr("Show active agents", "Mostrar agentes ativos"), run: () => openView("sessions") },
       { id: "whiteboard", label: tr("Terminals", "Terminais"), detail: tr("Open floating terminals", "Abrir terminais flutuantes"), run: () => openView("board") },
       { id: "history", label: tr("History and notes", "Histórico e notas"), detail: tr("Open completed results", "Abrir resultados finalizados"), run: () => openView("history") },
@@ -2192,7 +2230,7 @@
 
   async function runShortcutAction(action: ShortcutAction) {
     if (action === "workspace") {
-      await openWorkspaceWindow();
+      await showWorkspaceWindow();
       return;
     }
     if (action === "palette") {
@@ -2886,7 +2924,7 @@
           </div>
         </div>
         <div class="header-actions">
-          <button class="workspace-button" type="button" title={tr("Open Workspace", "Abrir Workspace")} onclick={() => void openWorkspaceWindow()} aria-label={tr("Open Workspace", "Abrir Workspace")}>
+          <button class="workspace-button" type="button" title={tr("Open Workspace", "Abrir Workspace")} disabled={openingWorkspace} aria-busy={openingWorkspace} onclick={() => void showWorkspaceWindow()} aria-label={tr("Open Workspace", "Abrir Workspace")}>
             <WorkspaceHeaderIcon name="orb" size={19} />
           </button>
           <button class="palette-button" type="button" title={preferences.globalShortcut} onclick={showCommandPalette} aria-label={tr("Open command palette", "Abrir paleta de comandos")}>

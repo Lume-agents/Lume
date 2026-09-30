@@ -331,7 +331,7 @@
   let remoteNodeBusy = $state(false);
   let remoteNodeMessage = $state<string | null>(null);
   let remoteNodeMessageIsError = $state(false);
-  const mobileApkUrl = "https://github.com/tulerws/Lume/releases/latest/download/Lume-Mobile.apk";
+  const mobileApkUrl = "https://github.com/Lume-agents/Lume/releases/latest/download/Lume-Mobile.apk";
   const startupRouteKey = "lume:startup-mode-routed:v1";
   let openingWorkspace = $state(false);
   let workspaceOpenError = $state<string | null>(null);

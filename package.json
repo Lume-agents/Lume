@@ -7,8 +7,6 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "landing:build": "node landing/build.mjs",
-    "landing:dev": "node landing/dev.mjs",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && npm run test:session-identity && npm run test:session-capabilities && npm run test:web-companion && npm run test:handoff && npm run test:workflow-order && npm run test:chat-attachments && npm run test:activity-presentation && npm run test:user-message-presentation && npm run test:markdown && npm run test:bounded-render-cache && npm run test:review-diffs && npm run test:theme-tokens && npm run test:workspace-agents && npm run test:agent-alerts && npm run test:orb-docking && npm run test:workspace-startup",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "check:mobile": "node scripts/validate-mobile-assets.mjs && node tests/response-dedup.test.mjs",
@@ -64,11 +62,18 @@
     "@vscode/vsce": "^3.9.2",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
-    "three": "^0.186.0",
     "typescript": "~5.6.2",
     "vite": "^6.0.3"
   },
   "overrides": {
     "cookie": "^0.7.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lume-agents/Lume.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Lume-agents/Lume/issues"
+  },
+  "homepage": "https://github.com/Lume-agents/Lume#readme"
 }

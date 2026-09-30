@@ -3,8 +3,29 @@ node_modules
 /build
 /.svelte-kit
 /package
+/landing/
 /landing-dist
-/.impeccable/review/
+# Local agent tooling and context
+.impeccable/
+.impeccable.md
+.agents/
+.codex/
+.claude/
+.gemini/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+CONTEXT.md
+MEMORY.md
+*.local.md
+
+# Internal planning and design notes
+*ROADMAP*.md
+*roadmap*.md
+/docs/*_DESIGN_REVIEW.md
+/landing/DIRECTION.md
+/landing/DESIGN.md
+
 .env
 .env.*
 !.env.example

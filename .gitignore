@@ -3,6 +3,7 @@ node_modules
 /build
 /.svelte-kit
 /package
+/landing/
 /landing-dist
 # Local agent tooling and context
 .impeccable/

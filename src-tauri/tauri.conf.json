@@ -10,6 +10,7 @@
     "frontendDist": "../build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Lume",
@@ -35,6 +36,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "category": "DeveloperTool",
     "createUpdaterArtifacts": true,
     "resources": {
       "resources/lume-vscode.vsix": "lume-vscode.vsix",
@@ -46,6 +48,9 @@
           "libgtk-layer-shell0"
         ]
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "15.0"
     },
     "icon": [
       "icons/32x32.png",

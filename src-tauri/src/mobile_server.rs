@@ -1556,6 +1556,7 @@ fn is_mobile_origin(origin: &str) -> bool {
         origin,
         "capacitor://localhost"
             | "https://localhost"
+            | "https://lume-agents.github.io"
             | "https://tulerws.github.io"
             | "http://localhost:4173"
             | "http://127.0.0.1:4173"

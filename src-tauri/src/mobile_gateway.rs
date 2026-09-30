@@ -17,7 +17,7 @@ use crate::{
 const PAIRING_TTL_MS: i64 = 5 * 60 * 1_000;
 const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const REQUEST_TTL_MS: i64 = 60 * 1_000;
-const MOBILE_WEB_URL: &str = "https://tulerws.github.io/Lume/";
+const MOBILE_WEB_URL: &str = "https://lume-agents.github.io/Lume/";
 
 #[derive(Clone, Debug)]
 struct PairingSession {
@@ -353,7 +353,7 @@ mod tests {
         assert!(offer.expires_at - started_at >= 5 * 60 * 1_000);
         assert!(offer
             .payload
-            .starts_with("https://tulerws.github.io/Lume/#"));
+            .starts_with("https://lume-agents.github.io/Lume/#"));
         assert!(offer
             .payload
             .contains("gateway=https%3A%2F%2F127.0.0.1%3A43122"));

@@ -11,6 +11,8 @@ pub enum AgentKind {
     Claude,
     ClaudeCode,
     Antigravity,
+    #[serde(rename = "opencode")]
+    OpenCode,
     #[serde(rename = "deepseek")]
     DeepSeek,
     Gemini,

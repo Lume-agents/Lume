@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { cubicOut } from "svelte/easing";
   import { fade, fly } from "svelte/transition";
   import LumeIcon, { type LumeIconName } from "$lib/LumeIcon.svelte";
@@ -12,7 +13,9 @@
     inline = false,
     duration,
     dismissLabel = "Dismiss",
+    detailsLabel = "View details",
     onDismiss,
+    onInspect,
   } = $props<{
     message: string;
     tone?: BannerTone;
@@ -20,11 +23,14 @@
     inline?: boolean;
     duration?: number;
     dismissLabel?: string;
+    detailsLabel?: string;
     onDismiss?: () => void;
+    onInspect?: () => void;
   }>();
 
   const icon = $derived<LumeIconName>(tone === "success" ? "check" : tone === "error" ? "close" : tone === "warning" ? "warning" : "bolt");
   let timeout: ReturnType<typeof setTimeout> | null = null;
+  const reducedMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   function clearDismissTimer() {
     if (timeout) clearTimeout(timeout);
@@ -34,13 +40,14 @@
   function scheduleDismiss() {
     clearDismissTimer();
     const delay = duration ?? (tone === "error" ? 7200 : tone === "warning" ? 5600 : 3600);
-    if (delay > 0 && onDismiss) timeout = setTimeout(onDismiss, delay);
+    if (delay > 0 && onDismiss) timeout = setTimeout(() => onDismiss?.(), delay);
   }
 
   $effect(() => {
     message;
     tone;
-    scheduleDismiss();
+    duration;
+    untrack(scheduleDismiss);
     return clearDismissTimer;
   });
 </script>
@@ -48,16 +55,24 @@
 <aside
   class:contained
   class:inline
+  class:inspectable={Boolean(onInspect)}
   class="system-banner tone-{tone}"
   role={tone === "error" ? "alert" : "status"}
   aria-live={tone === "error" ? "assertive" : "polite"}
   onmouseenter={clearDismissTimer}
   onmouseleave={scheduleDismiss}
-  in:fly={{ y: -7, duration: 190, easing: cubicOut }}
+  onfocusin={clearDismissTimer}
+  onfocusout={scheduleDismiss}
+  in:fly={{ y: reducedMotion ? 0 : -7, duration: reducedMotion ? 110 : 190, easing: cubicOut }}
   out:fade={{ duration: 110 }}
 >
   <span class="banner-icon" aria-hidden="true"><LumeIcon name={icon} size={13} strokeWidth={2} /></span>
   <p>{message}</p>
+  {#if onInspect}
+    <button type="button" aria-label={detailsLabel} title={detailsLabel} onclick={onInspect}>
+      <LumeIcon name="inspector" size={13} />
+    </button>
+  {/if}
   {#if onDismiss}
     <button type="button" aria-label={dismissLabel} title={dismissLabel} onclick={onDismiss}>
       <LumeIcon name="close" size={12} />
@@ -97,7 +112,8 @@
   .tone-warning { --banner-tone: #c78d35; }
   .tone-error { --banner-tone: #c45f5b; }
   .banner-icon { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 7px; color: var(--banner-tone); background: color-mix(in srgb, var(--banner-tone) 12%, transparent); }
-  p { min-width: 0; max-width: 48ch; margin: 0; overflow-wrap: anywhere; color: inherit; font: 650 9px/1.4 "Segoe UI Variable", "SF Pro Text", ui-sans-serif, system-ui, sans-serif; }
+  p { min-width: 0; flex: 1; max-width: 48ch; margin: 0; overflow-wrap: anywhere; color: inherit; font: 650 10px/1.45 "Segoe UI Variable", "SF Pro Text", ui-sans-serif, system-ui, sans-serif; }
+  .system-banner.inspectable p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
   button { width: 23px; height: 23px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 7px; color: color-mix(in srgb, currentColor 66%, transparent); background: transparent; cursor: pointer; }
   button:hover { color: var(--banner-tone); background: color-mix(in srgb, var(--banner-tone) 9%, transparent); }
   button:focus-visible { outline: 2px solid color-mix(in srgb, var(--banner-tone) 60%, transparent); outline-offset: 1px; }

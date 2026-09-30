@@ -1,6 +1,6 @@
 <script lang="ts">
   import { dev } from "$app/environment";
-  import { onMount, tick } from "svelte";
+  import { onMount, setContext, tick } from "svelte";
   import { flip } from "svelte/animate";
   import { cubicOut } from "svelte/easing";
   import { fade, fly, slide } from "svelte/transition";
@@ -38,8 +38,14 @@
     type OrbPosition,
   } from "$lib/orbDocking";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
+  import { SYSTEM_BANNER_CONTEXT, type SystemBannerNotice, type SystemBannerReporter } from "$lib/systemBannerContext";
+  import { animatedDisclosure } from "$lib/animatedDisclosure";
+  import OrbNavigationIcon from "$lib/OrbNavigationIcon.svelte";
+  import { TerminalOpeningTimeoutError, waitForTerminalWindow } from "$lib/terminalOpening";
+  import { createSurfaceSizeQueue } from "$lib/surfaceSizing";
   import StartupModeChooser from "$lib/StartupModeChooser.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
@@ -59,7 +65,6 @@
     AgentKind,
     AgentSession,
     CompanionStatus,
-    DiscoveredLumeNode,
     ExternalAgentPlugin,
     HistoryEntry,
     IntegrationDiagnostic,
@@ -68,8 +73,6 @@
     MobilePairingOffer,
     MobileScope,
     PairedDevice,
-    RemoteLumeNode,
-    RemoteLumeNodeHealth,
     PermissionAction,
     Preferences,
     PromptAttachmentInput,
@@ -89,7 +92,6 @@
     beginMobilePairing,
     answerQuestion,
     diagnoseIntegration,
-    discoverLumeNodes,
     disableMobileGateway,
     decidePermission,
     defaultPreferences,
@@ -103,8 +105,6 @@
     loadMobileGatewayStatus,
     loadOverlayPosition,
     loadPairedDevices,
-    loadRemoteLumeNodeHealth,
-    loadRemoteLumeNodes,
     loadPreferences,
     loadWorkflowRun,
     loadSessions,
@@ -125,8 +125,6 @@
     renameSession,
     revealBrowserCompanion,
     revokePairedDevice,
-    forgetRemoteLumeNode,
-    pairLumeNode,
     launchAgentSession,
     savePreferences,
     saveResultNote,
@@ -205,6 +203,7 @@
   let selectedId = $state<string | null>(null);
   let inspectorSessionId = $state<string | null>(null);
   let inspectorPane = $state<"inspect" | "archive">("inspect");
+  let orbInspectorSection = $state<"session" | "repository">("session");
   let permissionError = $state<string | null>(null);
   let questionSelections = $state<Record<string, string>>({});
   let savingSettings = $state(false);
@@ -233,6 +232,7 @@
   let terminatingSessionId = $state<string | null>(null);
   let interruptingSessionId = $state<string | null>(null);
   let sessionActionMessage = $state<string | null>(null);
+  let sessionActionMessageIsError = $state(false);
   let renamingSessionId = $state<string | null>(null);
   let renameDraft = $state("");
   let renameError = $state<string | null>(null);
@@ -240,6 +240,7 @@
   let copiedResultId = $state<string | null>(null);
   let savingNoteId = $state<string | null>(null);
   let noteMessage = $state<string | null>(null);
+  let noteMessageIsError = $state(false);
   let selectedProfileKey = $state<string | null>(null);
   let terminalWindows = $state<TerminalWindowState[]>([]);
   let workflowModeChanging = $state(false);
@@ -248,13 +249,18 @@
   let workflowRunStates = $state<Record<string, WorkflowRun | null>>({});
   let workflowRebindingStepId = $state<string | null>(null);
   let openingTerminal = $state<string | null>(null);
+  let terminalOpenError = $state<string | null>(null);
   let terminalMessage = $state<string | null>(null);
+  let terminalMessageIsError = $state(false);
   let layoutName = $state("");
   let selectedLayoutId = $state<string | null>(null);
   let restoringLayout = $state(false);
   let externalPlugins = $state<ExternalAgentPlugin[]>([]);
   let installingPlugin = $state(false);
   let pluginMessage = $state<string | null>(null);
+  let pluginMessageIsError = $state(false);
+  let componentBanners = $state<SystemBannerItem[]>([]);
+  let navigationActivation = $state({ view: "", count: 0 });
   let paletteOpen = $state(false);
   let paletteTrigger: HTMLElement | null = null;
   let shortcutEditorKey = $state<ShortcutPreferenceKey | null>(null);
@@ -324,13 +330,6 @@
   let mobileBusy = $state(false);
   let mobileMessage = $state<string | null>(null);
   let mobileMessageIsError = $state(false);
-  let remoteNodes = $state<RemoteLumeNode[]>([]);
-  let discoveredNodes = $state<DiscoveredLumeNode[]>([]);
-  let remoteNodeHealth = $state<Record<string, RemoteLumeNodeHealth>>({});
-  let remotePairingUri = $state("");
-  let remoteNodeBusy = $state(false);
-  let remoteNodeMessage = $state<string | null>(null);
-  let remoteNodeMessageIsError = $state(false);
   const mobileApkUrl = "https://github.com/Lume-agents/Lume/releases/latest/download/Lume-Mobile.apk";
   const startupRouteKey = "lume:startup-mode-routed:v1";
   let openingWorkspace = $state(false);
@@ -391,29 +390,35 @@
 
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
     if (!expanded) return [];
-    const items: Array<SystemBannerItem | null> = view === "sessions"
-      ? [
-          permissionError ? { id: "permission-error", message: permissionError, tone: "error", onDismiss: () => (permissionError = null) } : null,
-          launchError ? { id: "launch-error", message: launchError, tone: "error", onDismiss: () => (launchError = null) } : null,
-          composerMessage ? { id: "composer-error", message: composerMessage, tone: "error", onDismiss: () => (composerMessage = null) } : null,
-          sessionActionMessage ? { id: "session-message", message: sessionActionMessage, onDismiss: () => (sessionActionMessage = null) } : null,
-        ]
-      : view === "board"
-        ? [terminalMessage ? { id: "terminal-message", message: terminalMessage, onDismiss: () => (terminalMessage = null) } : null]
-        : view === "history"
-          ? [noteMessage ? { id: "note-message", message: noteMessage, tone: "success", onDismiss: () => (noteMessage = null) } : null]
-          : [
-              settingsMessage ? { id: "settings-message", message: settingsMessage, tone: settingsMessageIsError ? "error" : "success", onDismiss: () => (settingsMessage = null) } : null,
-              remoteNodeMessage ? { id: "remote-node-message", message: remoteNodeMessage, tone: remoteNodeMessageIsError ? "error" : "success", onDismiss: () => (remoteNodeMessage = null) } : null,
-              pluginMessage ? { id: "plugin-message", message: pluginMessage, onDismiss: () => (pluginMessage = null) } : null,
-              mobileMessage ? { id: "mobile-message", message: mobileMessage, tone: mobileMessageIsError ? "error" : "success", onDismiss: () => (mobileMessage = null) } : null,
-            ];
+    const items: Array<SystemBannerItem | null> = [
+      ...componentBanners,
+      permissionError ? { id: "permission-error", message: permissionError, tone: "error", onDismiss: () => (permissionError = null) } : null,
+      launchError ? { id: "launch-error", message: launchError, tone: "error", onDismiss: () => (launchError = null) } : null,
+      composerMessage ? { id: "composer-error", message: composerMessage, tone: "error", onDismiss: () => (composerMessage = null) } : null,
+      sessionActionMessage ? { id: "session-message", message: sessionActionMessage, tone: sessionActionMessageIsError ? "error" : "info", onDismiss: () => (sessionActionMessage = null) } : null,
+      renameError ? { id: "rename-error", message: renameError, tone: "error", onDismiss: () => (renameError = null) } : null,
+      shortcutEditorError && shortcutEditorError !== settingsMessage ? { id: "shortcut-error", message: shortcutEditorError, tone: "error", onDismiss: () => (shortcutEditorError = null) } : null,
+      terminalMessage ? { id: "terminal-message", message: terminalMessage, tone: terminalMessageIsError ? "error" : "info", onDismiss: () => (terminalMessage = null) } : null,
+      noteMessage ? { id: "note-message", message: noteMessage, tone: noteMessageIsError ? "error" : "success", onDismiss: () => (noteMessage = null) } : null,
+      settingsMessage ? { id: "settings-message", message: settingsMessage, tone: settingsMessageIsError ? "error" : "success", onDismiss: () => {
+        if (shortcutEditorError === settingsMessage) shortcutEditorError = null;
+        settingsMessage = null;
+      } } : null,
+      pluginMessage ? { id: "plugin-message", message: pluginMessage, tone: pluginMessageIsError ? "error" : "info", onDismiss: () => (pluginMessage = null) } : null,
+      mobileMessage ? { id: "mobile-message", message: mobileMessage, tone: mobileMessageIsError ? "error" : "success", onDismiss: () => (mobileMessage = null) } : null,
+    ];
     const visibleItems = items.filter((item): item is SystemBannerItem => item !== null);
     if (workspaceOpenError) visibleItems.unshift({
       id: "workspace-open-error",
       message: workspaceOpenError,
       tone: "error",
       onDismiss: () => { workspaceOpenError = null; },
+    });
+    if (terminalOpenError) visibleItems.unshift({
+      id: "terminal-open-error",
+      message: terminalOpenError,
+      tone: "error",
+      onDismiss: () => (terminalOpenError = null),
     });
     for (const alert of collectAgentAlerts(sessions, preferences.language)) {
       if (dismissedAgentAlertIds.includes(alert.id)) continue;
@@ -427,6 +432,29 @@
     }
     return visibleItems;
   });
+
+  function reportPanelBanner(notice: SystemBannerNotice) {
+    componentBanners = [
+      {
+        ...notice,
+        onDismiss: () => {
+          componentBanners = componentBanners.filter((item) => item.id !== notice.id);
+          notice.onDismiss?.();
+        },
+      },
+      ...componentBanners.filter((item) => item.id !== notice.id),
+    ].slice(0, 4);
+  }
+  setContext<SystemBannerReporter>(SYSTEM_BANNER_CONTEXT, reportPanelBanner);
+
+  function activateNavigation(nextView: typeof view) {
+    navigationActivation = { view: nextView, count: navigationActivation.count + 1 };
+    void openView(nextView).catch((reason) => reportPanelBanner({
+      id: "panel-navigation-error",
+      message: String(reason).replace(/^Error:\s*/, ""),
+      tone: "error",
+    }));
+  }
 
   function dismissAgentAlert(id: string) {
     if (dismissedAgentAlertIds.includes(id)) return;
@@ -826,12 +854,13 @@
         updateDetail = tr("You are using the latest version.", "Você está usando a versão mais recente.");
       }
       return nextUpdate;
-    } catch {
+    } catch (error) {
       updateState = "error";
       updateDetail = tr(
         "Could not check for updates right now. Try again shortly.",
         "Não foi possível verificar agora. Tente novamente em instantes.",
       );
+      reportPanelBanner({ id: "update-check-error", message: `${updateDetail} ${String(error).replace(/^Error:\s*/, "")}`, tone: "error" });
       return null;
     }
   }
@@ -894,12 +923,13 @@
       updateState = "ready";
       updateDetail = tr("Update installed. Restarting Lume…", "Atualização instalada. Reiniciando o Lume…");
       await relaunch();
-    } catch {
+    } catch (error) {
       updateState = "error";
       updateDetail = tr(
         "The update could not be installed. Try again.",
         "A atualização não pôde ser instalada. Tente novamente.",
       );
+      reportPanelBanner({ id: "update-install-error", message: `${updateDetail} ${String(error).replace(/^Error:\s*/, "")}`, tone: "error" });
       updateProgress = null;
     }
   }
@@ -1033,6 +1063,7 @@
     let expandedTarget = currentExpandedSize();
 
     void setTerminalWindowsVisible(opening).catch((error) => {
+      terminalMessageIsError = true;
       terminalMessage = String(error).replace(/^Error:\s*/, "");
     });
     morphing = opening ? "opening" : "closing";
@@ -1165,20 +1196,18 @@
     overlayPosition = { x: geometry.x, y: geometry.y };
   }
 
-  async function setOverlaySurfaceSize(
-    width: number,
-    height: number,
-    syncLinuxSurface = false,
-  ) {
+  const queueOverlaySurfaceSize = createSurfaceSizeQueue(async ({ width, height, syncLinuxSurface }) => {
     const size = new LogicalSize(width, height);
-    const tasks: Promise<unknown>[] = [getCurrentWindow().setSize(size)];
     if (isLinux && (displayBackend !== "native-gnome" || syncLinuxSurface)) {
-      tasks.push(
-        getCurrentWebview().setSize(size),
-        resizeOverlaySurface(width, height),
-      );
+      // Release the old WebView minimum before shrinking its GTK parent.
+      await getCurrentWebview().setSize(size);
+      await resizeOverlaySurface(width, height);
     }
-    await Promise.allSettled(tasks);
+    await getCurrentWindow().setSize(size);
+  });
+
+  function setOverlaySurfaceSize(width: number, height: number, syncLinuxSurface = false) {
+    return queueOverlaySurfaceSize({ width, height, syncLinuxSurface });
   }
 
   function morphEase(value: number) {
@@ -1216,7 +1245,7 @@
   function beginOverlayDrag(event: PointerEvent, compact = false) {
     if (!isTauri || !overlayReady || event.button !== 0 || morphing) return;
     bringOverlayToFront();
-    if (!compact && (event.target as HTMLElement).closest("button, input, select, textarea")) {
+    if (!compact && (event.target as HTMLElement).closest("button, input, select, textarea, .system-banner-stack")) {
       return;
     }
     if (!compact && event.detail === 2) {
@@ -1623,6 +1652,7 @@
       if (isTauri) await interruptPrompt(session.id);
       await refreshSessions(false);
     } catch (error) {
+      sessionActionMessageIsError = true;
       sessionActionMessage = String(error).replace(/^Error:\s*/, "");
     } finally {
       interruptingSessionId = null;
@@ -1636,8 +1666,10 @@
       setTimeout(() => {
         if (copiedResultId === resultId) copiedResultId = null;
       }, 1_500);
-    } catch {
+    } catch (error) {
       copiedResultId = null;
+      sessionActionMessageIsError = true;
+      sessionActionMessage = tr("Could not copy the response.", "Não foi possível copiar a resposta.") + ` ${String(error).replace(/^Error:\s*/, "")}`;
     }
   }
 
@@ -1648,8 +1680,10 @@
     try {
       const note = await saveResultNote(session.id, resultId, sessionDisplayName(session));
       resultNotes = [note, ...resultNotes.filter((item) => item.id !== note.id)];
+      noteMessageIsError = false;
       noteMessage = tr("Result saved as a local note.", "Resultado salvo como nota local.");
     } catch (error) {
+      noteMessageIsError = true;
       noteMessage = String(error).replace(/^Error:\s*/, "");
     } finally {
       savingNoteId = null;
@@ -1661,6 +1695,7 @@
       await deleteResultNote(id);
       resultNotes = resultNotes.filter((note) => note.id !== id);
     } catch (error) {
+      noteMessageIsError = true;
       noteMessage = String(error).replace(/^Error:\s*/, "");
     }
   }
@@ -1687,6 +1722,7 @@
       terminateConfirmId = null;
       await refreshSessions(false);
     } catch (error) {
+      sessionActionMessageIsError = true;
       sessionActionMessage = String(error).replace(/^Error:\s*/, "");
     } finally {
       terminatingSessionId = null;
@@ -1705,6 +1741,7 @@
       await updatePreference("workflowEnabled", enabled);
       if (isTauri) terminalWindows = await setTerminalWorkflowEnabled(enabled);
     } catch (error) {
+      terminalMessageIsError = true;
       terminalMessage = String(error).replace(/^Error:\s*/, "");
     } finally {
       workflowModeChanging = false;
@@ -1782,11 +1819,13 @@
       await rebindWorkflowSession(workflowId, stepId, sessionNativeId);
       preferences = await loadPreferences();
       if (isTauri) void emit("lume://preferences-changed", preferences);
+      terminalMessageIsError = false;
       terminalMessage = tr(
         "Workflow agent replaced. Retry the step if it was interrupted.",
         "Agente do workflow substituído. Tente a etapa novamente se ela foi interrompida.",
       );
     } catch (error) {
+      terminalMessageIsError = true;
       terminalMessage = String(error).replace(/^Error:\s*/, "");
     } finally {
       workflowRebindingStepId = null;
@@ -1796,26 +1835,37 @@
   async function openTerminal(session: AgentSession) {
     if (openingTerminal) return;
     openingTerminal = session.id;
+    terminalOpenError = null;
     terminalMessage = null;
     try {
       if (isTauri) {
-        await openTerminalWindow(session.id);
-        await refreshTerminalWindows();
+        const label = await openTerminalWindow(session.id);
+        terminalWindows = await waitForTerminalWindow(label, loadTerminalWindows);
       } else {
+        terminalMessageIsError = false;
         terminalMessage = tr(
           `${sessionDisplayName(session)} opens in a separate window.`,
           `${sessionDisplayName(session)} abre em uma janela separada.`,
         );
       }
     } catch (error) {
-      terminalMessage = String(error).replace(/^Error:\s*/, "");
+      terminalOpenError = error instanceof TerminalOpeningTimeoutError
+        ? tr("The terminal did not finish loading. Try opening it again.", "O terminal não terminou de carregar. Tente abri-lo novamente.")
+        : String(error).replace(/^Error:\s*/, "");
     } finally {
       openingTerminal = null;
     }
   }
 
   async function saveCurrentLayout() {
-    await refreshTerminalWindows();
+    terminalMessageIsError = false;
+    try {
+      await refreshTerminalWindows();
+    } catch (error) {
+      terminalMessageIsError = true;
+      terminalMessage = String(error).replace(/^Error:\s*/, "");
+      return;
+    }
     if (terminalWindows.length === 0) {
       terminalMessage = tr("Open at least one terminal before saving a layout.", "Abra ao menos um terminal antes de salvar um layout.");
       return;
@@ -1848,7 +1898,7 @@
     const layouts = preferences.whiteboardLayouts.some((item) => item.id === id)
       ? preferences.whiteboardLayouts.map((item) => item.id === id ? layout : item)
       : [...preferences.whiteboardLayouts, layout];
-    await updatePreference("whiteboardLayouts", layouts);
+    if (!await updatePreference("whiteboardLayouts", layouts)) return;
     selectedLayoutId = id;
     layoutName = name;
     terminalMessage = tr("Whiteboard layout saved.", "Layout do whiteboard salvo.");
@@ -1857,6 +1907,7 @@
   async function restoreSavedLayout(layout: WhiteboardLayout) {
     if (restoringLayout) return;
     restoringLayout = true;
+    terminalMessageIsError = false;
     terminalMessage = null;
     const used = new Set<string>();
     const entries: Array<{
@@ -1899,6 +1950,7 @@
       layoutName = layout.name;
       terminalMessage = tr(`Restored ${entries.length} terminals.`, `${entries.length} terminais restaurados.`);
     } catch (error) {
+      terminalMessageIsError = true;
       terminalMessage = String(error).replace(/^Error:\s*/, "");
     } finally {
       restoringLayout = false;
@@ -1906,6 +1958,7 @@
   }
 
   async function deleteSavedLayout(id: string) {
+    const previous = preferences;
     const profiles = Object.fromEntries(
       Object.entries(preferences.projectProfiles).map(([key, profile]) => [
         key,
@@ -1919,7 +1972,14 @@
       whiteboardLayouts: preferences.whiteboardLayouts.filter((layout) => layout.id !== id),
       projectProfiles: profiles,
     };
-    await savePreferences(preferences);
+    try {
+      await savePreferences(preferences);
+    } catch (error) {
+      preferences = previous;
+      terminalMessageIsError = true;
+      terminalMessage = String(error).replace(/^Error:\s*/, "");
+      return;
+    }
     selectedLayoutId = preferences.whiteboardLayouts[0]?.id ?? null;
     layoutName = preferences.whiteboardLayouts.find((layout) => layout.id === selectedLayoutId)?.name ?? "";
   }
@@ -2009,94 +2069,6 @@
     } catch (error) {
       mobileMessageIsError = true;
       mobileMessage = String(error).replace(/^Error:\s*/, "");
-    }
-  }
-
-  async function refreshRemoteNodes() {
-    if (!isTauri) return;
-    try {
-      remoteNodes = await loadRemoteLumeNodes();
-    } catch (error) {
-      remoteNodeMessageIsError = true;
-      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
-    }
-  }
-
-  async function scanRemoteNodes() {
-    if (!isTauri || remoteNodeBusy) return;
-    remoteNodeBusy = true;
-    remoteNodeMessage = null;
-    try {
-      discoveredNodes = await discoverLumeNodes();
-      remoteNodeMessageIsError = false;
-      remoteNodeMessage = discoveredNodes.length
-        ? tr(
-            `${discoveredNodes.length} Lume Node${discoveredNodes.length === 1 ? "" : "s"} found.`,
-            `${discoveredNodes.length} Lume Node${discoveredNodes.length === 1 ? " encontrado" : "s encontrados"}.`,
-          )
-        : tr("No Lume Node was found on this network.", "Nenhum Lume Node foi encontrado nesta rede.");
-    } catch (error) {
-      remoteNodeMessageIsError = true;
-      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
-    } finally {
-      remoteNodeBusy = false;
-    }
-  }
-
-  async function connectRemoteNode() {
-    const pairingUri = remotePairingUri.trim();
-    if (!isTauri || remoteNodeBusy || !pairingUri) return;
-    remoteNodeBusy = true;
-    remoteNodeMessage = null;
-    try {
-      const remote = await pairLumeNode(pairingUri);
-      remotePairingUri = "";
-      await refreshRemoteNodes();
-      remoteNodeMessageIsError = false;
-      remoteNodeMessage = tr(`Connected to ${remote.nodeId}.`, `Conectado a ${remote.nodeId}.`);
-    } catch (error) {
-      remoteNodeMessageIsError = true;
-      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
-    } finally {
-      remoteNodeBusy = false;
-    }
-  }
-
-  async function checkRemoteNode(nodeId: string) {
-    if (remoteNodeBusy) return;
-    remoteNodeBusy = true;
-    remoteNodeMessage = null;
-    try {
-      const health = await loadRemoteLumeNodeHealth(nodeId);
-      remoteNodeHealth = { ...remoteNodeHealth, [nodeId]: health };
-      await refreshRemoteNodes();
-      remoteNodeMessageIsError = false;
-      remoteNodeMessage = tr(`${health.displayName} is reachable.`, `${health.displayName} está acessível.`);
-    } catch (error) {
-      remoteNodeMessageIsError = true;
-      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
-    } finally {
-      remoteNodeBusy = false;
-    }
-  }
-
-  async function removeRemoteNode(nodeId: string) {
-    if (remoteNodeBusy) return;
-    remoteNodeBusy = true;
-    remoteNodeMessage = null;
-    try {
-      await forgetRemoteLumeNode(nodeId);
-      remoteNodes = await loadRemoteLumeNodes();
-      const nextHealth = { ...remoteNodeHealth };
-      delete nextHealth[nodeId];
-      remoteNodeHealth = nextHealth;
-      remoteNodeMessageIsError = false;
-      remoteNodeMessage = tr("Remote computer removed.", "Computador remoto removido.");
-    } catch (error) {
-      remoteNodeMessageIsError = true;
-      remoteNodeMessage = String(error).replace(/^Error:\s*/, "");
-    } finally {
-      remoteNodeBusy = false;
     }
   }
 
@@ -2222,7 +2194,7 @@
 
   async function openView(nextView: View) {
     if (
-      nextView === "settings" &&
+      (nextView === "settings" || nextView === "history") &&
       isTauri &&
       expanded &&
       !morphing &&
@@ -2261,7 +2233,7 @@
     if (nextView === "settings") {
       selectedProfileKey ??= detectedProjects[0]?.key ?? null;
       settingsMessage = null;
-      await Promise.all([refreshMobileSettings(), refreshRemoteNodes()]);
+      await refreshMobileSettings();
     }
   }
 
@@ -2594,10 +2566,6 @@
     diagnosingIntegration = integration.kind;
     settingsMessage = null;
     try {
-      if (integration.installed) {
-        await configureIntegration(integration.kind, true);
-        integrations = await loadIntegrationStatuses();
-      }
       integrationDiagnostics = {
         ...integrationDiagnostics,
         [integration.kind]: await diagnoseIntegration(integration.kind),
@@ -2633,30 +2601,33 @@
   async function openBrowserCompanion() {
     try {
       browserCompanionPath = await revealBrowserCompanion();
-    } catch {
-      browserCompanionPath = tr(
+    } catch (error) {
+      settingsMessageIsError = true;
+      settingsMessage = tr(
         "Could not open the extension folder.",
         "Não foi possível abrir a pasta da extensão.",
-      );
+      ) + ` ${String(error).replace(/^Error:\s*/, "")}`;
     }
   }
 
   async function addExternalPlugin() {
     if (!isTauri || installingPlugin) return;
-    const selected = await openDialog({
-      multiple: false,
-      directory: false,
-      title: tr("Install agent detector", "Instalar detector de agente"),
-      filters: [{ name: "Lume plugin", extensions: ["json"] }],
-    });
-    if (!selected || Array.isArray(selected)) return;
     installingPlugin = true;
     pluginMessage = null;
     try {
+      const selected = await openDialog({
+        multiple: false,
+        directory: false,
+        title: tr("Install agent detector", "Instalar detector de agente"),
+        filters: [{ name: "Lume plugin", extensions: ["json"] }],
+      });
+      if (!selected || Array.isArray(selected)) return;
       const plugin = await installExternalPlugin(selected);
       externalPlugins = await loadExternalPlugins();
+      pluginMessageIsError = false;
       pluginMessage = tr(`${plugin.name} is now monitored.`, `${plugin.name} agora é monitorado.`);
     } catch (error) {
+      pluginMessageIsError = true;
       pluginMessage = String(error).replace(/^Error:\s*/, "");
     } finally {
       installingPlugin = false;
@@ -2667,16 +2638,20 @@
     try {
       await removeExternalPlugin(id);
       externalPlugins = await loadExternalPlugins();
+      pluginMessageIsError = false;
       pluginMessage = tr("Detector removed.", "Detector removido.");
     } catch (error) {
+      pluginMessageIsError = true;
       pluginMessage = String(error).replace(/^Error:\s*/, "");
     }
   }
 
   async function openPluginFolder() {
     try {
+      pluginMessageIsError = false;
       pluginMessage = await revealPluginDirectory();
     } catch (error) {
+      pluginMessageIsError = true;
       pluginMessage = String(error).replace(/^Error:\s*/, "");
     }
   }
@@ -2830,13 +2805,21 @@
   async function applySelectedProjectProfile() {
     const profile = selectedProjectProfile;
     if (!profile) return;
+    const previous = preferences;
     preferences = {
       ...preferences,
       monitorId: profile.monitorId ?? preferences.monitorId,
       overlayX: profile.overlayX ?? preferences.overlayX,
       overlayY: profile.overlayY ?? preferences.overlayY,
     };
-    await savePreferences(preferences);
+    try {
+      await savePreferences(preferences);
+    } catch (error) {
+      preferences = previous;
+      settingsMessageIsError = true;
+      settingsMessage = String(error).replace(/^Error:\s*/, "");
+      return;
+    }
     if (isTauri) void emit("lume://preferences-changed", preferences);
     await positionWindow(true);
     const layout = preferences.whiteboardLayouts.find(
@@ -2845,6 +2828,7 @@
     if (layout) {
       view = "board";
       await restoreSavedLayout(layout);
+      if (terminalMessageIsError) return;
     }
     settingsMessageIsError = false;
     settingsMessage = tr("Project profile applied.", "Perfil do projeto aplicado.");
@@ -2987,7 +2971,6 @@
   onpointermove={wakeMascot}
   aria-label={tr("Lume, agent monitor", "Lume, monitor de agentes")}
 >
-  <SystemBannerStack items={systemBanners} dismissLabel={tr("Dismiss", "Fechar")} />
   {#if !expanded}
     <button
       class="lume-orb status-{shellStatus}"
@@ -3058,6 +3041,7 @@
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 8 4.5 4 4.5-4" /></svg>
           </button>
         </div>
+        <SystemBannerStack items={systemBanners} contained offset="calc(100% + 8px)" language={preferences.language} dismissLabel={tr("Dismiss", "Fechar")} />
       </header>
 
       {#if newMobileDevice}
@@ -3240,7 +3224,6 @@
             <button data-shortcut-capture class="shortcut-capture" type="button" onkeydown={captureShortcut}>
               <kbd>{shortcutDraft || tr("Press keys…", "Pressione as teclas…")}</kbd>
             </button>
-            {#if shortcutEditorError}<p>{shortcutEditorError}</p>{/if}
             <div class="shortcut-editor-actions">
               <button type="button" onclick={() => (shortcutEditorKey = null)}>{tr("Cancel", "Cancelar")}</button>
               <button class="primary" disabled={!shortcutDraft || savingSettings} type="button" onclick={() => void saveShortcut()}>{tr("Save", "Salvar")}</button>
@@ -3249,7 +3232,7 @@
         </div>
       {/if}
 
-      <div class="panel-content">
+      <div class="panel-content" class:inspector-content={view === "history"}>
         {#if view === "sessions"}
           <div class="session-list" use:revealScrollbarWhileScrolling>
             {#if sessions.length}
@@ -3355,9 +3338,6 @@
                       {/if}
 
                       <div class="session-action-bar" aria-label={tr("Session actions", "Ações da sessão")}>
-                        <button class="session-terminal-action" disabled={openingTerminal !== null} type="button" onclick={() => openTerminal(session)}>
-                          {openingTerminal === session.id ? tr("Opening…", "Abrindo…") : terminalIsOpen(session) ? tr("Show terminal", "Mostrar terminal") : tr("Open terminal", "Abrir terminal")}
-                        </button>
                         <button
                           class="session-action-button"
                           type="button"
@@ -3431,7 +3411,6 @@
                           />
                           <button class="primary" disabled={renamingSession} type="submit">{tr("Save", "Salvar")}</button>
                           <button disabled={renamingSession} type="button" onclick={cancelSessionRename}>{tr("Cancel", "Cancelar")}</button>
-                          {#if renameError}<small>{renameError}</small>{/if}
                         </form>
                       {/if}
 
@@ -3701,7 +3680,7 @@
                       </button>
                     {/if}
                   </div>
-                  <WorkspaceInspector session={inspectedSession} language={preferences.language} variant="orb" showCloseButton={false} />
+                  <WorkspaceInspector session={inspectedSession} language={preferences.language} variant="orb" showCloseButton={false} bind:section={orbInspectorSection} />
                 {:else}
                   <div class="inspector-no-sessions">
                     <strong>{tr("No agent sessions to inspect", "Nenhuma sessão de agente para inspecionar")}</strong>
@@ -3876,7 +3855,7 @@
           </div>
         {:else}
           <div class="settings" in:fade={{ duration: 150 }}>
-            <details class="settings-section" data-agent-integrations>
+            <details use:animatedDisclosure class="settings-section" data-agent-integrations>
               <summary class="settings-section-label">{tr("Agents", "Agentes")}</summary>
               <div class="settings-section-content">
                 {#each [
@@ -3929,7 +3908,7 @@
                 {/each}
               </div>
             </details>
-            <details class="settings-section">
+            <details use:animatedDisclosure class="settings-section">
               <summary class="settings-section-label">{tr("External detectors", "Detectores externos")}</summary>
               <div class="settings-section-content">
                 {#each externalPlugins as plugin (plugin.id)}
@@ -3947,7 +3926,7 @@
                 </div>
               </div>
             </details>
-            <details class="settings-section">
+            <details use:animatedDisclosure class="settings-section">
               <summary class="settings-section-label">Interface</summary>
               <div class="settings-section-content">
                 <div class="integration-row">
@@ -3976,7 +3955,7 @@
                 {/if}
               </div>
             </details>
-            <details class="settings-section">
+            <details use:animatedDisclosure class="settings-section">
               <summary class="settings-section-label">{tr("Preferences", "Preferências")}</summary>
               <div class="settings-section-content">
             <label class="field-row">
@@ -4141,7 +4120,7 @@
             </div>
               </div>
             </details>
-            <details class="settings-section">
+            <details use:animatedDisclosure class="settings-section">
               <summary class="settings-section-label">{tr("Keyboard shortcuts", "Atalhos de teclado")}</summary>
               <div class="settings-section-content">
                 {#each [
@@ -4163,7 +4142,7 @@
                 {/each}
               </div>
             </details>
-            <details class="settings-section">
+            <details use:animatedDisclosure class="settings-section">
               <summary class="settings-section-label">{tr("Project profiles", "Perfis por projeto")}</summary>
               <div class="settings-section-content">
             {#if detectedProjects.length > 0}
@@ -4276,70 +4255,13 @@
             {/if}
               </div>
             </details>
-            <details class="settings-section" data-remote-nodes-section>
+            <details use:animatedDisclosure class="settings-section" data-remote-nodes-section>
               <summary class="settings-section-label">{tr("Remote computers", "Computadores remotos")}</summary>
               <div class="settings-section-content">
-                <div class="remote-node-panel">
-                  <div class="remote-node-heading">
-                    <span>
-                      <strong>Lume Node</strong>
-                      <small>{tr("Pair a trusted computer on this network with read-only access.", "Pareie um computador confiável nesta rede com acesso somente leitura.")}</small>
-                    </span>
-                    <button disabled={!isTauri || remoteNodeBusy} type="button" onclick={() => void scanRemoteNodes()}>
-                      {remoteNodeBusy ? "…" : tr("Scan", "Buscar")}
-                    </button>
-                  </div>
-
-                  <div class="remote-pair-control">
-                    <input
-                      aria-label={tr("One-time Lume Node pairing link", "Link de pareamento de uso único do Lume Node")}
-                      autocomplete="off"
-                      placeholder="lume://pair-node?…"
-                      spellcheck="false"
-                      type="password"
-                      bind:value={remotePairingUri}
-                      onkeydown={(event) => {
-                        if (event.key === "Enter") void connectRemoteNode();
-                      }}
-                    />
-                    <button disabled={!isTauri || remoteNodeBusy || !remotePairingUri.trim()} type="button" onclick={() => void connectRemoteNode()}>
-                      {tr("Pair", "Parear")}
-                    </button>
-                  </div>
-
-                  {#if discoveredNodes.length}
-                    <div class="discovered-node-list" aria-label={tr("Discovered Lume Nodes", "Lume Nodes encontrados")}>
-                      {#each discoveredNodes as node (`${node.nodeId}:${node.address}:${node.port}`)}
-                        <span><i aria-hidden="true"></i><strong>{node.nodeId}</strong><small>{node.address}:{node.port}</small></span>
-                      {/each}
-                    </div>
-                  {/if}
-
-                  {#if remoteNodes.length}
-                    <div class="remote-node-list">
-                      {#each remoteNodes as node (node.nodeId)}
-                        {@const health = remoteNodeHealth[node.nodeId]}
-                        <article class="remote-node-row">
-                          <i class:online={health?.lifecycle === "running"} aria-hidden="true"></i>
-                          <span>
-                            <strong>{health?.displayName ?? node.nodeId}</strong>
-                            <small>{health ? `${health.machine.operatingSystem} · ${health.machine.architecture}` : `${node.address}:${node.port}`}</small>
-                          </span>
-                          <div>
-                            <button disabled={remoteNodeBusy} type="button" onclick={() => void checkRemoteNode(node.nodeId)}>{tr("Check", "Verificar")}</button>
-                            <button class="remove" disabled={remoteNodeBusy} type="button" onclick={() => void removeRemoteNode(node.nodeId)}>{tr("Remove", "Remover")}</button>
-                          </div>
-                        </article>
-                      {/each}
-                    </div>
-                  {:else}
-                    <p class="remote-node-empty">{tr("No paired computers yet.", "Nenhum computador pareado ainda.")}</p>
-                  {/if}
-
-                </div>
+                <RemoteComputers language={preferences.language} dark={effectiveDark} />
               </div>
             </details>
-            <details class="settings-section" data-mobile-access-section>
+            <details use:animatedDisclosure class="settings-section" data-mobile-access-section>
               <summary class="settings-section-label">{tr("Mobile access", "Acesso mobile")}</summary>
               <div class="settings-section-content">
                 <div class="mobile-access-card">
@@ -4492,7 +4414,7 @@
                   </button>
                 {/if}
               </div>
-              <p class:error={updateState === "error"}>{updateDetail}</p>
+              {#if updateState !== "error"}<p>{updateDetail}</p>{/if}
               {#if updateState === "downloading" || updateState === "ready"}
                 <div class:indeterminate={updateProgress === null} class="update-progress" aria-hidden="true">
                   <span style:width={`${updateProgress ?? 24}%`}></span>
@@ -4501,7 +4423,7 @@
                 </div>
               </div>
             </section>
-            <details class="settings-section">
+            <details use:animatedDisclosure class="settings-section">
               <summary class="settings-section-label">{tr("Reset", "Redefinir")}</summary>
               <div class="settings-section-content">
                 <div class:confirming={resetConfirming} class="reset-settings-control">
@@ -4528,35 +4450,28 @@
         <button
           class:active={view === "sessions"}
           type="button"
-          onclick={() => openView("sessions")}
+          onclick={() => activateNavigation("sessions")}
           aria-label={tr("Sessions", "Sessões")}
         >
-          <svg viewBox="0 0 20 20" aria-hidden="true">
-            <circle cx="6" cy="10" r="2.5" /><circle cx="14" cy="10" r="2.5" />
-          </svg>
+          <OrbNavigationIcon name="sessions" activation={navigationActivation.view === "sessions" ? navigationActivation.count : 0} />
           <span>{tr("Sessions", "Sessões")}</span>
         </button>
         <button
           class:active={view === "board"}
           type="button"
-          onclick={() => openView("board")}
+          onclick={() => activateNavigation("board")}
           aria-label={tr("Terminals", "Terminais")}
         >
-          <svg viewBox="0 0 20 20" aria-hidden="true">
-            <circle cx="5" cy="6" r="2" /><circle cx="15" cy="6" r="2" /><circle cx="10" cy="15" r="2" />
-            <path d="m6.7 7 2.2 6M13.3 7l-2.2 6M7 6h6" />
-          </svg>
+          <OrbNavigationIcon name="terminals" activation={navigationActivation.view === "board" ? navigationActivation.count : 0} />
           <span>{tr("Terminals", "Terminais")}</span>
         </button>
         <button
           class:active={view === "history"}
           type="button"
-          onclick={() => openView("history")}
+          onclick={() => activateNavigation("history")}
           aria-label={tr("Inspector", "Inspector")}
         >
-          <svg viewBox="0 0 20 20" aria-hidden="true">
-            <circle cx="8.5" cy="8.5" r="5.2" /><path d="m12.4 12.4 4.1 4.1M6.5 8.5h4M8.5 6.5v4" />
-          </svg>
+          <OrbNavigationIcon name="inspector" activation={navigationActivation.view === "history" ? navigationActivation.count : 0} />
           <span>{tr("Inspector", "Inspector")}</span>
         </button>
         <button
@@ -4564,13 +4479,10 @@
           class:has-update={updateState === "available"}
           class:has-mobile-device={newMobileDevice !== null}
           type="button"
-          onclick={() => openView("settings")}
+          onclick={() => activateNavigation("settings")}
           aria-label={tr("Settings", "Configurações")}
         >
-          <svg viewBox="0 0 20 20" aria-hidden="true">
-            <circle cx="10" cy="10" r="3" />
-            <path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" />
-          </svg>
+          <OrbNavigationIcon name="settings" activation={navigationActivation.view === "settings" ? navigationActivation.count : 0} />
           <span>{tr("Settings", "Ajustes")}</span>
         </button>
       </footer>
@@ -4741,6 +4653,8 @@
   }
 
   .panel-header {
+    --system-banner-layer: 260;
+    position: relative;
     flex: 0 0 auto;
     min-height: 61px;
     padding: 12px 13px 10px 16px;
@@ -4834,6 +4748,7 @@
   }
 
   .panel-content { position: relative; max-height: 431px; min-height: 0; flex: 0 1 auto; overflow: hidden; }
+  .panel-content.inspector-content { height: 431px; display: flex; flex-direction: column; }
   .launcher-popover { position: absolute; z-index: 4; top: 53px; right: 13px; width: 320px; max-height: calc(100vh - 65px); overflow: hidden; isolation: isolate; border: 1px solid rgba(99, 119, 110, 0.14); border-radius: 14px; background: #fafcfb; background-clip: padding-box; }
   .launcher-popover-scroll { box-sizing: border-box; width: 100%; max-height: calc(100vh - 65px); padding: 10px 11px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
   .launcher-title { display: block; padding: 1px 3px 7px; color: #8c9691; font-size: 9px; font-weight: 750; letter-spacing: 0.06em; text-transform: uppercase; }
@@ -4873,7 +4788,6 @@
   .shortcut-editor { position: relative; width: min(270px, 100%); padding: 16px; display: grid; gap: 8px; border: 1px solid rgba(89, 111, 101, 0.18); border-radius: 14px; background: rgba(250, 252, 251, 0.99); box-shadow: 0 18px 45px rgba(24, 38, 32, 0.26); }
   .shortcut-editor > strong { color: #34443d; font-size: 11px; }
   .shortcut-editor > small { color: #829089; font-size: 8px; line-height: 1.45; }
-  .shortcut-editor > p { margin: 0; color: #a34d4d; font-size: 8px; line-height: 1.4; }
   .shortcut-capture { height: 44px; margin-top: 3px; border: 1px solid rgba(70, 113, 95, 0.28); border-radius: 10px; outline: 0; color: #3e6153; background: rgba(74, 122, 102, 0.07); cursor: text; }
   .shortcut-capture:focus { border-color: rgba(69, 130, 103, 0.58); box-shadow: 0 0 0 3px rgba(74, 122, 102, 0.1); }
   .shortcut-capture kbd { font: 750 10px Inter, sans-serif; }
@@ -4914,9 +4828,8 @@
   .final-response-body .final-response-copy { position: relative; top: auto; right: auto; margin: 0 0 5px auto; }
   .result-response { margin-top: 8px; color: inherit; }
   .result-response > summary { padding: 6px 0; }
-  .session-terminal-action, .empty-session-actions button { min-height: 30px; padding: 5px 10px; border: 1px solid rgba(70, 109, 87, .3); border-radius: 7px; color: inherit; background: rgba(72, 131, 97, .08); font: 650 11px Inter, sans-serif; cursor: pointer; }
-  .session-terminal-action:hover, .empty-session-actions button:hover { background: rgba(72, 131, 97, .16); }
-  .session-terminal-action:disabled { opacity: .5; cursor: wait; }
+  .empty-session-actions button { min-height: 30px; padding: 5px 10px; border: 1px solid rgba(70, 109, 87, .3); border-radius: 7px; color: inherit; background: rgba(72, 131, 97, .08); font: 650 11px Inter, sans-serif; cursor: pointer; }
+  .empty-session-actions button:hover { background: rgba(72, 131, 97, .16); }
   .empty-session-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
   .session-details .permission-block, .session-details .question-block { margin: 0 0 14px; padding: 11px; border: 1px solid rgba(166, 122, 49, .28); border-radius: 10px; font-size: 12px; line-height: 1.5; }
   .session-details .permission-block code { max-height: 120px; overflow: auto; text-overflow: clip; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -5405,34 +5318,6 @@
     box-shadow: 0 0 0 2px rgba(74, 122, 102, 0.08);
   }
   .profile-empty { margin: 5px 1px 2px; color: #89938f; font-size: 9px; line-height: 1.45; }
-  .remote-node-panel { padding: 11px; display: grid; gap: 9px; border: 1px solid rgba(92, 111, 103, 0.11); border-radius: 13px; background: rgba(84, 111, 99, 0.035); }
-  .remote-node-heading { display: flex; align-items: center; gap: 9px; }
-  .remote-node-heading > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
-  .remote-node-heading strong,
-  .remote-node-row strong,
-  .discovered-node-list strong { color: #35423d; font-size: 9px; }
-  .remote-node-heading small,
-  .remote-node-row small,
-  .discovered-node-list small { overflow: hidden; color: #89938f; font-size: 8px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
-  .remote-node-panel button { min-height: 25px; padding: 0 7px; border: 1px solid rgba(82, 105, 95, 0.14); border-radius: 7px; color: #577064; background: transparent; font-size: 8px; font-weight: 680; cursor: pointer; }
-  .remote-node-panel button:disabled { cursor: default; opacity: 0.5; }
-  .remote-pair-control { display: flex; align-items: center; gap: 6px; }
-  .remote-pair-control input { width: 0; min-width: 0; height: 29px; padding: 0 8px; flex: 1; border: 1px solid rgba(92, 111, 103, 0.14); border-radius: 8px; outline: 0; color: #53665d; background: rgba(255, 255, 255, 0.48); font-family: inherit; font-size: 8px; }
-  .remote-pair-control input:focus-visible { border-color: rgba(69, 113, 94, 0.42); box-shadow: 0 0 0 2px rgba(74, 122, 102, 0.08); }
-  .discovered-node-list,
-  .remote-node-list { display: grid; border-top: 1px solid rgba(92, 111, 103, 0.09); }
-  .discovered-node-list > span,
-  .remote-node-row { min-width: 0; min-height: 40px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid rgba(92, 111, 103, 0.08); }
-  .discovered-node-list > span:last-child,
-  .remote-node-row:last-child { border-bottom: 0; }
-  .discovered-node-list i,
-  .remote-node-row > i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #bf9345; }
-  .remote-node-row > i.online { background: #4d9d76; }
-  .discovered-node-list > span > strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .remote-node-row > span { min-width: 0; flex: 1; display: grid; gap: 1px; }
-  .remote-node-row > div { display: flex; gap: 4px; }
-  .remote-node-row button.remove { color: #8a5e5e; border-color: rgba(151, 91, 91, 0.14); }
-  .remote-node-empty { margin: 0; color: #7d8b84; font-size: 8px; line-height: 1.4; }
   .mobile-access-card { padding: 11px; display: grid; gap: 9px; border: 1px solid rgba(92, 111, 103, 0.11); border-radius: 13px; background: rgba(84, 111, 99, 0.035); }
   .mobile-access-header,
   .mobile-address,
@@ -5488,7 +5373,6 @@
   .update-copy span,
   .update-card p { color: #89938f; font-size: 9px; }
   .update-card p { margin: 9px 0 0; line-height: 1.4; }
-  .update-card p.error { color: #a34f4f; }
   .update-main button { min-width: 63px; height: 27px; padding: 0 8px; border: 1px solid rgba(82, 105, 95, 0.14); border-radius: 8px; color: #577064; background: transparent; font-size: 9px; font-weight: 680; cursor: pointer; transition: background 150ms ease, transform 150ms ease; }
   .update-main button.update-available { color: #f7fbf9; border-color: #527c6c; background: #527c6c; }
   .update-main button:hover:not(:disabled) { transform: translateY(-1px); background: rgba(82, 112, 99, 0.09); }
@@ -5510,10 +5394,10 @@
     align-items: center;
     border-top: 1px solid rgba(101, 120, 112, 0.11);
   }
-  footer button { height: 36px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 0; border-radius: 10px; color: #88928e; background: transparent; font-size: 9px; font-weight: 650; cursor: pointer; transition: color 150ms ease, background 150ms ease; }
+  footer button { height: 36px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 0; border-radius: 10px; color: #88928e; background: transparent; font-size: 11px; font-weight: 650; cursor: pointer; transition: color 150ms ease, background 150ms ease; }
   footer button:hover { color: #52615a; background: rgba(76, 100, 90, 0.045); }
   footer button.active { color: #476c5d; }
-  footer button svg { width: 15px; height: 15px; }
+  footer button :global(.orb-navigation-icon) { width: 18px; height: 18px; }
   footer button.has-update,
   footer button.has-mobile-device { position: relative; }
   footer button.has-update::after { content: ""; position: absolute; top: 5px; right: 14px; width: 5px; height: 5px; border: 2px solid rgba(248, 250, 249, 0.95); border-radius: 50%; background: #5f8ac7; }
@@ -5644,21 +5528,6 @@
   .overlay-shell.dark .update-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .terminal-picker-copy small { color: #9aaba3; }
   .overlay-shell.dark .project-name { color: #9aaba3; }
-  .overlay-shell.dark .remote-node-panel { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
-  .overlay-shell.dark .remote-node-heading strong,
-  .overlay-shell.dark .remote-node-row strong,
-  .overlay-shell.dark .discovered-node-list strong { color: #dce7e1; }
-  .overlay-shell.dark .remote-node-heading small,
-  .overlay-shell.dark .remote-node-row small,
-  .overlay-shell.dark .discovered-node-list small,
-  .overlay-shell.dark .remote-node-empty { color: #aebdb5; }
-  .overlay-shell.dark .remote-node-panel button { color: #b9c8c0; border-color: rgba(207, 223, 215, 0.12); }
-  .overlay-shell.dark .remote-pair-control input { color: #c6d5cd; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
-  .overlay-shell.dark .discovered-node-list,
-  .overlay-shell.dark .remote-node-list,
-  .overlay-shell.dark .discovered-node-list > span,
-  .overlay-shell.dark .remote-node-row { border-color: rgba(190, 209, 200, 0.08); }
-  .overlay-shell.dark .remote-node-row button.remove { color: #d19a9a; border-color: rgba(209, 131, 131, 0.16); }
   .overlay-shell.dark .mobile-access-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .mobile-access-card strong { color: #dce7e1; }
   .overlay-shell.dark .mobile-access-card span,
@@ -5681,7 +5550,6 @@
   .overlay-shell.dark .permission-state.allowed { color: #91c7ae; }
   .overlay-shell.dark .preview-badge { color: #91c7ae; border-color: rgba(116, 191, 157, 0.16); background: rgba(92, 161, 130, 0.08); }
   .overlay-shell.dark .paired-devices .revoke-device { color: #d19a9a; border-color: rgba(209, 131, 131, 0.16); }
-  .overlay-shell.dark .update-card p.error { color: #d68d8d; }
   .overlay-shell.dark .diagnostic-card,
   .overlay-shell.dark .result-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .diagnostic-check strong,

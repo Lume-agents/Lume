@@ -17,6 +17,7 @@
   import { copyResolvedColorTokens } from "$lib/floatingTheme";
   import { appearanceAttributes, appearanceThemes, type AppearanceTheme } from "$lib/appearance";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import WorkspaceInspector from "$lib/WorkspaceInspector.svelte";
@@ -171,6 +172,7 @@
   let focusedPaneId = $state<string | null>(null);
   let maximizedPaneId = $state<string | null>(null);
   let inspectorOpen = $state(true);
+  let inspectorSection = $state<"session" | "repository">("session");
   let reviewOpen = $state(false);
   let reviewInitialPath = $state<string | undefined>();
   let inspectorBeforeReview = $state(false);
@@ -1429,6 +1431,13 @@
     reviewOpen = true;
   }
 
+  function openRepository(sessionId: string) {
+    focusedPaneId = sessionId;
+    reviewOpen = false;
+    inspectorOpen = true;
+    inspectorSection = "repository";
+  }
+
   function closeReview() {
     reviewOpen = false;
     reviewInitialPath = undefined;
@@ -2091,7 +2100,7 @@
   style:--workspace-background-color={workspaceCanvasColor}
   style:--workspace-background-opacity={`${workspaceCanvasOpacity}%`}
 >
-  <SystemBannerStack items={systemBanners} dismissLabel={tr("Dismiss", "Fechar")} />
+  <SystemBannerStack items={systemBanners} language={preferences.language} dismissLabel={tr("Dismiss", "Fechar")} />
   {#each workspaceResizeEdges as direction}
     <button
       class="window-resize-edge edge-{direction.toLocaleLowerCase()}"
@@ -2521,7 +2530,7 @@
           </details>
 
           <details class="settings-group">
-            <summary>{tr("Companions and detectors", "Companions e detectores")}</summary>
+            <summary>{tr("Companions", "Companions")}</summary>
             <div class="integration-row">
               <span class="integration-icon"><BrandIcon name="vscode" size={18} /></span>
               <span><strong>VS Code Companion</strong><small>{vscodeStatus.detail}</small><small>{tr("Does not control Antigravity IDE or Gemini Code Assist chats.", "Não controla chats da IDE Antigravity nem do Gemini Code Assist.")}</small></span>
@@ -2532,12 +2541,18 @@
               <span><strong>Chrome, Edge & Brave</strong><small>{tr("Browser companion extension", "Extensão companion do navegador")}</small></span>
               <button type="button" onclick={() => void revealBrowserCompanion()}>{tr("Open", "Abrir")}</button>
             </div>
+          </details>
+
+          <details class="settings-group" data-external-detectors>
+            <summary>{tr("External detectors", "Detectores externos")}</summary>
             {#each externalPlugins as plugin (plugin.id)}
               <div class="integration-row">
                 <span class="integration-icon"><BrandIcon name="unknown" size={17} /></span>
                 <span><strong>{plugin.name}</strong><small>{plugin.executable}</small></span>
                 <button type="button" onclick={() => void uninstallExternalPlugin(plugin.id)}>{tr("Remove", "Remover")}</button>
               </div>
+            {:else}
+              <p class="settings-hint">{tr("Install a JSON manifest to monitor another CLI. Detectors do not launch agents or change their tools.", "Instale um manifesto JSON para monitorar outra CLI. Detectores não iniciam agentes nem alteram suas ferramentas.")}</p>
             {/each}
             <div class="inline-actions">
               <button type="button" disabled={installingPlugin} onclick={() => void addExternalPlugin()}>{installingPlugin ? "…" : tr("Install manifest", "Instalar manifesto")}</button>
@@ -2602,6 +2617,11 @@
             {/if}
           </details>
 
+          <details class="settings-group" data-remote-nodes-section>
+            <summary>{tr("Remote computers", "Computadores remotos")}</summary>
+            <RemoteComputers language={preferences.language} dark={darkMode} />
+          </details>
+
           <details class="settings-group compact-settings">
             <summary>{tr("Mobile access", "Acesso mobile")}</summary>
             <label class="workspace-setting-row">
@@ -2656,7 +2676,7 @@
       <div class="integration-warning-dialog" role="alertdialog" aria-modal="true" aria-labelledby="antigravity-hook-title" aria-describedby="antigravity-hook-description">
         <span class="integration-warning-icon"><BrandIcon name="antigravity" size={22} /></span>
         <strong id="antigravity-hook-title">{tr("Connect Antigravity CLI?", "Conectar a CLI Antigravity?")}</strong>
-        <p id="antigravity-hook-description">{tr("Lume installs hooks only for the Antigravity CLI. Its wildcard PreToolUse hook automatically allows every CLI tool call. If Lume is closed or the hook command fails, the fail-open fallback still returns allow, so native approval prompts are not restored. This remains active until you disable or remove Lume’s hook in Antigravity CLI settings; restart open CLI sessions afterward. Enable it only if you accept automatic tool approval. Full history stays in the CLI. This does not configure Antigravity IDE or Gemini Code Assist.", "O Lume instala hooks somente para a CLI Antigravity. O hook PreToolUse com curinga permite automaticamente todas as chamadas de ferramentas. Se o Lume estiver fechado ou o comando do hook falhar, o fallback fail-open também responde allow; as confirmações nativas não são restauradas. Isso continua ativo até você desativar ou remover o hook do Lume nas configurações da CLI Antigravity; depois, reinicie as sessões abertas. Ative somente se aceitar a aprovação automática de ferramentas. O histórico completo continua na CLI. Isso não configura a IDE Antigravity nem o Gemini Code Assist.")}</p>
+        <p id="antigravity-hook-description">{tr("Lume installs monitoring hooks only for Antigravity CLI. Tool approvals follow the CLI's native policy; Lume does not auto-approve them. In headless sessions, tools that need an interactive approval are denied unless you have granted a specific rule in Antigravity. This does not configure Antigravity IDE or Gemini Code Assist.", "O Lume instala hooks de monitoramento somente na CLI Antigravity. As aprovações seguem a política nativa da CLI; o Lume não aprova ferramentas automaticamente. Em sessões sem terminal, ações que exigem confirmação são bloqueadas, salvo se você tiver uma regra específica no Antigravity. Isso não configura a IDE Antigravity nem o Gemini Code Assist.")}</p>
         <span>
           <button type="button" onclick={() => antigravityHookConfirmation = false}>{tr("Cancel", "Cancelar")}</button>
           <button class="primary" type="button" onclick={() => void confirmAntigravityHooks()}>{tr("Enable CLI hooks", "Ativar hooks da CLI")}</button>
@@ -2700,6 +2720,7 @@
           onFocus={() => focusPane(maximizedSession.id)}
           onFork={(threadId) => openForkedCodexSession(threadId, maximizedSession)}
           onOpenReview={(path) => openReview(path, maximizedSession.id)}
+          onOpenRepository={() => openRepository(maximizedSession.id)}
           onToggleMaximize={() => togglePaneMaximize(maximizedSession.id)}
           onDismissExternalWriterConflict={dismissExternalWriterConflict}
           onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(maximizedSession, externalWriterConflicts[maximizedSession.id]!, action)}
@@ -2716,6 +2737,7 @@
           onFocus={() => focusPane(primary.id)}
           onFork={(threadId) => openForkedCodexSession(threadId, primary)}
           onOpenReview={(path) => openReview(path, primary.id)}
+          onOpenRepository={() => openRepository(primary.id)}
           onToggleMaximize={() => togglePaneMaximize(primary.id)}
           onDismissExternalWriterConflict={dismissExternalWriterConflict}
           onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(primary, externalWriterConflicts[primary.id]!, action)}
@@ -2751,7 +2773,8 @@
             onClose={() => closeSidePane(secondary.id)}
             onFocus={() => focusPane(secondary.id)}
             onFork={(threadId) => openForkedCodexSession(threadId, secondary)}
-            onOpenReview={(path) => openReview(path, secondary.id)}
+          onOpenReview={(path) => openReview(path, secondary.id)}
+          onOpenRepository={() => openRepository(secondary.id)}
             onToggleMaximize={() => togglePaneMaximize(secondary.id)}
             onDismissExternalWriterConflict={dismissExternalWriterConflict}
             onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(secondary, externalWriterConflicts[secondary.id]!, action)}
@@ -2788,6 +2811,7 @@
               onFocus={() => focusPane(tertiary.id)}
               onFork={(threadId) => openForkedCodexSession(threadId, tertiary)}
               onOpenReview={(path) => openReview(path, tertiary.id)}
+              onOpenRepository={() => openRepository(tertiary.id)}
               onToggleMaximize={() => togglePaneMaximize(tertiary.id)}
               onDismissExternalWriterConflict={dismissExternalWriterConflict}
               onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(tertiary, externalWriterConflicts[tertiary.id]!, action)}
@@ -2824,7 +2848,7 @@
     <div class:open={inspectorOpen} class="inspector-shell" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
       {#if inspectorOpen}
         <div class="inspector-content" in:fly={{ x: 18, duration: motionDuration(210), easing: cubicOut }} out:fly={{ x: 14, duration: motionDuration(145), easing: cubicOut }}>
-          <WorkspaceInspector session={focusedSession} {language} onClose={toggleInspector} onOpenReview={openReview} />
+          <WorkspaceInspector session={focusedSession} {language} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} />
         </div>
       {/if}
     </div>
@@ -2949,6 +2973,7 @@
   .settings-group > summary::after { width: 7px; height: 7px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .55; transform: rotate(45deg) translate(-2px, 2px); transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .settings-group[open] > summary::after { transform: rotate(225deg) translate(-1px, 0); }
   .settings-group[open] { padding-bottom: 18px; }
+  .settings-hint { margin: 2px 0 10px; color: var(--workspace-muted); font-size: 8px; line-height: 1.5; }
   .appearance-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
   .appearance-option { min-width: 0; padding: 7px; display: grid; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: transparent; cursor: pointer; text-align: left; transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .appearance-option:hover { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 32%, var(--workspace-line)); transform: translateY(-1px); }

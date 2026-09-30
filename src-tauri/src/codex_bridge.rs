@@ -38,6 +38,9 @@ const PROXY_BASE_URL: &str = "ws://127.0.0.1:43131";
 const MAX_LOCAL_CODEX_MESSAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LOCAL_CODEX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const PROXY_SESSION_STABLE_FOR: Duration = Duration::from_millis(1_200);
+const CODEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(90);
+const CODEX_PROMPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_PROXY_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_PROXY_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static SERVER_URL: OnceLock<String> = OnceLock::new();
@@ -207,6 +210,22 @@ pub struct CodexThreadModelSettings {
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
     pub models: Vec<CodexModelOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_modes: Option<SessionModeSettings>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModeSettings {
+    pub current_mode: String,
+    pub options: Vec<SessionModeOption>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SessionModeOption {
+    pub value: String,
+    pub label: String,
+    pub description: String,
 }
 
 pub struct CodexBridge {
@@ -423,9 +442,10 @@ impl CodexBridge {
         thread_id: &str,
         model: &str,
         effort: &str,
+        models: &[CodexModelOption],
     ) -> Result<CodexThreadModelSettings, String> {
         self.ensure_server()?;
-        set_thread_model_settings_connection(thread_id, model, effort)
+        set_thread_model_settings_connection(thread_id, model, effort, models)
     }
 
     pub fn default_model_settings(&self) -> Result<CodexThreadModelSettings, String> {
@@ -564,7 +584,14 @@ impl CodexBridge {
         let mut turn = prompt_turn_request(&thread_id, prompt, attachment_paths);
         apply_model_override_to_turn_request(&mut turn, &model_settings);
         send_json(&mut server, turn)?;
-        if let Err(error) = wait_for_response(&mut server, 3, &state, &app, &profiles) {
+        if let Err(error) = wait_for_response_until(
+            &mut server,
+            3,
+            &state,
+            &app,
+            &profiles,
+            CODEX_PROMPT_ACK_TIMEOUT,
+        ) {
             if state.codex_active_turn(&thread_id)?.is_none() {
                 return Err(error);
             }
@@ -992,6 +1019,7 @@ fn command_for_server() -> Result<Command, String> {
     let mut command = crate::executables::command("codex")?;
     command
         .args(["app-server", "--listen", server_url()])
+        .env("LUME_MANAGED_SESSION", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1488,14 +1516,21 @@ fn prompt_connection(
         &mut server,
         json!({ "method": "thread/resume", "id": 2, "params": { "threadId": thread_id, "excludeTurns": true } }),
     )?;
-    wait_for_response(&mut server, 2, state, app, &profiles)?;
+    wait_for_response_until(&mut server, 2, state, app, &profiles, CODEX_RESUME_TIMEOUT)?;
 
     let mut turn = prompt_turn_request(thread_id, prompt, attachment_paths);
     let model_settings = state.session_model_override_for_native_id(AgentKind::Codex, thread_id)?;
     apply_model_override_to_turn_request(&mut turn, &model_settings);
     observe_client_message(&Message::Text(turn.to_string().into()), &mut profiles);
     send_json(&mut server, turn)?;
-    wait_for_response(&mut server, 3, state, app, &profiles)?;
+    wait_for_response_until(
+        &mut server,
+        3,
+        state,
+        app,
+        &profiles,
+        CODEX_PROMPT_ACK_TIMEOUT,
+    )?;
     set_server_timeout(&mut server, Duration::from_millis(200))?;
     Ok(server)
 }
@@ -1540,7 +1575,7 @@ fn prepare_thread_connection(
     // Resuming a long-lived thread can take substantially longer than the
     // five-second socket timeout. A timed-out read is not a failed takeover.
     let response = if resume_id.is_some() {
-        wait_for_plain_value_response_until(&mut server, 2, Duration::from_secs(90))?
+        wait_for_plain_value_response_until(&mut server, 2, CODEX_RESUME_TIMEOUT)?
     } else {
         wait_for_plain_value_response(&mut server, 2)?
     };
@@ -1733,24 +1768,28 @@ fn set_thread_model_settings_connection(
     thread_id: &str,
     model: &str,
     effort: &str,
+    models: &[CodexModelOption],
 ) -> Result<CodexThreadModelSettings, String> {
     let mut server = connect_initialized_plain()?;
+    apply_thread_model_settings(&mut server, thread_id, model, effort, models)
+}
+
+fn apply_thread_model_settings(
+    server: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    thread_id: &str,
+    model: &str,
+    effort: &str,
+    models: &[CodexModelOption],
+) -> Result<CodexThreadModelSettings, String> {
     send_json(
-        &mut server,
+        server,
         thread_model_settings_update_request(thread_id, model, effort),
     )?;
-    let resumed = wait_for_plain_value_response(&mut server, 2)?;
-    send_json(
-        &mut server,
-        json!({
-            "method": "model/list",
-            "id": 3,
-            "params": { "limit": 100, "includeHidden": false }
-        }),
-    )?;
-    let catalog = wait_for_plain_value_response(&mut server, 3)?;
-    let mut settings = model_settings_from_responses(&resumed, &catalog)?;
-    // Reflect the explicit thread overrides in the value returned to the UI.
+    let resumed = wait_for_plain_value_response(server, 2)?;
+    // The caller already loaded and validated the catalog. Older servers may
+    // still report the last turn's model, so retain the acknowledged overrides
+    // also saved by the caller and applied explicitly to the next turn.
+    let mut settings = model_settings_from_models(&resumed, models.to_vec())?;
     settings.model = model.to_string();
     settings.reasoning_effort = Some(effort.to_string());
     Ok(settings)
@@ -1829,20 +1868,6 @@ fn model_settings_from_responses(
     resumed: &Value,
     catalog: &Value,
 ) -> Result<CodexThreadModelSettings, String> {
-    let model = resumed
-        .pointer("/result/model")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "Codex did not report the current thread model".to_string())?
-        .to_string();
-    let reasoning_effort = resumed
-        .pointer("/result/reasoningEffort")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let service_tier = resumed
-        .pointer("/result/serviceTier")
-        .and_then(Value::as_str)
-        .map(str::to_string);
     let models = catalog
         .pointer("/result/data")
         .and_then(Value::as_array)
@@ -1895,6 +1920,27 @@ fn model_settings_from_responses(
             })
         })
         .collect::<Vec<_>>();
+    model_settings_from_models(resumed, models)
+}
+
+fn model_settings_from_models(
+    resumed: &Value,
+    models: Vec<CodexModelOption>,
+) -> Result<CodexThreadModelSettings, String> {
+    let model = resumed
+        .pointer("/result/model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Codex did not report the current thread model".to_string())?
+        .to_string();
+    let reasoning_effort = resumed
+        .pointer("/result/reasoningEffort")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let service_tier = resumed
+        .pointer("/result/serviceTier")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if models.is_empty() {
         return Err("Codex did not return any available models".into());
     }
@@ -1903,6 +1949,7 @@ fn model_settings_from_responses(
         reasoning_effort,
         service_tier,
         models,
+        session_modes: None,
     })
 }
 
@@ -1978,9 +2025,10 @@ fn update_thread_collaboration_mode(
     )?;
     send_json(
         &mut server,
-        json!({ "method": "thread/resume", "id": 2, "params": { "threadId": thread_id } }),
+        json!({ "method": "thread/resume", "id": 2, "params": { "threadId": thread_id, "excludeTurns": true } }),
     )?;
-    let resumed = wait_for_value_response(&mut server, 2, state, app, &profiles)?;
+    let resumed =
+        wait_for_value_response_until(&mut server, 2, state, app, &profiles, CODEX_RESUME_TIMEOUT)?;
     send_json(
         &mut server,
         json!({ "method": "collaborationMode/list", "id": 3, "params": {} }),
@@ -2098,13 +2146,7 @@ fn control_connection(
     if let Some(turn_id) = state.codex_active_turn(thread_id)? {
         return Ok((server, Some(turn_id), profiles));
     }
-    let expects_active_turn = state.sessions()?.iter().any(|session| {
-        session.native_session_id.as_deref() == Some(thread_id)
-            && matches!(
-                session.status,
-                SessionStatus::Running | SessionStatus::PermissionRequired
-            )
-    });
+    let expects_active_turn = state.native_session_has_active_task(&AgentKind::Codex, thread_id)?;
     if !expects_active_turn {
         return Ok((server, None, profiles));
     }
@@ -2166,47 +2208,102 @@ fn wait_for_response(
     app: &AppHandle,
     profiles: &HashMap<String, PermissionProfile>,
 ) -> Result<(), String> {
-    let mut responses = HashMap::new();
-    let deadline = Instant::now() + Duration::from_secs(6);
+    wait_for_response_until(
+        socket,
+        expected_id,
+        state,
+        app,
+        profiles,
+        CODEX_REQUEST_TIMEOUT,
+    )
+}
+
+fn wait_for_response_until(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    expected_id: i64,
+    state: &AppState,
+    app: &AppHandle,
+    profiles: &HashMap<String, PermissionProfile>,
+    timeout: Duration,
+) -> Result<(), String> {
+    wait_for_value_response_until(socket, expected_id, state, app, profiles, timeout).map(|_| ())
+}
+
+fn rpc_timeout_message(timeout: Duration) -> String {
+    format!(
+        "Codex did not respond within {} seconds. If you sent a prompt, check whether it started before sending it again.",
+        timeout.as_secs()
+    )
+}
+
+fn read_message_until(
+    deadline: Instant,
+    timeout_error: &str,
+    mut read: impl FnMut(Duration) -> Result<Message, tungstenite::Error>,
+) -> Result<Message, String> {
     loop {
-        let message = loop {
-            match socket.read() {
-                Ok(message) => break message,
-                Err(tungstenite::Error::Io(error))
-                    if transient(&error) && Instant::now() < deadline =>
-                {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => return Err(error.to_string()),
-            }
-        };
-        if let Message::Text(text) = &message {
-            if let Ok(value) = serde_json::from_str::<Value>(text) {
-                if value.get("id").and_then(Value::as_i64) == Some(expected_id) {
-                    if let Some(error) = value.get("error") {
-                        return Err(error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("O Codex recusou o prompt")
-                            .to_string());
-                    }
-                    return Ok(());
-                }
-            }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(timeout_error.to_string());
         }
-        if let Some(response) =
-            intercept_server_message(&message, state, app, profiles, &mut responses)?
-        {
-            socket.send(response).map_err(|error| error.to_string())?;
+        match read(remaining.min(Duration::from_secs(5))) {
+            Ok(message) => return Ok(message),
+            Err(tungstenite::Error::Io(error)) if transient(&error) => {
+                thread::sleep(
+                    Duration::from_millis(10)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(error.to_string()),
         }
     }
+}
+
+fn read_rpc_message(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    deadline: Instant,
+    timeout_error: &str,
+) -> Result<Message, String> {
+    read_message_until(deadline, timeout_error, |remaining| {
+        let MaybeTlsStream::Plain(stream) = socket.get_mut() else {
+            return Err(tungstenite::Error::Io(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "Local Codex must use a loopback WebSocket without TLS",
+            )));
+        };
+        stream.set_read_timeout(Some(remaining))?;
+        socket.read()
+    })
+}
+
+fn rpc_response_value(message: &Message, expected_id: i64) -> Result<Option<Value>, String> {
+    let Message::Text(text) = message else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return Ok(None);
+    };
+    // Server-side permission requests can use the same numeric id as a client
+    // request. They must be handled, never mistaken for an acknowledgement.
+    if value.get("method").is_some() || value.get("id").and_then(Value::as_i64) != Some(expected_id)
+    {
+        return Ok(None);
+    }
+    if let Some(error) = value.get("error") {
+        return Err(error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Codex refused the request")
+            .to_string());
+    }
+    Ok(value.get("result").is_some().then_some(value))
 }
 
 fn wait_for_plain_value_response(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     expected_id: i64,
 ) -> Result<Value, String> {
-    wait_for_plain_value_response_until(socket, expected_id, Duration::from_secs(10))
+    wait_for_plain_value_response_until(socket, expected_id, CODEX_REQUEST_TIMEOUT)
 }
 
 fn wait_for_plain_value_response_until(
@@ -2215,38 +2312,12 @@ fn wait_for_plain_value_response_until(
     timeout: Duration,
 ) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
+    let timeout_error = rpc_timeout_message(timeout);
     loop {
-        let message = match socket.read() {
-            Ok(message) => message,
-            Err(tungstenite::Error::Io(error))
-                if transient(&error) && Instant::now() < deadline =>
-            {
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-            Err(tungstenite::Error::Io(error)) if transient(&error) => {
-                return Err(format!(
-                    "The Codex App Server did not answer within {} seconds. The session was not marked as controlled; try again.",
-                    timeout.as_secs()
-                ));
-            }
-            Err(error) => return Err(error.to_string()),
-        };
-        let Message::Text(text) = message else {
-            continue;
-        };
-        let value = serde_json::from_str::<Value>(&text).map_err(|error| error.to_string())?;
-        if value.get("id").and_then(Value::as_i64) != Some(expected_id) {
-            continue;
+        let message = read_rpc_message(socket, deadline, &timeout_error)?;
+        if let Some(value) = rpc_response_value(&message, expected_id)? {
+            return Ok(value);
         }
-        if let Some(error) = value.get("error") {
-            return Err(error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("Codex refused the request")
-                .to_string());
-        }
-        return Ok(value);
     }
 }
 
@@ -2257,22 +2328,31 @@ fn wait_for_value_response(
     app: &AppHandle,
     profiles: &HashMap<String, PermissionProfile>,
 ) -> Result<Value, String> {
+    wait_for_value_response_until(
+        socket,
+        expected_id,
+        state,
+        app,
+        profiles,
+        CODEX_REQUEST_TIMEOUT,
+    )
+}
+
+fn wait_for_value_response_until(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    expected_id: i64,
+    state: &AppState,
+    app: &AppHandle,
+    profiles: &HashMap<String, PermissionProfile>,
+    timeout: Duration,
+) -> Result<Value, String> {
     let mut responses = HashMap::new();
+    let deadline = Instant::now() + timeout;
+    let timeout_error = rpc_timeout_message(timeout);
     loop {
-        let message = socket.read().map_err(|error| error.to_string())?;
-        if let Message::Text(text) = &message {
-            if let Ok(value) = serde_json::from_str::<Value>(text) {
-                if value.get("id").and_then(Value::as_i64) == Some(expected_id) {
-                    if let Some(error) = value.get("error") {
-                        return Err(error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Codex refused the request")
-                            .to_string());
-                    }
-                    return Ok(value);
-                }
-            }
+        let message = read_rpc_message(socket, deadline, &timeout_error)?;
+        if let Some(value) = rpc_response_value(&message, expected_id)? {
+            return Ok(value);
         }
         if let Some(response) =
             intercept_server_message(&message, state, app, profiles, &mut responses)?
@@ -2431,7 +2511,14 @@ fn reconnect_prompt_monitor(
                     "params": { "threadId": thread_id, "excludeTurns": true }
                 }),
             )?;
-            let resumed = wait_for_value_response(&mut server, 3, state, app, &profiles)?;
+            let resumed = wait_for_value_response_until(
+                &mut server,
+                3,
+                state,
+                app,
+                &profiles,
+                CODEX_RESUME_TIMEOUT,
+            )?;
             if resumed
                 .pointer("/result/thread/status/type")
                 .and_then(Value::as_str)
@@ -3782,6 +3869,157 @@ fn project_name(path: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn rpc_wait_retries_transient_socket_timeouts_without_resending_the_request() {
+        let expected = Message::Text(json!({ "id": 3, "result": {} }).to_string().into());
+        let mut reads = VecDeque::from([
+            Err(tungstenite::Error::Io(ErrorKind::WouldBlock.into())),
+            Err(tungstenite::Error::Io(ErrorKind::TimedOut.into())),
+            Err(tungstenite::Error::Io(ErrorKind::Interrupted.into())),
+            Ok(expected.clone()),
+        ]);
+        let received = read_message_until(
+            Instant::now() + Duration::from_secs(1),
+            "response timeout",
+            |remaining| {
+                assert!(!remaining.is_zero());
+                reads.pop_front().expect("scripted socket read")
+            },
+        )
+        .expect("acknowledgement after temporary socket errors");
+        assert_eq!(received, expected);
+        assert!(reads.is_empty());
+    }
+
+    #[test]
+    fn rpc_wait_reports_a_timeout_instead_of_raw_would_block_os_errors() {
+        let expected_error = rpc_timeout_message(CODEX_PROMPT_ACK_TIMEOUT);
+        let error = read_message_until(
+            Instant::now() + Duration::from_millis(25),
+            &expected_error,
+            |_| Err(tungstenite::Error::Io(ErrorKind::WouldBlock.into())),
+        )
+        .expect_err("bounded wait");
+        assert_eq!(error, expected_error);
+        assert!(!error.contains("Resource temporarily unavailable"));
+    }
+
+    #[test]
+    fn rpc_socket_remains_readable_after_a_temporary_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("isolated test socket");
+        let client =
+            TcpStream::connect(listener.local_addr().expect("test address")).expect("test client");
+        let (server, _) = listener.accept().expect("test server");
+        let mut client = WebSocket::from_raw_socket(
+            MaybeTlsStream::Plain(client),
+            tungstenite::protocol::Role::Client,
+            None,
+        );
+        let (release, released) = mpsc::channel();
+        let sender = thread::spawn(move || {
+            let mut server =
+                WebSocket::from_raw_socket(server, tungstenite::protocol::Role::Server, None);
+            let request = server.read().expect("one test request");
+            assert!(matches!(request, Message::Text(_)));
+            released
+                .recv_timeout(Duration::from_secs(2))
+                .expect("client observed the temporary timeout");
+            server
+                .send(Message::Text(
+                    json!({ "id": 3, "result": { "accepted": true } })
+                        .to_string()
+                        .into(),
+                ))
+                .expect("delayed acknowledgement");
+        });
+        send_json(&mut client, json!({ "id": 3, "method": "test-only" })).expect("request");
+        let error = wait_for_plain_value_response_until(&mut client, 3, Duration::from_millis(20))
+            .expect_err("temporary timeout");
+        assert_eq!(error, rpc_timeout_message(Duration::from_millis(20)));
+        release.send(()).expect("release the delayed response");
+        let response = wait_for_plain_value_response_until(&mut client, 3, Duration::from_secs(1))
+            .expect("read the acknowledgement without resending");
+        assert_eq!(
+            response.pointer("/result/accepted"),
+            Some(&Value::Bool(true))
+        );
+        sender.join().expect("test server completed");
+    }
+
+    #[test]
+    fn rpc_wait_deadline_is_not_reset_by_a_stream_of_unrelated_notifications() {
+        let deadline = Instant::now() + Duration::from_millis(25);
+        let notification = Message::Text(
+            json!({ "method": "thread/status/changed" })
+                .to_string()
+                .into(),
+        );
+        let mut received = 0;
+        loop {
+            let message = read_message_until(deadline, "response timeout", |_| {
+                thread::sleep(Duration::from_millis(10));
+                Ok(notification.clone())
+            });
+            match message {
+                Ok(message) => {
+                    assert!(rpc_response_value(&message, 3)
+                        .expect("notification")
+                        .is_none());
+                    received += 1;
+                }
+                Err(error) => {
+                    assert_eq!(error, "response timeout");
+                    break;
+                }
+            }
+        }
+        assert!(received > 0);
+        assert!(received <= 3);
+    }
+
+    #[test]
+    fn rpc_wait_preserves_fatal_socket_errors() {
+        let error = read_message_until(
+            Instant::now() + Duration::from_secs(1),
+            "response timeout",
+            |_| Err(tungstenite::Error::ConnectionClosed),
+        )
+        .expect_err("closed connection");
+        assert_eq!(error, tungstenite::Error::ConnectionClosed.to_string());
+    }
+
+    #[test]
+    fn rpc_acknowledgement_requires_a_response_not_a_permission_request_with_the_same_id() {
+        let request = Message::Text(
+            json!({
+                "id": 3, "method": "item/commandExecution/requestApproval", "params": {}
+            })
+            .to_string()
+            .into(),
+        );
+        assert!(rpc_response_value(&request, 3)
+            .expect("server request")
+            .is_none());
+        let response = Message::Text(json!({ "id": 3, "result": null }).to_string().into());
+        assert!(rpc_response_value(&response, 3)
+            .expect("acknowledgement")
+            .is_some());
+        assert!(rpc_response_value(&response, 2)
+            .expect("other request")
+            .is_none());
+        let refused = Message::Text(
+            json!({
+                "id": 3, "error": { "code": -32600, "message": "already has an active writer" }
+            })
+            .to_string()
+            .into(),
+        );
+        assert_eq!(
+            rpc_response_value(&refused, 3).expect_err("refusal"),
+            "already has an active writer"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn failed_port_probe_does_not_kill_a_running_app_server() {
@@ -4112,6 +4350,84 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn scripted_model_settings_update(response: Value) -> Result<CodexThreadModelSettings, String> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("isolated test socket");
+        let client =
+            TcpStream::connect(listener.local_addr().expect("test address")).expect("test client");
+        let (server, _) = listener.accept().expect("test server");
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("bounded test server");
+        let sender = thread::spawn(move || {
+            let mut server =
+                WebSocket::from_raw_socket(server, tungstenite::protocol::Role::Server, None);
+            let request = server.read().expect("settings update");
+            let request: Value = serde_json::from_str(request.to_text().expect("JSON request"))
+                .expect("settings request");
+            assert_eq!(
+                request,
+                thread_model_settings_update_request("thread-1", "gpt-test", "high")
+            );
+            server
+                .send(Message::Text(response.to_string().into()))
+                .expect("scripted response");
+            assert!(
+                server.read().is_err(),
+                "the catalog must not be fetched again"
+            );
+        });
+        let mut client = WebSocket::from_raw_socket(
+            MaybeTlsStream::Plain(client),
+            tungstenite::protocol::Role::Client,
+            None,
+        );
+        let models = default_model_settings_from_catalog(&json!({
+            "result": { "data": [{
+                "model": "gpt-test",
+                "defaultReasoningEffort": "medium",
+                "supportedReasoningEfforts": [
+                    { "reasoningEffort": "medium" },
+                    { "reasoningEffort": "high" }
+                ]
+            }] }
+        }))
+        .expect("catalog")
+        .models;
+        let result =
+            apply_thread_model_settings(&mut client, "thread-1", "gpt-test", "high", &models);
+        drop(client);
+        sender.join().expect("test server completed");
+        result
+    }
+
+    #[test]
+    fn model_settings_update_reuses_catalog_and_keeps_acknowledged_overrides() {
+        let settings = scripted_model_settings_update(json!({
+            "id": 2,
+            "result": {
+                "model": "previous-turn-model",
+                "reasoningEffort": "low",
+                "serviceTier": "fast"
+            }
+        }))
+        .expect("one acknowledged update");
+        assert_eq!(settings.model, "gpt-test");
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(settings.service_tier.as_deref(), Some("fast"));
+        assert_eq!(settings.models.len(), 1);
+        assert_eq!(settings.models[0].supported_reasoning_efforts.len(), 2);
+    }
+
+    #[test]
+    fn model_settings_update_does_not_hide_provider_errors() {
+        let error = scripted_model_settings_update(json!({
+            "id": 2,
+            "error": { "code": -32600, "message": "model unavailable" }
+        }))
+        .expect_err("provider rejected the update");
+        assert!(error.contains("model unavailable"));
     }
 
     #[test]

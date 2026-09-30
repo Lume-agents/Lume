@@ -163,6 +163,7 @@ fn notification_for(
             crate::domain::AgentKind::Claude => "Claude".into(),
             crate::domain::AgentKind::ClaudeCode => "Claude Code".into(),
             crate::domain::AgentKind::Antigravity => "Antigravity".into(),
+            crate::domain::AgentKind::OpenCode => "OpenCode".into(),
             crate::domain::AgentKind::DeepSeek => "DeepSeek".into(),
             crate::domain::AgentKind::Gemini => "Gemini".into(),
             crate::domain::AgentKind::Unknown => "Agente".into(),

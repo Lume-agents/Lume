@@ -85,7 +85,10 @@ impl SessionCapabilities {
         } else if session.native_session_id.is_none() {
             Some(PromptUnavailableReason::SessionNotConnected)
         } else if session.control_origin == SessionControlOrigin::External
-            && matches!(session.agent, AgentKind::Codex | AgentKind::ClaudeCode)
+            && matches!(
+                session.agent,
+                AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::OpenCode
+            )
         {
             Some(PromptUnavailableReason::ExternalSession)
         } else if session.agent != AgentKind::Codex && session.working_directory.is_none() {
@@ -100,14 +103,18 @@ impl SessionCapabilities {
                 && session.permission_profile.can_respond_from_lume,
             can_answer_question: session.pending_question.is_some(),
             can_terminate: (session.source == SessionSource::Cli && session.process_id.is_some())
-                || (session.agent == AgentKind::Codex
-                    && session.source == SessionSource::Desktop
+                || (matches!(
+                    session.agent,
+                    AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
+                ) && session.source == SessionSource::Desktop
                     && session.control_origin == SessionControlOrigin::Lume
                     && has_nonempty_value(session.native_session_id.as_deref())),
             can_open_source: matches!(session.source, SessionSource::Web | SessionSource::Vscode),
             can_read_results: !session.results.is_empty() || session.last_response.is_some(),
             can_attach_images: session.source != SessionSource::Web
-                && session.agent != AgentKind::Unknown,
+                && session.agent != AgentKind::Unknown
+                && !(session.agent == AgentKind::Antigravity
+                    && session.source == SessionSource::Desktop),
             can_interrupt: matches!(
                 session.status,
                 SessionStatus::Running | SessionStatus::PermissionRequired
@@ -137,7 +144,10 @@ impl SessionCapabilities {
 
 fn can_interrupt_session(session: &AgentSession) -> bool {
     session.source != SessionSource::Web
-        && session.agent == AgentKind::Codex
+        && matches!(
+            session.agent,
+            AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
+        )
         && has_nonempty_value(session.native_session_id.as_deref())
 }
 
@@ -1831,6 +1841,27 @@ mod tests {
         managed.process_id = None;
 
         assert!(SessionCapabilities::for_session(&managed).can_terminate);
+    }
+
+    #[test]
+    fn managed_opencode_uses_direct_chat_capabilities_without_a_terminal() {
+        let mut managed = session();
+        managed.agent = AgentKind::OpenCode;
+        managed.source = SessionSource::Desktop;
+        managed.process_id = None;
+        managed.status = SessionStatus::Running;
+        let capabilities = SessionCapabilities::for_session(&managed);
+        assert!(capabilities.can_prompt);
+        assert!(capabilities.can_attach_images);
+        assert!(capabilities.can_terminate);
+        assert!(capabilities.can_interrupt);
+        assert!(!capabilities.can_take_control);
+        assert_eq!(
+            capabilities.prompt_deliveries,
+            vec![PromptDelivery::NewTurn]
+        );
+        managed.control_origin = SessionControlOrigin::External;
+        assert!(!SessionCapabilities::for_session(&managed).can_prompt);
     }
 
     #[test]

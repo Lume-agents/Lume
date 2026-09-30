@@ -2,11 +2,15 @@
 
 ## Objetivo
 
-Lume acompanha sessões de agentes de IA que já estejam abertas ou que tenham sido iniciadas pelo próprio aplicativo. O produto é totalmente local e não envia histórico, comandos, caminhos ou conteúdo de projetos para um serviço próprio.
+Lume acompanha sessões de agentes de IA que já estejam abertas ou que tenham sido iniciadas pelo próprio aplicativo. O monitoramento local funciona sem conta, Relay ou internet e mantém os dados no computador.
+
+O acesso distribuído é opcional e está em desenvolvimento: o Lume Node no PC1 permite parear o Lume no PC2. A experiência planejada inclui monitorar agentes e controlar sessões autorizadas com modelos locais no PC1, inclusive de outra rede, mantendo a execução e os arquivos naquele computador. Conexões diretas terão preferência e um Relay transportará conteúdo cifrado quando necessário. O pareamento, a saúde e o inventário inicial de processos de agentes e modelos Ollama já têm implementação local; controle remoto de sessões e acesso pela internet ainda estão em desenvolvimento.
 
 ## Experiência principal
 
-- A cápsula inicia recolhida no topo do monitor principal.
+- Orb discreto e Workspace completo são duas interfaces sobre as mesmas sessões e funcionalidades.
+- O Inspector conecta cada chat ao repositório local, às ferramentas do GitHub e à atividade da conta; veja o [guia de GitHub](./GITHUB.md).
+- A cápsula inicia recolhida e pode ser arrastada e acoplada às bordas do monitor, adaptando seu formato.
 - O usuário pode escolher outro monitor nas preferências.
 - Por padrão, a cápsula não aparece sobre vídeos ou jogos em tela cheia.
 - Uma preferência permite manter a sobreposição visível em tela cheia.

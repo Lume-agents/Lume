@@ -21,6 +21,7 @@
   import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import SessionRepositoryBadge from "$lib/SessionRepositoryBadge.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import { renderFileTypeIconHtml } from "$lib/fileTypeIcons";
@@ -60,6 +61,7 @@
     setSessionCollaborationMode,
     setSessionFastMode,
     setSessionModelSettings,
+    setSessionAgentMode,
     steerQueuedPrompt,
     submitPrompt,
     takeControlSession,
@@ -76,9 +78,11 @@
     focused = false,
     maximized = false,
     streamMessages = true,
+    visible = true,
     onClose,
     onFocus,
     onOpenReview,
+    onOpenRepository,
     onFork,
     onToggleMaximize,
     onDismissExternalWriterConflict,
@@ -91,9 +95,11 @@
     focused?: boolean;
     maximized?: boolean;
     streamMessages?: boolean;
+    visible?: boolean;
     onClose?: () => void;
     onFocus?: () => void;
     onOpenReview?: (path: string) => void;
+    onOpenRepository?: () => void;
     onFork?: (threadId: string) => void | Promise<void>;
     onToggleMaximize?: () => void;
     onDismissExternalWriterConflict?: (conflict: ExternalWriterConflict) => void;
@@ -204,7 +210,7 @@
     if (!olderActivities.length) return session.activities;
     const byId = new Map(olderActivities.map((activity) => [activity.id, activity]));
     for (const activity of session.activities) byId.set(activity.id, activity);
-    return [...byId.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    return [...byId.values()].sort((left, right) => left.createdAt - right.createdAt);
   });
   const chatActivities = $derived(conversationActivities.filter((activity: SessionActivity) =>
     activity.kind !== "warning"
@@ -326,7 +332,7 @@
     && nextQueuedPrompt
     && session.capabilities.promptDeliveries.includes("steer")
   ));
-  const supportsAgentControls = $derived(["codex", "claude_code"].includes(session.agent));
+  const supportsAgentControls = $derived(["codex", "claude_code", "opencode"].includes(session.agent));
   let sourceEntryId = $state<string | null>(null);
   let actionNotice = $state("");
   let forkingEntryId = $state<string | null>(null);
@@ -929,9 +935,12 @@
   }
 
   function chooseModel(model: string) {
+    if (modelControlsDisabled) return;
     selectedModel = model;
     const option = modelSettings?.models.find((candidate) => candidate.model === model);
-    if (option && !option.supportedReasoningEfforts.some((effort) => effort.value === selectedEffort)) {
+    if (session.agent === "opencode" && model !== modelSettings?.model) {
+      selectedEffort = "";
+    } else if (option && !option.supportedReasoningEfforts.some((effort) => effort.value === selectedEffort)) {
       selectedEffort = option.defaultReasoningEffort;
     }
     void saveAgentControls();
@@ -941,9 +950,9 @@
     controlsLoading = true;
     controlsError = "";
     try {
-      if (session.agent === "codex") {
+      if (session.agent === "codex" || session.agent === "opencode") {
         const [mode, settings] = await Promise.all([
-          getSessionCollaborationMode(session.id),
+          session.agent === "codex" ? getSessionCollaborationMode(session.id) : Promise.resolve("default" as CollaborationMode),
           getSessionModelSettings(session.id),
         ]);
         collaborationMode = mode;
@@ -1011,8 +1020,8 @@
     controlsSaving = true;
     controlsError = "";
     try {
-      if (session.agent === "codex") {
-        if (!selectedModel || !selectedEffort) return;
+      if (session.agent === "codex" || session.agent === "opencode") {
+        if (!selectedModel || (session.agent === "codex" && !selectedEffort)) return;
         const savedSettings = await setSessionModelSettings(session.id, selectedModel, selectedEffort);
         modelSettings = savedSettings;
         selectedModel = savedSettings.model;
@@ -1027,6 +1036,28 @@
           claudeEffort || undefined,
         );
       }
+    } catch (error) {
+      controlsError = String(error).replace(/^Error:\s*/, "");
+      if (session.agent === "opencode") {
+        try {
+          modelSettings = await getSessionModelSettings(session.id);
+          selectedModel = modelSettings.model;
+          selectedEffort = modelSettings.reasoningEffort ?? "";
+        } catch { /* Keep the original provider error visible. */ }
+      }
+    } finally {
+      controlsSaving = false;
+    }
+  }
+
+  async function changeAgentMode(mode: string) {
+    if (modelControlsDisabled) return;
+    controlsSaving = true;
+    controlsError = "";
+    try {
+      modelSettings = await setSessionAgentMode(session.id, mode);
+      selectedModel = modelSettings.model;
+      selectedEffort = modelSettings.reasoningEffort ?? "";
     } catch (error) {
       controlsError = String(error).replace(/^Error:\s*/, "");
     } finally {
@@ -1443,7 +1474,7 @@
   onpointerdown={() => onFocus?.()}
   onfocusin={() => onFocus?.()}
 >
-  <SystemBannerStack items={systemBanners} contained dismissLabel={tr("Dismiss", "Fechar")} />
+  <SystemBannerStack items={systemBanners} contained {language} dismissLabel={tr("Dismiss", "Fechar")} />
   <header
     class="pane-header"
     role="group"
@@ -1453,6 +1484,7 @@
     <span class="pane-identity">
       <strong>{sessionName()}</strong>
       <small title={session.workingDirectory}><BrandIcon name={session.agent} size={10} />{session.agentLabel} · {session.project}</small>
+      {#if visible && onOpenRepository}<SessionRepositoryBadge {session} {language} onOpen={onOpenRepository} />{/if}
     </span>
     {#if session.controlOrigin === "external"}
       <span class="source-badge" title={sourceLabel()} aria-label={sourceLabel()}>
@@ -1909,7 +1941,7 @@
             aria-label={tr("Choose model and effort", "Escolher modelo e esforço")}
             aria-haspopup="dialog" aria-expanded={controlsOpen}
             onclick={() => void toggleAgentControls()}>
-            <span>{session.agent === "codex"
+            <span>{session.agent === "codex" || session.agent === "opencode"
               ? (modelSettings?.models.find((option) => option.model === selectedModel)?.displayName || selectedModel || "Model")
               : (claudeModel || tr("Model", "Modelo"))}</span>
             <LumeIcon name="chevron-down" size={12} />
@@ -1921,16 +1953,22 @@
               {:else if controlsLoading}
                 <div class="controls-loading"><i></i>{tr("Loading settings…", "Carregando ajustes…")}</div>
               {:else}
-                {#if session.agent === "codex"}
+                {#if session.agent === "codex" || session.agent === "opencode"}
                   {#if modelSettings}
                     <label class="controls-field"><span>{tr("Model", "Modelo")}</span>
                       <LumeSelect value={selectedModel}
                         options={modelSettings.models.map((option) => ({ value: option.model, label: option.displayName, description: option.isDefault ? tr("Default", "Padrão") : option.description }))}
-                        ariaLabel={tr("Model", "Modelo")} minWidth={190} onValueChange={chooseModel} />
+                        ariaLabel={tr("Model", "Modelo")} disabled={modelControlsDisabled} minWidth={190} onValueChange={chooseModel} />
                     </label>
                   {/if}
                 {:else}
                   <label class="controls-field"><span>{tr("Model", "Modelo")}</span><input bind:value={claudeModel} disabled={modelControlsDisabled} maxlength="128" placeholder={tr("Session default", "Padrão da sessão")} onchange={() => void saveAgentControls()} /></label>
+                {/if}
+                {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
+                  <label class="controls-field"><span>{tr("Agent mode", "Modo do agente")}</span>
+                    <LumeSelect value={modelSettings.sessionModes.currentMode} options={modelSettings.sessionModes.options}
+                      disabled={modelControlsDisabled} ariaLabel={tr("Agent mode", "Modo do agente")} minWidth={190} onValueChange={changeAgentMode} />
+                  </label>
                 {/if}
                 {#if effortValues().length}
                   <div class:max={currentEffort().toLowerCase() === "max"} class:ultra={currentEffort().toLowerCase() === "ultra"} class="controls-field effort-field"
@@ -1946,7 +1984,7 @@
                     </div>
                   </div>
                 {/if}
-                {#if promptIsRunning}<p class="controls-note">{session.agent === "codex"
+                {#if promptIsRunning && session.agent !== "opencode"}<p class="controls-note">{session.agent === "codex"
                   ? tr("Changes made now will apply when this prompt finishes.", "Mudanças feitas agora serão aplicadas ao final deste prompt.")
                   : tr("Finish or interrupt the current prompt to apply changes.", "Finalize ou interrompa o prompt atual para aplicar mudanças.")}</p>{/if}
                 {#if controlsSaving}<p class="controls-saving" role="status">{tr("Saving…", "Salvando…")}</p>{/if}

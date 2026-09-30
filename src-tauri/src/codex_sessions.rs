@@ -70,6 +70,7 @@ struct PendingTool {
     title: String,
     detail: Option<String>,
     files: Vec<String>,
+    created_at: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -472,10 +473,11 @@ fn publish_appended_events(
 fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Vec<HookEvent> {
     let mut events = Vec::new();
     for record in records {
+        let created_at = record_timestamp_millis(&record);
         if record.kind == "response_item" {
             match record.payload.r#type.as_deref() {
                 Some("function_call" | "custom_tool_call") => {
-                    if let Some(event) = remember_tool(&record.payload, file) {
+                    if let Some(event) = remember_tool(&record.payload, file, created_at) {
                         events.push(event);
                     }
                 }
@@ -521,11 +523,9 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
         }
         if record.payload.r#type.as_deref() == Some("task_started") {
             file.prompt_token_start = file.token_totals;
-            file.prompt_started_at = Some(record_timestamp_millis(&record));
+            file.prompt_started_at = Some(created_at);
         } else if record.payload.r#type.as_deref() == Some("task_complete") {
-            if let Some(event) =
-                completed_prompt_token_usage_event(file, record_timestamp_millis(&record))
-            {
+            if let Some(event) = completed_prompt_token_usage_event(file, created_at) {
                 events.push(event);
             }
             file.prompt_token_start = None;
@@ -543,7 +543,7 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
                 record.payload.agent_thread_id.as_deref(),
                 record.payload.agent_path.as_deref(),
                 record.payload.kind.as_deref(),
-                record.payload.occurred_at_ms,
+                record.payload.occurred_at_ms.or(Some(created_at)),
             ) {
                 events.push(event);
             }
@@ -568,7 +568,7 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
                         .or_else(|| item.get("agentPath"))
                         .and_then(Value::as_str),
                     item.get("kind").and_then(Value::as_str),
-                    record.payload.occurred_at_ms,
+                    record.payload.occurred_at_ms.or(Some(created_at)),
                 ) {
                     events.push(event);
                 }
@@ -582,7 +582,7 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
             continue;
         }
         if record.payload.r#type.as_deref() == Some("patch_apply_end") {
-            if let Some(event) = patch_finished_event(&record.payload, file) {
+            if let Some(event) = patch_finished_event(&record.payload, file, created_at) {
                 events.push(event);
             }
             continue;
@@ -721,7 +721,11 @@ fn subagent_activity_event(
     Some(event)
 }
 
-fn remember_tool(payload: &RecordPayload, file: &mut ObservedFile) -> Option<HookEvent> {
+fn remember_tool(
+    payload: &RecordPayload,
+    file: &mut ObservedFile,
+    created_at: i64,
+) -> Option<HookEvent> {
     let original_name = payload.name.as_deref()?;
     let call_id = payload.call_id.as_ref()?;
     let original_detail = tool_input_text(payload);
@@ -759,6 +763,7 @@ fn remember_tool(payload: &RecordPayload, file: &mut ObservedFile) -> Option<Hoo
             title: title.clone(),
             detail: detail.clone(),
             files: files.clone(),
+            created_at,
         },
     );
     if is_goal_tool(&name) {
@@ -771,7 +776,7 @@ fn remember_tool(payload: &RecordPayload, file: &mut ObservedFile) -> Option<Hoo
         title,
         detail,
         status: "running".into(),
-        created_at: now_millis(),
+        created_at,
         files,
         attachments: Vec::new(),
         append_detail: false,
@@ -814,7 +819,7 @@ fn tool_output_event(payload: &RecordPayload, file: &mut ObservedFile) -> Option
         },
         detail,
         status: "completed".into(),
-        created_at: now_millis(),
+        created_at: tool.created_at,
         files: tool.files,
         attachments: Vec::new(),
         append_detail: false,
@@ -845,7 +850,7 @@ fn command_finished_event(payload: &RecordPayload, file: &mut ObservedFile) -> O
         title: "Comando".into(),
         detail,
         status: if failed { "failed" } else { "completed" }.into(),
-        created_at: now_millis(),
+        created_at: tool.created_at,
         files: tool.files,
         attachments: Vec::new(),
         append_detail: false,
@@ -853,7 +858,11 @@ fn command_finished_event(payload: &RecordPayload, file: &mut ObservedFile) -> O
     Some(event)
 }
 
-fn patch_finished_event(payload: &RecordPayload, file: &mut ObservedFile) -> Option<HookEvent> {
+fn patch_finished_event(
+    payload: &RecordPayload,
+    file: &mut ObservedFile,
+    created_at: i64,
+) -> Option<HookEvent> {
     let changes = payload.changes.as_ref()?.as_object()?;
     if changes.is_empty() {
         return None;
@@ -869,6 +878,7 @@ fn patch_finished_event(payload: &RecordPayload, file: &mut ObservedFile) -> Opt
     let session_id = file.session.as_ref()?.id.clone();
     let call_id = payload.call_id.as_deref().unwrap_or("patch");
     let pending = file.pending_tools.remove(call_id);
+    let created_at = pending.as_ref().map_or(created_at, |tool| tool.created_at);
     let activity_id = pending
         .map(|tool| tool.activity_id)
         .unwrap_or_else(|| format!("codex:{session_id}:patch:{call_id}"));
@@ -880,7 +890,7 @@ fn patch_finished_event(payload: &RecordPayload, file: &mut ObservedFile) -> Opt
         title: "Arquivos alterados".into(),
         detail,
         status: if failed { "failed" } else { "completed" }.into(),
-        created_at: now_millis(),
+        created_at,
         files,
         attachments: Vec::new(),
         append_detail: false,
@@ -1214,7 +1224,10 @@ fn activity_event_for(
         title: title.into(),
         detail: response_text(detail),
         status: "completed".into(),
-        created_at: now_millis(),
+        created_at: timestamp
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.timestamp_millis())
+            .unwrap_or_else(now_millis),
         files: Vec::new(),
         attachments: Vec::new(),
         append_detail: false,
@@ -1809,6 +1822,68 @@ mod tests {
                 .map(|activity| activity.kind.as_str()),
             Some("message")
         );
+        let original_time = chrono::DateTime::parse_from_rfc3339("2026-07-24T10:00:00Z")
+            .expect("original timestamp")
+            .timestamp_millis();
+        assert_eq!(
+            events[0].activity.as_ref().expect("prompt").created_at,
+            original_time
+        );
+        assert_eq!(
+            events[1].activity.as_ref().expect("message").created_at,
+            original_time + 1_000
+        );
+    }
+
+    #[test]
+    fn buffered_rollout_tools_and_messages_keep_the_original_timeline() {
+        let mut file = observed_file(SessionSource::Vscode);
+        let records = vec![
+            record(
+                r#"{"timestamp":"2026-07-24T10:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"Inspect the project"}}"#,
+            ),
+            record(
+                r#"{"timestamp":"2026-07-24T10:00:01Z","type":"event_msg","payload":{"type":"agent_message","message":"Starting the inspection"}}"#,
+            ),
+            record(
+                r#"{"timestamp":"2026-07-24T10:00:02Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}","call_id":"command-1"}}"#,
+            ),
+            record(
+                r#"{"timestamp":"2026-07-24T10:00:03Z","type":"event_msg","payload":{"type":"agent_message","message":"The command is still running"}}"#,
+            ),
+            record(
+                r#"{"timestamp":"2026-07-24T10:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"command-1","output":"/work/lume"}}"#,
+            ),
+            record(
+                r#"{"timestamp":"2026-07-24T10:00:05Z","type":"event_msg","payload":{"type":"patch_apply_end","call_id":"patch-1","success":true,"changes":{"src/main.rs":{"unified_diff":"-old\n+new"}}}}"#,
+            ),
+        ];
+        let original_time = record_timestamp_millis(&records[0]);
+        let events = events_from_records(records, &mut file);
+        let timestamps = events
+            .iter()
+            .map(|event| event.activity.as_ref().expect("activity").created_at - original_time)
+            .collect::<Vec<_>>();
+        // Completion updates the original tool; it is not a new timeline item.
+        assert_eq!(timestamps, vec![0, 1_000, 2_000, 3_000, 2_000, 5_000]);
+
+        let state = AppState::new(Path::new(":memory:")).expect("isolated state");
+        for event in events {
+            state.ingest(event).expect("captured event");
+        }
+        let session = state
+            .connected_session("codex-app-server:chat-1")
+            .expect("session");
+        assert_eq!(
+            session
+                .activities
+                .iter()
+                .map(|activity| activity.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prompt", "message", "command", "message", "file"]
+        );
+        assert_eq!(session.activities[2].created_at, original_time + 2_000);
+        assert_eq!(session.activities[2].status, "completed");
     }
 
     #[test]

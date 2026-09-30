@@ -5,7 +5,7 @@
   import edge from "@iconify-icons/logos/microsoft-edge";
   import openai from "@iconify-icons/logos/openai-icon";
   import vscode from "@iconify-icons/logos/visual-studio-code";
-  import { siClaude, siDeepseek, siGooglegemini } from "simple-icons";
+  import { siClaude, siDeepseek, siGithub, siGooglegemini, siOpencode } from "simple-icons";
 
   type Brand =
     | "codex"
@@ -13,6 +13,7 @@
     | "claude"
     | "claude_code"
     | "antigravity"
+    | "opencode"
     | "deepseek"
     | "gemini"
     | "vscode"
@@ -21,6 +22,7 @@
     | "brave"
     | "browsers"
     | "lume"
+    | "github"
     | "terminal"
     | "unknown";
 
@@ -28,7 +30,9 @@
 </script>
 
 <span class="brand-icon" class:openai={name === "codex" || name === "chatgpt"} class:browsers={name === "browsers"} class:line={name === "terminal" || name === "unknown"} style:--brand-size={`${size}px`}>
-  {#if name === "codex" || name === "chatgpt"}
+  {#if name === "github"}
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d={siGithub.path} fill="currentColor" /></svg>
+  {:else if name === "codex" || name === "chatgpt"}
     <OfflineIcon icon={openai} />
   {:else if name === "claude" || name === "claude_code"}
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -54,6 +58,10 @@
   {:else if name === "deepseek"}
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d={siDeepseek.path} fill="#5786fe" />
+    </svg>
+  {:else if name === "opencode"}
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d={siOpencode.path} fill="currentColor" />
     </svg>
   {:else if name === "gemini"}
     <svg viewBox="0 0 24 24" aria-hidden="true">

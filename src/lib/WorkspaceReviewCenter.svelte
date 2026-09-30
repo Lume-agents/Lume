@@ -317,7 +317,7 @@
 </script>
 
 <section class:correction-open={correctionOpen} class:changes-view={viewMode === "changes"} class="review-center" aria-label={tr("Review center", "Central de revisão")}>
-  <SystemBannerStack items={systemBanners} contained dismissLabel={tr("Dismiss", "Fechar")} />
+  <SystemBannerStack items={systemBanners} contained {language} dismissLabel={tr("Dismiss", "Fechar")} />
   <header class="review-header">
     <span class="review-title">
       <i><LumeIcon name="diff" size={16} /></i>

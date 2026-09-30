@@ -1,5 +1,6 @@
 mod adapters;
 mod agent_plugins;
+mod antigravity_stream;
 mod browser_server;
 mod codex_bridge;
 mod codex_sessions;
@@ -17,12 +18,16 @@ mod legacy_cli_gateway_cleanup;
 mod mobile_gateway;
 mod mobile_server;
 pub mod node_client;
+mod node_http;
 pub mod node_identity;
+pub mod node_inventory;
 pub mod node_network;
 pub mod node_pairing;
 pub mod node_service;
+mod opencode_acp;
 mod overlay;
 mod protocol;
+mod repository;
 mod session_filters;
 mod state;
 mod store;
@@ -283,6 +288,57 @@ async fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSna
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+fn repository_directory(state: &AppState, session_id: &str) -> Result<String, String> {
+    state
+        .connected_session(session_id)?
+        .working_directory
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "no_working_directory".into())
+}
+
+#[tauri::command]
+async fn get_session_repository(
+    state: State<'_, AppState>,
+    session_id: String,
+    refresh: bool,
+) -> Result<repository::RepositorySnapshot, String> {
+    let directory = repository_directory(state.inner(), &session_id)?;
+    tauri::async_runtime::spawn_blocking(move || repository::snapshot(&directory, refresh))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_session_repository_diff(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<repository::RepositoryDiff, String> {
+    let directory = repository_directory(state.inner(), &session_id)?;
+    tauri::async_runtime::spawn_blocking(move || repository::diff(&directory, &path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_session_github(
+    state: State<'_, AppState>,
+    session_id: String,
+    refresh: bool,
+) -> Result<serde_json::Value, String> {
+    let directory = repository_directory(state.inner(), &session_id)?;
+    tauri::async_runtime::spawn_blocking(move || repository::github_repository(&directory, refresh))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_github_account(refresh: bool) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || repository::github_account(refresh))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[derive(serde::Serialize)]
@@ -760,16 +816,23 @@ fn set_session_collaboration_mode(
 }
 
 #[tauri::command]
-fn get_session_model_settings(
+async fn get_session_model_settings(
+    app: AppHandle,
     state: State<'_, AppState>,
     bridge: State<'_, codex_bridge::CodexBridge>,
     session_id: String,
 ) -> Result<codex_bridge::CodexThreadModelSettings, String> {
-    control::session_model_settings(state.inner(), bridge.inner(), &session_id)
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::session_model_settings(&app, &state, &bridge, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn set_session_model_settings(
+async fn set_session_model_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     bridge: State<'_, codex_bridge::CodexBridge>,
@@ -777,14 +840,28 @@ fn set_session_model_settings(
     model: String,
     effort: String,
 ) -> Result<codex_bridge::CodexThreadModelSettings, String> {
-    control::set_session_model_settings(
-        &app,
-        state.inner(),
-        bridge.inner(),
-        &session_id,
-        &model,
-        &effort,
-    )
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::set_session_model_settings(&app, &state, &bridge, &session_id, &model, &effort)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn set_session_agent_mode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    mode: String,
+) -> Result<codex_bridge::CodexThreadModelSettings, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::set_session_agent_mode(&app, &state, &session_id, &mode)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -966,14 +1043,22 @@ async fn get_preferences(state: State<'_, AppState>) -> Result<Preferences, Stri
 }
 
 #[tauri::command]
-fn discover_lume_nodes() -> Result<Vec<node_client::DiscoveredNode>, String> {
-    node_client::discover(std::time::Duration::from_secs(2))
+async fn discover_lume_nodes() -> Result<Vec<node_client::DiscoveredNode>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        node_client::discover(std::time::Duration::from_secs(2))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn pair_lume_node(pairing_uri: String) -> Result<node_client::RemoteNode, String> {
-    let directory = node_service::default_state_directory()?;
-    node_client::pair(&directory, &pairing_uri, std::time::Duration::from_secs(3))
+async fn pair_lume_node(pairing_uri: String) -> Result<node_client::RemoteNode, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = node_service::default_state_directory()?;
+        node_client::pair(&directory, &pairing_uri, std::time::Duration::from_secs(3))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -982,12 +1067,31 @@ fn list_remote_lume_nodes() -> Result<Vec<node_client::RemoteNode>, String> {
 }
 
 #[tauri::command]
-fn get_remote_lume_node_health(node_id: String) -> Result<node_service::NodeHealth, String> {
-    node_client::remote_health(
-        &node_service::default_state_directory()?,
-        &node_id,
-        std::time::Duration::from_secs(2),
-    )
+async fn get_remote_lume_node_health(node_id: String) -> Result<node_service::NodeHealth, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_client::remote_health(
+            &node_service::default_state_directory()?,
+            &node_id,
+            std::time::Duration::from_secs(2),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_remote_lume_node_inventory(
+    node_id: String,
+) -> Result<node_inventory::NodeInventory, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_client::remote_inventory(
+            &node_service::default_state_directory()?,
+            &node_id,
+            std::time::Duration::from_secs(2),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1467,16 +1571,23 @@ fn move_overlay(
 }
 
 #[tauri::command]
-fn resize_overlay_surface(app: AppHandle, width: i32, height: i32) -> Result<(), String> {
+async fn resize_overlay_surface(app: AppHandle, width: i32, height: i32) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "Janela do Lume não encontrada".to_string())?;
     let window_for_resize = window.clone();
+    let (completed, completion) = std::sync::mpsc::sync_channel(1);
     window
         .run_on_main_thread(move || {
-            let _ = overlay::resize_surface(&window_for_resize, width, height);
+            let _ = completed.send(overlay::resize_surface(&window_for_resize, width, height));
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        completion.recv_timeout(std::time::Duration::from_secs(3))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|_| "A janela do Lume não confirmou o redimensionamento".to_string())?
 }
 
 fn open_terminal_window_impl(
@@ -1803,6 +1914,7 @@ fn integration_statuses() -> Result<Vec<IntegrationStatus>, String> {
 
 #[tauri::command]
 fn list_resumable_sessions(
+    app: AppHandle,
     kind: IntegrationKind,
     state: State<'_, AppState>,
 ) -> Result<Vec<integrations::ResumableSession>, String> {
@@ -1811,7 +1923,13 @@ fn list_resumable_sessions(
         .into_iter()
         .filter_map(|session| session.native_session_id)
         .collect::<HashSet<_>>();
-    Ok(integrations::resumable_sessions(&kind)?
+    let sessions = if kind == IntegrationKind::OpenCode {
+        app.state::<opencode_acp::OpenCodeBridge>()
+            .resumable_sessions()?
+    } else {
+        integrations::resumable_sessions(&kind)?
+    };
+    Ok(sessions
         .into_iter()
         .filter(|session| !open_sessions.contains(&session.id))
         .collect())
@@ -1832,6 +1950,7 @@ fn diagnose_integration(
                 (IntegrationKind::Codex, domain::AgentKind::Codex)
                     | (IntegrationKind::Claude, domain::AgentKind::ClaudeCode)
                     | (IntegrationKind::Antigravity, domain::AgentKind::Antigravity)
+                    | (IntegrationKind::OpenCode, domain::AgentKind::OpenCode)
                     | (IntegrationKind::DeepSeek, domain::AgentKind::DeepSeek)
                     | (IntegrationKind::Gemini, domain::AgentKind::Gemini)
             )
@@ -1947,6 +2066,67 @@ fn launch_session_impl(
     bridge: &codex_bridge::CodexBridge,
     mut request: LaunchRequest,
 ) -> Result<(), String> {
+    if request.agent == IntegrationKind::OpenCode {
+        if request.resume {
+            ensure_native_session_not_external(
+                state,
+                &domain::AgentKind::OpenCode,
+                request.resume_id.as_deref(),
+            )?;
+        }
+        let bridge = app.state::<opencode_acp::OpenCodeBridge>();
+        let id = bridge.launch(
+            &request.working_directory,
+            request
+                .resume
+                .then_some(request.resume_id.as_deref())
+                .flatten(),
+        )?;
+        if let Some(prompt) = request
+            .initial_prompt
+            .as_deref()
+            .filter(|prompt| !prompt.trim().is_empty())
+        {
+            bridge.prompt(
+                &id,
+                &request.working_directory,
+                prompt.to_string(),
+                Vec::new(),
+            )?;
+            state.record_prompt_activity(&format!("opencode-acp:{id}"), prompt, Vec::new())?;
+        }
+        return Ok(());
+    }
+    if request.agent == IntegrationKind::Antigravity && request.target == "auto" {
+        if request.resume {
+            ensure_native_session_not_external(
+                state,
+                &domain::AgentKind::Antigravity,
+                request.resume_id.as_deref(),
+            )?;
+        }
+        let bridge = app.state::<antigravity_stream::AntigravityStream>();
+        let id = bridge.launch(
+            &request.working_directory,
+            request
+                .resume
+                .then_some(request.resume_id.as_deref())
+                .flatten(),
+        )?;
+        if let Some(prompt) = request
+            .initial_prompt
+            .as_deref()
+            .filter(|prompt| !prompt.trim().is_empty())
+        {
+            bridge.prompt(&id, &request.working_directory, prompt)?;
+            state.record_prompt_activity(
+                &format!("antigravity-stream:{id}"),
+                prompt,
+                Vec::new(),
+            )?;
+        }
+        return Ok(());
+    }
     if request.target == "vscode" && !integrations::vscode_status().configured {
         return Err("Conecte o Lume Companion ao VS Code nos Ajustes".into());
     }
@@ -2014,6 +2194,25 @@ fn launch_session_impl(
     Ok(())
 }
 
+fn ensure_native_session_not_external(
+    state: &AppState,
+    agent: &domain::AgentKind,
+    native_id: Option<&str>,
+) -> Result<(), String> {
+    let native_id = native_id.ok_or("Sessão sem identificador para retomar")?;
+    if state.connected_sessions()?.into_iter().any(|session| {
+        &session.agent == agent
+            && session.native_session_id.as_deref() == Some(native_id)
+            && session.control_origin == domain::SessionControlOrigin::External
+    }) {
+        return Err(
+            "Esta conversa ainda está aberta numa CLI externa. Feche-a antes de retomá-la pelo Lume."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn uses_headless_codex(request: &LaunchRequest) -> bool {
     request.agent == IntegrationKind::Codex && request.target == "auto"
 }
@@ -2076,6 +2275,7 @@ fn prepared_resume_preview_event(
         IntegrationKind::Claude => (AgentKind::ClaudeCode, "Claude Code", "claude"),
         IntegrationKind::Codex => (AgentKind::Codex, "Codex", "codex"),
         IntegrationKind::Antigravity => return None,
+        IntegrationKind::OpenCode => return None,
         IntegrationKind::DeepSeek => return None,
         IntegrationKind::Gemini => return None,
     };
@@ -2184,6 +2384,14 @@ pub fn run() {
             app.manage(workspace_windows::WorkspaceWindows::default());
             let _ = apply_global_shortcuts(app.handle(), &state.preferences()?);
             app.manage(state.clone());
+            app.manage(opencode_acp::OpenCodeBridge::new(
+                state.clone(),
+                app.handle().clone(),
+            ));
+            app.manage(antigravity_stream::AntigravityStream::new(
+                state.clone(),
+                app.handle().clone(),
+            ));
             let codex_bridge =
                 codex_bridge::CodexBridge::start(state.clone(), app.handle().clone())?;
             let workflow_codex_bridge = codex_bridge.clone();
@@ -2295,6 +2503,10 @@ pub fn run() {
             rename_session,
             fork_session_from_message,
             get_hub_snapshot,
+            get_session_repository,
+            get_session_repository_diff,
+            get_session_github,
+            get_github_account,
             get_workspace_conversation_page,
             get_workspace_prompt_index_page,
             get_subagent_timeline,
@@ -2321,6 +2533,7 @@ pub fn run() {
             set_session_collaboration_mode,
             get_session_model_settings,
             set_session_model_settings,
+            set_session_agent_mode,
             set_session_fast_mode,
             get_claude_session_model_settings,
             set_claude_session_model_settings,
@@ -2348,6 +2561,7 @@ pub fn run() {
             pair_lume_node,
             list_remote_lume_nodes,
             get_remote_lume_node_health,
+            get_remote_lume_node_inventory,
             forget_remote_lume_node,
             get_workflow_role_contract,
             preview_workflow_context,

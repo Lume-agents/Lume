@@ -5,13 +5,14 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{Mutex, OnceLock},
-    time::UNIX_EPOCH,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -26,6 +27,8 @@ pub enum IntegrationKind {
     Codex,
     Claude,
     Antigravity,
+    #[serde(rename = "opencode")]
+    OpenCode,
     #[serde(rename = "deepseek")]
     DeepSeek,
     Gemini,
@@ -102,14 +105,14 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
         .map(|plugin| {
             let kind = plugin.kind();
             let installed = crate::executables::available(plugin.executable());
-            let configured = kind != IntegrationKind::Gemini
+            let configured = !matches!(kind, IntegrationKind::Gemini | IntegrationKind::OpenCode)
                 && config_path(&kind)
                     .and_then(|path| fs::read_to_string(path).ok())
                     .is_some_and(|content| configured_content(&content, &kind, executable));
-            let can_configure = kind != IntegrationKind::Gemini && config_path(&kind).is_some();
+            let can_configure = !matches!(kind, IntegrationKind::Gemini | IntegrationKind::OpenCode) && config_path(&kind).is_some();
             let can_launch = kind != IntegrationKind::Gemini;
             let antigravity_hook_warning = (kind == IntegrationKind::Antigravity)
-                .then(antigravity_legacy_hook_warning)
+                .then(antigravity_hook_warning)
                 .flatten();
             let gemini_hook_warning = (kind == IntegrationKind::Gemini)
                 .then(gemini_legacy_hook_warning)
@@ -122,6 +125,8 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
                 "CLI não encontrada".into()
             } else if kind == IntegrationKind::Gemini {
                 "Somente monitoramento por processo; o Lume não altera as configurações compartilhadas do Gemini".into()
+            } else if kind == IntegrationKind::OpenCode {
+                "Controle direto via ACP local; sem hook ou gateway global".into()
             } else if kind == IntegrationKind::DeepSeek {
                 "CLI detectada; requer o perfil TUI do DeepSeek Harness".into()
             } else if plugin.hook_events().is_empty() {
@@ -130,7 +135,7 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
                 if kind == IntegrationKind::Codex {
                     "Hook conectado; /hooks está disponível no Codex CLI".into()
                 } else if kind == IntegrationKind::Antigravity {
-                    "Hook conectado; ferramentas seguem permitidas se o Lume ficar indisponível; desative o hook na CLI para restaurar confirmações nativas".into()
+                    "Monitoramento conectado; para conversar pelo Lume, use o destino Auto".into()
                 } else if plugin.direct_permissions() {
                     "Monitoramento e decisões conectados".into()
                 } else {
@@ -139,7 +144,7 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
             } else if kind == IntegrationKind::Codex {
                 "Decisões diretas ao abrir uma sessão pelo Lume".into()
             } else if kind == IntegrationKind::Antigravity {
-                "Somente CLI; conectar permite todas as ferramentas mesmo se o Lume fechar; desative o hook na CLI para restaurar confirmações nativas".into()
+                "CLI disponível; destino Auto conversa pelo Lume sem aprovar ferramentas automaticamente".into()
             } else {
                 "Pronto para conectar".into()
             };
@@ -174,7 +179,9 @@ pub fn resumable_sessions(kind: &IntegrationKind) -> Result<Vec<ResumableSession
         IntegrationKind::Antigravity => {
             antigravity_resumable_sessions(&home.join(".gemini/antigravity-cli"))
         }
-        IntegrationKind::DeepSeek | IntegrationKind::Gemini => Vec::new(),
+        IntegrationKind::OpenCode | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {
+            Vec::new()
+        }
     };
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     sessions.truncate(250);
@@ -205,6 +212,7 @@ pub(crate) fn indexed_session_names(
         // Its hook events remain the authoritative source for live names.
         IntegrationKind::Claude
         | IntegrationKind::Antigravity
+        | IntegrationKind::OpenCode
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini => HashMap::new(),
     })
@@ -242,12 +250,18 @@ pub(crate) fn recent_codex_sessions_for_discovery(limit: usize) -> Vec<Resumable
 }
 
 pub(crate) fn native_session_title(kind: &IntegrationKind, session_id: &str) -> Option<String> {
+    if *kind == IntegrationKind::Codex {
+        if let Some(name) = indexed_session_names(kind).ok()?.remove(session_id) {
+            return Some(name);
+        }
+    }
     let path = resume_path(kind, session_id)?;
     let file = fs::File::open(path).ok()?;
     match kind {
         IntegrationKind::Codex => codex_session_title(BufReader::new(file)),
         IntegrationKind::Claude
         | IntegrationKind::Antigravity
+        | IntegrationKind::OpenCode
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini => None,
     }
@@ -259,7 +273,10 @@ pub fn resume_preview(kind: &IntegrationKind, session_id: &str) -> Option<Resume
     let response = match kind {
         IntegrationKind::Codex => codex_last_response(std::io::Cursor::new(recent)),
         IntegrationKind::Claude => claude_last_response(std::io::Cursor::new(recent)),
-        IntegrationKind::Antigravity | IntegrationKind::DeepSeek | IntegrationKind::Gemini => None,
+        IntegrationKind::Antigravity
+        | IntegrationKind::OpenCode
+        | IntegrationKind::DeepSeek
+        | IntegrationKind::Gemini => None,
     }?;
     Some(ResumePreview {
         response,
@@ -277,9 +294,10 @@ pub fn resume_work_activities(kind: &IntegrationKind, session_id: &str) -> Vec<S
     match kind {
         IntegrationKind::Codex => codex_work_activities(std::io::Cursor::new(recent), session_id),
         IntegrationKind::Claude => claude_work_activities(std::io::Cursor::new(recent), session_id),
-        IntegrationKind::Antigravity | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {
-            Vec::new()
-        }
+        IntegrationKind::Antigravity
+        | IntegrationKind::OpenCode
+        | IntegrationKind::DeepSeek
+        | IntegrationKind::Gemini => Vec::new(),
     }
 }
 
@@ -315,7 +333,9 @@ fn resume_path(kind: &IntegrationKind, session_id: &str) -> Option<PathBuf> {
         IntegrationKind::Antigravity => {
             return antigravity_transcript_path(&home.join(".gemini/antigravity-cli"), session_id)
         }
-        IntegrationKind::DeepSeek | IntegrationKind::Gemini => return None,
+        IntegrationKind::OpenCode | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {
+            return None
+        }
     };
     resume_files(&root).into_iter().find(|path| {
         path.file_stem()
@@ -325,7 +345,7 @@ fn resume_path(kind: &IntegrationKind, session_id: &str) -> Option<PathBuf> {
 }
 
 fn codex_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
-    let names = codex_session_names(root);
+    let names = cached_codex_session_names(root);
     resume_files(root)
         .into_iter()
         .filter_map(|path| {
@@ -413,10 +433,58 @@ fn codex_session_names(root: &Path) -> HashMap<String, String> {
     let Some(index_path) = root.parent().map(|home| home.join("session_index.jsonl")) else {
         return HashMap::new();
     };
-    let Ok(file) = fs::File::open(index_path) else {
-        return HashMap::new();
-    };
-    codex_session_name_entries(BufReader::new(file))
+    let mut names = fs::File::open(index_path)
+        .map(|file| codex_session_name_entries(BufReader::new(file)))
+        .unwrap_or_default();
+    if let Some(database) = codex_state_database(root) {
+        // Current Codex versions store explicit names in SQLite, not necessarily
+        // session_index.jsonl. Keep the index for older threads, but prefer the
+        // current name. Never create, migrate or write the provider's database.
+        if let Some(current) = codex_state_session_names(&database) {
+            names.extend(current);
+        }
+    }
+    names
+}
+
+fn codex_state_database(root: &Path) -> Option<PathBuf> {
+    fs::read_dir(root.parent()?)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let version = name
+                .to_str()?
+                .strip_prefix("state_")?
+                .strip_suffix(".sqlite")?
+                .parse::<u32>()
+                .ok()?;
+            entry
+                .file_type()
+                .ok()?
+                .is_file()
+                .then_some((version, entry.path()))
+        })
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, path)| path)
+}
+
+fn codex_state_session_names(path: &Path) -> Option<HashMap<String, String>> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    connection.busy_timeout(Duration::from_millis(25)).ok()?;
+    let mut statement = connection
+        .prepare("SELECT id, name FROM threads WHERE name IS NOT NULL AND trim(name) != '' ORDER BY updated_at DESC LIMIT 10000")
+        .ok()?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .ok()?;
+    Some(rows.filter_map(Result::ok).collect())
 }
 
 fn codex_session_name_entries(reader: impl BufRead) -> HashMap<String, String> {
@@ -429,43 +497,57 @@ fn codex_session_name_entries(reader: impl BufRead) -> HashMap<String, String> {
 }
 
 struct CodexSessionNameCache {
-    path: PathBuf,
-    length: u64,
-    updated_at: i64,
+    root: PathBuf,
+    checked_at: Instant,
+    fingerprint: Vec<(PathBuf, Option<(u64, SystemTime)>)>,
     names: HashMap<String, String>,
 }
 
 static CODEX_SESSION_NAME_CACHE: OnceLock<Mutex<Option<CodexSessionNameCache>>> = OnceLock::new();
 
 fn cached_codex_session_names(root: &Path) -> HashMap<String, String> {
-    let Some(index_path) = root.parent().map(|home| home.join("session_index.jsonl")) else {
-        return HashMap::new();
-    };
-    let Ok(metadata) = fs::metadata(&index_path) else {
-        return HashMap::new();
-    };
-    let updated_at = file_updated_at(&index_path);
     let cache = CODEX_SESSION_NAME_CACHE.get_or_init(|| Mutex::new(None));
     let Ok(mut cache) = cache.lock() else {
         return codex_session_names(root);
     };
     if let Some(current) = cache.as_ref() {
-        if current.path == index_path
-            && current.length == metadata.len()
-            && current.updated_at == updated_at
-        {
+        if current.root == root && current.checked_at.elapsed() < Duration::from_secs(2) {
             return current.names.clone();
         }
     }
 
-    // Re-read only when the compact index changes. Starting in the middle of a
+    let Some(home) = root.parent() else {
+        return HashMap::new();
+    };
+    let mut paths = vec![home.join("session_index.jsonl")];
+    if let Some(database) = codex_state_database(root) {
+        paths.push(PathBuf::from(format!("{}-wal", database.display())));
+        paths.push(database);
+    }
+    let fingerprint = paths
+        .into_iter()
+        .map(|path| {
+            let metadata = fs::metadata(&path)
+                .ok()
+                .and_then(|metadata| Some((metadata.len(), metadata.modified().ok()?)));
+            (path, metadata)
+        })
+        .collect::<Vec<_>>();
+    if let Some(current) = cache.as_mut() {
+        if current.root == root && current.fingerprint == fingerprint {
+            current.checked_at = Instant::now();
+            return current.names.clone();
+        }
+    }
+
+    // Re-read only when the compact index or SQLite/WAL changes. Starting in the middle of a
     // concurrently appended JSONL record can permanently lose that name, so a
     // changed index is parsed from the beginning instead of from a byte offset.
     let names = codex_session_names(root);
     *cache = Some(CodexSessionNameCache {
-        path: index_path,
-        length: metadata.len(),
-        updated_at,
+        root: root.to_path_buf(),
+        checked_at: Instant::now(),
+        fingerprint,
         names: names.clone(),
     });
     names
@@ -1026,7 +1108,19 @@ pub fn diagnose(
         });
     }
 
-    if plugin.hook_events().is_empty() {
+    if kind == &IntegrationKind::OpenCode {
+        checks.push(DiagnosticCheck {
+            id: "control".into(),
+            label: "Controle".into(),
+            status: if executable_path.is_some() {
+                "ok"
+            } else {
+                "warning"
+            }
+            .into(),
+            detail: "ACP local sob demanda; não instala hooks globais".into(),
+        });
+    } else if plugin.hook_events().is_empty() {
         checks.push(DiagnosticCheck {
             id: "monitoring".into(),
             label: "Monitoramento".into(),
@@ -1089,6 +1183,9 @@ pub fn diagnose(
 }
 
 pub fn configure(kind: &IntegrationKind, executable: &str, enabled: bool) -> Result<(), String> {
+    if *kind == IntegrationKind::OpenCode {
+        return Err("OpenCode uses the ACP bridge and has no hook to configure".into());
+    }
     if *kind == IntegrationKind::Antigravity {
         return configure_antigravity(executable, enabled);
     }
@@ -1364,11 +1461,10 @@ fn apply_named_antigravity_hooks(
         if !enabled || !supported_events.contains(&event) {
             continue;
         }
-        // The versioned command marker represents explicit consent to the
-        // wildcard allow policy without adding unsupported keys to Antigravity
-        // settings. Older handler commands do not carry this marker.
+        // The versioned marker distinguishes native approval from legacy
+        // Lume handlers that returned an unconditional allow.
         let provider = if event == "PreToolUse" {
-            "antigravity:PreToolUseAllow".to_string()
+            "antigravity:PreToolUseAsk".to_string()
         } else {
             format!("antigravity:{event}")
         };
@@ -1445,7 +1541,9 @@ pub fn refresh_connected(executable: &str) {
             {
                 // A user's explicit disabled flag must survive migration. The
                 // CLI registry is authoritative when both locations exist.
-                let _ = configure(&kind, executable, enabled);
+                if let Err(error) = configure(&kind, executable, enabled) {
+                    eprintln!("Could not refresh Antigravity CLI hooks: {error}");
+                }
             }
             continue;
         }
@@ -1558,6 +1656,7 @@ fn add_handler(
             "timeout": timeout * 1_000,
             "description": "Envia o estado da sessão ao Lume"
         }),
+        IntegrationKind::OpenCode => return Err("OpenCode does not use hooks".into()),
         IntegrationKind::Gemini => json!({
             "type": "command",
             "name": "Lume",
@@ -1646,6 +1745,7 @@ fn config_path(kind: &IntegrationKind) -> Option<PathBuf> {
         IntegrationKind::Antigravity => {
             return Some(antigravity_cli_settings_path_for(&PathBuf::from(user_home)))
         }
+        IntegrationKind::OpenCode => return None,
         IntegrationKind::DeepSeek => return None,
         IntegrationKind::Gemini => ".gemini/settings.json",
     };
@@ -1722,6 +1822,7 @@ fn provider(kind: &IntegrationKind) -> &'static str {
         IntegrationKind::Codex => "codex",
         IntegrationKind::Claude => "claude",
         IntegrationKind::Antigravity => "antigravity",
+        IntegrationKind::OpenCode => "opencode",
         IntegrationKind::DeepSeek => "deepseek",
         IntegrationKind::Gemini => "gemini",
     }
@@ -1778,7 +1879,8 @@ fn configured_content(content: &str, kind: &IntegrationKind, executable: &str) -
     };
     if *kind == IntegrationKind::Antigravity {
         return antigravity_hook_registry(&root).is_some_and(|value| {
-            antigravity_auto_approval_enabled(value)
+            antigravity_registry_enabled(value)
+                && value_contains_lume_hook(value, "antigravity:PreToolUseAsk")
                 && value_contains_command(value, executable, "antigravity:")
         });
     }
@@ -1870,7 +1972,11 @@ fn antigravity_auto_approval_enabled(registry: &Value) -> bool {
 
 fn antigravity_cli_hook_enabled(content: &str) -> Option<bool> {
     let root = serde_json::from_str::<Value>(content).ok()?;
-    antigravity_hook_registry(&root).map(antigravity_auto_approval_enabled)
+    antigravity_hook_registry(&root).map(|registry| {
+        antigravity_registry_enabled(registry)
+            && (value_contains_lume_hook(registry, "antigravity:PreToolUseAsk")
+                || antigravity_auto_approval_enabled(registry))
+    })
 }
 
 fn legacy_antigravity_hook_enabled(content: &str) -> Option<bool> {
@@ -1915,6 +2021,26 @@ fn gemini_legacy_hook_warning_at_path(path: &Path) -> Option<String> {
 fn antigravity_legacy_hook_warning() -> Option<String> {
     let path = antigravity_legacy_hooks_path()?;
     antigravity_legacy_hook_warning_at_path(&path)
+}
+
+fn antigravity_hook_warning() -> Option<String> {
+    antigravity_legacy_hook_warning().or_else(|| {
+        let path = config_path(&IntegrationKind::Antigravity)?;
+        antigravity_unsafe_cli_hook_warning_at_path(&path)
+    })
+}
+
+fn antigravity_unsafe_cli_hook_warning_at_path(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let root = serde_json::from_str::<Value>(&content).ok()?;
+    antigravity_hook_registry(&root)
+        .filter(|registry| antigravity_auto_approval_enabled(registry))
+        .map(|_| {
+            format!(
+                "O hook antigo do Lume que aprova ferramentas automaticamente ainda está ativo: {}",
+                path.display()
+            )
+        })
 }
 
 fn antigravity_legacy_hook_warning_at_path(path: &Path) -> Option<String> {
@@ -2055,7 +2181,7 @@ fn shell_command(executable: &str, provider: &str) -> String {
 
 fn antigravity_fallback_output(provider: &str) -> &'static str {
     match provider.rsplit_once(':').map(|(_, event)| event) {
-        Some("PreToolUse" | "PreToolUseAllow") => r#"{"decision":"allow"}"#,
+        Some("PreToolUse" | "PreToolUseAllow" | "PreToolUseAsk") => r#"{"decision":"ask"}"#,
         Some("Stop") => r#"{"decision":"allow"}"#,
         _ => "{}",
     }
@@ -2199,6 +2325,118 @@ mod tests {
         .expect("nome salvo");
 
         assert_eq!(entry, ("thread-1".into(), "Lume principal".into()));
+    }
+
+    fn codex_name_test_home(label: &str) -> PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "lume-codex-names-{label}-{}-{}",
+            std::process::id(),
+            crate::state::now_millis(),
+        ));
+        fs::create_dir_all(home.join("sessions")).expect("test home");
+        home
+    }
+
+    #[test]
+    fn codex_names_prefer_the_current_state_database_and_keep_legacy_names() {
+        let home = codex_name_test_home("combined");
+        fs::write(
+            home.join("session_index.jsonl"),
+            concat!(
+                "{\"id\":\"thread-renamed\",\"thread_name\":\"Old name\"}\n",
+                "{\"id\":\"thread-legacy\",\"thread_name\":\"Legacy thread\"}\n",
+            ),
+        )
+        .expect("legacy index");
+        let database = Connection::open(home.join("state_5.sqlite")).expect("test database");
+        database
+            .execute_batch(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, updated_at INTEGER);\
+             INSERT INTO threads VALUES ('thread-renamed', 'Current thread name', 42);\
+             INSERT INTO threads VALUES ('thread-new', 'New conversation', 43);\
+             INSERT INTO threads VALUES ('thread-empty', ' ', 44);",
+            )
+            .expect("test names");
+        let names = codex_session_names(&home.join("sessions"));
+        assert_eq!(
+            names.get("thread-renamed").map(String::as_str),
+            Some("Current thread name")
+        );
+        assert_eq!(
+            names.get("thread-legacy").map(String::as_str),
+            Some("Legacy thread")
+        );
+        assert_eq!(
+            names.get("thread-new").map(String::as_str),
+            Some("New conversation")
+        );
+        assert!(!names.contains_key("thread-empty"));
+        drop(database);
+        fs::remove_dir_all(home).expect("remove test home");
+    }
+
+    #[test]
+    fn codex_names_work_without_a_legacy_index_and_invalidate_on_wal_rename() {
+        let home = codex_name_test_home("wal");
+        let root = home.join("sessions");
+        let database = Connection::open(home.join("state_5.sqlite")).expect("test database");
+        database
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;\
+             CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, updated_at INTEGER);\
+             INSERT INTO threads VALUES ('thread-live', 'Before rename', 42);",
+            )
+            .expect("WAL names");
+        let before = cached_codex_session_names(&root);
+        assert_eq!(
+            before.get("thread-live").map(String::as_str),
+            Some("Before rename")
+        );
+        database
+            .execute(
+                "UPDATE threads SET name = 'After rename' WHERE id = 'thread-live'",
+                [],
+            )
+            .expect("rename in WAL");
+        // Advance the polling cache without slowing the suite down with a sleep.
+        if let Some(cache) = CODEX_SESSION_NAME_CACHE
+            .get()
+            .and_then(|cache| cache.lock().ok())
+            .as_mut()
+        {
+            if let Some(current) = cache.as_mut().filter(|current| current.root == root) {
+                current.checked_at = Instant::now() - Duration::from_secs(3);
+            }
+        }
+        let after = cached_codex_session_names(&root);
+        assert_eq!(
+            after.get("thread-live").map(String::as_str),
+            Some("After rename")
+        );
+        drop(database);
+        fs::remove_dir_all(home).expect("remove test home");
+    }
+
+    #[test]
+    fn codex_names_keep_the_index_when_the_provider_schema_has_no_name_column() {
+        let home = codex_name_test_home("old-schema");
+        fs::write(
+            home.join("session_index.jsonl"),
+            "{\"id\":\"thread-old\",\"thread_name\":\"Saved name\"}\n",
+        )
+        .expect("legacy index");
+        let database = Connection::open(home.join("state_3.sqlite")).expect("old database");
+        database
+            .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT);")
+            .expect("old schema");
+        assert_eq!(
+            codex_session_names(&home.join("sessions"))
+                .get("thread-old")
+                .map(String::as_str),
+            Some("Saved name")
+        );
+        drop(database);
+        fs::remove_dir_all(home).expect("remove test home");
     }
 
     #[test]
@@ -2939,6 +3177,24 @@ mod tests {
             antigravity_refresh_enabled(Some(&explicitly_approved_cli), None),
             Some(true)
         );
+        let safe_cli = explicitly_approved_cli.replace("PreToolUseAllow", "PreToolUseAsk");
+        assert_eq!(
+            antigravity_refresh_enabled(Some(&safe_cli), None),
+            Some(true)
+        );
+        let cli_path = std::env::temp_dir().join(format!(
+            "lume-antigravity-hook-warning-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::write(&cli_path, &explicitly_approved_cli).expect("write old CLI hook");
+        assert!(antigravity_unsafe_cli_hook_warning_at_path(&cli_path).is_some());
+        fs::write(&cli_path, &safe_cli).expect("write safe CLI hook");
+        assert!(antigravity_unsafe_cli_hook_warning_at_path(&cli_path).is_none());
+        let _ = fs::remove_file(&cli_path);
         assert!(!configured_content(
             &disabled_cli,
             &IntegrationKind::Antigravity,
@@ -3045,7 +3301,7 @@ mod tests {
         assert!(
             migrated_cli["hooks"][ANTIGRAVITY_HOOK_NAME]["PreToolUse"][0]["hooks"][0]["command"]
                 .as_str()
-                .is_some_and(|command| command.contains(r#"{"decision":"allow"}"#))
+                .is_some_and(|command| command.contains(r#"{"decision":"ask"}"#))
         );
         assert_eq!(
             migrated_cli["hooks"][ANTIGRAVITY_HOOK_NAME]["custom-event"][0]["hooks"][0]["command"],
@@ -3324,7 +3580,7 @@ mod tests {
     #[test]
     fn antigravity_hook_commands_fail_open_when_lume_is_missing_or_returns_no_output() {
         for (provider, expected) in [
-            ("antigravity:PreToolUseAllow", r#"{"decision":"allow"}"#),
+            ("antigravity:PreToolUseAsk", r#"{"decision":"ask"}"#),
             ("antigravity:PostToolUse", "{}"),
             ("antigravity:PreInvocation", "{}"),
             ("antigravity:PostInvocation", "{}"),
@@ -3372,22 +3628,22 @@ mod tests {
     fn windows_hook_command_is_a_fail_open_powershell_script() {
         let command = powershell_fail_open_hook_command(
             r"C:\Program Files\Lume\lume.exe",
-            "antigravity:PreToolUseAllow",
-            antigravity_fallback_output("antigravity:PreToolUseAllow"),
+            "antigravity:PreToolUseAsk",
+            antigravity_fallback_output("antigravity:PreToolUseAsk"),
         );
         let script = decode_powershell_command(&command).expect("script codificado");
 
         assert!(command.starts_with("powershell.exe -NoLogo -NoProfile -NonInteractive"));
         assert!(script.contains("C:\\Program Files\\Lume\\lume.exe"));
-        assert!(script.contains("antigravity:PreToolUseAllow"));
-        assert!(script.contains(r#"{"decision":"allow"}"#));
+        assert!(script.contains("antigravity:PreToolUseAsk"));
+        assert!(script.contains(r#"{"decision":"ask"}"#));
         assert!(script.contains("$output = @("));
         assert!(script.contains("$payload.Length -gt 0"));
         assert!(script.contains("catch"));
         assert!(script.ends_with("exit 0"));
         assert!(command_mentions_lume_hook(
             &command,
-            "antigravity:PreToolUseAllow"
+            "antigravity:PreToolUseAsk"
         ));
         assert!(command_contains_executable_marker(
             &command,
@@ -3412,8 +3668,8 @@ mod tests {
         fs::write(&executable, "@echo off\r\nexit /b 0\r\n").expect("write hook stub");
         let command = powershell_fail_open_hook_command(
             &executable.to_string_lossy(),
-            "antigravity:PreToolUseAllow",
-            antigravity_fallback_output("antigravity:PreToolUseAllow"),
+            "antigravity:PreToolUseAsk",
+            antigravity_fallback_output("antigravity:PreToolUseAsk"),
         );
         let script = decode_powershell_command(&command).expect("decode PowerShell script");
         let output = Command::new("powershell.exe")
@@ -3425,7 +3681,7 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
-            r#"{"decision":"allow"}"#
+            r#"{"decision":"ask"}"#
         );
         fs::remove_dir_all(&root).expect("remove hook test directory");
     }

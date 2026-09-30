@@ -8,9 +8,9 @@ use crate::{
     codex_bridge::{CodexBridge, CodexThreadModelSettings},
     discovery,
     domain::{
-        AgentKind, PendingQuestion, PermissionAction, PromptAttachment, PromptAttachmentInput,
-        PromptDelivery, QuestionAnswer, SessionControlOrigin, SessionModelOverride, SessionSource,
-        SessionStatus,
+        AgentKind, AgentSession, PendingQuestion, PermissionAction, PromptAttachment,
+        PromptAttachmentInput, PromptDelivery, QuestionAnswer, SessionControlOrigin,
+        SessionModelOverride, SessionSource, SessionStatus,
     },
     integrations::{self, IntegrationKind},
     launcher::{self, LaunchRequest},
@@ -22,7 +22,6 @@ const MAX_PROMPT_ATTACHMENTS: usize = 4;
 const MAX_IMAGE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
 const MAX_FILE_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_PREVIEW_LENGTH: usize = 384 * 1024;
-const TAKEOVER_WRITER_SETTLE_DELAY: std::time::Duration = std::time::Duration::from_millis(1_500);
 
 struct PreparedPromptAttachment {
     path: String,
@@ -141,11 +140,7 @@ pub fn submit_prompt(
     if prompt.len() > 16 * 1024 {
         return Err("O prompt excede o limite local de 16 KB".into());
     }
-    let session = state
-        .sessions()?
-        .into_iter()
-        .find(|session| session.id == session_id)
-        .ok_or_else(|| "Sessão não encontrada".to_string())?;
+    let session = state.connected_session(session_id)?;
     if is_legacy_gemini_monitoring_only(&session.agent, &session.source) {
         return Err("A CLI legada do Gemini é somente monitorada pelo Lume".into());
     }
@@ -160,7 +155,10 @@ pub fn submit_prompt(
     }
     if session.control_origin == SessionControlOrigin::External
         && session.source != SessionSource::Web
-        && matches!(session.agent, AgentKind::Codex | AgentKind::ClaudeCode)
+        && matches!(
+            session.agent,
+            AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::OpenCode
+        )
     {
         return Err(
             "This session is controlled by an external CLI. Transfer it to Lume before sending a prompt."
@@ -238,6 +236,47 @@ pub fn submit_prompt(
         }
         browser.request_prompt(session.id.clone(), prompt.to_string())?;
         browser.request_focus(session.id.clone())
+    } else if session.agent == AgentKind::OpenCode {
+        if session.control_origin != SessionControlOrigin::Lume {
+            return Err("Esta sessão OpenCode externa não está sob controle do Lume".into());
+        }
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or("Sessão OpenCode sem ID nativo")?;
+        let cwd = session
+            .working_directory
+            .as_deref()
+            .ok_or("Sessão OpenCode sem pasta de projeto")?;
+        app.state::<crate::opencode_acp::OpenCodeBridge>().prompt(
+            native_id,
+            cwd,
+            prompt.to_string(),
+            attachments
+                .iter()
+                .map(|file| crate::opencode_acp::PromptFile {
+                    path: file.path.clone(),
+                    mime_type: file.display.mime_type.clone(),
+                    is_image: file.is_image,
+                })
+                .collect(),
+        )
+    } else if session.agent == AgentKind::Antigravity && session.source == SessionSource::Desktop {
+        if !attachments.is_empty() {
+            return Err(
+                "Anexos ainda não são suportados na sessão estruturada do Antigravity".into(),
+            );
+        }
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or("Conversa do Antigravity sem ID")?;
+        let cwd = session
+            .working_directory
+            .as_deref()
+            .ok_or("Conversa do Antigravity sem pasta")?;
+        app.state::<crate::antigravity_stream::AntigravityStream>()
+            .prompt(native_id, cwd, prompt)
     } else if session.agent == AgentKind::Codex {
         let mut profile = session.permission_profile.clone();
         profile.can_respond_from_lume = true;
@@ -289,6 +328,7 @@ pub fn submit_prompt(
         let agent = match session.agent {
             AgentKind::ClaudeCode => IntegrationKind::Claude,
             AgentKind::Antigravity => IntegrationKind::Antigravity,
+            AgentKind::OpenCode => IntegrationKind::OpenCode,
             AgentKind::DeepSeek => IntegrationKind::DeepSeek,
             AgentKind::Gemini => IntegrationKind::Gemini,
             AgentKind::Codex => unreachable!(),
@@ -373,11 +413,7 @@ pub fn interrupt_prompt(
     bridge: &CodexBridge,
     session_id: &str,
 ) -> Result<(), String> {
-    let session = state
-        .sessions()?
-        .into_iter()
-        .find(|session| session.id == session_id)
-        .ok_or_else(|| "Session not found".to_string())?;
+    let session = state.connected_session(session_id)?;
     if session.control_origin != SessionControlOrigin::Lume {
         return Err("Only Lume-controlled sessions can be interrupted safely".into());
     }
@@ -400,6 +436,20 @@ pub fn interrupt_prompt(
                 return Err(error);
             }
         }
+    } else if session.agent == AgentKind::OpenCode {
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or("OpenCode session ID missing")?;
+        app.state::<crate::opencode_acp::OpenCodeBridge>()
+            .cancel(native_id)?;
+    } else if session.agent == AgentKind::Antigravity && session.source == SessionSource::Desktop {
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or("Antigravity conversation ID missing")?;
+        app.state::<crate::antigravity_stream::AntigravityStream>()
+            .stop(native_id)?;
     } else if session.agent == AgentKind::ClaudeCode {
         let native_session_id = session
             .native_session_id
@@ -416,6 +466,8 @@ fn supports_safe_prompt_interrupt(agent: &AgentKind, source: &SessionSource) -> 
     match agent {
         AgentKind::Codex => source != &SessionSource::Web,
         AgentKind::ClaudeCode => source == &SessionSource::Cli,
+        AgentKind::OpenCode => source == &SessionSource::Desktop,
+        AgentKind::Antigravity => source == &SessionSource::Desktop,
         _ => false,
     }
 }
@@ -432,11 +484,7 @@ pub fn session_collaboration_mode(
     bridge: &CodexBridge,
     session_id: &str,
 ) -> Result<String, String> {
-    let session = state
-        .sessions()?
-        .into_iter()
-        .find(|session| session.id == session_id)
-        .ok_or_else(|| "Session not found".to_string())?;
+    let session = state.connected_session(session_id)?;
     if session.agent != AgentKind::Codex {
         return Err("Collaboration modes are only available for Codex sessions".into());
     }
@@ -457,11 +505,7 @@ pub fn set_session_collaboration_mode(
     session_id: &str,
     mode: &str,
 ) -> Result<String, String> {
-    let session = state
-        .sessions()?
-        .into_iter()
-        .find(|session| session.id == session_id)
-        .ok_or_else(|| "Session not found".to_string())?;
+    let session = state.connected_session(session_id)?;
     if session.agent != AgentKind::Codex {
         return Err("Collaboration modes are only available for Codex sessions".into());
     }
@@ -478,15 +522,29 @@ pub fn set_session_collaboration_mode(
 }
 
 pub fn session_model_settings(
+    app: &AppHandle,
     state: &AppState,
     bridge: &CodexBridge,
     session_id: &str,
 ) -> Result<CodexThreadModelSettings, String> {
-    let session = state
-        .sessions()?
-        .into_iter()
-        .find(|session| session.id == session_id)
-        .ok_or_else(|| "Session not found".to_string())?;
+    let session = state.connected_session(session_id)?;
+    if session.agent == AgentKind::OpenCode {
+        if session.control_origin != SessionControlOrigin::Lume {
+            return Err("Retome esta sessão OpenCode pelo Lume antes de alterar o modelo".into());
+        }
+        return app
+            .state::<crate::opencode_acp::OpenCodeBridge>()
+            .model_settings(
+                session
+                    .native_session_id
+                    .as_deref()
+                    .ok_or("Sessão OpenCode sem ID nativo")?,
+                session
+                    .working_directory
+                    .as_deref()
+                    .ok_or("Sessão OpenCode sem pasta de projeto")?,
+            );
+    }
     if session.agent != AgentKind::Codex {
         return Err("Model settings are currently available only for Codex sessions".into());
     }
@@ -519,11 +577,26 @@ pub fn set_session_model_settings(
     model: &str,
     effort: &str,
 ) -> Result<CodexThreadModelSettings, String> {
-    let session = state
-        .sessions()?
-        .into_iter()
-        .find(|session| session.id == session_id)
-        .ok_or_else(|| "Session not found".to_string())?;
+    let session = state.connected_session(session_id)?;
+    if session.agent == AgentKind::OpenCode {
+        if session.control_origin != SessionControlOrigin::Lume {
+            return Err("Retome esta sessão OpenCode pelo Lume antes de alterar o modelo".into());
+        }
+        return app
+            .state::<crate::opencode_acp::OpenCodeBridge>()
+            .set_model_settings(
+                session
+                    .native_session_id
+                    .as_deref()
+                    .ok_or("Sessão OpenCode sem ID nativo")?,
+                session
+                    .working_directory
+                    .as_deref()
+                    .ok_or("Sessão OpenCode sem pasta de projeto")?,
+                model,
+                effort,
+            );
+    }
     if session.agent != AgentKind::Codex {
         return Err("Model settings are currently available only for Codex sessions".into());
     }
@@ -538,26 +611,22 @@ pub fn set_session_model_settings(
         session.status,
         SessionStatus::Running | SessionStatus::PermissionRequired
     );
-    let mut update_thread = !running;
-    let mut settings = if running {
-        bridge.default_model_settings()?
-    } else {
-        match bridge.thread_model_settings(thread_id) {
-            Ok(settings) => settings,
-            Err(error) if is_missing_codex_rollout(&error) => {
-                update_thread = false;
-                bridge.default_model_settings()?
-            }
-            Err(error) => return Err(error),
-        }
-    };
+    // Validate the explicit selection against the catalog, not a resumed copy
+    // of the current thread. Resuming here would repeat the writer/replay work
+    // performed by the update below and subscribe a throwaway connection.
+    let mut settings = bridge.default_model_settings()?;
     validate_model_selection(&mut settings, model, effort)?;
-    if update_thread {
-        settings = bridge.set_thread_model_settings(
+    if !running {
+        match bridge.set_thread_model_settings(
             thread_id,
             &settings.model,
             settings.reasoning_effort.as_deref().unwrap_or_default(),
-        )?;
+            &settings.models,
+        ) {
+            Ok(updated) => settings = updated,
+            Err(error) if is_missing_codex_rollout(&error) => {}
+            Err(error) => return Err(error),
+        }
     }
     state.set_session_model_override(
         session_id,
@@ -568,6 +637,34 @@ pub fn set_session_model_settings(
     )?;
     protocol::emit_sessions_changed(app);
     Ok(settings)
+}
+
+pub fn set_session_agent_mode(
+    app: &AppHandle,
+    state: &AppState,
+    session_id: &str,
+    mode: &str,
+) -> Result<CodexThreadModelSettings, String> {
+    let session = state
+        .sessions()?
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .ok_or("Sessão não encontrada")?;
+    if session.agent != AgentKind::OpenCode || session.control_origin != SessionControlOrigin::Lume
+    {
+        return Err("Este seletor de modo requer uma sessão OpenCode controlada pelo Lume".into());
+    }
+    app.state::<crate::opencode_acp::OpenCodeBridge>().set_mode(
+        session
+            .native_session_id
+            .as_deref()
+            .ok_or("Sessão OpenCode sem ID nativo")?,
+        session
+            .working_directory
+            .as_deref()
+            .ok_or("Sessão OpenCode sem pasta de projeto")?,
+        mode,
+    )
 }
 
 fn apply_pending_model_override(
@@ -938,6 +1035,16 @@ fn cache_attachment_name(name: &str) -> String {
     }
 }
 
+fn is_managed_native_session(session: &AgentSession) -> bool {
+    session.control_origin == SessionControlOrigin::Lume
+        && (session.source == SessionSource::Desktop
+            || (session.source == SessionSource::Cli && session.process_id.is_none()))
+        && matches!(
+            session.agent,
+            AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
+        )
+}
+
 pub fn terminate_session(
     app: &AppHandle,
     state: &AppState,
@@ -952,26 +1059,49 @@ pub fn terminate_session(
     if is_legacy_gemini_monitoring_only(&session.agent, &session.source) {
         return Err("A CLI legada do Gemini é somente monitorada pelo Lume".into());
     }
-    if session.agent == AgentKind::Codex
-        && session.source == SessionSource::Desktop
-        && session.control_origin == SessionControlOrigin::Lume
-    {
+    if session.agent == AgentKind::Codex && is_managed_native_session(&session) {
         let thread_id = session
             .native_session_id
             .as_deref()
             .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
-        if matches!(
-            session.status,
-            SessionStatus::Running | SessionStatus::PermissionRequired
-        ) {
+        // Clear the queue first: completion of the interrupted turn must not
+        // start another queued prompt while the user is closing the session.
+        bridge.discard_queued_prompts(thread_id)?;
+        state.clear_queued_prompts_for_thread(thread_id)?;
+        if state.codex_active_turn(thread_id)?.is_some()
+            || matches!(
+                session.status,
+                SessionStatus::Running | SessionStatus::PermissionRequired
+            )
+        {
             if let Err(error) = bridge.interrupt_prompt(thread_id, state, app) {
                 if !is_no_active_prompt(&error) {
                     return Err(error);
                 }
             }
         }
-        bridge.discard_queued_prompts(thread_id)?;
-        state.clear_queued_prompts_for_thread(thread_id)?;
+        state.mark_session_terminated(session_id)?;
+        protocol::emit_sessions_changed(app);
+        return Ok(());
+    }
+    if session.agent == AgentKind::OpenCode && is_managed_native_session(&session) {
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or("OpenCode session ID missing")?;
+        app.state::<crate::opencode_acp::OpenCodeBridge>()
+            .close(native_id)?;
+        state.mark_session_terminated(session_id)?;
+        protocol::emit_sessions_changed(app);
+        return Ok(());
+    }
+    if session.agent == AgentKind::Antigravity && is_managed_native_session(&session) {
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or("Antigravity conversation ID missing")?;
+        app.state::<crate::antigravity_stream::AntigravityStream>()
+            .stop(native_id)?;
         state.mark_session_terminated(session_id)?;
         protocol::emit_sessions_changed(app);
         return Ok(());
@@ -1161,19 +1291,12 @@ pub fn take_control_session(
         if last_writer_error.is_some() {
             return Err("The external CLI closed, but Codex has not released this thread yet. Wait a moment and try transferring it again.".into());
         }
-        // The next direct prompt resumes this thread on a fresh App Server
-        // connection. Give the probe writer a short moment to release first.
-        std::thread::sleep(TAKEOVER_WRITER_SETTLE_DELAY);
+        // The verified resume acknowledgment already confirms ownership in
+        // the same App Server used by the next prompt. A new RPC connection
+        // reuses that loaded thread; it does not need a fixed writer delay.
         let controlled_source = SessionSource::Desktop;
-        let controlled_session_id = session
-            .native_session_id
-            .as_deref()
-            .and_then(|native_id| {
-                state.sessions().ok()?.into_iter().find_map(|candidate| {
-                    (candidate.native_session_id.as_deref() == Some(native_id))
-                        .then_some(candidate.id)
-                })
-            })
+        let controlled_session_id = state
+            .connected_session_id_for_native_id(&session.agent, thread_id, None)?
             .unwrap_or_else(|| session_id.to_string());
         state.mark_session_lume_controlled(
             &controlled_session_id,
@@ -1181,14 +1304,11 @@ pub fn take_control_session(
             provider_thread_name.as_deref(),
         )?;
         let promptable_session_id = state
-            .sessions()?
-            .into_iter()
-            .find(|candidate| {
-                candidate.agent == session.agent
-                    && candidate.control_origin == SessionControlOrigin::Lume
-                    && candidate.native_session_id == session.native_session_id
-            })
-            .map(|candidate| candidate.id)
+            .connected_session_id_for_native_id(
+                &session.agent,
+                thread_id,
+                Some(SessionControlOrigin::Lume),
+            )?
             .unwrap_or(controlled_session_id);
         state.clear_takeover_operation(session_id)?;
         Ok(promptable_session_id)
@@ -1445,6 +1565,62 @@ pub fn execute_hub_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_termination_routes_only_lume_owned_sessions_without_a_cli() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        state
+            .ingest(crate::domain::HookEvent {
+                event: crate::domain::HookEventKind::SessionStarted,
+                session_id: "codex-app-server:thread-test".into(),
+                agent: AgentKind::Codex,
+                agent_label: None,
+                session_name: Some("Managed session".into()),
+                project: Some("project".into()),
+                source: Some(SessionSource::Cli),
+                source_app: None,
+                control_origin: SessionControlOrigin::Lume,
+                status_label: None,
+                started_at: None,
+                process_id: None,
+                native_session_id: Some("thread-test".into()),
+                working_directory: Some("/work/project".into()),
+                permission_profile: None,
+                permission: None,
+                question: None,
+                last_response: None,
+                activity: None,
+                activities: Vec::new(),
+                wait_for_decision: false,
+            })
+            .expect("managed session");
+        let mut session = state.sessions().expect("sessions").remove(0);
+        for agent in [
+            AgentKind::Codex,
+            AgentKind::OpenCode,
+            AgentKind::Antigravity,
+        ] {
+            session.agent = agent;
+            for source in [SessionSource::Cli, SessionSource::Desktop] {
+                session.source = source;
+                assert!(is_managed_native_session(&session));
+                session.control_origin = SessionControlOrigin::External;
+                assert!(!is_managed_native_session(&session));
+                session.control_origin = SessionControlOrigin::Lume;
+            }
+        }
+        session.source = SessionSource::Cli;
+        session.process_id = Some(4242);
+        assert!(!is_managed_native_session(&session));
+        session.process_id = None;
+        session.source = SessionSource::Vscode;
+        assert!(!is_managed_native_session(&session));
+        session.source = SessionSource::Web;
+        assert!(!is_managed_native_session(&session));
+        session.source = SessionSource::Desktop;
+        session.agent = AgentKind::ClaudeCode;
+        assert!(!is_managed_native_session(&session));
+    }
 
     #[test]
     fn local_image_preview_is_returned_as_a_valid_data_url() {

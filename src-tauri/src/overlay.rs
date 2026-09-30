@@ -587,9 +587,9 @@ mod linux {
                 let mut parent = widget.parent();
                 while let Some(container) = parent {
                     parent = container.parent();
-                    let allocation = gtk::Allocation::new(0, 0, width, height);
-                    container.set_size_request(width, height);
-                    container.size_allocate(&allocation);
+                    // A permanent minimum on every ancestor prevents GTK from
+                    // shrinking the panel again and clips the transparent Orb.
+                    container.set_size_request(-1, -1);
                 }
             })
             .is_ok();
@@ -615,7 +615,15 @@ mod linux {
             let expansion = (f64::from(width - 78) / f64::from(392 - 78)).clamp(0.0, 1.0);
             (22.0 - expansion).round() as i32
         };
-        shape_xwayland_window(&gtk_window, width, height, radius);
+        if window.label() == "main" {
+            // CSS owns the animated Orb/panel contour. A native X11 shape from
+            // a previous allocation can cut the next frame or expanded panel.
+            if let Some(surface) = gtk_window.window() {
+                surface.shape_combine_region(None, 0, 0);
+            }
+        } else {
+            shape_xwayland_window(&gtk_window, width, height, radius);
+        }
         if window.label() == "main" {
             if width <= 78 && height <= 44 {
                 let input_region = rounded_window_region(width, height, radius);
@@ -1024,13 +1032,15 @@ pub fn resize_surface(
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        if linux::resize_surface(window, width, height) {
-            return Ok(());
-        }
+        linux::resize_surface(window, width, height)
+            .then_some(())
+            .ok_or_else(|| "A superfície do Lume não aceitou o redimensionamento".to_string())
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = (window, width, height);
-    Ok(())
+    {
+        let _ = (window, width, height);
+        Ok(())
+    }
 }
 
 pub fn set_terminal_docked_shape(

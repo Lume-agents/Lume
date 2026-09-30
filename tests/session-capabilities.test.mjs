@@ -16,6 +16,26 @@ function session(overrides = {}) {
 }
 
 assert.equal(sessionCapabilities(session()).canInterrupt, true);
+for (const agent of ["codex", "opencode", "antigravity"]) {
+  for (const source of ["desktop", "cli"]) {
+    assert.equal(
+      sessionCapabilities(session({ agent, source })).canTerminate,
+      true,
+      `${agent} sessions managed without a CLI must still be terminable`,
+    );
+    assert.equal(
+      sessionCapabilities(session({ agent, source, controlOrigin: "external" })).canTerminate,
+      false,
+      "a native session id alone must not authorize closing an external application",
+    );
+  }
+  for (const source of ["web", "vscode"]) {
+    assert.equal(sessionCapabilities(session({ agent, source })).canTerminate, false);
+  }
+}
+assert.equal(sessionCapabilities(session({ processId: 4242 })).canTerminate, true);
+assert.equal(sessionCapabilities(session({ nativeSessionId: " " })).canTerminate, false);
+assert.equal(sessionCapabilities(session({ agent: "claude_code" })).canTerminate, false);
 assert.equal(
   sessionCapabilities(session({ agent: "claude_code" })).canInterrupt,
   true,

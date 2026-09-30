@@ -2,12 +2,15 @@
   import BrandIcon from "$lib/BrandIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import RepositoryPanel from "$lib/RepositoryPanel.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
+  import { transientScrollbar } from "$lib/transientScrollbar";
   import { displayFileChangePath } from "$lib/fileChanges";
-  import type { AgentSession } from "$lib/domain";
+  import { cleanPromptTransport } from "$lib/chatAttachments";
+  import type { AgentSession, SessionActivity } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
-  import { refreshAgentRateLimits } from "$lib/lume";
+  import { loadWorkspacePromptIndexPage, refreshAgentRateLimits, type WorkspacePromptIndexEntry } from "$lib/lume";
   import { buildReviewTurns } from "$lib/reviewDiffs";
   import { subagentsForSession } from "$lib/workspaceAgents";
 
@@ -18,6 +21,7 @@
     onOpenReview,
     variant = "workspace",
     showCloseButton = true,
+    section = $bindable("session"),
   } = $props<{
     session: (AgentSession & { activityTotal?: number }) | null;
     language?: Language;
@@ -25,15 +29,34 @@
     onOpenReview?: (path?: string) => void;
     variant?: "workspace" | "orb";
     showCloseButton?: boolean;
+    section?: "session" | "repository";
   }>();
 
   let usageRefreshing = $state(false);
   let requestedUsageKey = "";
+  let indexedPrompts = $state<WorkspacePromptIndexEntry[]>([]);
+  let promptIndexLoading = $state(false);
+  let promptIndexFailed = $state(false);
+  let promptReload = $state(0);
+  const promptSessionId = $derived(session?.id ?? "");
+  const promptSourceKey = $derived(section === "session" && session?.nativeSessionId
+    ? `${session.id}:${session.nativeSessionId}:${session.activities.filter((activity: SessionActivity) => activity.kind === "prompt").at(-1)?.id ?? ""}`
+    : "");
+  const recentPrompts = $derived.by(() => {
+    const byId = new Map(indexedPrompts.map((prompt) => [prompt.id, prompt]));
+    for (const activity of session?.activities ?? []) {
+      if (activity.kind === "prompt") byId.set(activity.id, {
+        id: activity.id, createdAt: activity.createdAt, detail: activity.detail ?? "",
+      });
+    }
+    return [...byId.values()]
+      .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
+      .slice(0, 5);
+  });
 
   const latestTurn = $derived(session ? buildReviewTurns(session.activities, session.results, session.workingDirectory)[0] : null);
   const changes = $derived(latestTurn?.files ?? []);
   const visibleChanges = $derived(changes.slice(0, 6));
-  const checks = $derived(latestTurn?.checks ?? []);
   const subagents = $derived(session ? subagentsForSession(session) : []);
   const visibleSubagents = $derived([...subagents]
     .sort((left, right) => Number(["running", "waiting"].includes(right.status)) - Number(["running", "waiting"].includes(left.status)) || right.updatedAt - left.updatedAt)
@@ -50,6 +73,22 @@
     if (!key || key === requestedUsageKey) return;
     requestedUsageKey = key;
     void refreshUsage();
+  });
+
+  $effect(() => {
+    const key = promptSourceKey;
+    const sessionId = promptSessionId;
+    void promptReload;
+    indexedPrompts = [];
+    promptIndexFailed = false;
+    promptIndexLoading = Boolean(key);
+    if (!key) return;
+    let active = true;
+    void loadWorkspacePromptIndexPage(sessionId)
+      .then((page) => { if (active) indexedPrompts = page.prompts.slice(0, 5); })
+      .catch(() => { if (active) promptIndexFailed = true; })
+      .finally(() => { if (active) promptIndexLoading = false; });
+    return () => { active = false; };
   });
 
   function tr(english: string, portuguese: string) {
@@ -69,9 +108,8 @@
     return fallback.match(/\b\d+\s*[dhm]\b/i)?.[0]?.replaceAll(" ", "") ?? fallback;
   }
 
-  function sessionSource(session: AgentSession) {
-    if (session.source === "web") return session.sourceApp ?? "Web";
-    return { cli: "CLI", vscode: "VS Code", desktop: "Lume" }[session.source];
+  function promptTime(value: number) {
+    return new Intl.DateTimeFormat(language, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
   }
 
   function tokenGraphGeometry(samples: NonNullable<AgentSession["promptTokenUsage"]>) {
@@ -117,7 +155,7 @@
   }
 </script>
 
-<aside class="workspace-inspector" class:orb-inspector={variant === "orb"} aria-label={tr("Session inspector", "Inspector da sessão")}>
+<aside class="workspace-inspector" class:has-session={Boolean(session)} class:orb-inspector={variant === "orb"} aria-label={tr("Session inspector", "Inspector da sessão")}>
   <header>
     {#if session}
       <span class="agent-icon"><BrandIcon name={session.agent} size={21} /></span>
@@ -147,13 +185,14 @@
   </header>
 
   {#if session}
-    <div class="inspector-scroll">
-      <section class="session-overview" aria-label={tr("Session overview", "Resumo da sessão")}>
-        <span><strong>{session.activityTotal ?? session.activities.length}</strong><small>{tr("events", "eventos")}</small></span>
-        <span><strong>{session.results.length}</strong><small>{tr("results", "resultados")}</small></span>
-        <span><strong>{subagents.length}</strong><small>{tr("subagents", "subagentes")}</small></span>
-      </section>
-
+    <nav class="inspector-tabs" aria-label={tr("Inspector sections", "Seções do Inspector")}>
+      <button type="button" class:active={section === "session"} aria-pressed={section === "session"} onclick={() => (section = "session")}><LumeIcon name="inspector" size={14} />{tr("Chat overview", "Visão do chat")}</button>
+      <button type="button" class:active={section === "repository"} aria-pressed={section === "repository"} onclick={() => (section = "repository")}><LumeIcon name="repository" size={14} />{tr("Repository", "Repositório")}</button>
+    </nav>
+    {#if section === "repository"}
+      <div class="inspector-scroll" use:transientScrollbar><RepositoryPanel {session} {language} compact /></div>
+    {:else}
+    <div class="inspector-scroll" use:transientScrollbar>
       {#if session.agent === "codex"}
         <section class="usage-section" aria-label={tr("Codex usage", "Uso do Codex")}>
           <div class="usage-gauges" class:loading={usageRefreshing && !session.rateLimits?.length}>
@@ -172,7 +211,7 @@
           </div>
           <div class="token-chart">
             <span>{tr("Tokens / prompt", "Tokens / prompt")}</span>
-            <svg class:empty={!tokenGraph.points} class="token-graph" viewBox="0 0 226 54" preserveAspectRatio={variant === "orb" ? "none" : "xMidYMid meet"} role="img" aria-label={tr("Tokens used per prompt over time", "Tokens usados por prompt ao longo do tempo")}>
+            <svg class:empty={!tokenGraph.points} class="token-graph" viewBox="0 0 226 54" preserveAspectRatio="none" role="img" aria-label={tr("Tokens used per prompt over time", "Tokens usados por prompt ao longo do tempo")}>
               <path class="graph-grid" d="M4 14H222M4 28H222M4 42H222" />
               <polygon points={tokenGraph.area} />
               <polyline points={tokenGraph.points || "4,42 222,42"} />
@@ -184,6 +223,26 @@
           </div>
         </section>
       {/if}
+
+      <details class="inspector-section events-section" open>
+        <summary><LumeIcon name="send" size={14} /><span>{tr("Events", "Eventos")}</span><em>{recentPrompts.length}</em></summary>
+        <p class="section-description">{tr("Latest prompts", "Últimos prompts")}</p>
+        {#if recentPrompts.length}
+          <ol class="prompt-events">
+            {#each recentPrompts as prompt (prompt.id)}
+              {@const text = cleanPromptTransport(prompt.detail) || tr("Prompt sent", "Prompt enviado")}
+              <li><span class="event-mark"><LumeIcon name="send" size={12} /></span><div><time datetime={new Date(prompt.createdAt).toISOString()}>{promptTime(prompt.createdAt)}</time><p title={text}>{text}</p></div></li>
+            {/each}
+          </ol>
+        {:else if promptIndexLoading}
+          <p class="empty-section" role="status">{tr("Loading recent prompts…", "Carregando prompts recentes…")}</p>
+        {:else if promptIndexFailed}
+          <p class="empty-section" role="status">{tr("Could not load recent prompts.", "Não foi possível carregar os prompts recentes.")}</p>
+        {:else}
+          <p class="empty-section">{tr("No prompts recorded yet.", "Nenhum prompt registrado ainda.")}</p>
+        {/if}
+        {#if promptIndexFailed}<button class="event-retry" type="button" onclick={() => (promptReload += 1)}><LumeIcon name="refresh" size={12} />{tr("Retry history", "Recarregar histórico")}</button>{/if}
+      </details>
 
       {#if subagents.length}
         <details class="inspector-section" open>
@@ -229,29 +288,8 @@
         {/if}
       </details>
 
-      {#if variant === "workspace"}
-        <details class="inspector-section" open={checks.length > 0}>
-          <summary><span>{tr("Validations", "Validações")}</span><em>{checks.length}</em></summary>
-          <p class="section-description">{tr("Tests, builds, and checks reported by the agent in the latest turn.", "Testes, builds e verificações reportados pelo agente no último turno.")}</p>
-          {#if checks.length}
-            <ul class="check-list">{#each checks as check}<li title={check}><i><LumeIcon name="check" size={9} /></i><span>{check}</span></li>{/each}</ul>
-          {:else}
-            <p class="empty-section">{tr("No validation evidence was reported.", "Nenhuma evidência de validação foi reportada.")}</p>
-          {/if}
-        </details>
-
-        <details class="inspector-section metadata-section">
-          <summary>{tr("Session details", "Detalhes da sessão")}</summary>
-          <dl>
-            <div><dt>{tr("Source", "Origem")}</dt><dd>{sessionSource(session)}</dd></div>
-            <div><dt>{tr("Control", "Controle")}</dt><dd>{session.controlOrigin === "lume" ? tr("Managed by Lume", "Gerenciado pelo Lume") : tr("Externally owned", "Controle externo")}</dd></div>
-            <div><dt>{tr("Process ID", "ID do processo")}</dt><dd>{session.processId ?? tr("Not reported by source", "Não informado pela origem")}</dd></div>
-            <div><dt>{tr("Directory", "Diretório")}</dt><dd title={session.workingDirectory}>{session.workingDirectory || "—"}</dd></div>
-            <div><dt>{tr("Thread", "Thread")}</dt><dd title={session.nativeSessionId}>{session.nativeSessionId || "—"}</dd></div>
-          </dl>
-        </details>
-      {/if}
     </div>
+    {/if}
   {:else}
     <div class="inspector-empty"><BrandIcon name="lume" size={30} /><span>{tr("Select an agent to inspect its work.", "Selecione um agente para inspecionar o trabalho.")}</span></div>
   {/if}
@@ -259,37 +297,47 @@
 
 <style>
   .workspace-inspector { min-width: 0; height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; border-left: 1px solid var(--workspace-line); color: var(--workspace-text); background: var(--workspace-sidebar); }
-  .workspace-inspector.orb-inspector { --workspace-accent: #397b5c; --workspace-accent-soft: rgba(57, 123, 92, .11); --workspace-faint: #87968e; --workspace-line: rgba(92, 114, 103, .15); --workspace-muted: #697a71; --workspace-raised: rgba(255, 255, 255, .44); --workspace-scroll-thumb: #cad2ce; --workspace-sidebar: transparent; --workspace-strong: #34473d; --workspace-subtle: rgba(74, 108, 90, .07); --workspace-text: #526158; border-left: 0; }
-  :global(.overlay-shell.dark) .workspace-inspector.orb-inspector { --workspace-accent: #83c29f; --workspace-accent-soft: rgba(100, 180, 143, .11); --workspace-faint: #8b9a92; --workspace-line: rgba(199, 218, 207, .11); --workspace-muted: #a0b0a7; --workspace-raised: rgba(206, 228, 216, .045); --workspace-scroll-thumb: rgba(199, 218, 207, .32); --workspace-strong: #e0e9e4; --workspace-subtle: rgba(206, 228, 216, .055); --workspace-text: #c5d2cb; }
-  .workspace-inspector.orb-inspector > header { min-height: 50px; padding: 7px 8px; }
-  .workspace-inspector.orb-inspector > header .header-copy strong { font-size: 11px; }
-  .workspace-inspector.orb-inspector > header .header-copy small { font-size: 8px; }
-  .workspace-inspector.orb-inspector .inspector-scroll { padding: 0 9px 14px; }
-  .workspace-inspector.orb-inspector .inspector-section > summary { min-height: 40px; font-size: 9px; }
-  .orb-inspector .usage-section { grid-template-columns: max-content minmax(0, 1fr); gap: 12px; }
-  .orb-inspector .token-graph :is(path, polyline, circle) { vector-effect: non-scaling-stroke; }
-  .workspace-inspector > header { min-height: 64px; padding: 10px 12px 10px 15px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-line); }
-  .header-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }.header-copy strong, .header-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.header-copy strong { color: var(--workspace-strong); font-size: 12px; letter-spacing: -.015em; }.header-copy small { color: var(--workspace-muted); font-size: 9px; }
+  .workspace-inspector.has-session { grid-template-rows: auto auto minmax(0, 1fr); }
+  .inspector-tabs { display: flex; gap: 3px; margin: 12px 12px 0; padding: 3px; border-radius: 8px; background: var(--workspace-subtle); }
+  .inspector-tabs > button { min-width: 0; flex: 1; min-height: 31px; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 0 5px; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+  .inspector-tabs > button.active { color: var(--workspace-strong); background: var(--workspace-pane); }
+  .inspector-tabs > button.active :global(svg) { color: var(--workspace-accent); }
+  .inspector-tabs > button:hover:not(.active) { color: var(--workspace-strong); }
+  .inspector-tabs > button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
+  .workspace-inspector.orb-inspector { --workspace-pane: var(--lume-surface-light); --workspace-accent: #397b5c; --workspace-accent-soft: rgba(57, 123, 92, .11); --workspace-faint: #87968e; --workspace-line: rgba(92, 114, 103, .15); --workspace-muted: var(--lume-ink-muted-light); --workspace-raised: rgba(255, 255, 255, .44); --workspace-scroll-thumb: #cad2ce; --workspace-sidebar: transparent; --workspace-strong: #34473d; --workspace-subtle: rgba(74, 108, 90, .07); --workspace-text: #526158; border-left: 0; }
+  :global(.overlay-shell.dark) .workspace-inspector.orb-inspector { --workspace-pane: var(--lume-surface-dark); --workspace-accent: #83c29f; --workspace-accent-soft: rgba(100, 180, 143, .11); --workspace-faint: #8b9a92; --workspace-line: rgba(199, 218, 207, .11); --workspace-muted: #a0b0a7; --workspace-raised: rgba(206, 228, 216, .045); --workspace-scroll-thumb: rgba(199, 218, 207, .32); --workspace-strong: #e0e9e4; --workspace-subtle: rgba(206, 228, 216, .055); --workspace-text: #c5d2cb; }
+  .workspace-inspector > header { min-height: 50px; padding: 7px 8px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-line); }
+  .header-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }.header-copy strong, .header-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.header-copy strong { color: var(--workspace-strong); font-size: 11px; letter-spacing: -.015em; }.header-copy small { color: var(--workspace-muted); font-size: 8px; }
   .agent-icon { width: 31px; height: 31px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
   .inspector-access-badge { min-height: 21px; padding: 0 6px; display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; border-radius: 999px; font-size: 7px; font-weight: 780; line-height: 1; white-space: nowrap; }.inspector-access-badge svg { width: 9px; height: 9px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; }.inspector-access-badge.auto-review { color: #315f86; background: #cbdff0; }.inspector-access-badge.auto-review svg { fill: currentColor; stroke: none; }.inspector-access-badge.full-access { color: #764c2e; background: #e8ceb1; }
   :global(.workspace.dark) .inspector-access-badge.auto-review { color: #b4d3ee; background: #29445d; }:global(.workspace.dark) .inspector-access-badge.full-access { color: #e4b88f; background: #543b29; }
   .workspace-inspector > header button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; }.workspace-inspector > header button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
-  .inspector-scroll { min-height: 0; padding: 0 15px 24px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
-  .session-overview { min-height: 58px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; border-bottom: 1px solid var(--workspace-line); }.session-overview > span { min-width: 0; display: grid; gap: 2px; text-align: center; }.session-overview > span + span { border-left: 1px solid var(--workspace-line); }.session-overview strong { color: var(--workspace-strong); font-size: 13px; font-variant-numeric: tabular-nums; }.session-overview small { color: var(--workspace-faint); font-size: 8px; text-transform: uppercase; letter-spacing: .045em; }
-  .usage-section { min-height: 72px; margin: 13px 0 3px; display: grid; grid-template-columns: minmax(126px, 47%) minmax(0, 1fr); align-items: center; gap: 9px; }
+  .inspector-scroll { min-height: 0; padding: 0 12px 16px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: transparent transparent; }
+  .inspector-scroll:global(.is-scrolling) { scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .inspector-scroll::-webkit-scrollbar { width: 5px; }
+  .inspector-scroll::-webkit-scrollbar-thumb { border-radius: 5px; background: transparent; }
+  .inspector-scroll:global(.is-scrolling)::-webkit-scrollbar-thumb { background: var(--workspace-scroll-thumb); }
+  .usage-section { min-height: 72px; margin: 13px 0 3px; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 12px; }
+  .token-graph :is(path, polyline, circle) { vector-effect: non-scaling-stroke; }
   .usage-gauges { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; }.usage-gauge { position: relative; width: 62px; height: 51px; flex: 0 1 62px; --usage-color: color-mix(in srgb, #43a873 calc(var(--usage-remaining) * 1%), #ca605c); }.usage-gauge svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; fill: none; stroke-linecap: round; }.gauge-track { stroke: var(--workspace-line); stroke-width: 5.5; }.gauge-progress { stroke: var(--usage-color); stroke-width: 5.5; transition: stroke-dasharray 360ms cubic-bezier(.16, 1, .3, 1); }.usage-gauge strong { position: absolute; right: 0; bottom: 3px; left: 0; color: var(--workspace-strong); font-size: 15px; font-variant-numeric: tabular-nums; line-height: 1; text-align: center; }.usage-gauge em { position: absolute; top: 1px; right: 2px; color: var(--workspace-muted); font-size: 7px; font-style: normal; font-weight: 780; }.usage-gauges > i { width: 56px; height: 30px; border: 5px solid var(--workspace-line); border-bottom: 0; border-radius: 32px 32px 0 0; opacity: .5; }.usage-gauges.loading > i { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
   .token-chart { min-width: 0; display: grid; grid-template-rows: auto 48px auto; gap: 3px; }.token-chart > span, .token-chart > small { color: var(--workspace-muted); font-size: 10px; font-weight: 720; line-height: 1.2; }.token-chart > small { color: var(--workspace-faint); text-align: right; }.token-graph { width: 100%; min-width: 0; height: 48px; overflow: visible; }.token-graph .graph-grid { fill: none; stroke: color-mix(in srgb, var(--workspace-line) 54%, transparent); stroke-width: .7; }.token-graph polygon { fill: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }.token-graph polyline { fill: none; stroke: var(--workspace-accent); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }.token-graph.empty polyline { stroke: var(--workspace-line); stroke-dasharray: 3 4; }.token-graph circle { fill: var(--workspace-raised); stroke: var(--workspace-accent); stroke-width: 1.3; }
-  .inspector-section { border-bottom: 1px solid var(--workspace-line); }.inspector-section > summary { min-height: 46px; display: flex; align-items: center; gap: 7px; color: var(--workspace-strong); font-size: 10px; font-weight: 750; list-style: none; cursor: pointer; }.inspector-section > summary::-webkit-details-marker { display: none; }.inspector-section > summary::after { width: 6px; height: 6px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .5; transform: rotate(45deg); transition: transform 160ms ease; }.inspector-section[open] > summary::after { transform: rotate(225deg); }.inspector-section > summary em { min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 8px; font-style: normal; }.inspector-section[open] { padding-bottom: 13px; }
-  .check-list { margin: 0; padding: 0; display: grid; gap: 7px; list-style: none; }.check-list li { min-width: 0; display: flex; align-items: flex-start; gap: 7px; color: var(--workspace-muted); font-size: 9px; line-height: 1.45; }
+  .inspector-section { border-bottom: 1px solid var(--workspace-line); }.inspector-section > summary { min-height: 40px; display: flex; align-items: center; gap: 7px; color: var(--workspace-strong); font-size: 11px; font-weight: 600; list-style: none; cursor: pointer; }.inspector-section > summary::-webkit-details-marker { display: none; }.inspector-section > summary::after { width: 6px; height: 6px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .5; transform: rotate(45deg); transition: transform 160ms ease; }.inspector-section[open] > summary::after { transform: rotate(225deg); }.inspector-section > summary em { min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 9px; font-style: normal; }.inspector-section[open] { padding-bottom: 13px; }
+  .prompt-events { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+  .prompt-events > li { min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 9px 0; }
+  .prompt-events > li + li { border-top: 1px solid var(--workspace-line); }
+  .event-mark { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 6px; color: var(--workspace-accent); background: var(--workspace-accent-soft); }
+  .prompt-events > li > div { min-width: 0; flex: 1; }
+  .prompt-events time { color: var(--workspace-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+  .prompt-events p { margin: 4px 0 0; color: var(--workspace-text); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+  .event-retry { display: inline-flex; align-items: center; gap: 5px; padding: 6px 0; border: 0; color: var(--workspace-accent); background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
+  .event-retry:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
   .subagent-list { display: grid; gap: 3px; }.subagent-list > div { min-width: 0; min-height: 36px; padding: 4px 5px; display: flex; align-items: center; gap: 8px; border-radius: 8px; }.subagent-list > div:hover { background: var(--workspace-subtle); }.subagent-list > div > span { min-width: 0; display: grid; gap: 2px; }.subagent-list strong { overflow: hidden; color: var(--workspace-text); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.subagent-list small { color: var(--workspace-faint); font-size: 8px; }.subagent-list small.status-running { color: #4e98ca; }.subagent-list small.status-failed { color: #c66762; }.subagent-list small.status-completed { color: #50aa79; }
   .files-toolbar { min-height: 40px; margin-bottom: 4px; padding-bottom: 8px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 65%, transparent); }.files-toolbar > span { min-width: 0; display: grid; gap: 2px; flex: 1; }.files-toolbar > span > strong { color: var(--workspace-text); font-size: 9px; }.files-toolbar > span small { display: flex; gap: 5px; font-size: 8px; }.files-toolbar b, .inspector-files b { color: #43a873; }.files-toolbar i, .inspector-files i { color: #c16660; font-style: normal; }.files-toolbar button { min-height: 28px; padding: 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 28%, var(--workspace-line)); border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 8px; font-weight: 740; cursor: pointer; }.files-toolbar button:hover { border-color: color-mix(in srgb, var(--workspace-accent) 52%, var(--workspace-line)); }
   .inspector-files { display: grid; gap: 1px; }.inspector-files > button, .inspector-files > .inspector-file-entry { width: 100%; min-width: 0; min-height: 31px; padding: 0 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font-size: 9px; text-align: left; }.inspector-files > button { cursor: pointer; }.inspector-files > button:hover { background: var(--workspace-subtle); }.inspector-files > button > span, .inspector-file-entry > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.inspector-files > button > small, .inspector-file-entry > small { display: flex; gap: 4px; flex: 0 0 auto; font-size: 7px; }.review-more { margin: 5px 0 0 4px; padding: 3px 0; border: 0; color: var(--workspace-accent); background: transparent; font-size: 8px; font-weight: 720; cursor: pointer; }
-  .section-description { margin: -1px 0 9px; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }.check-list li > i { width: 15px; height: 15px; margin-top: 0; display: grid; place-items: center; flex: 0 0 auto; border-radius: 50%; color: #43a873; background: color-mix(in srgb, #43a873 12%, transparent); }.check-list li span { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+  .section-description { margin: -1px 0 3px; color: var(--workspace-muted); font-size: 10px; line-height: 1.45; }
   .empty-section { margin: 0; padding: 0 0 5px; color: var(--workspace-faint); font-size: 9px; line-height: 1.45; }
-  .metadata-section dl { margin: 0; display: grid; gap: 9px; }.metadata-section dl > div { min-width: 0; display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 8px; }.metadata-section dt { color: var(--workspace-faint); font-size: 8px; }.metadata-section dd { margin: 0; overflow: hidden; color: var(--workspace-text); font-size: 9px; text-overflow: ellipsis; text-transform: capitalize; white-space: nowrap; }
   .inspector-empty { margin: auto; padding: 24px; display: grid; justify-items: center; gap: 10px; color: var(--workspace-faint); font-size: 10px; text-align: center; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes usage-pulse { to { opacity: .9; } }
-  @media (max-width: 300px) { .session-overview small { font-size: 7px; } }
   @media (prefers-reduced-motion: reduce) { .inspector-section > summary::after, .gauge-progress { transition: none; }.usage-gauges.loading > i { animation: none; } }
 </style>

@@ -1,11 +1,11 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     net::{IpAddr, SocketAddr, TcpStream},
     path::Path,
     process,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -23,7 +23,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     distributed_protocol::{NodeScope, MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION},
+    node_http::{self, DeadlineStream},
     node_identity::{verify, NodeIdentity, PublicDeviceIdentity},
+    node_inventory::NodeInventory,
     node_network::{authenticated_request, NodeServerIdentity},
     node_pairing::{self, NodePairingOffer, PairedNodeClient},
     node_service::NodeHealth,
@@ -34,6 +36,9 @@ const MDNS_SERVICE_TYPE: &str = "_lume-node._tcp.local.";
 const REMOTE_STATE_FILE: &str = "remote-nodes.json";
 const CLIENT_IDENTITY_DIRECTORY: &str = "client-identity";
 const MAX_HTTP_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
+const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
+const LAST_SEEN_WRITE_INTERVAL_MS: i64 = 30_000;
+static REMOTE_STATE_LOCK: Mutex<()> = Mutex::new(());
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -237,17 +242,82 @@ pub fn remote_health(
     node_id: &str,
     rediscovery_timeout: Duration,
 ) -> Result<NodeHealth, String> {
+    query_remote(directory, node_id, rediscovery_timeout, health_at)
+}
+
+pub fn remote_inventory(
+    directory: &Path,
+    node_id: &str,
+    rediscovery_timeout: Duration,
+) -> Result<NodeInventory, String> {
+    query_remote(
+        directory,
+        node_id,
+        rediscovery_timeout,
+        |directory, remote| {
+            let inventory = serde_json::from_value::<NodeInventory>(observe_at(
+                directory,
+                remote,
+                "/v1/inventory",
+            )?)
+            .map_err(|_| "invalid remote Node inventory response".to_string())?;
+            let mut agent_ids = HashSet::new();
+            let mut runtime_ids = HashSet::new();
+            if inventory.node_id != remote.node_id
+                || inventory.agents.len() > 128
+                || inventory.runtimes.len() > 8
+                || inventory.runtimes.iter().any(|runtime| {
+                    let mut model_names = HashSet::new();
+                    runtime.id.is_empty()
+                        || runtime.id.len() > 128
+                        || !runtime_ids.insert(&runtime.id)
+                        || runtime.models.len() > 128
+                        || runtime.models.iter().any(|model| {
+                            model.name.is_empty()
+                                || model.name.chars().count() > 256
+                                || !model_names.insert(&model.name)
+                        })
+                })
+                || inventory.agents.iter().any(|agent| {
+                    agent.can_control
+                        || agent.id.is_empty()
+                        || agent.id.len() > 128
+                        || !agent_ids.insert(&agent.id)
+                        || agent.agent_label.chars().count() > 256
+                        || agent.origin
+                            != crate::distributed_protocol::ExecutionOrigin::ExternalObserved
+                })
+            {
+                return Err("remote Node inventory does not match the read-only contract".into());
+            }
+            Ok(inventory)
+        },
+    )
+}
+
+fn query_remote<T>(
+    directory: &Path,
+    node_id: &str,
+    rediscovery_timeout: Duration,
+    query: impl Fn(&Path, &RemoteNode) -> Result<T, String>,
+) -> Result<T, String> {
     let mut remote = remotes(directory)?
         .into_iter()
         .find(|remote| remote.node_id == node_id)
         .ok_or_else(|| "remote Node is not paired on this client".to_string())?;
-    match health_at(directory, &remote) {
-        Ok(health) => {
-            remote.last_seen_at = Some(now_millis());
-            upsert_remote(directory, remote)?;
-            Ok(health)
+    match query(directory, &remote) {
+        Ok(snapshot) => {
+            update_remote_contact(directory, &remote)?;
+            Ok(snapshot)
         }
         Err(first_error) => {
+            // Rejected keys, unsupported endpoints and quotas are not address changes.
+            if ["(HTTP 401)", "(HTTP 403)", "(HTTP 404)", "(HTTP 429)"]
+                .iter()
+                .any(|status| first_error.ends_with(status))
+            {
+                return Err(first_error);
+            }
             let Some(discovered) = discover(rediscovery_timeout)?.into_iter().find(|node| {
                 node.node_id == remote.node_id
                     && node.identity_fingerprint == remote.identity.fingerprint
@@ -257,41 +327,15 @@ pub fn remote_health(
             };
             remote.address = discovered.address;
             remote.port = discovered.port;
-            let health = health_at(directory, &remote)?;
-            remote.last_seen_at = Some(now_millis());
-            upsert_remote(directory, remote)?;
-            Ok(health)
+            let snapshot = query(directory, &remote)?;
+            update_remote_contact(directory, &remote)?;
+            Ok(snapshot)
         }
     }
 }
 
 fn health_at(directory: &Path, remote: &RemoteNode) -> Result<NodeHealth, String> {
-    let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
-    let request = authenticated_request(
-        &identity,
-        &remote.device_id,
-        &remote.node_id,
-        "POST",
-        "/v1/health",
-        now_millis(),
-    )?;
-    let discovered = DiscoveredNode {
-        node_id: remote.node_id.clone(),
-        address: remote.address.clone(),
-        port: remote.port,
-        identity_fingerprint: remote.identity.fingerprint.clone(),
-        certificate_sha256: remote.certificate_sha256.clone(),
-        protocol_minimum: MIN_PROTOCOL_VERSION,
-        protocol_maximum: MAX_PROTOCOL_VERSION,
-    };
-    let response = tls_json_request(
-        &discovered,
-        "POST",
-        "/v1/health",
-        Some(serde_json::to_value(request).map_err(|error| error.to_string())?),
-        &remote.certificate_sha256,
-    )?;
-    let health = serde_json::from_value::<NodeHealth>(response)
+    let health = serde_json::from_value::<NodeHealth>(observe_at(directory, remote, "/v1/health")?)
         .map_err(|_| "invalid remote Node health response".to_string())?;
     verify(&health.identity_attestation)?;
     if health.node_id != remote.node_id
@@ -304,13 +348,47 @@ fn health_at(directory: &Path, remote: &RemoteNode) -> Result<NodeHealth, String
     Ok(health)
 }
 
+fn observe_at(directory: &Path, remote: &RemoteNode, path: &str) -> Result<Value, String> {
+    let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
+    let request = authenticated_request(
+        &identity,
+        &remote.device_id,
+        &remote.node_id,
+        "POST",
+        path,
+        now_millis(),
+    )?;
+    let discovered = DiscoveredNode {
+        node_id: remote.node_id.clone(),
+        address: remote.address.clone(),
+        port: remote.port,
+        identity_fingerprint: remote.identity.fingerprint.clone(),
+        certificate_sha256: remote.certificate_sha256.clone(),
+        protocol_minimum: MIN_PROTOCOL_VERSION,
+        protocol_maximum: MAX_PROTOCOL_VERSION,
+    };
+    tls_json_request(
+        &discovered,
+        "POST",
+        path,
+        Some(serde_json::to_value(request).map_err(|error| error.to_string())?),
+        &remote.certificate_sha256,
+    )
+}
+
 pub fn remotes(directory: &Path) -> Result<Vec<RemoteNode>, String> {
+    let _lock = REMOTE_STATE_LOCK
+        .lock()
+        .map_err(|_| "remote Node state is unavailable")?;
     let mut nodes = load_remote_state(directory)?.nodes;
     nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
     Ok(nodes)
 }
 
 pub fn forget(directory: &Path, node_id: &str) -> Result<bool, String> {
+    let _lock = REMOTE_STATE_LOCK
+        .lock()
+        .map_err(|_| "remote Node state is unavailable")?;
     let mut state = load_remote_state(directory)?;
     let previous = state.nodes.len();
     state.nodes.retain(|node| node.node_id != node_id);
@@ -384,6 +462,7 @@ fn tls_json_request(
     body: Option<Value>,
     certificate_sha256: &str,
 ) -> Result<Value, String> {
+    let deadline = Instant::now() + REQUEST_DEADLINE;
     let address = node
         .address
         .parse::<IpAddr>()
@@ -391,12 +470,7 @@ fn tls_json_request(
     let socket = SocketAddr::new(address, node.port);
     let stream = TcpStream::connect_timeout(&socket, CONNECTION_TIMEOUT)
         .map_err(|error| format!("could not connect to the Lume Node: {error}"))?;
-    stream
-        .set_read_timeout(Some(CONNECTION_TIMEOUT))
-        .map_err(|error| error.to_string())?;
-    stream
-        .set_write_timeout(Some(CONNECTION_TIMEOUT))
-        .map_err(|error| error.to_string())?;
+    let stream = DeadlineStream::new(stream, deadline);
     let verifier = Arc::new(PinnedCertificateVerifier::new(certificate_sha256)?);
     let config = ClientConfig::builder()
         .dangerous()
@@ -421,39 +495,12 @@ fn tls_json_request(
         .and_then(|_| stream.write_all(&body))
         .and_then(|_| stream.flush())
         .map_err(|error| error.to_string())?;
-    let mut response = Vec::new();
-    stream
-        .take((MAX_HTTP_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut response)
-        .map_err(|error| error.to_string())?;
-    if response.len() > MAX_HTTP_RESPONSE_BYTES {
-        return Err("Node response is too large".into());
-    }
-    parse_http_response(&response)
+    node_http::read_json_response(&mut stream, MAX_HTTP_RESPONSE_BYTES)
 }
 
+#[cfg(test)]
 fn parse_http_response(response: &[u8]) -> Result<Value, String> {
-    let header_end = find_bytes(response, b"\r\n\r\n")
-        .map(|index| index + 4)
-        .ok_or_else(|| "invalid Node HTTP response".to_string())?;
-    let headers = std::str::from_utf8(&response[..header_end])
-        .map_err(|_| "invalid Node HTTP response".to_string())?;
-    let status = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse::<u16>().ok())
-        .ok_or_else(|| "invalid Node HTTP status".to_string())?;
-    let body = serde_json::from_slice::<Value>(&response[header_end..])
-        .map_err(|_| "invalid Node JSON response".to_string())?;
-    if !(200..300).contains(&status) {
-        let message = body
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("Node request failed");
-        return Err(format!("{message} (HTTP {status})"));
-    }
-    Ok(body)
+    node_http::parse_json_response(response)
 }
 
 #[derive(Debug)]
@@ -514,7 +561,38 @@ impl ServerCertVerifier for PinnedCertificateVerifier {
     }
 }
 
+fn update_remote_contact(directory: &Path, remote: &RemoteNode) -> Result<(), String> {
+    let _lock = REMOTE_STATE_LOCK
+        .lock()
+        .map_err(|_| "remote Node state is unavailable")?;
+    let mut state = load_remote_state(directory)?;
+    let Some(stored) = state.nodes.iter_mut().find(|node| {
+        node.node_id == remote.node_id
+            && node.device_id == remote.device_id
+            && node.identity == remote.identity
+            && node.certificate_sha256 == remote.certificate_sha256
+    }) else {
+        // A concurrent Forget or re-pair must not be undone by a delayed response.
+        return Ok(());
+    };
+    let now = now_millis();
+    let address_changed = stored.address != remote.address || stored.port != remote.port;
+    let seen_due = stored
+        .last_seen_at
+        .is_none_or(|at| now.saturating_sub(at) >= LAST_SEEN_WRITE_INTERVAL_MS);
+    if address_changed || seen_due {
+        stored.address = remote.address.clone();
+        stored.port = remote.port;
+        stored.last_seen_at = Some(now);
+        save_remote_state(directory, &state)?;
+    }
+    Ok(())
+}
+
 fn upsert_remote(directory: &Path, remote: RemoteNode) -> Result<(), String> {
+    let _lock = REMOTE_STATE_LOCK
+        .lock()
+        .map_err(|_| "remote Node state is unavailable")?;
     let mut state = load_remote_state(directory)?;
     state.nodes.retain(|node| node.node_id != remote.node_id);
     state.nodes.push(remote);
@@ -574,12 +652,6 @@ fn sha256_hex(value: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 #[cfg(unix)]
@@ -676,9 +748,14 @@ mod tests {
         let client_directory = test_directory("client");
         let initial_health = crate::node_service::health(&server_directory).expect("Node health");
         let identity = NodeIdentity::load_or_create(&server_directory).expect("Node identity");
-        let server =
-            NodeNetworkServer::start(&server_directory, &initial_health.node_id, 0, &identity)
-                .expect("Node server");
+        let server = NodeNetworkServer::start(
+            &server_directory,
+            &initial_health.node_id,
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            0,
+            &identity,
+        )
+        .expect("Node server");
         let offer =
             node_pairing::begin_pairing(&server_directory, &initial_health.node_id, &identity)
                 .expect("pairing offer");

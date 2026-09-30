@@ -15,9 +15,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            bundles: deb,appimage,rpm
+            args: --bundles deb,appimage,rpm
           - os: windows-2022
-            bundles: nsis
+            args: --bundles nsis
+          - os: macos-15
+            args: --bundles dmg --target aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +28,12 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: swatinem/rust-cache@v2
+        if: runner.os == 'macOS'
+        with:
+          workspaces: './src-tauri -> target'
       - name: Dependências Linux
         if: runner.os == 'Linux'
         run: |
@@ -47,7 +55,7 @@ jobs:
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          args: --bundles ${{ matrix.bundles }}
+          args: ${{ matrix.args }}
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           uploadWorkflowArtifacts: true

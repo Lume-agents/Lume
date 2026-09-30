@@ -4,7 +4,7 @@
   "description": "Abre sessões locais de agentes no terminal integrado do VS Code.",
   "version": "0.2.0",
   "publisher": "tulerws",
-  "repository": "https://github.com/tulerws/Lume",
+  "repository": "https://github.com/Lume-agents/Lume",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"

@@ -50,6 +50,8 @@ pub enum NodeScope {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeCapability {
+    AgentInventory,
+    ModelInventory,
     SessionMonitoring,
     ManagedPrompts,
     Approvals,
@@ -78,6 +80,7 @@ pub enum MessageChannel {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportKind {
+    LanTlsHttp,
     LanTlsWebSocket,
     WebRtcDataChannel,
     RelayTlsWebSocket,

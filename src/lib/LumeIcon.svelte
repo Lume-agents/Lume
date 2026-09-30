@@ -36,6 +36,14 @@
     | "plus"
     | "rename"
     | "refresh"
+    | "repository"
+    | "branch"
+    | "pull-request"
+    | "issue"
+    | "commit"
+    | "external"
+    | "arrow-right"
+    | "arrow-up"
     | "trash"
     | "warning";
 </script>
@@ -71,7 +79,25 @@
   focusable="false"
 >
   {#if label}<title>{label}</title>{/if}
-  {#if name === "warning"}
+  {#if name === "repository"}
+    <path d="M4 18.5V5a2 2 0 0 1 2-2h13v18H6a2 2 0 0 1 0-4h13M8 3v8l2.5-1.5L13 11V3" />
+  {:else if name === "branch"}
+    <circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="6" r="2" />
+    <path d="M6 7v10M18 8a9 9 0 0 1-9 9H6" />
+  {:else if name === "pull-request"}
+    <circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="19" r="2" />
+    <path d="M6 7v10M18 17V9a4 4 0 0 0-4-4h-2m3-3-3 3 3 3" />
+  {:else if name === "issue"}
+    <circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+  {:else if name === "commit"}
+    <circle cx="12" cy="12" r="4" /><path d="M3 12h5m8 0h5" />
+  {:else if name === "external"}
+    <path d="M14 3h7v7m0-7L11 13M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5" />
+  {:else if name === "arrow-right"}
+    <path d="M4 12h16m-6-6 6 6-6 6" />
+  {:else if name === "arrow-up"}
+    <path d="M12 20V4M6 10l6-6 6 6" />
+  {:else if name === "warning"}
     <path d="M10.3 4.1 2.9 17a2 2 0 0 0 1.8 3h14.6a2 2 0 0 0 1.8-3L13.7 4.1a2 2 0 0 0-3.4 0Z" />
     <path d="M12 9v4.5M12 17h.01" />
   {:else if name === "inspector"}

@@ -43,9 +43,19 @@ pub struct ExternalWriterConflict {
     pub process_id: u32,
 }
 
+fn lume_owns_codex_writer(sessions: &[AgentSession], process_id: u32, native_id: &str) -> bool {
+    sessions.iter().any(|session| {
+        session.agent == AgentKind::Codex
+            && session.control_origin == SessionControlOrigin::Lume
+            && session.process_id == Some(process_id)
+            && session.native_session_id.as_deref() == Some(native_id)
+    })
+}
+
 #[derive(Clone)]
 pub struct AppState {
     sessions: Arc<Mutex<Vec<AgentSession>>>,
+    terminated_native_sessions: Arc<Mutex<HashSet<(AgentKind, String)>>>,
     internal_services: Arc<Mutex<Vec<crate::domain::InternalService>>>,
     store: Arc<Mutex<Store>>,
     decisions: Arc<(Mutex<HashMap<String, PermissionAction>>, Condvar)>,
@@ -53,6 +63,7 @@ pub struct AppState {
     missing_process_scans: Arc<Mutex<HashMap<String, u8>>>,
     sessions_in_takeover: Arc<Mutex<HashSet<String>>>,
     external_writer_attempts: Arc<Mutex<HashSet<(String, u32, String)>>>,
+    resolved_external_writer_attempts: Arc<Mutex<HashSet<(u32, String)>>>,
     workspace_snapshots: Arc<Mutex<HashMap<String, WorkspaceSnapshot>>>,
     agent_rate_limits: Arc<Mutex<HashMap<AgentKind, Vec<AgentRateLimit>>>>,
     session_aliases: Arc<Mutex<HashMap<String, String>>>,
@@ -112,6 +123,7 @@ impl AppState {
         store.purge_history(cutoff)?;
         let state = Self {
             sessions: Arc::new(Mutex::new(sessions)),
+            terminated_native_sessions: Arc::new(Mutex::new(HashSet::new())),
             internal_services: Arc::new(Mutex::new(Vec::new())),
             store: Arc::new(Mutex::new(store)),
             decisions: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
@@ -119,6 +131,7 @@ impl AppState {
             missing_process_scans: Arc::new(Mutex::new(HashMap::new())),
             sessions_in_takeover: Arc::new(Mutex::new(HashSet::new())),
             external_writer_attempts: Arc::new(Mutex::new(HashSet::new())),
+            resolved_external_writer_attempts: Arc::new(Mutex::new(HashSet::new())),
             workspace_snapshots: Arc::new(Mutex::new(HashMap::new())),
             agent_rate_limits: Arc::new(Mutex::new(HashMap::new())),
             session_aliases: Arc::new(Mutex::new(preferences.session_aliases)),
@@ -279,6 +292,9 @@ impl AppState {
             .clone();
         let mut active = HashSet::new();
         for attempt in attempts {
+            if lume_owns_codex_writer(&sessions, attempt.process_id, &attempt.native_session_id) {
+                continue;
+            }
             for session in sessions.iter().filter(|session| {
                 session.agent == AgentKind::Codex
                     && session.control_origin == SessionControlOrigin::Lume
@@ -298,6 +314,14 @@ impl AppState {
             .lock()
             .map_err(|_| "Could not track external Codex attempts".to_string())?;
         reported.retain(|key| live_pids.contains(&key.1) && active.contains(key));
+        let active_attempts = active
+            .iter()
+            .map(|(_, pid, native_id)| (*pid, native_id.clone()))
+            .collect::<HashSet<_>>();
+        self.resolved_external_writer_attempts
+            .lock()
+            .map_err(|_| "Could not update resolved Codex attempts".to_string())?
+            .retain(|key| live_pids.contains(&key.0) && active_attempts.contains(key));
         let conflicts = active
             .iter()
             .filter(|key| !reported.contains(*key))
@@ -319,19 +343,23 @@ impl AppState {
         process_id: u32,
         native_session_id: &str,
     ) -> Result<(), String> {
-        let session = self
+        let sessions = self
             .sessions
             .lock()
             .map_err(|_| "Could not verify the Codex session".to_string())?
+            .clone();
+        let session = sessions
             .iter()
             .find(|session| session.id == session_id)
-            .cloned()
             .ok_or_else(|| "The Lume-controlled conversation is no longer available".to_string())?;
         if session.agent != AgentKind::Codex
             || session.control_origin != SessionControlOrigin::Lume
             || session.native_session_id.as_deref() != Some(native_session_id)
         {
             return Err("This conversation is no longer controlled by Lume".into());
+        }
+        if lume_owns_codex_writer(&sessions, process_id, native_session_id) {
+            return Err("This CLI belongs to Lume, not an external writer".into());
         }
         let attempts = self
             .external_writer_attempts
@@ -358,8 +386,14 @@ impl AppState {
             .external_writer_attempts
             .lock()
             .map_err(|_| "Could not inspect external Codex attempts".to_string())?;
+        let resolved = self
+            .resolved_external_writer_attempts
+            .lock()
+            .map_err(|_| "Could not inspect resolved Codex attempts".to_string())?;
         Ok(attempts
             .iter()
+            .filter(|(_, pid, native_id)| !resolved.contains(&(*pid, native_id.clone())))
+            .filter(|(_, pid, native_id)| !lume_owns_codex_writer(&sessions, *pid, native_id))
             .filter_map(|(session_id, process_id, native_session_id)| {
                 let still_controlled = sessions.iter().any(|session| {
                     session.id == *session_id
@@ -378,18 +412,17 @@ impl AppState {
 
     pub fn clear_external_writer_conflict(
         &self,
-        session_id: &str,
+        _session_id: &str,
         process_id: u32,
         native_session_id: &str,
     ) -> Result<(), String> {
-        self.external_writer_attempts
+        // Keep the observed attempt until discovery confirms it is gone. A
+        // scan captured before cancellation must not reopen the same dialog.
+        // Acknowledgement covers aliases of this same native conversation.
+        self.resolved_external_writer_attempts
             .lock()
             .map_err(|_| "Could not update external Codex attempts".to_string())?
-            .remove(&(
-                session_id.to_string(),
-                process_id,
-                native_session_id.to_string(),
-            ));
+            .insert((process_id, native_session_id.to_string()));
         Ok(())
     }
 
@@ -534,6 +567,55 @@ impl AppState {
             .ok_or_else(|| "Session not found".to_string())
     }
 
+    /// Resolve a control target without loading or cloning any chat history.
+    pub fn connected_session_id_for_native_id(
+        &self,
+        agent: &AgentKind,
+        native_id: &str,
+        control_origin: Option<SessionControlOrigin>,
+    ) -> Result<Option<String>, String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Não foi possível acessar as sessões".to_string())?;
+        Ok(sessions
+            .iter()
+            .filter(|session| {
+                &session.agent == agent
+                    && session.native_session_id.as_deref() == Some(native_id)
+                    && control_origin
+                        .as_ref()
+                        .is_none_or(|origin| &session.control_origin == origin)
+            })
+            .reduce(|current, candidate| {
+                if prefer_session(candidate, current) {
+                    candidate
+                } else {
+                    current
+                }
+            })
+            .map(|session| session.id.clone()))
+    }
+
+    pub fn native_session_has_active_task(
+        &self,
+        agent: &AgentKind,
+        native_id: &str,
+    ) -> Result<bool, String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Não foi possível acessar as sessões".to_string())?;
+        Ok(sessions.iter().any(|session| {
+            &session.agent == agent
+                && session.native_session_id.as_deref() == Some(native_id)
+                && matches!(
+                    session.status,
+                    SessionStatus::Running | SessionStatus::PermissionRequired
+                )
+        }))
+    }
+
     pub fn session_with_history(&self, session_id: &str) -> Result<AgentSession, String> {
         let mut sessions = vec![self.connected_session(session_id)?];
         self.attach_archived_conversations(&mut sessions)?;
@@ -627,6 +709,14 @@ impl AppState {
             .map_err(|_| "Não foi possível acessar os nomes das sessões".to_string())?
             .clone();
         apply_session_aliases(&mut sessions, &aliases);
+        if sessions
+            .iter()
+            .any(|session| session.agent == AgentKind::Codex && session.native_session_id.is_some())
+        {
+            let names =
+                integrations::indexed_session_names(&IntegrationKind::Codex).unwrap_or_default();
+            apply_indexed_codex_names(&mut sessions, &names);
+        }
         let agent_rate_limits = self
             .agent_rate_limits
             .lock()
@@ -1758,6 +1848,15 @@ impl AppState {
             .iter()
             .map(|session| session.id.clone())
             .collect::<Vec<_>>();
+        self.terminated_native_sessions
+            .lock()
+            .map_err(|_| "Não foi possível registrar o encerramento".to_string())?
+            .extend(removed.iter().filter_map(|session| {
+                (session.control_origin == SessionControlOrigin::Lume)
+                    .then(|| session.native_session_id.clone())
+                    .flatten()
+                    .map(|native_id| (session.agent.clone(), native_id))
+            }));
         sessions.retain(|session| !removed_ids.contains(&session.id));
         drop(sessions);
         self.missing_process_scans
@@ -1807,6 +1906,20 @@ impl AppState {
             .sessions
             .lock()
             .map_err(|_| "Não foi possível atualizar as sessões".to_string())?;
+        if let Some(native_id) = &event.native_session_id {
+            let mut terminated = self
+                .terminated_native_sessions
+                .lock()
+                .map_err(|_| "Não foi possível verificar a sessão encerrada".to_string())?;
+            let identity = (event.agent.clone(), native_id.clone());
+            if matches!(event.event, HookEventKind::SessionStarted) {
+                terminated.remove(&identity);
+            } else if terminated.contains(&identity) {
+                // A prompt monitor can deliver its final notification after
+                // termination. Only an explicit start/resume may reopen it.
+                return Ok(None);
+            }
+        }
         let native_ids = event
             .native_session_id
             .as_ref()
@@ -2727,9 +2840,10 @@ impl AppState {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let ambiguous_antigravity_context =
-                process.agent == AgentKind::Antigravity && exact_contextual_chat_ids.len() > 1;
-            let contextual_chat_ids = if ambiguous_antigravity_context {
+            let ambiguous_native_context =
+                matches!(process.agent, AgentKind::Codex | AgentKind::Antigravity)
+                    && exact_contextual_chat_ids.len() > 1;
+            let contextual_chat_ids = if ambiguous_native_context {
                 Vec::new()
             } else if exact_contextual_chat_ids.is_empty() {
                 let fallback = sessions
@@ -2862,8 +2976,8 @@ impl AppState {
                 changed = true;
                 continue;
             }
-            if ambiguous_antigravity_context {
-                // A workspace can have several Antigravity conversations, but
+            if ambiguous_native_context {
+                // A workspace can have several native conversations, but
                 // the CLI process may not expose which one it has selected.
                 // Keep their identities separate instead of binding one PID to
                 // every chat or creating a misleading duplicate session.
@@ -2919,7 +3033,11 @@ impl AppState {
 
         let process_is_present = |session: &AgentSession| {
             session.process_id.is_some_and(|pid| {
-                if is_provisional_process(session) && session.source == SessionSource::Vscode {
+                if (session.agent == AgentKind::Codex && session.source == SessionSource::Cli)
+                    || (is_provisional_process(session) && session.source == SessionSource::Vscode)
+                {
+                    // A live shared server (or a reused PID) is not evidence
+                    // that the external CLI for this conversation is open.
                     active_pids.contains(&pid)
                 } else {
                     live_pids.contains(&pid)
@@ -3118,14 +3236,21 @@ fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) 
             merge_attachments(&mut existing.attachments, activity.attachments);
             return;
         }
-        activity.created_at = existing.created_at;
+        let reordered = activity.created_at < existing.created_at;
+        activity.created_at = activity.created_at.min(existing.created_at);
         *existing = activity;
+        if reordered {
+            session
+                .activities
+                .sort_by_key(|activity| activity.created_at);
+        }
         return;
     }
     if activity.kind == "message" {
         let activity_detail = activity.detail.clone();
         let duplicate = session.activities.iter().rposition(|existing| {
             existing.kind == "message"
+                && !distinct_codex_message_items(&existing.id, &activity.id)
                 && match (existing.detail.as_deref(), activity_detail.as_deref()) {
                     (Some(existing), Some(incoming)) => same_chat_response(existing, incoming),
                     (None, None) => true,
@@ -3137,6 +3262,10 @@ fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) 
                 .iter()
                 .any(|existing| existing.kind == "prompt")
         }) {
+            let reordered = activity.created_at < session.activities[index].created_at;
+            session.activities[index].created_at = activity
+                .created_at
+                .min(session.activities[index].created_at);
             if let Some(incoming) = activity.detail.take() {
                 let should_replace =
                     session.activities[index]
@@ -3160,6 +3289,11 @@ fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) 
                 &mut session.activities[index].attachments,
                 activity.attachments,
             );
+            if reordered {
+                session
+                    .activities
+                    .sort_by_key(|activity| activity.created_at);
+            }
             return;
         }
     }
@@ -3168,6 +3302,18 @@ fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) 
         .activities
         .sort_by_key(|activity| activity.created_at);
     prune_transient_activities(&mut session.activities, 160);
+}
+
+fn distinct_codex_message_items(left: &str, right: &str) -> bool {
+    if left == right {
+        return false;
+    }
+    if left.starts_with("codex-rollout:") && right.starts_with("codex-rollout:") {
+        return true;
+    }
+    left.starts_with("codex:")
+        && right.starts_with("codex:")
+        && left.rsplit(':').next() != right.rsplit(':').next()
 }
 
 fn remember_prompt_token_usage(session: &mut AgentSession, usage: PromptTokenUsage) {
@@ -3888,8 +4034,10 @@ fn apply_metadata(session: &mut AgentSession, event: &HookEvent) {
         && session.process_id.is_some()
         && event.process_id.is_none()
         && event.native_session_id.is_some();
-    let keeps_managed_desktop_source = session.agent == AgentKind::Codex
-        && session.control_origin == SessionControlOrigin::Lume
+    let keeps_managed_desktop_source = matches!(
+        session.agent,
+        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
+    ) && session.control_origin == SessionControlOrigin::Lume
         && session.source == SessionSource::Desktop
         && event.process_id.is_none();
     if !keeps_bound_process_source && !keeps_managed_desktop_source {
@@ -4132,6 +4280,23 @@ fn session_needs_recovered_identity(session: &AgentSession) -> bool {
                 == normalized_session_name(&session.project))
 }
 
+fn apply_indexed_codex_names(sessions: &mut [AgentSession], names: &HashMap<String, String>) {
+    for session in sessions {
+        if session.agent != AgentKind::Codex {
+            continue;
+        }
+        if let Some(name) = session
+            .native_session_id
+            .as_ref()
+            .and_then(|id| names.get(id))
+        {
+            if let Some(name) = normalized_session_name(name) {
+                session.session_name = name;
+            }
+        }
+    }
+}
+
 fn apply_recovered_identity(
     session: &mut AgentSession,
     (native_id, name): &(String, String),
@@ -4153,6 +4318,7 @@ fn integration_kind_for_agent(agent: &AgentKind) -> Option<IntegrationKind> {
         AgentKind::Codex => Some(IntegrationKind::Codex),
         AgentKind::ClaudeCode => Some(IntegrationKind::Claude),
         AgentKind::Antigravity => Some(IntegrationKind::Antigravity),
+        AgentKind::OpenCode => Some(IntegrationKind::OpenCode),
         AgentKind::DeepSeek => Some(IntegrationKind::DeepSeek),
         AgentKind::Gemini => Some(IntegrationKind::Gemini),
         AgentKind::ChatGpt | AgentKind::Claude | AgentKind::Unknown => None,
@@ -4352,6 +4518,7 @@ fn agent_label(agent: &AgentKind) -> &'static str {
         AgentKind::Claude => "Claude",
         AgentKind::ClaudeCode => "Claude Code",
         AgentKind::Antigravity => "Antigravity",
+        AgentKind::OpenCode => "OpenCode",
         AgentKind::DeepSeek => "DeepSeek",
         AgentKind::Gemini => "Gemini",
         AgentKind::Unknown => "Agente",
@@ -4392,6 +4559,7 @@ fn persistent_session_alias_key(session: &AgentSession) -> Option<String> {
         AgentKind::Claude => "claude".to_string(),
         AgentKind::ClaudeCode => "claude_code".to_string(),
         AgentKind::Antigravity => "antigravity".to_string(),
+        AgentKind::OpenCode => "opencode".to_string(),
         AgentKind::DeepSeek => "deepseek".to_string(),
         AgentKind::Gemini => "gemini".to_string(),
         AgentKind::Unknown => format!("unknown:{}", session.agent_label.to_lowercase()),
@@ -4495,6 +4663,128 @@ mod tests {
             activities: Vec::new(),
             wait_for_decision: false,
         }
+    }
+
+    #[test]
+    fn control_target_lookup_keeps_provider_and_ownership_boundaries() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut external = session_from_event(&started_event("external", 4242), 1);
+        external.agent = AgentKind::Codex;
+        external.permission_profile.can_respond_from_lume = false;
+        let mut managed = external.clone();
+        managed.id = "managed".into();
+        managed.control_origin = SessionControlOrigin::Lume;
+        managed.permission_profile.can_respond_from_lume = true;
+        let mut other_provider = managed.clone();
+        other_provider.id = "other-provider".into();
+        other_provider.agent = AgentKind::ClaudeCode;
+        other_provider.updated_at = 100;
+        *state.sessions.lock().expect("sessions") = vec![external, managed, other_provider];
+
+        for (origin, expected) in [
+            (None, "managed"),
+            (Some(SessionControlOrigin::Lume), "managed"),
+            (Some(SessionControlOrigin::External), "external"),
+        ] {
+            assert_eq!(
+                state
+                    .connected_session_id_for_native_id(
+                        &AgentKind::Codex,
+                        "native-session",
+                        origin,
+                    )
+                    .expect("control target")
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            state
+                .connected_session_id_for_native_id(&AgentKind::Codex, "missing", None)
+                .expect("missing target"),
+            None
+        );
+    }
+
+    #[test]
+    fn active_native_task_lookup_ignores_other_providers_and_finished_tasks() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut codex = session_from_event(&started_event("codex", 4242), 1);
+        codex.agent = AgentKind::Codex;
+        codex.status = SessionStatus::Completed;
+        let mut other_provider = codex.clone();
+        other_provider.id = "claude".into();
+        other_provider.agent = AgentKind::ClaudeCode;
+        other_provider.status = SessionStatus::Running;
+        *state.sessions.lock().expect("sessions") = vec![codex, other_provider];
+
+        assert!(!state
+            .native_session_has_active_task(&AgentKind::Codex, "native-session")
+            .expect("finished Codex task"));
+        for status in [SessionStatus::Running, SessionStatus::PermissionRequired] {
+            state.sessions.lock().expect("sessions")[0].status = status;
+            assert!(state
+                .native_session_has_active_task(&AgentKind::Codex, "native-session")
+                .expect("active Codex task"));
+        }
+        assert!(!state
+            .native_session_has_active_task(&AgentKind::Codex, "missing")
+            .expect("missing task"));
+    }
+
+    #[test]
+    fn control_queries_do_not_hydrate_archived_messages() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut session = session_from_event(&started_event("control-target", 4242), 1);
+        session.agent = AgentKind::Codex;
+        session.status = SessionStatus::Running;
+        session.activities.push(SessionActivity {
+            id: "archived-message".into(),
+            kind: "message".into(),
+            title: "Codex".into(),
+            detail: Some("Archived conversation stays out of control queries".into()),
+            status: "completed".into(),
+            created_at: 1,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        });
+        state
+            .store
+            .lock()
+            .expect("store")
+            .save_session(&session)
+            .expect("archive");
+        session.activities.clear();
+        state.sessions.lock().expect("sessions").push(session);
+
+        assert!(state
+            .connected_session("control-target")
+            .expect("target")
+            .activities
+            .is_empty());
+        assert_eq!(
+            state
+                .connected_session_id_for_native_id(&AgentKind::Codex, "native-session", None)
+                .expect("control target")
+                .as_deref(),
+            Some("control-target")
+        );
+        assert!(state
+            .native_session_has_active_task(&AgentKind::Codex, "native-session")
+            .expect("active task"));
+        assert!(state
+            .archived_conversations
+            .lock()
+            .expect("archive cache")
+            .is_empty());
+        let history = state
+            .session_with_history("control-target")
+            .expect("explicit history");
+        assert!(history
+            .activities
+            .iter()
+            .any(|activity| activity.id == "archived-message"));
     }
 
     #[test]
@@ -4710,6 +5000,83 @@ mod tests {
     }
 
     #[test]
+    fn lume_resumed_cli_never_creates_an_external_writer_conflict() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        let mut event = started_event("codex:own-cli", 4242);
+        event.agent = AgentKind::Codex;
+        event.control_origin = SessionControlOrigin::Lume;
+        event.native_session_id = Some("thread-own-cli".into());
+        state.ingest(event).expect("CLI aberta pelo Lume");
+        let attempt = ExternalWriterAttempt {
+            process_id: 4242,
+            native_session_id: "thread-own-cli".into(),
+        };
+        assert!(state
+            .observe_external_writer_attempts(
+                std::slice::from_ref(&attempt),
+                &HashSet::from([4242])
+            )
+            .expect("ignorar CLI própria")
+            .is_empty());
+        assert!(state
+            .list_external_writer_conflicts()
+            .expect("conflitos")
+            .is_empty());
+        assert!(state
+            .validate_external_writer_conflict("codex:own-cli", 4242, "thread-own-cli")
+            .is_err());
+
+        let external = ExternalWriterAttempt {
+            process_id: 4343,
+            ..attempt
+        };
+        let conflicts = state
+            .observe_external_writer_attempts(&[external], &HashSet::from([4242, 4343]))
+            .expect("detectar outra CLI");
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].process_id, 4343);
+    }
+
+    #[test]
+    fn stale_external_conflict_cannot_terminate_a_cli_that_became_lume_owned() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        let mut event = started_event("codex:late-own-cli", 4242);
+        event.agent = AgentKind::Codex;
+        event.native_session_id = Some("thread-late-own-cli".into());
+        state.ingest(event.clone()).expect("sessão");
+        state
+            .mark_session_lume_controlled("codex:late-own-cli", SessionSource::Cli, None)
+            .expect("controle");
+        let attempt = ExternalWriterAttempt {
+            process_id: 4242,
+            native_session_id: "thread-late-own-cli".into(),
+        };
+        assert_eq!(
+            state
+                .observe_external_writer_attempts(
+                    std::slice::from_ref(&attempt),
+                    &HashSet::from([4242])
+                )
+                .expect("varredura antiga")
+                .len(),
+            1
+        );
+        event.control_origin = SessionControlOrigin::Lume;
+        state.ingest(event).expect("identidade da CLI própria");
+        assert!(state
+            .list_external_writer_conflicts()
+            .expect("conflitos")
+            .is_empty());
+        assert!(state
+            .validate_external_writer_conflict("codex:late-own-cli", 4242, "thread-late-own-cli")
+            .is_err());
+        assert!(state
+            .observe_external_writer_attempts(&[attempt], &HashSet::from([4242]))
+            .expect("nova varredura")
+            .is_empty());
+    }
+
+    #[test]
     fn external_resume_conflict_is_emitted_once_and_does_not_replace_lume_identity() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");
         let mut event = started_event("codex:controlled", 4242);
@@ -4755,12 +5122,42 @@ mod tests {
             source: SessionSource::Cli,
         };
         state
-            .reconcile_process_snapshot(vec![process], live_pids)
+            .reconcile_process_snapshot(vec![process], live_pids.clone())
             .expect("reconciliar processo externo");
         let session = state.sessions().expect("sessão continua no Lume").remove(0);
         assert_eq!(session.control_origin, SessionControlOrigin::Lume);
         assert_eq!(session.source, SessionSource::Desktop);
         assert_eq!(session.process_id, None);
+
+        state
+            .clear_external_writer_conflict("codex:controlled", 4343, "thread-controlled")
+            .expect("confirmar permanência no Lume");
+        for _ in 0..3 {
+            assert!(state
+                .observe_external_writer_attempts(std::slice::from_ref(&attempt), &live_pids)
+                .expect("varredura anterior ao encerramento")
+                .is_empty());
+            assert!(state
+                .list_external_writer_conflicts()
+                .expect("não repetir confirmação")
+                .is_empty());
+        }
+        let second_attempt = ExternalWriterAttempt {
+            process_id: 4444,
+            native_session_id: "thread-controlled".into(),
+        };
+        let next = state
+            .observe_external_writer_attempts(
+                &[attempt.clone(), second_attempt],
+                &HashSet::from([4343, 4444]),
+            )
+            .expect("nova tentativa externa");
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].process_id, 4444);
+        assert_eq!(
+            state.list_external_writer_conflicts().expect("pendentes"),
+            next
+        );
 
         state
             .observe_external_writer_attempts(&[], &HashSet::new())
@@ -4772,6 +5169,13 @@ mod tests {
         assert!(state
             .validate_external_writer_conflict("codex:controlled", 4343, "thread-controlled",)
             .is_err());
+        assert_eq!(
+            state
+                .observe_external_writer_attempts(std::slice::from_ref(&attempt), &live_pids)
+                .expect("uma nova instância não deve herdar a confirmação antiga")
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -4799,6 +5203,27 @@ mod tests {
                 && session.process_id.is_none()
                 && session.permission_profile.can_respond_from_lume
         }));
+        let attempt = ExternalWriterAttempt {
+            process_id: 6262,
+            native_session_id: "thread-shared".into(),
+        };
+        assert_eq!(
+            state
+                .observe_external_writer_attempts(
+                    std::slice::from_ref(&attempt),
+                    &HashSet::from([6262])
+                )
+                .expect("aliases da mesma tentativa")
+                .len(),
+            2
+        );
+        state
+            .clear_external_writer_conflict("codex:external", 6262, "thread-shared")
+            .expect("confirmar uma vez para toda a conversa");
+        assert!(state
+            .list_external_writer_conflicts()
+            .expect("aliases resolvidos")
+            .is_empty());
     }
 
     #[test]
@@ -4927,6 +5352,31 @@ mod tests {
             recovered.get(&4104),
             Some(&("thread-main".into(), "Lume principal".into()))
         );
+    }
+
+    #[test]
+    fn indexed_codex_names_refresh_existing_threads_without_reassigning_processes() {
+        let mut event = started_event("codex:thread-named", 4104);
+        event.agent = AgentKind::Codex;
+        event.native_session_id = Some("thread-named".into());
+        event.session_name = Some("First prompt title".into());
+        let mut sessions = vec![session_from_event(&event, 42)];
+        let names = HashMap::from([
+            ("thread-named".into(), "Renamed conversation".into()),
+            ("different-thread".into(), "Another conversation".into()),
+        ]);
+        apply_indexed_codex_names(&mut sessions, &names);
+        assert_eq!(sessions[0].session_name, "Renamed conversation");
+        assert_eq!(sessions[0].process_id, Some(4104));
+        assert_eq!(sessions[0].project, "lume");
+        sessions[0].native_session_id = None;
+        sessions[0].session_name = "Unidentified CLI".into();
+        apply_indexed_codex_names(&mut sessions, &names);
+        assert_eq!(sessions[0].session_name, "Unidentified CLI");
+        sessions[0].agent = AgentKind::ClaudeCode;
+        sessions[0].native_session_id = Some("thread-named".into());
+        apply_indexed_codex_names(&mut sessions, &names);
+        assert_eq!(sessions[0].session_name, "Unidentified CLI");
     }
 
     #[test]
@@ -5440,6 +5890,87 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn distinct_codex_messages_are_not_merged_across_intervening_tools() {
+        for ids in [
+            [
+                "codex:chat:turn:t:item:msg-1",
+                "codex:chat:turn:t:item:msg-2",
+            ],
+            ["codex-rollout:1", "codex-rollout:2"],
+        ] {
+            let mut session = session_from_event(&started_event("chat", 4242), 1);
+            for (id, kind, created_at, detail) in [
+                (ids[0], "message", 10_000, "Running another check"),
+                ("command", "command", 20_000, "cargo check"),
+                (ids[1], "message", 30_000, "Running another check"),
+            ] {
+                remember_activity(
+                    &mut session,
+                    SessionActivity {
+                        id: id.into(),
+                        kind: kind.into(),
+                        title: kind.into(),
+                        detail: Some(detail.into()),
+                        status: "completed".into(),
+                        created_at,
+                        files: Vec::new(),
+                        attachments: Vec::new(),
+                        append_detail: false,
+                    },
+                );
+            }
+            assert_eq!(
+                session
+                    .activities
+                    .iter()
+                    .map(|activity| activity.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![ids[0], "command", ids[1]]
+            );
+        }
+    }
+
+    #[test]
+    fn original_timestamps_from_replays_restore_message_order() {
+        for replay_id in ["codex:chat:msg-1", "codex-rollout:original"] {
+            let mut session = session_from_event(&started_event("chat", 4242), 1);
+            for (id, kind, created_at, detail) in [
+                (
+                    "codex:chat:msg-1",
+                    "message",
+                    10_000,
+                    "Inspecting the project",
+                ),
+                ("command", "command", 8_000, "cargo check"),
+                (replay_id, "message", 5_000, "Inspecting the project"),
+            ] {
+                remember_activity(
+                    &mut session,
+                    SessionActivity {
+                        id: id.into(),
+                        kind: kind.into(),
+                        title: kind.into(),
+                        detail: Some(detail.into()),
+                        status: "completed".into(),
+                        created_at,
+                        files: Vec::new(),
+                        attachments: Vec::new(),
+                        append_detail: false,
+                    },
+                );
+            }
+            assert_eq!(
+                session
+                    .activities
+                    .iter()
+                    .map(|activity| (activity.kind.as_str(), activity.created_at))
+                    .collect::<Vec<_>>(),
+                vec![("message", 5_000), ("command", 8_000)]
+            );
+        }
     }
 
     #[test]
@@ -6197,6 +6728,36 @@ mod tests {
     }
 
     #[test]
+    fn terminated_managed_threads_ignore_late_events_until_explicitly_resumed() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut event = started_event("codex-app-server:thread-closed", 4242);
+        event.agent = AgentKind::Codex;
+        event.source = Some(SessionSource::Cli);
+        event.control_origin = SessionControlOrigin::Lume;
+        event.process_id = None;
+        event.native_session_id = Some("thread-closed".into());
+        state.ingest(event.clone()).expect("start");
+        state
+            .mark_session_terminated(&event.session_id)
+            .expect("terminate");
+        let mut late = event.clone();
+        for kind in [
+            HookEventKind::Completed,
+            HookEventKind::WaitingForInput,
+            HookEventKind::Activity,
+        ] {
+            late.event = kind;
+            assert!(state.ingest(late.clone()).expect("late event").is_none());
+            assert!(state.sessions().expect("sessions").is_empty());
+        }
+        state.ingest(event.clone()).expect("explicit resume");
+        assert_eq!(state.sessions().expect("sessions").len(), 1);
+        late.event = HookEventKind::Completed;
+        state.ingest(late).expect("new completion");
+        assert_eq!(state.sessions().expect("sessions").len(), 1);
+    }
+
+    #[test]
     fn provisional_process_is_hidden_when_an_active_chat_has_the_same_context() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");
         state
@@ -6260,6 +6821,114 @@ mod tests {
         assert!(sessions.iter().all(|session| {
             session.agent == AgentKind::Antigravity && session.process_id.is_none()
         }));
+    }
+
+    #[test]
+    fn ambiguous_codex_process_does_not_bind_one_pid_to_two_threads() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        for thread in ["conversation-1", "conversation-2"] {
+            let mut event = started_event(&format!("codex:{thread}"), 0);
+            event.agent = AgentKind::Codex;
+            event.agent_label = Some("Codex".into());
+            event.process_id = None;
+            event.native_session_id = Some(thread.into());
+            state.ingest(event).expect("native event");
+        }
+        state
+            .reconcile_processes(vec![DiscoveredProcess {
+                agent: AgentKind::Codex,
+                agent_label: "Codex".into(),
+                process_id: 4344,
+                started_at: 0,
+                native_session_ids: Vec::new(),
+                working_directory: Some("/work/lume".into()),
+                source: SessionSource::Cli,
+            }])
+            .expect("ambiguous process");
+        let sessions = state.sessions().expect("sessions");
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|session| session.process_id.is_none()));
+    }
+
+    #[test]
+    fn four_identified_codex_clis_keep_names_without_duplicate_process_sessions() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let processes = (0..4)
+            .map(|index| DiscoveredProcess {
+                agent: AgentKind::Codex,
+                agent_label: "Codex".into(),
+                process_id: 10000 + index,
+                started_at: 0,
+                native_session_ids: Vec::new(),
+                working_directory: Some("/work/lume".into()),
+                source: SessionSource::Cli,
+            })
+            .collect::<Vec<_>>();
+        state
+            .reconcile_processes(processes.clone())
+            .expect("CLI discovery");
+        for (index, process) in processes.iter().enumerate() {
+            let mut event =
+                started_event(&format!("codex:conversation-{index}"), process.process_id);
+            event.agent = AgentKind::Codex;
+            event.agent_label = Some("Codex".into());
+            event.session_name = Some(format!("Thread {index}"));
+            event.native_session_id = Some(format!("conversation-{index}"));
+            state.ingest(event).expect("CLI hook");
+        }
+        let processes = processes
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut process)| {
+                process.native_session_ids = vec![format!("conversation-{index}")];
+                process
+            })
+            .collect::<Vec<_>>();
+        state
+            .reconcile_processes(processes.clone())
+            .expect("exact native identities");
+        let sessions = state.sessions().expect("sessions");
+        assert_eq!(sessions.len(), 4);
+        for index in 0..4 {
+            let session = sessions
+                .iter()
+                .find(|session| {
+                    session.native_session_id.as_deref()
+                        == Some(format!("conversation-{index}").as_str())
+                })
+                .expect("same thread");
+            assert_eq!(session.session_name, format!("Thread {index}"));
+            assert_eq!(session.process_id, Some(10000 + index));
+        }
+        for _ in 0..PROCESS_MISSING_SCAN_LIMIT {
+            state
+                .reconcile_process_snapshot(
+                    processes[1..].to_vec(),
+                    HashSet::from([10001, 10002, 10003]),
+                )
+                .expect("closed CLI");
+        }
+        let sessions = state.sessions().expect("remaining CLIs");
+        assert_eq!(sessions.len(), 3);
+        assert!(sessions
+            .iter()
+            .all(|session| session.native_session_id.as_deref() != Some("conversation-0")));
+    }
+
+    #[test]
+    fn codex_session_cannot_stay_open_only_because_a_server_pid_is_alive() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut event = started_event("codex:stale-server-owner", 5005);
+        event.agent = AgentKind::Codex;
+        event.agent_label = Some("Codex".into());
+        event.native_session_id = Some("stale-server-thread".into());
+        state.ingest(event).expect("legacy PID association");
+        for _ in 0..PROCESS_MISSING_SCAN_LIMIT {
+            state
+                .reconcile_process_snapshot(Vec::new(), HashSet::from([5005]))
+                .expect("live server, no CLI");
+        }
+        assert!(state.sessions().expect("sessions").is_empty());
     }
 
     #[test]

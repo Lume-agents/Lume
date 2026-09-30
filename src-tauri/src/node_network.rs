@@ -2,14 +2,14 @@ use std::{
     collections::{HashMap, VecDeque},
     fs::{self, OpenOptions},
     io::{Read, Write},
-    net::{IpAddr, TcpListener, TcpStream, UdpSocket},
+    net::{IpAddr, TcpListener, TcpStream},
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -25,7 +25,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     distributed_protocol::{NodeScope, MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION},
+    node_http::DeadlineStream,
     node_identity::{verify, NodeIdentity, PublicDeviceIdentity, SignedDeviceStatement},
+    node_inventory::InventoryCache,
     node_pairing::{self, NodePairingRequest},
     node_service,
     state::now_millis,
@@ -35,6 +37,11 @@ const CERTIFICATE_FILE: &str = "node-tls.der";
 const PRIVATE_KEY_FILE: &str = "node-tls-key.der";
 const MDNS_SERVICE_TYPE: &str = "_lume-node._tcp.local.";
 const MAX_CONNECTIONS: usize = 8;
+const MAX_PEER_CONNECTIONS: usize = 2;
+const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
+const HEALTH_CACHE_TTL: Duration = Duration::from_secs(5);
+const OBSERVE_RATE_WINDOW: Duration = Duration::from_secs(10);
+const MAX_OBSERVE_REQUESTS: usize = 8;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
 const AUTH_CLOCK_WINDOW_MS: u64 = 60_000;
@@ -73,6 +80,7 @@ pub struct NodeNetworkServer {
     running: Arc<AtomicBool>,
     listener_thread: Option<JoinHandle<()>>,
     _discovery: Option<MdnsAdvertisement>,
+    pub address: IpAddr,
     pub port: u16,
     pub discovery_available: bool,
     pub identity: NodeServerIdentity,
@@ -82,13 +90,15 @@ impl NodeNetworkServer {
     pub fn start(
         directory: &Path,
         node_id: &str,
+        address: IpAddr,
         port: u16,
         identity: &NodeIdentity,
     ) -> Result<Self, String> {
-        let local_ip = local_network_ip().ok();
+        validate_listen_address(address)?;
+        let local_ip = (!address.is_loopback()).then_some(address);
         let tls = NodeTlsIdentity::load_or_create(directory, local_ip)?;
         let server_identity = server_identity(node_id, identity, &tls.certificate_sha256)?;
-        let listener = TcpListener::bind(("0.0.0.0", port))
+        let listener = TcpListener::bind((address, port))
             .map_err(|error| format!("could not bind the Lume Node TLS listener: {error}"))?;
         let bound_port = listener
             .local_addr()
@@ -105,11 +115,14 @@ impl NodeNetworkServer {
         });
         let discovery_available = discovery.is_some();
         let running = Arc::new(AtomicBool::new(true));
-        let active_connections = Arc::new(AtomicUsize::new(0));
+        let active_connections = Arc::new(Mutex::new(ConnectionCounts::default()));
         let state = Arc::new(NodeNetworkState {
             directory: directory.to_path_buf(),
             server_identity: server_identity.clone(),
             replay: Mutex::new(ReplayCache::default()),
+            observe_budget: Mutex::new(ObserveBudget::default()),
+            health: Mutex::new(None),
+            inventory: Mutex::new(InventoryCache::default()),
         });
         let tls_config = tls.server_config;
         let thread_running = running.clone();
@@ -118,12 +131,13 @@ impl NodeNetworkServer {
             .spawn(move || {
                 while thread_running.load(Ordering::Relaxed) {
                     match listener.accept() {
-                        Ok((stream, _)) => {
-                            if active_connections.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                        Ok((stream, peer)) => {
+                            let Some(permit) =
+                                ConnectionPermit::acquire(active_connections.clone(), peer.ip())
+                            else {
                                 drop(stream);
                                 continue;
-                            }
-                            let permit = ConnectionPermit::new(active_connections.clone());
+                            };
                             let connection_state = state.clone();
                             let connection_config = tls_config.clone();
                             let _ = thread::Builder::new()
@@ -150,6 +164,7 @@ impl NodeNetworkServer {
             running,
             listener_thread: Some(listener_thread),
             _discovery: discovery,
+            address,
             port: bound_port,
             discovery_available,
             identity: server_identity,
@@ -170,6 +185,33 @@ struct NodeNetworkState {
     directory: std::path::PathBuf,
     server_identity: NodeServerIdentity,
     replay: Mutex<ReplayCache>,
+    observe_budget: Mutex<ObserveBudget>,
+    health: Mutex<Option<(Instant, node_service::NodeHealth)>>,
+    inventory: Mutex<InventoryCache>,
+}
+
+#[derive(Default)]
+struct ObserveBudget {
+    devices: HashMap<String, (Instant, usize)>,
+}
+
+impl ObserveBudget {
+    fn accept(&mut self, device_id: &str) -> bool {
+        self.devices
+            .retain(|_, (at, _)| at.elapsed() < OBSERVE_RATE_WINDOW);
+        if self.devices.len() >= MAX_REPLAY_NONCES && !self.devices.contains_key(device_id) {
+            return false;
+        }
+        let (_, requests) = self
+            .devices
+            .entry(device_id.into())
+            .or_insert((Instant::now(), 0));
+        if *requests >= MAX_OBSERVE_REQUESTS {
+            return false;
+        }
+        *requests += 1;
+        true
+    }
 }
 
 #[derive(Default)]
@@ -204,20 +246,44 @@ impl ReplayCache {
     }
 }
 
+#[derive(Default)]
+struct ConnectionCounts {
+    total: usize,
+    peers: HashMap<IpAddr, usize>,
+}
+
 struct ConnectionPermit {
-    active: Arc<AtomicUsize>,
+    active: Arc<Mutex<ConnectionCounts>>,
+    peer: IpAddr,
 }
 
 impl ConnectionPermit {
-    fn new(active: Arc<AtomicUsize>) -> Self {
-        active.fetch_add(1, Ordering::Relaxed);
-        Self { active }
+    fn acquire(active: Arc<Mutex<ConnectionCounts>>, peer: IpAddr) -> Option<Self> {
+        {
+            let mut counts = active.lock().ok()?;
+            if counts.total >= MAX_CONNECTIONS
+                || counts.peers.get(&peer).copied().unwrap_or_default() >= MAX_PEER_CONNECTIONS
+            {
+                return None;
+            }
+            counts.total += 1;
+            *counts.peers.entry(peer).or_default() += 1;
+        }
+        Some(Self { active, peer })
     }
 }
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::Relaxed);
+        if let Ok(mut counts) = self.active.lock() {
+            counts.total = counts.total.saturating_sub(1);
+            if let Some(active) = counts.peers.get_mut(&self.peer) {
+                *active = active.saturating_sub(1);
+                if *active == 0 {
+                    counts.peers.remove(&self.peer);
+                }
+            }
+        }
     }
 }
 
@@ -336,16 +402,25 @@ fn start_mdns_advertisement(
     Ok(MdnsAdvertisement { daemon, fullname })
 }
 
-fn local_network_ip() -> Result<IpAddr, String> {
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|error| error.to_string())?;
-    socket
-        .connect("1.1.1.1:80")
-        .map_err(|error| error.to_string())?;
-    let ip = socket.local_addr().map_err(|error| error.to_string())?.ip();
-    if ip.is_loopback() || ip.is_unspecified() {
-        return Err("no LAN address is available".into());
+pub(crate) fn validate_listen_address(address: IpAddr) -> Result<(), String> {
+    let private = match address {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private()
+                || ip.is_link_local()
+                // Explicitly selected Tailscale/private CGNAT interface.
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        IpAddr::V6(ip) => ip.is_unique_local(),
+    };
+    if address.is_loopback() || private {
+        Ok(())
+    } else {
+        Err(
+            "select a loopback or private interface IP; wildcard and public listeners are disabled"
+                .into(),
+        )
     }
-    Ok(ip)
 }
 
 fn server_identity(
@@ -439,8 +514,7 @@ fn handle_tls_connection(
     config: Arc<ServerConfig>,
     state: Arc<NodeNetworkState>,
 ) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let stream = DeadlineStream::new(stream, Instant::now() + REQUEST_DEADLINE);
     let Ok(connection) = ServerConnection::new(config) else {
         return;
     };
@@ -493,10 +567,15 @@ fn read_http_request(stream: &mut impl Read) -> Result<HttpRequest, String> {
         .unwrap_or_default()
         .to_ascii_uppercase();
     let path = request_parts.next().unwrap_or_default().to_string();
-    if method.is_empty() || !path.starts_with('/') {
+    let version = request_parts.next();
+    if method.is_empty()
+        || !path.starts_with('/')
+        || !matches!(version, Some("HTTP/1.0" | "HTTP/1.1"))
+        || request_parts.next().is_some()
+    {
         return Err("invalid Node request line".into());
     }
-    let mut content_length = 0_usize;
+    let mut content_length = None;
     for line in lines {
         if line.is_empty() {
             continue;
@@ -508,17 +587,30 @@ fn read_http_request(stream: &mut impl Read) -> Result<HttpRequest, String> {
             return Err("Node requests do not support transfer encoding".into());
         }
         if name.eq_ignore_ascii_case("content-length") {
-            content_length = value
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| "invalid Node content length".to_string())?;
+            if content_length.is_some() {
+                return Err("duplicate Node content length".into());
+            }
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| "invalid Node content length".to_string())?,
+            );
         }
     }
+    let content_length = content_length.unwrap_or_default();
     if content_length > MAX_HTTP_BODY_BYTES {
         return Err("Node request body is too large".into());
     }
+    if buffer.len().saturating_sub(header_end) > content_length {
+        return Err("unexpected data after Node request".into());
+    }
     while buffer.len().saturating_sub(header_end) < content_length {
-        let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
+        let remaining = content_length - buffer.len().saturating_sub(header_end);
+        let read_limit = remaining.min(chunk.len());
+        let read = stream
+            .read(&mut chunk[..read_limit])
+            .map_err(|error| error.to_string())?;
         if read == 0 {
             return Err("incomplete Node request body".into());
         }
@@ -562,7 +654,7 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                 Err(error) => json_response(403, serde_json::json!({ "error": error })),
             }
         }
-        ("POST", "/v1/health") => {
+        ("POST", "/v1/health" | "/v1/inventory") => {
             let authentication =
                 match serde_json::from_slice::<AuthenticatedNodeRequest>(&request.body) {
                     Ok(authentication) => authentication,
@@ -578,19 +670,11 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                 &state.server_identity,
                 &authentication,
                 "POST",
-                "/v1/health",
+                &request.path,
                 &state.replay,
                 now_millis(),
             ) {
-                Ok(()) => match node_service::health(&state.directory) {
-                    Ok(health) => {
-                        json_response(200, serde_json::to_value(health).unwrap_or(Value::Null))
-                    }
-                    Err(_) => json_response(
-                        503,
-                        serde_json::json!({ "error": "Node health is unavailable" }),
-                    ),
-                },
+                Ok(()) => observe_response(state, &authentication.device_id, &request.path),
                 Err(_) => json_response(
                     401,
                     serde_json::json!({ "error": "Node authentication failed" }),
@@ -601,12 +685,59 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
     }
 }
 
+fn observe_response(state: &NodeNetworkState, device_id: &str, path: &str) -> String {
+    if !state
+        .observe_budget
+        .lock()
+        .is_ok_and(|mut budget| budget.accept(device_id))
+    {
+        return json_response(
+            429,
+            serde_json::json!({ "error": "Node observation rate limit exceeded" }),
+        );
+    }
+    let snapshot = if path == "/v1/inventory" {
+        state
+            .inventory
+            .lock()
+            .map_err(|_| "inventory unavailable".to_string())
+            .and_then(|mut cache| cache.snapshot(&state.directory))
+            .and_then(|inventory| {
+                serde_json::to_value(inventory).map_err(|error| error.to_string())
+            })
+    } else {
+        state
+            .health
+            .lock()
+            .map_err(|_| "health unavailable".to_string())
+            .and_then(|mut cache| {
+                if let Some((at, health)) = cache.as_ref() {
+                    if at.elapsed() < HEALTH_CACHE_TTL {
+                        return Ok(health.clone());
+                    }
+                }
+                let health = node_service::health(&state.directory)?;
+                *cache = Some((Instant::now(), health.clone()));
+                Ok(health)
+            })
+            .and_then(|health| serde_json::to_value(health).map_err(|error| error.to_string()))
+    };
+    match snapshot {
+        Ok(snapshot) => json_response(200, snapshot),
+        Err(_) => json_response(
+            503,
+            serde_json::json!({ "error": "Node snapshot is unavailable" }),
+        ),
+    }
+}
+
 fn json_response(status: u16, value: Value) -> String {
     let body = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        429 => "Too Many Requests",
         403 => "Forbidden",
         404 => "Not Found",
         503 => "Service Unavailable",

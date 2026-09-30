@@ -52,6 +52,9 @@ pub fn launch(
     app_data_dir: &Path,
     codex_remote: Option<&str>,
 ) -> Result<(), String> {
+    if request.agent == IntegrationKind::OpenCode {
+        return Err("OpenCode is launched through its ACP bridge, not a terminal".into());
+    }
     let payload = payload_for(&request, codex_remote);
     if request.target == "vscode" {
         if crate::integrations::vscode_status().configured {
@@ -149,6 +152,7 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
         IntegrationKind::Antigravity => ("agy".to_string(), Vec::new()),
         IntegrationKind::DeepSeek => ("dsh".to_string(), vec!["--profile".into(), "tui".into()]),
         IntegrationKind::Gemini => ("gemini".to_string(), Vec::new()),
+        IntegrationKind::OpenCode => ("opencode".to_string(), Vec::new()),
     };
     if request.agent == IntegrationKind::Claude
         && request
@@ -197,6 +201,7 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
                 }
             }
             IntegrationKind::DeepSeek => {}
+            IntegrationKind::OpenCode => {}
         }
     }
     if let Some(prompt) = request
@@ -288,7 +293,10 @@ fn apply_permission_profile(request: &LaunchRequest, arguments: &mut Vec<String>
                 arguments.extend(["--permission-mode".into(), mode.into()]);
             }
         }
-        IntegrationKind::Antigravity | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {}
+        IntegrationKind::Antigravity
+        | IntegrationKind::OpenCode
+        | IntegrationKind::DeepSeek
+        | IntegrationKind::Gemini => {}
     }
 }
 
@@ -404,6 +412,7 @@ fn launch_vscode(payload: &TerminalPayload, agent: &IntegrationKind) -> Result<(
             IntegrationKind::Antigravity => "antigravity",
             IntegrationKind::DeepSeek => "deepseek",
             IntegrationKind::Gemini => "gemini",
+            IntegrationKind::OpenCode => "opencode",
         },
         "cwd": payload.working_directory,
         "args": payload.arguments,

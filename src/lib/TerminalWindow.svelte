@@ -9,6 +9,7 @@
   import type { AgentSession, DockPreviewEvent, DockSide, PermissionAction, Preferences, PromptAttachmentInput, QuestionAnswer, SessionActivity, SessionNote, TerminalWindowState, WorkflowGroupDefinition, WorkflowRole, WorkflowRoleContract, WorkflowStepDefinition } from "$lib/domain";
   import type { HubSession, WorkItemStatus } from "$lib/hubProtocol";
   import BrandIcon from "$lib/BrandIcon.svelte";
+  import LumeSelect from "$lib/LumeSelect.svelte";
   import { colorWithOpacity, normalizeAccentColor, normalizeAppearanceTheme, type AppearanceTheme } from "$lib/appearance";
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
   import CollapsibleUserMessage from "$lib/CollapsibleUserMessage.svelte";
@@ -100,6 +101,7 @@
     setSessionCollaborationMode,
     setClaudeSessionModelSettings,
     setSessionModelSettings,
+    setSessionAgentMode,
     setTerminalFileDialogActive,
     steerQueuedPrompt,
     submitPrompt,
@@ -1410,7 +1412,8 @@
       await initializeTerminal();
       if (disposed) return;
       await tick();
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      // Hidden WebViews can suspend animation frames. Commit the DOM before
+      // acknowledging readiness, then let the native window show its first frame.
       await markTerminalFrontendReady(label);
       if (disposed) return;
       const flushSessionRefresh = async () => {
@@ -2357,7 +2360,7 @@
   }
 
   async function terminateAgent() {
-    if (!session?.processId || session.source !== "cli" || terminating) return;
+    if (!session || !capabilities?.canTerminate || terminating) return;
     terminating = true;
     message = null;
     try {
@@ -2458,13 +2461,15 @@
     selectedModel = model;
     const option = modelSettings.models.find((candidate) => candidate.model === model);
     if (!option) return;
-    if (!option.supportedReasoningEfforts.some((effort) => effort.value === selectedEffort)) {
+    if (session?.agent === "opencode" && model !== modelSettings.model) {
+      selectedEffort = "";
+    } else if (!option.supportedReasoningEfforts.some((effort) => effort.value === selectedEffort)) {
       selectedEffort = option.defaultReasoningEffort;
     }
   }
 
   async function openModelDialog() {
-    if (!session || !["codex", "claude_code"].includes(session.agent)) return false;
+    if (!session || !["codex", "claude_code", "opencode"].includes(session.agent)) return false;
     composerToolsOpen = false;
     if (session.controlOrigin !== "lume") {
       message = tr(
@@ -2473,7 +2478,7 @@
       );
       return true;
     }
-    if (promptIsRunning && session.agent !== "codex") {
+    if (promptIsRunning && session.agent === "claude_code") {
       message = tr(
         "The model can be changed after the current task finishes.",
         "O modelo pode ser alterado depois que a tarefa atual terminar.",
@@ -2485,7 +2490,7 @@
     modelError = null;
     modelSettings = null;
     try {
-      if (session.agent === "codex") {
+      if (session.agent === "codex" || session.agent === "opencode") {
         modelSettings = await getSessionModelSettings(session.id);
         selectedModel = modelSettings.model;
         const option = currentModelOption();
@@ -2513,7 +2518,7 @@
     modelError = null;
     const deferredUntilPromptEnds = session.agent === "codex" && promptIsRunning;
     try {
-      if (session.agent === "codex") {
+      if (session.agent === "codex" || session.agent === "opencode") {
         modelSettings = await setSessionModelSettings(
           session.id,
           selectedModel,
@@ -2540,6 +2545,21 @@
             "Model settings will apply to the next prompt.",
             "As configurações de modelo serão aplicadas ao próximo prompt.",
           );
+    } catch (error) {
+      modelError = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      modelSaving = false;
+    }
+  }
+
+  async function changeAgentMode(mode: string) {
+    if (!session || modelSaving || modelLoading) return;
+    modelSaving = true;
+    modelError = null;
+    try {
+      modelSettings = await setSessionAgentMode(session.id, mode);
+      selectedModel = modelSettings.model;
+      selectedEffort = modelSettings.reasoningEffort ?? "";
     } catch (error) {
       modelError = String(error).replace(/^Error:\s*/, "");
     } finally {
@@ -2882,7 +2902,7 @@
 </script>
 
 <main class:dark={effectiveDark} class="terminal-window" data-appearance={appearanceTheme} style:--lume-accent={colorWithOpacity(accentColor, accentOpacity)} style:--lume-accent-strong={colorWithOpacity(accentColor, accentOpacity)} onpointerdown={() => void currentWindow.setFocus().catch(() => undefined)}>
-  <SystemBannerStack items={systemBanners} dismissLabel={tr("Dismiss", "Fechar")} />
+  <SystemBannerStack items={systemBanners} {language} dismissLabel={tr("Dismiss", "Fechar")} />
   {#if session}
     <section
       class:dragging
@@ -3110,7 +3130,7 @@
                 <svg viewBox="0 0 20 20"><path d="m6 6 8 8M14 6l-8 8" /></svg>
                 <span>{tr("Close terminal", "Fechar terminal")}</span>
               </button>
-              {#if session.source === "cli" && session.processId}
+              {#if capabilities?.canTerminate}
                 <button class="danger terminal-stop-menu" type="button" role="menuitem" onclick={() => { headerActionsOpen = false; terminateConfirm = true; }}>
                   <svg viewBox="0 0 20 20"><path d="M10 3v7M5.5 5.5a6 6 0 1 0 9 0" /></svg>
                   <span>{tr("Stop agent", "Encerrar agente")}</span>
@@ -3793,7 +3813,7 @@
                 </div>
               </section>
             {:else if modelSettings}
-              {#if promptIsRunning}
+              {#if promptIsRunning && session.agent === "codex"}
                 <p class="model-pending-note">{tr("Changes will be applied when this prompt finishes.", "As mudanças serão aplicadas quando este prompt terminar.")}</p>
               {/if}
               <section class="model-settings-section">
@@ -3807,7 +3827,14 @@
                 </div>
               </section>
 
-              {#if currentModelOption()}
+              {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
+                <section class="model-settings-section">
+                  <span class="model-settings-label">{tr("Agent mode", "Modo do agente")}</span>
+                  <LumeSelect value={modelSettings.sessionModes.currentMode} options={modelSettings.sessionModes.options}
+                    disabled={modelSaving || modelLoading} ariaLabel={tr("Agent mode", "Modo do agente")} onValueChange={changeAgentMode} />
+                </section>
+              {/if}
+              {#if effortValues().length}
                 <section class="model-settings-section">
                   <span class="model-settings-label">{tr("Reasoning effort", "Nível de raciocínio")}<b>{effortLabel()}</b></span>
                   <div class="effort-slider">
@@ -3955,7 +3982,7 @@
                       <span><strong>{tr("Agent mode", "Modo do agente")}</strong><small>{collaborationMode === "plan" ? "Plan" : "Default"}</small></span>
                     </button>
                   {/if}
-                  {#if ["codex", "claude_code"].includes(session.agent)}
+                  {#if ["codex", "claude_code", "opencode"].includes(session.agent)}
                     <button type="button" role="menuitem" onclick={() => void openModelDialog()}>
                       <span class="tool-icon"><svg viewBox="0 0 20 20"><path d="M5 5.5 10 3l5 2.5v9L10 17l-5-2.5zM5 5.5l5 2.5 5-2.5M10 8v9" /></svg></span>
                       <span><strong>{tr("Model and effort", "Modelo e effort")}</strong><small>{tr("Configure", "Configurar")}</small></span>

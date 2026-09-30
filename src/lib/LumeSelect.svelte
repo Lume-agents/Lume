@@ -17,12 +17,14 @@
     ariaLabel,
     onValueChange,
     minWidth = 120,
+    disabled = false,
   }: {
     value: string;
     options: LumeSelectOption[];
     ariaLabel: string;
     onValueChange: (value: string) => void;
     minWidth?: number;
+    disabled?: boolean;
   } = $props();
 
   let root = $state<HTMLDivElement | null>(null);
@@ -37,6 +39,7 @@
   let reducedMotion = $state(false);
   let activeIndex = $state(0);
   const selected = $derived(options.find((option) => option.value === value) ?? options[0]);
+  $effect(() => { if (disabled) open = false; });
 
   function syncFloatingTheme() {
     if (!root || !menuNode) return;
@@ -73,6 +76,7 @@
   }
 
   function toggle() {
+    if (disabled) return;
     if (open) { open = false; return; }
     activeIndex = Math.max(0, options.findIndex((option) => option.value === value));
     placeMenu();
@@ -80,6 +84,7 @@
   }
 
   function choose(option: LumeSelectOption) {
+    if (disabled) return;
     open = false;
     if (option.value !== value) onValueChange(option.value);
     trigger?.focus();
@@ -135,6 +140,7 @@
     aria-label={ariaLabel}
     aria-haspopup="listbox"
     aria-expanded={open}
+    {disabled}
     onkeydown={handleKeydown}
     onclick={toggle}
   >
@@ -183,6 +189,7 @@
   :global(.terminal-window.dark) .lume-select,
   :global(.bridge-window.dark) .lume-select { --select-surface: var(--lume-raised-dark); --select-text: var(--lume-ink-dark); --select-muted: var(--lume-ink-muted-dark); --select-line: var(--lume-line-dark); --select-accent: var(--lume-accent); --select-hover: var(--lume-subtle-dark); --select-active: var(--lume-accent-soft-dark); }
   .lume-select-trigger { width: 100%; min-height: 30px; padding: 0 8px 0 10px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--select-line); border-radius: 9px; color: var(--select-text); background: var(--select-surface); cursor: pointer; text-align: left; transition: border-color 140ms ease, background 140ms ease; }
+  .lume-select-trigger:disabled { opacity: .55; cursor: not-allowed; }
   .lume-select-trigger:hover,
   .lume-select-trigger.open { border-color: color-mix(in srgb, var(--select-accent) 35%, var(--select-line)); background: color-mix(in srgb, var(--select-accent) 5%, var(--select-surface)); }
   .lume-select-trigger > span:first-child { min-width: 0; flex: 1; overflow: hidden; font: 700 9px Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }

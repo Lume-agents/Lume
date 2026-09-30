@@ -4,6 +4,7 @@ export type AgentKind =
   | "claude"
   | "claude_code"
   | "antigravity"
+  | "opencode"
   | "deepseek"
   | "gemini"
   | "unknown";
@@ -490,7 +491,7 @@ export interface WorkflowContextPackage {
 }
 
 export interface IntegrationStatus {
-  kind: "codex" | "claude" | "antigravity" | "deepseek" | "gemini";
+  kind: "codex" | "claude" | "antigravity" | "opencode" | "deepseek" | "gemini";
   label: string;
   installed: boolean;
   configured: boolean;
@@ -594,6 +595,7 @@ export interface RemoteLumeNodeHealth {
   capabilities: string[];
   transports: string[];
   network?: {
+    address: string;
     port: number;
     discoveryAvailable: boolean;
   };
@@ -605,6 +607,34 @@ export interface RemoteLumeNodeHealth {
     totalMemoryBytes: number;
     availableMemoryBytes: number;
   };
+}
+
+export interface RemoteLumeNodeInventory {
+  nodeId: string;
+  observedAt: number;
+  agentsTruncated: boolean;
+  agents: {
+    id: string;
+    agent: AgentKind;
+    agentLabel: string;
+    startedAt: number;
+    origin: "external_observed";
+    canControl: false;
+  }[];
+  runtimes: {
+    id: string;
+    availability: "available" | "unavailable" | "invalid_response";
+    modelsTruncated: boolean;
+    loadedStateKnown: boolean;
+    models: {
+      name: string;
+      digest: string;
+      sizeBytes?: number;
+      parameterSize?: string;
+      quantization?: string;
+      loaded: boolean | null;
+    }[];
+  }[];
 }
 
 export interface TerminalWindowState {

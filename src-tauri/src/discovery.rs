@@ -13,7 +13,7 @@ use std::{
 use sysinfo::{
     get_current_pid, Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     agent_plugins::{self, ExternalAgentPlugin},
@@ -46,7 +46,16 @@ struct ProcessScan {
     live_pids: HashSet<u32>,
 }
 
+/// Built-in agent detection for headless observers; does not acquire ownership,
+/// reconcile desktop state, send events or terminate a process.
+pub(crate) fn read_only_process_snapshot(system: &mut System) -> Vec<DiscoveredProcess> {
+    scan(system, &[], None).discovered
+}
+
 pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
+    let managed_proxy_url = app
+        .try_state::<crate::codex_bridge::CodexBridge>()
+        .map(|bridge| bridge.proxy_url().to_string());
     thread::Builder::new()
         .name("lume-process-discovery".into())
         .spawn(move || {
@@ -54,7 +63,7 @@ pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
             let mut last_external_conflicts = HashSet::new();
             loop {
                 let plugins = agent_plugins::external_catalog(&app);
-                let scan = scan(&mut system, &plugins);
+                let scan = scan(&mut system, &plugins, managed_proxy_url.as_deref());
                 let _ = state.observe_external_writer_attempts(
                     &scan.external_writer_attempts,
                     &scan.live_pids,
@@ -82,7 +91,11 @@ pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> ProcessScan {
+fn scan(
+    system: &mut System,
+    external_plugins: &[ExternalAgentPlugin],
+    managed_proxy_url: Option<&str>,
+) -> ProcessScan {
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -103,14 +116,16 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
         .processes()
         .iter()
         .filter_map(|(pid, process)| {
-            let command = process
+            let arguments = process
                 .cmd()
                 .iter()
-                .map(|part| part.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase();
-            is_lume_codex_infrastructure_process(&command).then_some(*pid)
+                .map(|part| part.to_string_lossy().to_lowercase())
+                .collect::<Vec<_>>();
+            is_codex_infrastructure_arguments(
+                &process.name().to_string_lossy().to_lowercase(),
+                &arguments,
+            )
+            .then_some(*pid)
         })
         .collect::<Vec<_>>();
     let candidates = system
@@ -120,15 +135,14 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
             if Some(*pid) == own_pid {
                 return None;
             }
-            let command = process
+            let arguments = process
                 .cmd()
                 .iter()
-                .map(|part| part.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase();
+                .map(|part| part.to_string_lossy().to_lowercase())
+                .collect::<Vec<_>>();
+            let command = arguments.join(" ");
             let name = process.name().to_string_lossy().to_lowercase();
-            if is_lume_codex_infrastructure_process(&command) {
+            if is_codex_infrastructure_arguments(&name, &arguments) {
                 return None;
             }
             if is_claude_headless_resume(&command) {
@@ -140,7 +154,7 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
             {
                 return None;
             }
-            let (agent, agent_label) = detect_agent(&name, &command)
+            let (agent, agent_label) = detect_agent_arguments(&name, &arguments)
                 .map(|agent| {
                     let label = match agent {
                         AgentKind::Codex => "Codex",
@@ -148,13 +162,14 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
                         AgentKind::Claude => "Claude",
                         AgentKind::ClaudeCode => "Claude Code",
                         AgentKind::Antigravity => "Antigravity",
+                        AgentKind::OpenCode => "OpenCode",
                         AgentKind::DeepSeek => "DeepSeek",
                         AgentKind::Gemini => "Gemini",
                         AgentKind::Unknown => "Agent",
                     };
                     (agent, label.to_string())
                 })
-                .or_else(|| detect_external_agent(&name, &command, external_plugins))?;
+                .or_else(|| detect_external_agent_arguments(&name, &arguments, external_plugins))?;
             let working_directory = command_working_directory(process.cmd());
             Some((
                 *pid,
@@ -280,10 +295,11 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
                 && !system
                     .process(Pid::from_u32(process.process_id))
                     .is_some_and(|process| {
-                        process
-                            .environ()
-                            .iter()
-                            .any(|value| value == "LUME_MANAGED_SESSION=1")
+                        is_lume_managed_codex_process(
+                            process.cmd(),
+                            process.environ(),
+                            managed_proxy_url,
+                        )
                     })
         })
         .flat_map(|process| {
@@ -305,12 +321,106 @@ fn scan(system: &mut System, external_plugins: &[ExternalAgentPlugin]) -> Proces
     }
 }
 
+fn is_lume_managed_codex_process(
+    command: &[std::ffi::OsString],
+    environment: &[std::ffi::OsString],
+    managed_proxy_url: Option<&str>,
+) -> bool {
+    if environment
+        .iter()
+        .any(|value| value == "LUME_MANAGED_SESSION=1")
+    {
+        return true;
+    }
+    // Terminal launchers can reuse a running terminal service and lose the
+    // environment marker. Match the complete, authenticated proxy URL, not
+    // merely its loopback port: another CLI's endpoint is not Lume ownership.
+    let Some(proxy_url) = managed_proxy_url.filter(|url| !url.is_empty()) else {
+        return false;
+    };
+    command.iter().enumerate().any(|(index, argument)| {
+        if argument == "--remote" {
+            command
+                .get(index + 1)
+                .is_some_and(|value| value == proxy_url)
+        } else {
+            argument
+                .to_str()
+                .and_then(|value| value.strip_prefix("--remote="))
+                == Some(proxy_url)
+        }
+    })
+}
+
+/// Servers and updater loops are shared infrastructure, never a user CLI.
+/// Inspect the executable and subcommand, not a port or arbitrary prompt text.
+pub(crate) fn is_codex_infrastructure_arguments(name: &str, arguments: &[String]) -> bool {
+    let executable_name = |value: &str| {
+        value
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(value)
+            .trim_matches(['\'', '"'])
+            .trim_end_matches(".exe")
+            .to_string()
+    };
+    let tokens = launch_tokens(name, arguments);
+    if tokens
+        .iter()
+        .any(|token| executable_name(token) == "codex-code-mode-host")
+    {
+        return true;
+    }
+    let Some(executable) = tokens.iter().find(|token| {
+        executable_name(token) == "codex" || token.replace('\\', "/").contains("/@openai/codex/")
+    }) else {
+        return false;
+    };
+    let Some(index) = arguments
+        .iter()
+        .position(|argument| argument.as_str() == *executable)
+    else {
+        return false;
+    };
+    let mut options = arguments.iter().skip(index + 1);
+    while let Some(argument) = options.next() {
+        if argument == "--" {
+            return false;
+        }
+        if matches!(
+            argument.as_str(),
+            "-c" | "--config"
+                | "--enable"
+                | "--disable"
+                | "--remote"
+                | "--remote-auth-token-env"
+                | "-p"
+                | "--profile"
+                | "-m"
+                | "--model"
+                | "-C"
+                | "--cd"
+                | "--add-dir"
+                | "-s"
+                | "--sandbox"
+                | "-a"
+                | "--ask-for-approval"
+        ) {
+            options.next();
+        } else if !argument.starts_with('-') {
+            return matches!(argument.as_str(), "app-server" | "exec-server");
+        }
+    }
+    false
+}
+
+#[cfg(test)]
 fn is_lume_codex_infrastructure_process(command: &str) -> bool {
-    let normalized = command.replace('\\', "/");
-    normalized.contains("127.0.0.1:43130")
-        || (normalized.contains("app-server")
-            && normalized.contains(".vscode/extensions")
-            && normalized.contains("openai.chatgpt"))
+    let arguments = command
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    is_codex_infrastructure_arguments("codex", &arguments)
 }
 
 fn native_session_ids_for_process_tree(system: &System, root: sysinfo::Pid) -> Vec<String> {
@@ -619,7 +729,72 @@ fn is_versioned_claude_executable(token: &str) -> bool {
 }
 
 fn detect_agent(name: &str, command: &str) -> Option<AgentKind> {
-    let raw_tokens = command.split_whitespace().collect::<Vec<_>>();
+    detect_agent_arguments(
+        name,
+        &command
+            .split_whitespace()
+            .map(String::from)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Only inspect the executable and, for interpreters, its actual script.
+/// Prompt text, shell command bodies and search arguments are never executables.
+fn launch_tokens<'a>(name: &str, arguments: &'a [String]) -> Vec<&'a str> {
+    let Some(first) = arguments.first() else {
+        return Vec::new();
+    };
+    let mut tokens = vec![first.as_str()];
+    let executable = first
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(first)
+        .trim_matches(['"', '\''])
+        .trim_end_matches(".exe");
+    if matches!(
+        executable,
+        "node" | "nodejs" | "bun" | "deno" | "python" | "python3" | "bash" | "sh"
+    ) || matches!(
+        name.trim_end_matches(".exe"),
+        "node" | "nodejs" | "bun" | "deno" | "python" | "python3"
+    ) {
+        for argument in arguments.iter().skip(1) {
+            if matches!(
+                argument.as_str(),
+                "-c" | "-lc"
+                    | "-ic"
+                    | "-e"
+                    | "--eval"
+                    | "-p"
+                    | "--print"
+                    | "-r"
+                    | "--require"
+                    | "--import"
+            ) {
+                break;
+            }
+            if argument.starts_with('-') {
+                continue;
+            }
+            tokens.push(argument.as_str());
+            break;
+        }
+    }
+    tokens
+}
+
+pub(crate) fn detect_agent_arguments(name: &str, arguments: &[String]) -> Option<AgentKind> {
+    let raw_tokens = launch_tokens(name, arguments);
+    let command_tokens = arguments
+        .iter()
+        .map(|token| {
+            token
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(token)
+                .trim_matches(['"', '\''])
+        })
+        .collect::<Vec<_>>();
     let tokens = raw_tokens
         .iter()
         .map(|token| {
@@ -640,11 +815,24 @@ fn detect_agent(name: &str, command: &str) -> Option<AgentKind> {
                     || token.strip_suffix(".exe") == Some(candidate)
                     || token.strip_suffix(".cmd") == Some(candidate)
                     || token.strip_suffix(".bat") == Some(candidate)
+                    || token.strip_suffix(".js") == Some(candidate)
+                    || token.strip_suffix(".mjs") == Some(candidate)
+                    || token.strip_suffix(".cjs") == Some(candidate)
+                    || token.strip_suffix(".py") == Some(candidate)
+            })
+            || raw_tokens.iter().any(|token| {
+                let normalized = token.replace('\\', "/");
+                match candidate {
+                    "codex" => normalized.contains("/@openai/codex/"),
+                    "claude" => normalized.contains("/@anthropic-ai/claude-code/"),
+                    "gemini" => normalized.contains("/@google/gemini-cli/"),
+                    _ => false,
+                }
             })
     };
     if executable_matches("codex") {
         Some(AgentKind::Codex)
-    } else if is_claude_infrastructure(&tokens) {
+    } else if is_claude_infrastructure(&command_tokens) {
         None
     } else if executable_matches("claude")
         || raw_tokens
@@ -657,7 +845,14 @@ fn detect_agent(name: &str, command: &str) -> Option<AgentKind> {
             .iter()
             .any(|token| matches!(*token, "agy" | "agy.exe"))
     {
-        Some(AgentKind::Antigravity)
+        (!arguments
+            .iter()
+            .any(|argument| argument == "--input-format")
+            || !arguments.iter().any(|argument| argument == "stream-json"))
+        .then_some(AgentKind::Antigravity)
+    } else if executable_matches("opencode") && !arguments.iter().any(|argument| argument == "acp")
+    {
+        Some(AgentKind::OpenCode)
     } else if matches!(name, "dsh" | "dsh.exe")
         || tokens
             .iter()
@@ -671,11 +866,28 @@ fn detect_agent(name: &str, command: &str) -> Option<AgentKind> {
     }
 }
 
+#[cfg(test)]
 fn detect_external_agent(
     name: &str,
     command: &str,
     plugins: &[ExternalAgentPlugin],
 ) -> Option<(AgentKind, String)> {
+    detect_external_agent_arguments(
+        name,
+        &command
+            .split_whitespace()
+            .map(String::from)
+            .collect::<Vec<_>>(),
+        plugins,
+    )
+}
+
+fn detect_external_agent_arguments(
+    name: &str,
+    arguments: &[String],
+    plugins: &[ExternalAgentPlugin],
+) -> Option<(AgentKind, String)> {
+    let command = launch_tokens(name, arguments).join(" ");
     plugins.iter().find_map(|plugin| {
         let matches_name = plugin
             .process_names
@@ -880,6 +1092,16 @@ fn agent_process_tree(
     if detect_agent(&name, &command).as_ref() != Some(expected_agent) {
         return Err("O PID da sessão não pertence mais ao agente esperado".into());
     }
+    let arguments = target
+        .cmd()
+        .iter()
+        .map(|part| part.to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>();
+    if is_codex_infrastructure_arguments(&name, &arguments) {
+        return Err(
+            "O servidor interno do Codex não pode ser encerrado como uma CLI externa".into(),
+        );
+    }
     if get_current_pid().ok().is_some_and(|own_pid| {
         own_pid == target_pid || process_descends_from(&system, own_pid, target_pid)
     }) {
@@ -966,6 +1188,65 @@ fn process_depth(system: &System, mut pid: Pid) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_codex_cli_is_not_an_external_writer_when_terminal_loses_environment() {
+        let proxy_url = "ws://127.0.0.1:43131/?token=private-test-token";
+        let separated =
+            ["codex", "--remote", proxy_url, "resume", "thread-id"].map(std::ffi::OsString::from);
+        let equals = [
+            std::ffi::OsString::from("codex.exe"),
+            std::ffi::OsString::from(format!("--remote={proxy_url}")),
+            std::ffi::OsString::from("resume"),
+        ];
+        assert!(is_lume_managed_codex_process(
+            &separated,
+            &[],
+            Some(proxy_url)
+        ));
+        assert!(is_lume_managed_codex_process(&equals, &[], Some(proxy_url)));
+        assert!(!is_lume_managed_codex_process(&separated, &[], None));
+    }
+
+    #[test]
+    fn external_codex_remote_endpoints_are_not_mistaken_for_the_lume_proxy() {
+        let proxy_url = "ws://127.0.0.1:43131/?token=private-test-token";
+        for other_url in [
+            "ws://127.0.0.1:43131",
+            "ws://127.0.0.1:43131/?token=another-app",
+            "ws://127.0.0.1:49131/?token=private-test-token",
+        ] {
+            let command = ["codex", "--remote", other_url, "resume", "thread-id"]
+                .map(std::ffi::OsString::from);
+            assert!(!is_lume_managed_codex_process(
+                &command,
+                &[],
+                Some(proxy_url)
+            ));
+        }
+        let prompt_argument =
+            ["codex", "resume", "thread-id", proxy_url].map(std::ffi::OsString::from);
+        assert!(!is_lume_managed_codex_process(
+            &prompt_argument,
+            &[],
+            Some(proxy_url)
+        ));
+    }
+
+    #[test]
+    fn managed_codex_environment_marker_still_identifies_the_own_cli() {
+        let command = ["codex", "resume", "thread-id"].map(std::ffi::OsString::from);
+        assert!(is_lume_managed_codex_process(
+            &command,
+            &["LUME_MANAGED_SESSION=1".into()],
+            None
+        ));
+        assert!(!is_lume_managed_codex_process(
+            &command,
+            &["LUME_MANAGED_SESSION=0".into()],
+            None
+        ));
+    }
 
     #[test]
     fn vscode_codex_app_server_is_ignored_until_a_real_chat_emits_events() {
@@ -1072,10 +1353,73 @@ mod tests {
         assert!(!is_lume_codex_infrastructure_process(
             "codex --remote ws://127.0.0.1:43131 resume chat"
         ));
+        assert!(is_lume_codex_infrastructure_process(
+            "codex app-server --listen ws://127.0.0.1:58473"
+        ));
+        assert!(is_lume_codex_infrastructure_process(
+            r"C:\Users\user\codex.exe app-server --listen ws://127.0.0.1:59182"
+        ));
+        assert!(!is_lume_codex_infrastructure_process(
+            "codex --remote ws://127.0.0.1:58473 resume chat"
+        ));
+        assert!(is_lume_codex_infrastructure_process(
+            "codex app-server --listen ws://example.com:58473"
+        ));
         assert_eq!(
             detect_agent("codex", "codex --remote ws://127.0.0.1:43131 resume chat"),
             Some(AgentKind::Codex)
         );
+    }
+
+    #[test]
+    fn shared_codex_servers_and_updaters_are_not_session_processes() {
+        for command in [
+            "codex app-server --listen unix:// --managed-daemon",
+            "codex app-server daemon pid-update-loop",
+            "codex app-server",
+            "codex -c features.code_mode_host=true app-server --analytics-default-enabled",
+            "codex exec-server",
+            "codex-code-mode-host",
+        ] {
+            assert!(is_lume_codex_infrastructure_process(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn codex_server_detection_ignores_prompts_and_config_values() {
+        for command in [
+            "codex --no-daemon resume --all",
+            "codex --remote unix:// resume thread-id",
+            "codex --profile app-server resume --all",
+            "codex -- app-server",
+            "codex exec inspect app-server --listen unix://",
+            "bash -lc codex app-server --listen unix://",
+        ] {
+            assert!(!is_lume_codex_infrastructure_process(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn codex_servers_with_spaces_and_npm_wrappers_are_infrastructure() {
+        let windows = [
+            r"c:\program files\codex\codex.exe",
+            "-c",
+            "features.code_mode_host=true",
+            "app-server",
+            "--listen",
+            "unix://",
+        ]
+        .map(str::to_string);
+        assert!(is_codex_infrastructure_arguments("codex.exe", &windows));
+        let npm = [
+            "node",
+            "/opt/node_modules/@openai/codex/bin/codex.js",
+            "app-server",
+            "--listen",
+            "unix://",
+        ]
+        .map(str::to_string);
+        assert!(is_codex_infrastructure_arguments("node", &npm));
     }
 
     #[test]
@@ -1283,6 +1627,93 @@ mod tests {
         assert_eq!(
             detect_external_agent("local-agent", "/usr/bin/local-agent", &[plugin]),
             Some((AgentKind::Unknown, "Local Agent".into()))
+        );
+    }
+
+    #[test]
+    fn agent_names_in_searches_or_prompt_arguments_are_not_sessions() {
+        for agent in ["codex", "claude", "gemini", "agy", "dsh"] {
+            assert_eq!(detect_agent("rg", &format!("rg -n {agent} src")), None);
+            assert_eq!(
+                detect_agent("bash", &format!("/bin/bash -lc rg -n {agent} src")),
+                None
+            );
+            assert_eq!(
+                detect_agent_arguments(
+                    "node",
+                    &[
+                        "/usr/bin/node".into(),
+                        "/work/scripts/check.mjs".into(),
+                        agent.into(),
+                    ]
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            detect_agent_arguments(
+                "node",
+                &[
+                    "/usr/bin/node".into(),
+                    "--eval".into(),
+                    "require('codex')".into(),
+                ]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn node_agent_entrypoints_are_detected_without_matching_arbitrary_arguments() {
+        assert_eq!(
+            detect_agent_arguments(
+                "node",
+                &[
+                    "/usr/bin/node".into(),
+                    "/work/my tools/node_modules/@google/gemini-cli/dist/index.js".into(),
+                ]
+            ),
+            Some(AgentKind::Gemini)
+        );
+        assert_eq!(
+            detect_agent_arguments(
+                "node",
+                &[
+                    "/usr/bin/node".into(),
+                    "/work/node_modules/@openai/codex/bin/codex.js".into(),
+                ]
+            ),
+            Some(AgentKind::Codex)
+        );
+        assert_eq!(
+            detect_agent_arguments(
+                "node",
+                &[
+                    "/usr/bin/node".into(),
+                    "/work/node_modules/@anthropic-ai/claude-code/cli.js".into(),
+                ]
+            ),
+            Some(AgentKind::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn external_manifest_markers_in_search_arguments_are_ignored() {
+        let plugin = ExternalAgentPlugin {
+            id: "local-agent".into(),
+            name: "Local Agent".into(),
+            executable: "local-agent".into(),
+            process_names: vec!["local-agent".into()],
+            command_tokens: vec!["local-agent".into()],
+            ..ExternalAgentPlugin::default()
+        };
+        assert_eq!(
+            detect_external_agent_arguments(
+                "rg",
+                &["/usr/bin/rg".into(), "local-agent".into(), "/work".into(),],
+                &[plugin]
+            ),
+            None
         );
     }
 }

@@ -19,6 +19,7 @@ import type {
   PairedDevice,
   RemoteLumeNode,
   RemoteLumeNodeHealth,
+  RemoteLumeNodeInventory,
   PermissionAction,
   Preferences,
   PromptAttachmentInput,
@@ -195,6 +196,10 @@ export async function loadRemoteLumeNodeHealth(nodeId: string): Promise<RemoteLu
   return invoke<RemoteLumeNodeHealth>("get_remote_lume_node_health", { nodeId });
 }
 
+export async function loadRemoteLumeNodeInventory(nodeId: string): Promise<RemoteLumeNodeInventory> {
+  return invoke<RemoteLumeNodeInventory>("get_remote_lume_node_inventory", { nodeId });
+}
+
 export async function forgetRemoteLumeNode(nodeId: string): Promise<boolean> {
   return invoke<boolean>("forget_remote_lume_node", { nodeId });
 }
@@ -334,6 +339,10 @@ export interface CodexThreadModelSettings {
   reasoningEffort?: string;
   serviceTier?: string | null;
   models: CodexModelOption[];
+  sessionModes?: {
+    currentMode: string;
+    options: { value: string; label: string; description: string }[];
+  };
 }
 
 export interface SessionModelOverride {
@@ -370,6 +379,10 @@ export async function setSessionModelSettings(
     model,
     effort,
   });
+}
+
+export async function setSessionAgentMode(sessionId: string, mode: string): Promise<CodexThreadModelSettings> {
+  return invoke<CodexThreadModelSettings>("set_session_agent_mode", { sessionId, mode });
 }
 
 export async function setSessionFastMode(sessionId: string, enabled: boolean): Promise<boolean> {

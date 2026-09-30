@@ -121,6 +121,13 @@ pub fn catalog() -> Vec<Box<dyn AgentPlugin>> {
             ],
         }),
         Box::new(BuiltInAgentPlugin {
+            kind: IntegrationKind::OpenCode,
+            label: "OpenCode",
+            executable: "opencode",
+            direct_permissions: true,
+            hook_events: &[],
+        }),
+        Box::new(BuiltInAgentPlugin {
             kind: IntegrationKind::DeepSeek,
             label: "DeepSeek Harness",
             executable: "dsh",
@@ -233,7 +240,7 @@ mod tests {
     #[test]
     fn built_in_plugins_expose_their_monitoring_contract() {
         let plugins = catalog();
-        assert_eq!(plugins.len(), 5);
+        assert_eq!(plugins.len(), 6);
         let claude = plugins
             .iter()
             .find(|plugin| plugin.kind() == IntegrationKind::Claude)
@@ -264,6 +271,14 @@ mod tests {
         assert!(antigravity.hook_events().contains(&"PostToolUse"));
         assert!(antigravity.hook_events().contains(&"Stop"));
         assert!(!antigravity.direct_permissions());
+
+        let opencode = plugins
+            .iter()
+            .find(|plugin| plugin.kind() == IntegrationKind::OpenCode)
+            .expect("plugin OpenCode");
+        assert_eq!(opencode.executable(), "opencode");
+        assert!(opencode.hook_events().is_empty());
+        assert!(opencode.direct_permissions());
 
         let deepseek = plugins
             .iter()

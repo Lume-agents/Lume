@@ -45,6 +45,16 @@ function mergeAttachments(target: SessionActivity, source: SessionActivity) {
   if (attachments.length) target.attachments = attachments;
 }
 
+function distinctCodexMessageItems(left: SessionActivity, right: SessionActivity): boolean {
+  if (left.id === right.id) return false;
+  if (left.id.startsWith("codex-rollout:") && right.id.startsWith("codex-rollout:")) return true;
+  if (left.id.startsWith("codex:") && right.id.startsWith("codex:")) {
+    // Legacy and turn-qualified IDs can refer to the same native item.
+    return left.id.split(":").at(-1) !== right.id.split(":").at(-1);
+  }
+  return false;
+}
+
 export function buildConversationEntries(
   session: AgentSession | null,
   activities: SessionActivity[],
@@ -91,7 +101,7 @@ export function buildConversationEntries(
   };
 
   const entries: ConversationEntry[] = [];
-  for (const activity of activities) {
+  for (const activity of sortedActivities) {
     if (["queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
     if (activity.kind === "prompt") {
       let duplicateIndex = -1;
@@ -123,6 +133,7 @@ export function buildConversationEntries(
     const matchingMessage = activity.kind === "message"
       ? entries.findLast((entry) =>
           entry.activity.kind === "message"
+          && !distinctCodexMessageItems(entry.activity, activity)
           && sameResponseText(entry.activity.detail, activity.detail)
           && promptSegment(entry.activity.createdAt) === promptSegment(activity.createdAt)
         )
@@ -139,6 +150,10 @@ export function buildConversationEntries(
         matchingMessage.activity = {
           ...matchingMessage.activity,
           ...activity,
+          id: matchingMessage.activity.id,
+          // Replays/completion notifications update the text, not its place
+          // in the provider's timeline.
+          createdAt: previousCreatedAt,
           detail: matchingMessage.activity.detail,
         };
       }
@@ -188,7 +203,6 @@ export function buildConversationEntries(
         result.createdAt,
       );
       if (result.createdAt >= matchingMessage.activity.createdAt) {
-        matchingMessage.activity.createdAt = result.createdAt;
         matchingMessage.activity.status = "completed";
       }
       mergeFileChanges(matchingMessage.files, resultFiles);
@@ -220,40 +234,40 @@ export function buildConversationEntries(
 
   if (session?.lastResponse) {
     const responseKey = textKey(session.lastResponse);
-    const matchingMessage = entries.find((entry) =>
+    const matchingResult = session.results.findLast((result) => sameResponseText(result.response, responseKey));
+    const matchingMessage = entries.findLast((entry) =>
       entry.activity.kind === "message" && sameResponseText(entry.activity.detail, responseKey)
     );
     if (matchingMessage) {
+      const responseAt = matchingResult?.createdAt ?? matchingMessage.activity.createdAt;
       matchingMessage.activity.detail = latestResponseText(
         matchingMessage.activity.detail,
         session.lastResponse,
         matchingMessage.activity.createdAt,
-        session.updatedAt,
+        responseAt,
       );
-      if (session.updatedAt >= matchingMessage.activity.createdAt) {
-        matchingMessage.activity.createdAt = session.updatedAt;
-        matchingMessage.activity.status = "completed";
-      }
+      matchingMessage.activity.status = "completed";
       if (matchingMessage.durationMs === undefined && ["completed", "failed"].includes(session.status)) {
-        matchingMessage.durationMs = durationFromPrompt(session.updatedAt);
+        matchingMessage.durationMs = durationFromPrompt(responseAt);
       }
       matchingMessage.isFinalResponse = true;
-    } else {
+    } else if (matchingResult || !["running", "permission_required"].includes(session.status)) {
+      const responseAt = matchingResult?.createdAt ?? session.updatedAt;
       entries.push({
-        id: `last-response:${session.id}:${session.updatedAt}`,
+        id: `last-response:${session.id}:${responseAt}`,
         activity: {
-          id: `response:${session.id}:${session.updatedAt}`,
+          id: `response:${session.id}:${responseAt}`,
           kind: "message",
           title: "Resposta do agente",
           detail: session.lastResponse,
           status: "completed",
-          createdAt: session.updatedAt,
+          createdAt: responseAt,
           files: [],
         },
         files: [],
         sequence: sequence++,
         durationMs: ["completed", "failed"].includes(session.status)
-          ? durationFromPrompt(session.updatedAt)
+          ? durationFromPrompt(responseAt)
           : undefined,
         isFinalResponse: true,
       });

@@ -98,16 +98,15 @@ fn antigravity_hook_output(provider: &str) -> Option<Value> {
     if agent != "antigravity" {
         return None;
     }
-    let event = if event == "PreToolUseAllow" {
+    let event = if matches!(event, "PreToolUseAllow" | "PreToolUseAsk") {
         "PreToolUse"
     } else {
         event
     };
 
     Some(match event {
-        // Antigravity requires an explicit decision for PreToolUse. Connecting
-        // the CLI integration is opt-in and warns that this permits tool calls.
-        "PreToolUse" => json!({ "decision": "allow" }),
+        // Preserve the CLI's native approval policy, including headless soft-denial.
+        "PreToolUse" => json!({ "decision": "ask" }),
         "Stop" => json!({ "decision": "allow" }),
         _ => json!({}),
     })
@@ -133,7 +132,9 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
     let hook_name = forced_hook_name
         .map(str::to_string)
         .or_else(|| string(raw, "hook_event_name"))?;
-    let hook_name = if provider == "antigravity" && hook_name == "PreToolUseAllow" {
+    let hook_name = if provider == "antigravity"
+        && matches!(hook_name.as_str(), "PreToolUseAllow" | "PreToolUseAsk")
+    {
         "PreToolUse".to_string()
     } else {
         hook_name
@@ -142,6 +143,10 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
     // already contain a provider-native session identity, while traversing all
     // processes for every tool hook is both expensive and prone to associating
     // another same-workspace CLI process with this conversation.
+    let managed_antigravity_stream = is_managed_antigravity_stream(
+        provider,
+        std::env::var("LUME_ANTIGRAVITY_STREAM").ok().as_deref(),
+    );
     let (process_id, source, headless_resume) =
         if matches!(&agent, AgentKind::Antigravity | AgentKind::Gemini) {
             (None, SessionSource::Cli, false)
@@ -203,6 +208,11 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
     } else {
         string(raw, "cwd").or_else(|| antigravity_working_directory(raw))
     };
+    let source = if managed_antigravity_stream {
+        SessionSource::Desktop
+    } else {
+        source
+    };
     let process_id = (!headless_resume).then_some(process_id).flatten();
     let permission_mode = string(raw, "permission_mode");
     let is_permission = matches!(event, HookEventKind::PermissionRequest);
@@ -254,7 +264,11 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
 
     Some(HookEvent {
         event,
-        session_id: format!("{provider}:{session_id}"),
+        session_id: if managed_antigravity_stream {
+            format!("antigravity-stream:{session_id}")
+        } else {
+            format!("{provider}:{session_id}")
+        },
         agent,
         agent_label: None,
         session_name: ["session_name", "thread_name", "conversation_name", "slug"]
@@ -281,6 +295,10 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
         activities,
         wait_for_decision: direct_response,
     })
+}
+
+fn is_managed_antigravity_stream(provider: &str, marker: Option<&str>) -> bool {
+    provider == "antigravity" && marker == Some("1")
 }
 
 fn hook_activity(
@@ -838,17 +856,17 @@ fn status_label(hook: &str, event: &HookEventKind) -> Option<&'static str> {
 }
 
 fn agent_process_context(provider: &str) -> (Option<u32>, SessionSource, bool) {
+    let Some(current_pid) = get_current_pid().ok() else {
+        return (None, SessionSource::Cli, false);
+    };
     let mut system = System::new();
     system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
+        ProcessesToUpdate::Some(&[current_pid]),
         true,
         ProcessRefreshKind::nothing()
             .with_cmd(UpdateKind::Always)
             .without_tasks(),
     );
-    let Some(current_pid) = get_current_pid().ok() else {
-        return (None, SessionSource::Cli, false);
-    };
     // O processo atual é `lume hook <provider>` e contém o nome do agente nos
     // próprios argumentos. A busca precisa começar no processo pai para não
     // associar o chat ao PID efêmero do hook.
@@ -862,34 +880,28 @@ fn agent_process_context(provider: &str) -> (Option<u32>, SessionSource, bool) {
     let mut source = SessionSource::Cli;
     let mut headless_resume = false;
     for _ in 0..10 {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::Always)
+                .without_tasks(),
+        );
         let Some(process) = system.process(pid) else {
             break;
         };
         let name = process.name().to_string_lossy().to_lowercase();
-        let command = process
+        let arguments = process
             .cmd()
             .iter()
-            .map(|part| part.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
+            .map(|part| part.to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>();
+        let command = arguments.join(" ");
         // Hooks de Codex/Gemini podem passar por um shell efêmero cujo comando
         // também contém o provider. Continua subindo para guardar o processo
         // estável mais externo da sessão, em vez do wrapper que termina logo
         // após enviar o evento ao Lume.
-        let process_marker = if provider == "antigravity" {
-            "agy"
-        } else {
-            provider
-        };
-        if command.split_whitespace().any(|part| {
-            let executable = part
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(part)
-                .trim_matches(['\"', '\'']);
-            executable == process_marker || executable.strip_suffix(".exe") == Some(process_marker)
-        }) {
+        if hook_parent_is_user_agent(provider, &name, &arguments) {
             agent_pid = Some(pid.as_u32());
         }
         if provider == "claude"
@@ -911,6 +923,70 @@ fn agent_process_context(provider: &str) -> (Option<u32>, SessionSource, bool) {
         pid = parent;
     }
     (agent_pid, source, headless_resume)
+}
+
+fn hook_parent_is_user_agent(provider: &str, name: &str, arguments: &[String]) -> bool {
+    if provider == "codex" {
+        // A local --no-daemon server has a TUI ancestor; a shared daemon does
+        // not. Keep walking past either server but never store its PID on a
+        // conversation or offer to terminate it as an external CLI.
+        return crate::discovery::detect_agent_arguments(name, arguments) == Some(AgentKind::Codex)
+            && !crate::discovery::is_codex_infrastructure_arguments(name, arguments);
+    }
+    let process_marker = if provider == "antigravity" {
+        "agy"
+    } else {
+        provider
+    };
+    arguments.iter().any(|part| {
+        let executable = part
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(part)
+            .trim_matches(['\"', '\'']);
+        executable == process_marker || executable.strip_suffix(".exe") == Some(process_marker)
+    })
+}
+
+#[cfg(test)]
+mod process_context_tests {
+    use super::hook_parent_is_user_agent;
+
+    #[test]
+    fn codex_hooks_skip_servers_but_recognize_the_standalone_tui() {
+        for command in [
+            "codex app-server --listen unix:// --managed-daemon",
+            "codex app-server daemon pid-update-loop",
+            "codex app-server --listen ws://127.0.0.1:50001",
+            "codex -c features.code_mode_host=true app-server",
+            "bash -lc codex app-server",
+        ] {
+            let arguments = command
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            assert!(
+                !hook_parent_is_user_agent("codex", arguments[0].as_str(), &arguments),
+                "{command}"
+            );
+        }
+        let arguments = ["codex", "--no-daemon", "resume", "--all"].map(str::to_string);
+        assert!(hook_parent_is_user_agent("codex", "codex", &arguments));
+    }
+
+    #[test]
+    fn codex_hook_shell_text_is_not_a_cli_identity() {
+        let arguments = ["bash", "-lc", "lume hook codex"].map(str::to_string);
+        assert!(!hook_parent_is_user_agent("codex", "bash", &arguments));
+        let arguments = [
+            "node",
+            "/opt/node_modules/@openai/codex/bin/codex.js",
+            "resume",
+            "--all",
+        ]
+        .map(str::to_string);
+        assert!(hook_parent_is_user_agent("codex", "node", &arguments));
+    }
 }
 
 fn string(value: &Value, key: &str) -> Option<String> {
@@ -1220,11 +1296,15 @@ mod tests {
     fn antigravity_hooks_return_protocol_safe_defaults() {
         assert_eq!(
             antigravity_hook_output("antigravity:PreToolUse"),
-            Some(json!({ "decision": "allow" }))
+            Some(json!({ "decision": "ask" }))
         );
         assert_eq!(
             antigravity_hook_output("antigravity:PreToolUseAllow"),
-            Some(json!({ "decision": "allow" }))
+            Some(json!({ "decision": "ask" }))
+        );
+        assert_eq!(
+            antigravity_hook_output("antigravity:PreToolUseAsk"),
+            Some(json!({ "decision": "ask" }))
         );
         assert_eq!(
             antigravity_hook_output("antigravity:PostToolUse"),
@@ -1237,6 +1317,13 @@ mod tests {
         assert_eq!(antigravity_hook_output("claude:PreToolUse"), None);
         assert_eq!(gemini_hook_output("gemini"), Some(json!({})));
         assert_eq!(gemini_hook_output("claude"), None);
+    }
+
+    #[test]
+    fn antigravity_stream_marker_never_changes_external_or_other_agent_identity() {
+        assert!(is_managed_antigravity_stream("antigravity", Some("1")));
+        assert!(!is_managed_antigravity_stream("antigravity", None));
+        assert!(!is_managed_antigravity_stream("gemini", Some("1")));
     }
 
     #[test]

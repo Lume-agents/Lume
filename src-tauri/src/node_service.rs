@@ -37,7 +37,10 @@ pub struct NodeConfig {
     pub start_at_login: bool,
     pub node_id: String,
     pub display_name: String,
+    pub listen_address: std::net::IpAddr,
     pub listen_port: u16,
+    pub ollama_inventory_enabled: bool,
+    pub ollama_port: u16,
     pub allowed_project_roots: Vec<PathBuf>,
 }
 
@@ -48,7 +51,10 @@ impl Default for NodeConfig {
             start_at_login: false,
             node_id: new_node_id(),
             display_name: System::host_name().unwrap_or_else(|| "Lume Node".into()),
+            listen_address: std::net::Ipv4Addr::LOCALHOST.into(),
             listen_port: 43_132,
+            ollama_inventory_enabled: true,
+            ollama_port: 11_434,
             allowed_project_roots: Vec::new(),
         }
     }
@@ -97,6 +103,7 @@ pub struct NodeHealth {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeNetworkHealth {
+    pub address: std::net::IpAddr,
     pub port: u16,
     pub discovery_available: bool,
 }
@@ -110,6 +117,8 @@ struct NodeRuntime {
     heartbeat_at: i64,
     #[serde(default)]
     network_port: Option<u16>,
+    #[serde(default)]
+    network_address: Option<std::net::IpAddr>,
     #[serde(default)]
     discovery_available: bool,
 }
@@ -133,6 +142,19 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
     let command = arguments.first().map(String::as_str).unwrap_or("help");
     let state_directory = state_directory(arguments)?;
     match command {
+        "listen" => {
+            let address = positional_argument(arguments, 1)
+                .ok_or("listen requires a local interface IP address")?
+                .parse()
+                .map_err(|_| "invalid Node listen address")?;
+            let mut config = load_or_create_config(&state_directory)?;
+            config.listen_address = address;
+            save_config(&state_directory, &config)?;
+            Ok(Some(json(&serde_json::json!({
+                "listenAddress": address,
+                "restartRequired": true
+            }))?))
+        }
         "enable" => {
             let mut config = load_or_create_config(&state_directory)?;
             config.enabled = true;
@@ -148,6 +170,9 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             Ok(Some(json(&health(&state_directory)?)?))
         }
         "status" | "health" => Ok(Some(json(&health(&state_directory)?)?)),
+        "inventory" => Ok(Some(json(
+            &crate::node_inventory::InventoryCache::default().snapshot(&state_directory)?,
+        )?)),
         "pair" => {
             let config = load_or_create_config(&state_directory)?;
             if !config.enabled {
@@ -173,6 +198,15 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             let node_id = positional_argument(arguments, 1)
                 .ok_or_else(|| "remote-health requires a Node ID".to_string())?;
             Ok(Some(json(&node_client::remote_health(
+                &state_directory,
+                node_id,
+                Duration::from_secs(2),
+            )?)?))
+        }
+        "remote-inventory" => {
+            let node_id =
+                positional_argument(arguments, 1).ok_or("remote-inventory requires a Node ID")?;
+            Ok(Some(json(&node_client::remote_inventory(
                 &state_directory,
                 node_id,
                 Duration::from_secs(2),
@@ -209,7 +243,7 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lume node <enable|disable|status|run|pair|clients|revoke|discover|connect|remotes|remote-health|forget> [VALUE] [--state-dir PATH] [--once]"
+    "Usage: lume node <enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget> [VALUE] [--state-dir PATH] [--once]"
 }
 
 fn positional_argument(arguments: &[String], index: usize) -> Option<&str> {
@@ -265,7 +299,7 @@ pub fn default_state_directory() -> Result<PathBuf, String> {
     state_directory(&[])
 }
 
-fn load_or_create_config(directory: &Path) -> Result<NodeConfig, String> {
+pub(crate) fn load_or_create_config(directory: &Path) -> Result<NodeConfig, String> {
     fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     restrict_directory(directory)?;
     let path = directory.join(CONFIG_FILE);
@@ -282,6 +316,7 @@ fn load_or_create_config(directory: &Path) -> Result<NodeConfig, String> {
 }
 
 fn validate_config(config: &NodeConfig) -> Result<(), String> {
+    crate::node_network::validate_listen_address(config.listen_address)?;
     if config.node_id.len() < 16
         || config.node_id.len() > 128
         || !config
@@ -297,6 +332,9 @@ fn validate_config(config: &NodeConfig) -> Result<(), String> {
     if config.listen_port < 1024 {
         return Err("invalid Node listen port".into());
     }
+    if config.ollama_port < 1024 {
+        return Err("invalid local Ollama port".into());
+    }
     Ok(())
 }
 
@@ -310,11 +348,16 @@ fn save_config(directory: &Path, config: &NodeConfig) -> Result<(), String> {
 pub(crate) fn health(directory: &Path) -> Result<NodeHealth, String> {
     let config = load_or_create_config(directory)?;
     let identity = NodeIdentity::load_or_create(directory)?;
+    let capabilities = vec![
+        NodeCapability::AgentInventory,
+        NodeCapability::ModelInventory,
+        NodeCapability::ResourceTelemetry,
+    ];
     let identity_attestation = identity.sign(serde_json::json!({
         "nodeId": config.node_id,
         "protocolMinimum": MIN_PROTOCOL_VERSION,
         "protocolMaximum": MAX_PROTOCOL_VERSION,
-        "capabilities": ["session_monitoring", "resource_telemetry"]
+        "capabilities": capabilities
     }))?;
     verify_node_statement(&identity_attestation)?;
     let runtime = read_runtime(directory).filter(runtime_is_live);
@@ -328,15 +371,18 @@ pub(crate) fn health(directory: &Path) -> Result<NodeHealth, String> {
     let transports = runtime
         .as_ref()
         .and_then(|runtime| runtime.network_port)
-        .map(|_| vec![TransportKind::LanTlsWebSocket])
+        .map(|_| vec![TransportKind::LanTlsHttp])
         .unwrap_or_default();
     let network = runtime.as_ref().and_then(|runtime| {
         runtime.network_port.map(|port| NodeNetworkHealth {
+            address: runtime.network_address.unwrap_or(config.listen_address),
             port,
             discovery_available: runtime.discovery_available,
         })
     });
-    let system = System::new_all();
+    let mut system = System::new();
+    system.refresh_memory();
+    system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
     Ok(NodeHealth {
         lifecycle,
         enabled: config.enabled,
@@ -350,10 +396,7 @@ pub(crate) fn health(directory: &Path) -> Result<NodeHealth, String> {
         heartbeat_at: runtime.as_ref().map(|runtime| runtime.heartbeat_at),
         protocol_minimum: MIN_PROTOCOL_VERSION,
         protocol_maximum: MAX_PROTOCOL_VERSION,
-        capabilities: vec![
-            NodeCapability::SessionMonitoring,
-            NodeCapability::ResourceTelemetry,
-        ],
+        capabilities,
         transports,
         network,
         machine: MachineSnapshot {
@@ -380,7 +423,13 @@ fn run_service_inner(directory: &Path, once: bool, start_network: bool) -> Resul
     let _lock = NodeLock::acquire(directory)?;
     let network = start_network
         .then(|| {
-            NodeNetworkServer::start(directory, &config.node_id, config.listen_port, &identity)
+            NodeNetworkServer::start(
+                directory,
+                &config.node_id,
+                config.listen_address,
+                config.listen_port,
+                &identity,
+            )
         })
         .transpose()?;
     let process_started_at = process_start_time(process::id())
@@ -401,6 +450,7 @@ fn run_service_inner(directory: &Path, once: bool, start_network: bool) -> Resul
                 started_at,
                 heartbeat_at: now,
                 network_port: network.as_ref().map(|server| server.port),
+                network_address: network.as_ref().map(|server| server.address),
                 discovery_available: network
                     .as_ref()
                     .is_some_and(|server| server.discovery_available),
@@ -434,10 +484,14 @@ fn runtime_is_live(runtime: &NodeRuntime) -> bool {
 }
 
 pub(crate) fn process_start_time(process_id: u32) -> Option<u64> {
-    let system = System::new_all();
-    system
-        .process(Pid::from_u32(process_id))
-        .map(|process| process.start_time())
+    let mut system = System::new();
+    let pid = Pid::from_u32(process_id);
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().without_tasks(),
+    );
+    system.process(pid).map(|process| process.start_time())
 }
 
 pub(crate) fn process_instance_is_live(process_id: u32, started_at: u64) -> bool {
@@ -613,6 +667,7 @@ mod tests {
                 started_at: 1,
                 heartbeat_at: 1,
                 network_port: None,
+                network_address: None,
                 discovery_available: false,
             },
         )

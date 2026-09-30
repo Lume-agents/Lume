@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/tulerws/Lume/releases/latest"><strong>Download the latest release</strong></a>
+  <a href="https://github.com/Lume-agents/Lume/releases/latest"><strong>Download the latest release</strong></a>
   · Windows · Linux · Android
 </p>
 
@@ -101,7 +101,7 @@ Process detection works independently of hooks. Antigravity hook delivery on Win
 
 ## Install
 
-The [latest GitHub release](https://github.com/tulerws/Lume/releases/latest) provides:
+The [latest GitHub release](https://github.com/Lume-agents/Lume/releases/latest) provides:
 
 - Windows NSIS installer (`.exe`)
 - Debian/Ubuntu package (`.deb`)
@@ -137,12 +137,7 @@ npm run tauri dev
 
 Lume opens on the primary monitor and adds an icon to the system tray. Use **Settings** to connect installed agents, configure VS Code, install the browser Companion, and customize shortcuts.
 
-The standalone marketing site is isolated from the desktop UI. Build or preview it with:
-
-```bash
-npm run landing:build
-npm run landing:dev
-```
+The marketing website is maintained separately in the private `Lume-agents/lume-website` repository. This public repository contains the desktop app, mobile clients, Node, and shared agent integrations.
 
 ## Connect agent sources
 

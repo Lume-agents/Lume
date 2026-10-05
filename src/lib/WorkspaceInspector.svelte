@@ -2,6 +2,7 @@
   import BrandIcon from "$lib/BrandIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import LumeSelect, { type LumeSelectOption } from "$lib/LumeSelect.svelte";
   import RepositoryPanel from "$lib/RepositoryPanel.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import { transientScrollbar } from "$lib/transientScrollbar";
@@ -22,6 +23,8 @@
     variant = "workspace",
     showCloseButton = true,
     section = $bindable("session"),
+    sessionOptions = [],
+    onSelectSession,
   } = $props<{
     session: (AgentSession & { activityTotal?: number }) | null;
     language?: Language;
@@ -30,6 +33,8 @@
     variant?: "workspace" | "orb";
     showCloseButton?: boolean;
     section?: "session" | "repository";
+    sessionOptions?: LumeSelectOption[];
+    onSelectSession?: (sessionId: string) => void;
   }>();
 
   let usageRefreshing = $state(false);
@@ -160,7 +165,19 @@
     {#if session}
       <span class="agent-icon"><BrandIcon name={session.agent} size={21} /></span>
       <span class="header-copy">
-        <strong>{session.sessionName?.trim() || session.project || session.agentLabel}</strong>
+        {#if variant === "orb" && onSelectSession && sessionOptions.length}
+          <LumeSelect
+            value={session.id}
+            options={sessionOptions}
+            ariaLabel={tr("Session to inspect", "Sessão para inspecionar")}
+            minWidth={0}
+            menuMinWidth={260}
+            variant="heading"
+            onValueChange={onSelectSession}
+          />
+        {:else}
+          <strong>{session.sessionName?.trim() || session.project || session.agentLabel}</strong>
+        {/if}
         <small>{tr("Inspector", "Inspector")} · {displayText(language, session.statusLabel)}</small>
       </span>
       {#if automaticAccess}
@@ -308,6 +325,7 @@
   :global(.overlay-shell.dark) .workspace-inspector.orb-inspector { --workspace-pane: var(--lume-surface-dark); --workspace-accent: #83c29f; --workspace-accent-soft: rgba(100, 180, 143, .11); --workspace-faint: #8b9a92; --workspace-line: rgba(199, 218, 207, .11); --workspace-muted: #a0b0a7; --workspace-raised: rgba(206, 228, 216, .045); --workspace-scroll-thumb: rgba(199, 218, 207, .32); --workspace-strong: #e0e9e4; --workspace-subtle: rgba(206, 228, 216, .055); --workspace-text: #c5d2cb; }
   .workspace-inspector > header { min-height: 50px; padding: 7px 8px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid var(--workspace-line); }
   .header-copy { min-width: 0; display: grid; gap: 2px; flex: 1; }.header-copy strong, .header-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.header-copy strong { color: var(--workspace-strong); font-size: 11px; letter-spacing: -.015em; }.header-copy small { color: var(--workspace-muted); font-size: 8px; }
+  .header-copy :global(.lume-select.heading) { margin: -2px -4px; }
   .agent-icon { width: 31px; height: 31px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
   .inspector-access-badge { min-height: 21px; padding: 0 6px; display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; border-radius: 999px; font-size: 7px; font-weight: 780; line-height: 1; white-space: nowrap; }.inspector-access-badge svg { width: 9px; height: 9px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; }.inspector-access-badge.auto-review { color: #315f86; background: #cbdff0; }.inspector-access-badge.auto-review svg { fill: currentColor; stroke: none; }.inspector-access-badge.full-access { color: #764c2e; background: #e8ceb1; }
   :global(.workspace.dark) .inspector-access-badge.auto-review { color: #b4d3ee; background: #29445d; }:global(.workspace.dark) .inspector-access-badge.full-access { color: #e4b88f; background: #543b29; }

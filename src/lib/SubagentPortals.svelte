@@ -18,6 +18,9 @@
   let rail: HTMLDivElement;
   let timelineElement = $state<HTMLDivElement | null>(null);
   let portalOrigin = $state(32);
+  let showLeftOverflow = $state(false);
+  let showRightOverflow = $state(false);
+  let railCollapsed = $state(false);
   let selectedId = $state<string | null>(null);
   let expanded = $state(false);
   let timelines = $state<Record<string, SessionActivity[]>>({});
@@ -31,6 +34,8 @@
   let currentSessionId = "";
   const lastFetched = new Map<string, number>();
   const inFlight = new Set<string>();
+  const compactChildren = $derived(children.slice(-3));
+  const compactOverflow = $derived(Math.max(0, children.length - 3));
   const selectedChild = $derived(children.find((child) => child.id === selectedId));
   const selectedActivities = $derived(selectedId ? timelines[selectedId] ?? [] : []);
   const selectedFinal = $derived(selectedActivities.findLast((activity) => activity.kind === "message" && activity.title === "Resposta final")
@@ -96,7 +101,8 @@
 
   function updatePortalOrigin() {
     if (!selectedId || !root || !rail) return;
-    const button = [...rail.querySelectorAll<HTMLButtonElement>(".portal-button")]
+    const selector = railCollapsed ? ".compact-agent" : ".portal-button";
+    const button = [...root.querySelectorAll<HTMLButtonElement>(selector)]
       .find((item) => item.dataset.childId === selectedId);
     if (!button) return;
     const buttonRect = button.getBoundingClientRect();
@@ -104,12 +110,38 @@
     portalOrigin = Math.max(24, Math.min(rootRect.width - 24, buttonRect.left + buttonRect.width / 2 - rootRect.left - 8));
   }
 
+  async function setRailCollapsed(collapsed: boolean) {
+    railCollapsed = collapsed;
+    await tick();
+    root.querySelector<HTMLButtonElement>(collapsed ? ".compact-expand" : ".portal-rail-toolbar button")?.focus({ preventScroll: true });
+  }
+
+  function updateRailOverflow() {
+    if (!rail) return;
+    const maxScroll = Math.max(0, rail.scrollWidth - rail.clientWidth);
+    showLeftOverflow = rail.scrollLeft > 2;
+    showRightOverflow = maxScroll - rail.scrollLeft > 2;
+  }
+
+  function onRailScroll() {
+    updatePortalOrigin();
+    updateRailOverflow();
+  }
+
+  function scrollRail(direction: -1 | 1) {
+    if (!rail) return;
+    rail.scrollBy({
+      left: direction * Math.max(144, Math.floor(rail.clientWidth * 0.72)),
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    });
+  }
+
   function closePortal(restoreFocus = false) {
     expanded = false;
     messageOpen = false;
     if (restoreFocus) {
       queueMicrotask(() => {
-        [...root.querySelectorAll<HTMLButtonElement>(".portal-button")]
+        [...root.querySelectorAll<HTMLButtonElement>(railCollapsed ? ".compact-agent" : ".portal-button")]
           .find((item) => item.dataset.childId === selectedId)?.focus();
       });
     }
@@ -200,6 +232,7 @@
       currentSessionId = session.id;
       selectedId = null;
       expanded = false;
+      railCollapsed = false;
       messageOpen = false;
       messageDraft = "";
       messageNotice = "";
@@ -209,12 +242,18 @@
     }
     if (selectedId && !children.some((child) => child.id === selectedId)) expanded = false;
     refreshVisible();
+    void tick().then(updateRailOverflow);
   });
 
   onMount(() => {
     mounted = true;
     currentSessionId = session.id;
     refreshVisible();
+    const resizeObserver = new ResizeObserver(updateRailOverflow);
+    resizeObserver.observe(rail);
+    const mutationObserver = new MutationObserver(() => void tick().then(updateRailOverflow));
+    mutationObserver.observe(rail, { childList: true });
+    void tick().then(updateRailOverflow);
     const timer = window.setInterval(refreshVisible, 8_000);
     const closeOutside = (event: PointerEvent) => {
       if (expanded && root && !root.contains(event.target as Node)) closePortal();
@@ -228,6 +267,8 @@
     return () => {
       mounted = false;
       window.clearInterval(timer);
+      resizeObserver.disconnect();
+      mutationObserver.disconnect();
       document.removeEventListener("pointerdown", closeOutside);
       window.removeEventListener("keydown", closeOnEscape);
       document.removeEventListener("visibilitychange", refreshVisible);
@@ -237,36 +278,84 @@
 
 <section class="subagent-portals" bind:this={root} aria-label={tr("Subagent activity", "Atividade dos subagentes")}
   style={`--portal-origin:${portalOrigin}px`}>
-  <div class="portal-rail" bind:this={rail} onscroll={updatePortalOrigin}>
-    {#each children as child (child.id)}
-      {@const recent = (timelines[child.id] ?? []).slice(-3)}
-      <button
-        type="button"
-        class:chosen={selectedId === child.id && expanded}
-        class="portal-button status-{child.status}"
-        data-child-id={child.id}
-        aria-label={tr(`Show ${child.label} timeline · ${statusText(child.status)}`, `Mostrar timeline de ${child.label} · ${statusText(child.status)}`)}
-        aria-expanded={selectedId === child.id && expanded}
-        aria-controls={`subagent-timeline-${session.id}`}
-        title={`${child.label} · ${statusText(child.status)}`}
-        onclick={() => togglePortal(child.id)}
-      >
-        <span class="portal-surface" aria-hidden="true">
-          <span class="portal-feed">
-            {#if recent.length}
-              {#each recent as activity (activity.id)}
-                <span class="portal-feed-row"><i class:live={activity.status === "running"}></i><b>{activityDisplayTitle(activity, language)}</b></span>
-              {/each}
-            {:else}
-              <span class="portal-feed-row"><i class:live={child.status === "running"}></i><b>{statusText(child.status)}</b></span>
-              <span class="portal-feed-row faint"><i></i><b>{child.label}</b></span>
-            {/if}
-          </span>
-        </span>
-        <span class="portal-avatar" aria-hidden="true"><ThreadAvatar seed={`${session.id}:subagent:${child.id}`} label={child.label} size={20} /></span>
-        <span class="portal-name">{child.label}</span>
+  {#if railCollapsed}
+    <div class="portal-compact" role="group" aria-label={tr("Subagents", "Subagentes")}>
+      <div class="compact-avatar-stack">
+        {#each compactChildren as child, index (child.id)}
+          <button
+            type="button"
+            class="compact-agent status-{child.status}"
+            data-child-id={child.id}
+            style={`--stack-index:${index}`}
+            aria-label={tr(`Show ${child.label} timeline · ${statusText(child.status)}`, `Mostrar timeline de ${child.label} · ${statusText(child.status)}`)}
+            aria-expanded={selectedId === child.id && expanded}
+            aria-controls={`subagent-timeline-${session.id}`}
+            title={`${child.label} · ${statusText(child.status)}`}
+            onclick={() => togglePortal(child.id)}
+          >
+            <span class="compact-agent-avatar"><ThreadAvatar seed={`${session.id}:subagent:${child.id}`} label={child.label} size={23} /></span>
+            <i aria-hidden="true"></i>
+          </button>
+        {/each}
+        {#if compactOverflow > 0}
+          <span class="compact-more" role="img" aria-label={tr(`${compactOverflow} more subagents`, `${compactOverflow} subagentes a mais`)}>+{compactOverflow}</span>
+        {/if}
+      </div>
+      <button type="button" class="compact-expand" aria-expanded={false} aria-controls={`subagent-rail-${session.id}`} aria-label={tr("Show subagent rail", "Abrir trilho de subagentes")} title={tr("Show subagent rail", "Abrir trilho de subagentes")} onclick={() => void setRailCollapsed(false)}>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg>
       </button>
-    {/each}
+    </div>
+  {:else}
+    <div class="portal-rail-toolbar">
+      <span>{tr("Subagents", "Subagentes")} <b>{children.length}</b></span>
+      <button type="button" aria-expanded={true} aria-controls={`subagent-rail-${session.id}`} aria-label={tr("Minimize subagent rail", "Recolher trilho de subagentes")} title={tr("Minimize subagent rail", "Recolher trilho de subagentes")} onclick={() => void setRailCollapsed(true)}>
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 10 4-4 4 4" /></svg>
+      </button>
+    </div>
+  {/if}
+
+  <div id={`subagent-rail-${session.id}`} class:collapsed={railCollapsed} class="portal-rail-shell" aria-hidden={railCollapsed} inert={railCollapsed}>
+    <div class="portal-rail" bind:this={rail} onscroll={onRailScroll}>
+      {#each children as child (child.id)}
+        {@const recent = (timelines[child.id] ?? []).slice(-3)}
+        <button
+          type="button"
+          class:chosen={selectedId === child.id && expanded}
+          class="portal-button status-{child.status}"
+          data-child-id={child.id}
+          aria-label={tr(`Show ${child.label} timeline · ${statusText(child.status)}`, `Mostrar timeline de ${child.label} · ${statusText(child.status)}`)}
+          aria-expanded={selectedId === child.id && expanded}
+          aria-controls={`subagent-timeline-${session.id}`}
+          title={`${child.label} · ${statusText(child.status)}`}
+          onclick={() => togglePortal(child.id)}
+        >
+          <span class="portal-surface" aria-hidden="true">
+            <span class="portal-feed">
+              {#if recent.length}
+                {#each recent as activity (activity.id)}
+                  <span class="portal-feed-row"><i class:live={activity.status === "running"}></i><b>{activityDisplayTitle(activity, language)}</b></span>
+                {/each}
+              {:else}
+                <span class="portal-feed-row"><i class:live={child.status === "running"}></i><b>{statusText(child.status)}</b></span>
+                <span class="portal-feed-row faint"><i></i><b>{child.label}</b></span>
+              {/if}
+            </span>
+          </span>
+          <span class="portal-avatar" aria-hidden="true"><ThreadAvatar seed={`${session.id}:subagent:${child.id}`} label={child.label} size={20} /></span>
+          <span class="portal-name">{child.label}</span>
+        </button>
+      {/each}
+    </div>
+    {#if showLeftOverflow}
+      <button type="button" class="portal-overflow-control left" aria-label={tr("Show previous subagents", "Mostrar subagentes anteriores")} title={tr("Show previous subagents", "Mostrar subagentes anteriores")} onclick={() => scrollRail(-1)}>
+        <span aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><path d="m10 3-5 5 5 5" /></svg></span>
+      </button>
+    {/if}
+    {#if showRightOverflow}
+      <button type="button" class="portal-overflow-control right" aria-label={tr("Show more subagents", "Mostrar mais subagentes")} title={tr("Show more subagents", "Mostrar mais subagentes")} onclick={() => scrollRail(1)}>
+        <span aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><path d="m6 3 5 5-5 5" /></svg></span>
+      </button>
+    {/if}
   </div>
 
   <div id={`subagent-timeline-${session.id}`} class:open={expanded} class:has-final={Boolean(selectedFinal)} class="portal-panel" aria-hidden={!expanded} inert={!expanded}>
@@ -363,7 +452,42 @@
 
 <style>
   .subagent-portals { position: relative; z-index: 4; min-width: 0; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); background: color-mix(in srgb, var(--workspace-pane) 94%, transparent); }
+  .portal-rail-toolbar { min-height: 24px; padding: 2px 10px 0; display: flex; align-items: center; justify-content: space-between; color: var(--workspace-faint); font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .portal-rail-toolbar b { margin-left: 4px; color: var(--workspace-muted); font-size: 8px; font-variant-numeric: tabular-nums; }
+  .portal-rail-toolbar button { width: 24px; height: 20px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 5px; color: var(--workspace-accent); background: transparent; cursor: pointer; }
+  .portal-rail-toolbar button:hover, .portal-rail-toolbar button:focus-visible { background: var(--workspace-subtle); }
+  .portal-rail-toolbar button:focus-visible, .compact-expand:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 1px; }
+  .portal-rail-toolbar svg, .compact-expand svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .portal-compact { width: max-content; min-width: 48px; margin: 5px 10px 7px; padding: 4px 8px 1px; display: flex; flex-direction: column; align-items: center; gap: 1px; border: 1px solid color-mix(in srgb, var(--workspace-line) 72%, transparent); border-radius: 13px; background: color-mix(in srgb, var(--workspace-raised) 88%, transparent); box-shadow: 0 5px 15px rgba(0, 0, 0, .12); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  .compact-avatar-stack { min-height: 30px; display: flex; align-items: flex-start; gap: 3px; }
+  .compact-agent { position: relative; z-index: calc(4 - var(--stack-index)); width: 27px; height: 29px; padding: 0; display: grid; place-items: start center; border: 0; color: var(--workspace-text); background: transparent; cursor: pointer; transform: translateY(calc(var(--stack-index) * 3px)); }
+  .compact-agent-avatar { width: 24px; height: 24px; display: grid; place-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--portal-color) 62%, var(--workspace-line)); border-radius: 50%; background: var(--workspace-raised); box-shadow: 0 2px 6px rgba(0, 0, 0, .2); transition: border-color 150ms ease, transform 150ms ease; }
+  .compact-agent-avatar :global(svg), .compact-agent-avatar :global(img) { width: 100%; height: 100%; }
+  .compact-agent > i { position: absolute; right: 0; bottom: 3px; width: 6px; height: 6px; border: 1px solid var(--workspace-raised); border-radius: 50%; background: var(--portal-color); }
+  .compact-agent.status-running { --portal-color: #4d99cc; }
+  .compact-agent.status-waiting { --portal-color: #d2a257; }
+  .compact-agent.status-completed { --portal-color: #50aa79; }
+  .compact-agent.status-failed { --portal-color: #ce736c; }
+  .compact-agent.status-interrupted { --portal-color: var(--workspace-muted); }
+  .compact-agent:hover .compact-agent-avatar, .compact-agent:focus-visible .compact-agent-avatar { border-color: var(--portal-color); transform: scale(1.08); }
+  .compact-agent:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 1px; border-radius: 50%; }
+  .compact-more { min-width: 25px; height: 22px; padding: 0 5px; display: grid; place-items: center; align-self: center; border: 1px solid color-mix(in srgb, var(--workspace-accent) 25%, var(--workspace-line)); border-radius: 12px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 10%, var(--workspace-raised)); font-size: 9px; font-weight: 750; font-variant-numeric: tabular-nums; }
+  .compact-expand { width: 26px; height: 18px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 5px; color: var(--workspace-accent); background: transparent; cursor: pointer; }
+  .compact-expand:hover { background: var(--workspace-subtle); }
+  .portal-rail-shell { position: relative; min-width: 0; }
+  .portal-rail-shell.collapsed { display: none; }
   .portal-rail { min-width: 0; min-height: 81px; padding: 9px 12px 7px; display: flex; align-items: start; gap: 10px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .portal-overflow-control { position: absolute; z-index: 2; top: 0; bottom: 0; width: 40px; padding: 0; display: flex; align-items: center; border: 0; color: var(--workspace-accent); background: transparent; cursor: pointer; }
+  .portal-overflow-control::before { position: absolute; inset: 0; z-index: 0; pointer-events: none; content: ""; backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
+  .portal-overflow-control.left { left: 0; justify-content: flex-start; padding-left: 9px; }
+  .portal-overflow-control.right { right: 0; justify-content: flex-end; padding-right: 9px; }
+  .portal-overflow-control.left::before { background: linear-gradient(90deg, color-mix(in srgb, #07110f 68%, var(--workspace-pane)), color-mix(in srgb, #07110f 38%, transparent) 58%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 20%, #000 54%, transparent 100%); mask-image: linear-gradient(90deg, transparent 0%, #000 20%, #000 54%, transparent 100%); }
+  .portal-overflow-control.right::before { background: linear-gradient(270deg, color-mix(in srgb, #07110f 68%, var(--workspace-pane)), color-mix(in srgb, #07110f 38%, transparent) 58%, transparent); -webkit-mask-image: linear-gradient(270deg, transparent 0%, #000 20%, #000 54%, transparent 100%); mask-image: linear-gradient(270deg, transparent 0%, #000 20%, #000 54%, transparent 100%); }
+  .portal-overflow-control > span { position: relative; z-index: 1; width: 22px; height: 22px; display: grid; place-items: center; color: var(--workspace-accent); transition: transform 150ms ease; }
+  .portal-overflow-control svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .portal-overflow-control.left:hover > span { transform: translateX(-2px); }
+  .portal-overflow-control.right:hover > span { transform: translateX(2px); }
+  .portal-overflow-control:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -3px; }
   .portal-button { position: relative; width: 60px; min-width: 60px; padding: 0; display: grid; justify-items: center; gap: 5px; border: 0; color: var(--workspace-muted); background: transparent; cursor: pointer; text-align: center; }
   .portal-button.status-running { --portal-color: #4d99cc; --portal-speed: 2.9s; }
   .portal-button.status-waiting { --portal-color: #d2a257; --portal-speed: 9s; }
@@ -461,5 +585,5 @@
     50% { border-radius: 56% 44% 58% 42% / 45% 57% 43% 55%; }
     100% { border-radius: 48% 52% 42% 58% / 58% 43% 57% 42%; }
   }
-  @media (prefers-reduced-motion: reduce) { .portal-button .portal-surface, .portal-button.status-running .portal-surface::before, .portal-button.status-running .portal-surface::after { animation: none; }.portal-panel, .portal-button .portal-surface { transition: opacity 100ms ease; } }
+  @media (prefers-reduced-motion: reduce) { .portal-button .portal-surface, .portal-button.status-running .portal-surface::before, .portal-button.status-running .portal-surface::after { animation: none; }.portal-panel, .portal-button .portal-surface { transition: opacity 100ms ease; }.portal-overflow-control > span, .compact-agent-avatar { transition: none; } }
 </style>

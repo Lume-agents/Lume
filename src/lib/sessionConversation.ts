@@ -102,7 +102,7 @@ export function buildConversationEntries(
 
   const entries: ConversationEntry[] = [];
   for (const activity of sortedActivities) {
-    if (["queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
+    if (["queued_prompt", "codex_queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
     if (activity.kind === "prompt") {
       let duplicateIndex = -1;
       for (let index = entries.length - 1; index >= 0; index -= 1) {

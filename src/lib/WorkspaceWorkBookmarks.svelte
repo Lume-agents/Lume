@@ -9,6 +9,9 @@
 
   type WorkKind = "goal" | "plan" | "todo";
   type TodoEntry = { item: WorkItem; key: string };
+  const BOOKMARK_WIDTH = 46;
+  const BOOKMARK_HEIGHT = 34;
+  const BOOKMARK_GAP = 6;
 
   let { session, language = "en", hasSubagents = false } = $props<{
     session: HubSession;
@@ -69,10 +72,10 @@
     todoItems.length ? "todo" as const : null,
   ].filter((kind): kind is WorkKind => kind !== null));
   const drawerProgress = $derived(open ? 1 : pullProgress);
-  const panelWidth = $derived(Math.max(0, Math.min(318, containerWidth - 39)));
+  const panelWidth = $derived(Math.max(0, Math.min(318, containerWidth - BOOKMARK_WIDTH)));
   const panelReveal = $derived(drawerProgress * panelWidth);
   const selectedIndex = $derived(Math.max(0, available.indexOf(selected)));
-  const panelTop = $derived(selectedIndex * 45);
+  const panelTop = $derived(selectedIndex * (BOOKMARK_HEIGHT + BOOKMARK_GAP));
 
   function sameKeys(left: string[], right: string[]) {
     return left.length === right.length && left.every((key, index) => key === right[index]);
@@ -220,7 +223,7 @@
     bind:clientWidth={containerWidth}
     class:open
     class="work-bookmarks"
-    style={`--work-bookmark-top:${hasSubagents ? 154 : 74}px;--panel-top:${panelTop}px;--panel-width:${panelWidth}px;--panel-reveal:${panelReveal}px;--panel-opacity:${drawerProgress}`}
+    style={`--bookmark-width:${BOOKMARK_WIDTH}px;--bookmark-height:${BOOKMARK_HEIGHT}px;--bookmark-gap:${BOOKMARK_GAP}px;--work-bookmark-top:${hasSubagents ? 154 : 74}px;--panel-top:${panelTop}px;--panel-width:${panelWidth}px;--panel-reveal:${panelReveal}px;--panel-opacity:${drawerProgress}`}
     aria-label={tr("Agent work", "Trabalho do agente")}
   >
     <nav class="bookmark-rail" aria-label={tr("Work bookmarks", "Marcadores de trabalho")}>
@@ -284,12 +287,47 @@
 
 <style>
   .work-bookmarks { position: absolute; z-index: 6; top: var(--work-bookmark-top); right: 0; bottom: 82px; width: min(357px, calc(100% - 10px)); pointer-events: none; }
-  .bookmark-rail { position: absolute; z-index: 4; top: 0; right: 0; display: grid; gap: 6px; pointer-events: auto; }
-  .bookmark-trigger { width: 39px; height: 39px; padding: 0; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-right: 0; border-radius: 10px 0 0 10px; color: var(--workspace-muted); background: var(--workspace-raised); box-shadow: -5px 6px 16px rgba(8, 22, 16, .08); cursor: grab; touch-action: none; transform: translateX(calc(0px - var(--trigger-reveal))); transition: transform 240ms cubic-bezier(.22, 1, .36, 1), color 100ms ease, border-color 100ms ease, background 100ms ease, box-shadow 140ms ease; will-change: transform; }
-  .bookmark-trigger:hover, .bookmark-trigger:focus-visible { color: var(--bookmark-tone); border-color: color-mix(in srgb, var(--bookmark-tone) 46%, var(--workspace-line)); background: color-mix(in srgb, var(--bookmark-tone) 8%, var(--workspace-raised)); box-shadow: -7px 8px 20px rgba(8, 22, 16, .11); }
-  .bookmark-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }.bookmark-trigger:active { cursor: grabbing; }
+  .bookmark-rail { position: absolute; z-index: 4; top: 0; right: 0; display: grid; gap: var(--bookmark-gap); pointer-events: auto; }
+  .bookmark-trigger {
+    --bookmark-fill: var(--workspace-raised);
+    --bookmark-edge: var(--workspace-line);
+    position: relative;
+    isolation: isolate;
+    width: var(--bookmark-width);
+    height: var(--bookmark-height);
+    padding: 0 0 0 6px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 0;
+    color: var(--bookmark-tone);
+    background: transparent;
+    filter: drop-shadow(-3px 4px 6px rgba(8, 22, 16, .1));
+    cursor: grab;
+    touch-action: none;
+    transform: translateX(calc(0px - var(--trigger-reveal)));
+    transition: transform 240ms cubic-bezier(.22, 1, .36, 1), filter 140ms ease;
+    will-change: transform;
+  }
+  .bookmark-trigger::before, .bookmark-trigger::after {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 10px 50%);
+    pointer-events: none;
+    transition: background 100ms ease;
+  }
+  .bookmark-trigger::before { background: var(--bookmark-edge); }
+  .bookmark-trigger::after { inset: 1px 0 1px 1px; background: var(--bookmark-fill); }
+  .bookmark-trigger:not(.active):is(:hover, :focus-visible) {
+    --bookmark-edge: color-mix(in srgb, var(--bookmark-tone) 46%, var(--workspace-line));
+    --bookmark-fill: color-mix(in srgb, var(--bookmark-tone) 8%, var(--workspace-raised));
+  }
+  .bookmark-trigger.active { --bookmark-edge: var(--workspace-raised); filter: none; }
+  .bookmark-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
+  .bookmark-trigger:active { cursor: grabbing; }
   .kind-goal { --bookmark-tone: #c28a48; }.kind-plan { --bookmark-tone: #718fc8; }.kind-todo { --bookmark-tone: var(--workspace-accent); }
-  .bookmark-trigger { color: var(--bookmark-tone); }
 
   .bookmark-panel { position: absolute; z-index: 3; top: 0; right: 0; width: var(--panel-width); max-height: min(470px, calc(100% - var(--panel-top))); display: flex; flex-direction: column; overflow: hidden; border-radius: 0 0 15px 15px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: -18px 18px 52px rgba(4, 18, 12, .2); opacity: var(--panel-opacity); pointer-events: none; clip-path: inset(0 0 0 calc(100% - var(--panel-reveal)) round 0 0 15px 15px); transform: translateY(var(--panel-top)); transition: transform 160ms cubic-bezier(.22, 1, .36, 1), clip-path 280ms cubic-bezier(.22, 1, .36, 1), opacity 140ms ease; will-change: transform, clip-path; }
   .work-bookmarks.open .bookmark-panel { pointer-events: auto; }

@@ -39,7 +39,10 @@ pub fn run_hook(provider: &str) -> i32 {
 fn read_hook_event(provider: &str) -> Option<Value> {
     let input = read_hook_stdin()?;
     let raw: Value = serde_json::from_str(&input).ok()?;
-    let event = map_event(provider, &raw)?;
+    // Capture exact CLI identity even while the desktop is closed. Diagnostic
+    // records remain opt-in; neither failure can block the provider's tool.
+    let codex_context = crate::codex_identity_probe::observe_hook(provider, &raw);
+    let event = map_event_with_context(provider, &raw, codex_context)?;
     let wait_for_decision = event.wait_for_decision;
     let is_question = matches!(event.event, HookEventKind::QuestionRequest);
     let payload = serde_json::to_string(&event).ok()?;
@@ -116,7 +119,16 @@ fn gemini_hook_output(provider: &str) -> Option<Value> {
     (provider == "gemini").then(|| json!({}))
 }
 
+#[cfg(test)]
 fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
+    map_event_with_context(provider, raw, None)
+}
+
+fn map_event_with_context(
+    provider: &str,
+    raw: &Value,
+    codex_context: Option<(Option<u32>, SessionSource)>,
+) -> Option<HookEvent> {
     let (provider, forced_hook_name) = provider
         .split_once(':')
         .map_or((provider, None), |(provider, event)| {
@@ -129,6 +141,24 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
         "gemini" => AgentKind::Gemini,
         _ => return None,
     };
+    // Child hooks can reuse the parent's session ID. Drop their explicit
+    // lineage before normalization loses it and before ancestry fallback can
+    // turn them into root conversation activity. A root tool describing a
+    // subagent still passes: tool_input/agent_id are not lineage markers.
+    if provider == "codex"
+        && (raw
+            .get("parent_session_id")
+            .is_some_and(|value| !value.is_null())
+            || raw
+                .get("parent_thread_id")
+                .is_some_and(|value| !value.is_null())
+            || raw.get("is_subagent").and_then(Value::as_bool) == Some(true)
+            || raw
+                .get("source")
+                .is_some_and(|source| source.is_object() || source.as_str() == Some("subagent")))
+    {
+        return None;
+    }
     let hook_name = forced_hook_name
         .map(str::to_string)
         .or_else(|| string(raw, "hook_event_name"))?;
@@ -150,6 +180,9 @@ fn map_event(provider: &str, raw: &Value) -> Option<HookEvent> {
     let (process_id, source, headless_resume) =
         if matches!(&agent, AgentKind::Antigravity | AgentKind::Gemini) {
             (None, SessionSource::Cli, false)
+        } else if provider == "codex" && codex_context.is_some() {
+            let (pid, source) = codex_context?;
+            (pid, source, false)
         } else {
             agent_process_context(provider)
         };
@@ -856,6 +889,10 @@ fn status_label(hook: &str, event: &HookEventKind) -> Option<&'static str> {
 }
 
 fn agent_process_context(provider: &str) -> (Option<u32>, SessionSource, bool) {
+    if provider == "codex" {
+        let (pid, source) = crate::codex_identity_probe::hook_process_context();
+        return (pid, source, false);
+    }
     let Some(current_pid) = get_current_pid().ok() else {
         return (None, SessionSource::Cli, false);
     };
@@ -1420,6 +1457,74 @@ mod tests {
             output["hookSpecificOutput"]["decision"]["behavior"],
             "allow"
         );
+    }
+
+    #[test]
+    fn codex_child_lineage_cannot_be_normalized_into_root_activity() {
+        let parent = "aaaaaaaa-1234-5678-9abc-123456789abc";
+        for hook in [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "Stop",
+            "SessionEnd",
+        ] {
+            for (key, marker) in [
+                ("parent_session_id", json!(parent)),
+                ("parent_thread_id", json!(parent)),
+                ("is_subagent", json!(true)),
+                ("source", json!({ "subagent": { "thread_spawn": {} } })),
+                ("source", json!("subagent")),
+            ] {
+                let mut raw = json!({
+                    "session_id": parent, "hook_event_name": hook,
+                    "tool_name": "spawn_agent", "tool_input": { "message": "Inspect" }
+                });
+                raw[key] = marker;
+                assert!(
+                    map_event_with_context("codex", &raw, Some((None, SessionSource::Web)))
+                        .is_none(),
+                    "{hook}: {key}"
+                );
+                assert!(map_event("codex", &raw).is_none(), "fallback {hook}: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn codex_root_subagent_tools_keep_their_main_thread_timeline() {
+        let parent = "aaaaaaaa-1234-5678-9abc-123456789abc";
+        for hook in ["PreToolUse", "PostToolUse"] {
+            let raw = json!({
+                "session_id": parent, "hook_event_name": hook,
+                "parent_session_id": null, "parent_thread_id": null,
+                "is_subagent": false, "source": "resume",
+                "agent_id": "child-1", "tool_name": "spawn_agent",
+                "tool_input": { "agent_id": "child-1", "message": "Inspect" }
+            });
+            let event = map_event_with_context("codex", &raw, Some((None, SessionSource::Web)))
+                .expect("root subagent tool");
+            assert!(matches!(event.event, HookEventKind::Running));
+            assert_eq!(event.session_id, format!("codex:{parent}"));
+            assert_eq!(event.native_session_id.as_deref(), Some(parent));
+            assert_eq!(event.activity.unwrap().kind, "tool");
+        }
+    }
+
+    #[test]
+    fn codex_root_prompt_and_compaction_start_still_normalize() {
+        for (hook, source) in [("UserPromptSubmit", "resume"), ("SessionStart", "compact")] {
+            let raw = json!({
+                "session_id": "aaaaaaaa-1234-5678-9abc-123456789abc",
+                "hook_event_name": hook, "source": source
+            });
+            let event = map_event_with_context("codex", &raw, Some((None, SessionSource::Web)))
+                .expect("root event");
+            assert!(matches!(
+                event.event,
+                HookEventKind::Running | HookEventKind::SessionStarted
+            ));
+        }
     }
 
     #[test]

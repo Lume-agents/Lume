@@ -84,6 +84,7 @@ pub fn resolve_permission(
     permission_id: &str,
     action: PermissionAction,
 ) -> Result<(), String> {
+    ensure_monitor_control_available(&state.connected_session(session_id)?)?;
     state.resolve_permission(session_id, permission_id, action)
 }
 
@@ -93,7 +94,15 @@ pub fn resolve_question(
     question_id: &str,
     answers: Vec<QuestionAnswer>,
 ) -> Result<(), String> {
+    ensure_monitor_control_available(&state.connected_session(session_id)?)?;
     state.resolve_question(session_id, question_id, answers)
+}
+
+fn ensure_monitor_control_available(session: &AgentSession) -> Result<(), String> {
+    if protocol::is_unbound_codex_cli_monitor(session) {
+        return Err("Esta conversa é somente monitorada; a CLI ainda não foi identificada".into());
+    }
+    Ok(())
 }
 
 pub fn open_session_source(
@@ -141,6 +150,7 @@ pub fn submit_prompt(
         return Err("O prompt excede o limite local de 16 KB".into());
     }
     let session = state.connected_session(session_id)?;
+    ensure_monitor_control_available(&session)?;
     if is_legacy_gemini_monitoring_only(&session.agent, &session.source) {
         return Err("A CLI legada do Gemini é somente monitorada pelo Lume".into());
     }
@@ -1051,11 +1061,15 @@ pub fn terminate_session(
     bridge: &CodexBridge,
     session_id: &str,
 ) -> Result<(), String> {
+    if let Ok(session) = state.connected_session(session_id) {
+        ensure_monitor_control_available(&session)?;
+    }
     let session = state
         .sessions()?
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or_else(|| "Sessão não encontrada".to_string())?;
+    ensure_monitor_control_available(&session)?;
     if is_legacy_gemini_monitoring_only(&session.agent, &session.source) {
         return Err("A CLI legada do Gemini é somente monitorada pelo Lume".into());
     }
@@ -1620,6 +1634,49 @@ mod tests {
         session.source = SessionSource::Desktop;
         session.agent = AgentKind::ClaudeCode;
         assert!(!is_managed_native_session(&session));
+    }
+
+    #[test]
+    fn unbound_codex_cli_monitor_cannot_dispatch_pending_responses() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        state
+            .ingest(crate::domain::HookEvent {
+                event: crate::domain::HookEventKind::SessionStarted,
+                session_id: "codex:thread-monitor".into(),
+                agent: AgentKind::Codex,
+                agent_label: None,
+                session_name: Some("Observed conversation".into()),
+                project: Some("project".into()),
+                source: Some(SessionSource::Cli),
+                source_app: None,
+                control_origin: SessionControlOrigin::External,
+                status_label: None,
+                started_at: None,
+                process_id: None,
+                native_session_id: Some("thread-monitor".into()),
+                working_directory: Some("/work/project".into()),
+                permission_profile: None,
+                permission: None,
+                question: None,
+                last_response: None,
+                activity: None,
+                activities: Vec::new(),
+                wait_for_decision: false,
+            })
+            .expect("observed session");
+
+        let permission_error = resolve_permission(
+            &state,
+            "codex:thread-monitor",
+            "approval",
+            PermissionAction::AllowOnce,
+        )
+        .expect_err("permission must not dispatch by thread id");
+        let question_error =
+            resolve_question(&state, "codex:thread-monitor", "question", Vec::new())
+                .expect_err("question must not dispatch by thread id");
+        assert!(permission_error.contains("somente monitorada"));
+        assert!(question_error.contains("somente monitorada"));
     }
 
     #[test]

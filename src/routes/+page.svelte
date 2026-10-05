@@ -38,6 +38,8 @@
     type OrbPosition,
   } from "$lib/orbDocking";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import LumeIcon from "$lib/LumeIcon.svelte";
+  import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
@@ -66,7 +68,6 @@
     AgentSession,
     CompanionStatus,
     ExternalAgentPlugin,
-    HistoryEntry,
     IntegrationDiagnostic,
     IntegrationStatus,
     MobileGatewayStatus,
@@ -78,12 +79,10 @@
     PromptAttachmentInput,
     QuestionAnswer,
     ResumableSession,
-    ResultNote,
     SessionStatus,
     TerminalWindowState,
     WhiteboardLayout,
     WorkflowRun,
-    WorkflowHistoryRecord,
   } from "$lib/domain";
   import { demoSessions } from "$lib/demo";
   import {
@@ -95,11 +94,7 @@
     disableMobileGateway,
     decidePermission,
     defaultPreferences,
-    deleteResultNote,
     loadDisplayBackend,
-    loadHistory,
-    loadWorkflowHistory,
-    loadResultNotes,
     loadResumableSessions,
     loadIntegrationStatuses,
     loadMobileGatewayStatus,
@@ -123,11 +118,13 @@
     refreshAgentRateLimits,
     rebindWorkflowSession,
     renameSession,
+    canLinkCodexCli,
+    isUnidentifiedCodexCli,
     revealBrowserCompanion,
     revokePairedDevice,
     launchAgentSession,
     savePreferences,
-    saveResultNote,
+    watchShortcutRegistrationError,
     restoreTerminalLayout,
     setTerminalWorkflowEnabled,
     setTerminalWindowsVisible,
@@ -189,9 +186,7 @@
   let startupChooserOpen = $state(false);
   let view = $state<View>("sessions");
   let sessions = $state<AgentSession[]>(isTauri ? [] : structuredClone(demoSessions));
-  let history = $state<HistoryEntry[]>([]);
-  let workflowHistory = $state<WorkflowHistoryRecord[]>([]);
-  let resultNotes = $state<ResultNote[]>([]);
+  let visibleAgentSessions = $derived(sessions.filter((session) => !isUnidentifiedCodexCli(session)));
   let preferences = $state<Preferences>({ ...defaultPreferences });
   let monitors = $state<MonitorOption[]>([]);
   let integrations = $state<IntegrationStatus[]>([]);
@@ -202,7 +197,6 @@
   });
   let selectedId = $state<string | null>(null);
   let inspectorSessionId = $state<string | null>(null);
-  let inspectorPane = $state<"inspect" | "archive">("inspect");
   let orbInspectorSection = $state<"session" | "repository">("session");
   let permissionError = $state<string | null>(null);
   let questionSelections = $state<Record<string, string>>({});
@@ -234,13 +228,50 @@
   let sessionActionMessage = $state<string | null>(null);
   let sessionActionMessageIsError = $state(false);
   let renamingSessionId = $state<string | null>(null);
+  let cliAssociationSessionId = $state<string | null>(null);
+  let cliContextMenu = $state<{ sessionId: string; x: number; y: number } | null>(null);
+  let cliContextMenuNode = $state<HTMLDivElement | null>(null);
+  let cliContextTrigger: HTMLButtonElement | null = null;
+
+  function openCliContextMenu(session: AgentSession, trigger: HTMLButtonElement, x: number, y: number) {
+    if (!canLinkCodexCli(session)) return;
+    cliContextTrigger = trigger;
+    cliContextMenu = {
+      sessionId: session.id,
+      x: Math.max(8, Math.min(x, window.innerWidth - 204)),
+      y: Math.max(8, Math.min(y, window.innerHeight - 54)),
+    };
+    void tick().then(() => cliContextMenuNode?.querySelector<HTMLButtonElement>("button")?.focus());
+  }
+
+  $effect(() => {
+    if (!cliContextMenu) return;
+    const dismiss = () => { cliContextMenu = null; };
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !cliContextMenuNode?.contains(event.target)) dismiss();
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismiss();
+        cliContextTrigger?.focus();
+      } else if (event.key === "Tab") dismiss();
+    };
+    window.addEventListener("pointerdown", outside);
+    window.addEventListener("keydown", key);
+    window.addEventListener("resize", dismiss);
+    window.addEventListener("scroll", dismiss, true);
+    return () => {
+      window.removeEventListener("pointerdown", outside);
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("scroll", dismiss, true);
+    };
+  });
   let renameDraft = $state("");
   let renameError = $state<string | null>(null);
   let renamingSession = $state(false);
   let copiedResultId = $state<string | null>(null);
-  let savingNoteId = $state<string | null>(null);
-  let noteMessage = $state<string | null>(null);
-  let noteMessageIsError = $state(false);
   let selectedProfileKey = $state<string | null>(null);
   let terminalWindows = $state<TerminalWindowState[]>([]);
   let workflowModeChanging = $state(false);
@@ -266,6 +297,7 @@
   let shortcutEditorKey = $state<ShortcutPreferenceKey | null>(null);
   let shortcutDraft = $state("");
   let shortcutEditorError = $state<string | null>(null);
+  let shortcutRegistrationError = $state<string | null>(null);
   let paletteQuery = $state("");
   let paletteIndex = $state(0);
   let overlayPosition = $state({ x: 0, y: 12 });
@@ -398,8 +430,13 @@
       sessionActionMessage ? { id: "session-message", message: sessionActionMessage, tone: sessionActionMessageIsError ? "error" : "info", onDismiss: () => (sessionActionMessage = null) } : null,
       renameError ? { id: "rename-error", message: renameError, tone: "error", onDismiss: () => (renameError = null) } : null,
       shortcutEditorError && shortcutEditorError !== settingsMessage ? { id: "shortcut-error", message: shortcutEditorError, tone: "error", onDismiss: () => (shortcutEditorError = null) } : null,
+      shortcutRegistrationError ? {
+        id: "shortcut-registration-error",
+        message: `${tr("Global shortcuts could not be registered. Review them in Settings.", "Não foi possível registrar os atalhos globais. Revise-os nas Configurações.")} ${shortcutRegistrationError}`,
+        tone: "warning",
+        onDismiss: () => (shortcutRegistrationError = null),
+      } : null,
       terminalMessage ? { id: "terminal-message", message: terminalMessage, tone: terminalMessageIsError ? "error" : "info", onDismiss: () => (terminalMessage = null) } : null,
-      noteMessage ? { id: "note-message", message: noteMessage, tone: noteMessageIsError ? "error" : "success", onDismiss: () => (noteMessage = null) } : null,
       settingsMessage ? { id: "settings-message", message: settingsMessage, tone: settingsMessageIsError ? "error" : "success", onDismiss: () => {
         if (shortcutEditorError === settingsMessage) shortcutEditorError = null;
         settingsMessage = null;
@@ -582,7 +619,7 @@
     }
   });
   const activeCount = $derived(
-    sessions.filter((session) =>
+    visibleAgentSessions.filter((session) =>
       ["running", "permission_required", "waiting_for_input"].includes(session.status),
     ).length,
   );
@@ -591,16 +628,11 @@
       || ["permission_required", "waiting_for_input", "failed"].includes(session.status);
   }
 
-  const recentResults = $derived.by(() =>
-    sessions
-      .flatMap((session) => session.results.map((result) => ({ session, result })))
-      .sort((left, right) => right.result.createdAt - left.result.createdAt),
-  );
   const inspectedSession = $derived(
-    sessions.find((session) => session.id === inspectorSessionId)
-      ?? sessions.find(needsAttention)
-      ?? sessions.find((session) => session.status === "running")
-      ?? sessions[0]
+    visibleAgentSessions.find((session) => session.id === inspectorSessionId)
+      ?? visibleAgentSessions.find(needsAttention)
+      ?? visibleAgentSessions.find((session) => session.status === "running")
+      ?? visibleAgentSessions[0]
       ?? null,
   );
   const detectedProjects = $derived.by(() => {
@@ -608,7 +640,7 @@
     for (const [key, profile] of Object.entries(preferences.projectProfiles)) {
       if (profile.label) projects.set(key, profile.label);
     }
-    for (const session of sessions) {
+    for (const session of visibleAgentSessions) {
       projects.set(projectKey(session.workingDirectory ?? session.project), session.project);
     }
     return Array.from(projects, ([key, label]) => ({ key, label })).sort((left, right) =>
@@ -623,14 +655,14 @@
   );
 
   const shellStatus = $derived.by<ShellStatus>(() => {
-    if (sessions.length === 0) return "idle";
-    if (sessions.some((session) => session.status === "permission_required")) {
+    if (visibleAgentSessions.length === 0) return "idle";
+    if (visibleAgentSessions.some((session) => session.status === "permission_required")) {
       return "permission_required";
     }
-    if (sessions.some((session) => session.status === "failed")) return "failed";
-    if (sessions.some((session) => session.status === "running")) return "running";
-    if (sessions.some((session) => session.status === "completed")) return "completed";
-    if (sessions.some((session) => session.status === "waiting_for_input")) {
+    if (visibleAgentSessions.some((session) => session.status === "failed")) return "failed";
+    if (visibleAgentSessions.some((session) => session.status === "running")) return "running";
+    if (visibleAgentSessions.some((session) => session.status === "completed")) return "completed";
+    if (visibleAgentSessions.some((session) => session.status === "waiting_for_input")) {
       return "waiting_for_input";
     }
     return "idle";
@@ -659,7 +691,14 @@
     let stopCompanionUpdateListening: (() => void) | undefined;
     let stopMobileDeviceListening: (() => void) | undefined;
     let stopWorkspaceFailureListening: (() => void) | undefined;
+    let stopShortcutStatusListening: (() => void) | undefined;
     if (isTauri) {
+      void watchShortcutRegistrationError((error) => {
+        if (!disposed) shortcutRegistrationError = error;
+      }).then((stop) => {
+        if (disposed) stop();
+        else stopShortcutStatusListening = stop;
+      }).catch(() => undefined);
       void listen<string>("lume://workspace-open-failed", ({ payload }) => {
         if (!disposed) void showWorkspaceOpenFailure(payload);
       }).then((stop) => {
@@ -789,6 +828,7 @@
       stopCompanionUpdateListening?.();
       stopMobileDeviceListening?.();
       stopWorkspaceFailureListening?.();
+      stopShortcutStatusListening?.();
       colorScheme.removeEventListener("change", syncSystemTheme);
       window.removeEventListener("focus", refreshAfterResume);
       window.removeEventListener("pageshow", refreshAfterResume);
@@ -941,9 +981,9 @@
         session.nativeSessionId
           ? `${session.agent}:${session.nativeSessionId}`
           : session.id;
-      const previous = new Map(sessions.map((session) => [soundKey(session), session.status]));
+      const previous = new Map(visibleAgentSessions.map((session) => [soundKey(session), session.status]));
       const played = new Set<string>();
-      for (const session of next) {
+      for (const session of next.filter((item) => !isUnidentifiedCodexCli(item))) {
         if (!projectSoundEnabled(session)) continue;
         const key = soundKey(session);
         const previousStatus = previous.get(key);
@@ -1508,7 +1548,8 @@
   function pendingQueuedPrompts(session: AgentSession) {
     return session.activities
       .filter((activity) =>
-        activity.kind === "queued_prompt" && activity.status === "waiting"
+        ["queued_prompt", "codex_queued_prompt"].includes(activity.kind)
+        && activity.status === "waiting"
       )
       .sort((left, right) => left.createdAt - right.createdAt);
   }
@@ -1553,7 +1594,7 @@
 
   async function steerSessionQueuedPrompt(session: AgentSession) {
     const queuedPrompt = pendingQueuedPrompts(session)[0];
-    if (!queuedPrompt || steeringQueuedActivityId) return;
+    if (!queuedPrompt || queuedPrompt.kind !== "queued_prompt" || steeringQueuedActivityId) return;
     steeringQueuedActivityId = queuedPrompt.id;
     composerMessage = null;
     try {
@@ -1574,11 +1615,12 @@
   }
 
   function handleSessionComposerKeydown(event: KeyboardEvent, session: AgentSession) {
+    const nextQueuedPrompt = pendingQueuedPrompts(session)[0];
     if (
       event.key !== "Tab"
       || event.shiftKey
       || event.isComposing
-      || pendingQueuedPrompts(session).length === 0
+      || nextQueuedPrompt?.kind !== "queued_prompt"
     ) return;
     event.preventDefault();
     void steerSessionQueuedPrompt(session);
@@ -1673,41 +1715,6 @@
     }
   }
 
-  async function keepResultAsNote(session: AgentSession, resultId: string) {
-    if (savingNoteId) return;
-    savingNoteId = resultId;
-    noteMessage = null;
-    try {
-      const note = await saveResultNote(session.id, resultId, sessionDisplayName(session));
-      resultNotes = [note, ...resultNotes.filter((item) => item.id !== note.id)];
-      noteMessageIsError = false;
-      noteMessage = tr("Result saved as a local note.", "Resultado salvo como nota local.");
-    } catch (error) {
-      noteMessageIsError = true;
-      noteMessage = String(error).replace(/^Error:\s*/, "");
-    } finally {
-      savingNoteId = null;
-    }
-  }
-
-  async function removeResultNote(id: string) {
-    try {
-      await deleteResultNote(id);
-      resultNotes = resultNotes.filter((note) => note.id !== id);
-    } catch (error) {
-      noteMessageIsError = true;
-      noteMessage = String(error).replace(/^Error:\s*/, "");
-    }
-  }
-
-  function continueFromResult(session: AgentSession) {
-    view = "sessions";
-    selectedId = session.id;
-    composerSessionId = session.id;
-    composerPrompt = "";
-    composerMessage = null;
-  }
-
   async function terminateAgent(session: AgentSession) {
     if (!canTerminateSession(session) || terminatingSessionId) return;
     if (terminateConfirmId !== session.id) {
@@ -1767,7 +1774,7 @@
   }
 
   function missingWorkflowSteps() {
-    const connected = new Set(sessions.map(workflowSessionKey));
+    const connected = new Set(visibleAgentSessions.map(workflowSessionKey));
     return preferences.workflowGroups
       .filter((group) => {
         const run = workflowRunStates[group.id];
@@ -1788,7 +1795,7 @@
         .filter((step) => step.id !== stepId)
         .map((step) => step.sessionNativeId) ?? [],
     );
-    return sessions.filter((session) => !occupied.has(workflowSessionKey(session)));
+    return visibleAgentSessions.filter((session) => !occupied.has(workflowSessionKey(session)));
   }
 
   async function updateWorkflowSetting<K extends keyof Preferences["workflowSettings"]>(
@@ -2214,7 +2221,6 @@
       overlayPosition = position;
     }
     view = nextView;
-    if (nextView === "history") inspectorPane = "inspect";
     paletteOpen = false;
     selectedId = null;
     permissionError = null;
@@ -2223,13 +2229,6 @@
     composerMessage = null;
     terminalMessage = null;
     if (nextView === "board") await refreshTerminalWindows();
-    if (nextView === "history") {
-      [history, resultNotes, workflowHistory] = await Promise.all([
-        loadHistory(),
-        loadResultNotes(),
-        loadWorkflowHistory(),
-      ]);
-    }
     if (nextView === "settings") {
       selectedProfileKey ??= detectedProjects[0]?.key ?? null;
       settingsMessage = null;
@@ -2254,7 +2253,7 @@
       { id: "workspace", label: "Workspace", detail: tr("Open the multi-agent workbench", "Abrir a bancada de múltiplos agentes"), run: async () => { await showWorkspaceWindow(); } },
       { id: "sessions", label: tr("Sessions", "Sessões"), detail: tr("Show active agents", "Mostrar agentes ativos"), run: () => openView("sessions") },
       { id: "whiteboard", label: tr("Terminals", "Terminais"), detail: tr("Open floating terminals", "Abrir terminais flutuantes"), run: () => openView("board") },
-      { id: "history", label: tr("History and notes", "Histórico e notas"), detail: tr("Open completed results", "Abrir resultados finalizados"), run: () => openView("history") },
+      { id: "history", label: tr("Inspector", "Inspector"), detail: tr("Inspect a session and its repository", "Inspecionar uma sessão e seu repositório"), run: () => openView("history") },
       { id: "settings", label: tr("Settings", "Ajustes"), detail: tr("Configure Lume", "Configurar o Lume"), run: () => openView("settings") },
       { id: "new-session", label: tr("New agent session", "Nova sessão de agente"), detail: tr("Open the agent launcher", "Abrir o iniciador de agentes"), run: async () => { await openView("sessions"); launcherOpen = true; } },
     ];
@@ -2922,38 +2921,6 @@
     );
   }
 
-  function eventLabel(event: HistoryEntry["event"]) {
-    return {
-      completed: tr("Completed", "Finalizado"),
-      failed: tr("Error", "Erro"),
-      permission_allowed: tr("Allowed", "Permitido"),
-      permission_denied: tr("Denied", "Recusado"),
-    }[event];
-  }
-
-  function workflowRunLabel(status: WorkflowRun["status"]) {
-    return {
-      draft: tr("Draft", "Rascunho"),
-      ready: tr("Ready for next step", "Pronto para próxima etapa"),
-      running: tr("Running", "Executando"),
-      waiting_for_approval: tr("Waiting for approval", "Aguardando aprovação"),
-      paused: tr("Paused", "Pausado"),
-      completed: tr("Completed", "Concluído"),
-      failed: tr("Failed", "Falhou"),
-      cancelled: tr("Cancelled", "Cancelado"),
-    }[status];
-  }
-
-  function workflowElapsed(record: WorkflowHistoryRecord) {
-    const end = ["completed", "failed", "cancelled"].includes(record.run.status)
-      ? record.run.updatedAt
-      : Date.now();
-    const minutes = Math.max(0, Math.round((end - record.run.createdAt) / 60_000));
-    if (minutes < 1) return tr("under a minute", "menos de um minuto");
-    if (minutes < 60) return `${minutes} min`;
-    const hours = Math.floor(minutes / 60);
-    return `${hours}h ${minutes % 60}m`;
-  }
 </script>
 
 <svelte:head>
@@ -2971,6 +2938,22 @@
   onpointermove={wakeMascot}
   aria-label={tr("Lume, agent monitor", "Lume, monitor de agentes")}
 >
+  {#if cliAssociationSessionId}
+    {#key cliAssociationSessionId}
+      <CodexCliAssociationDialog sessionId={cliAssociationSessionId} language={preferences.language} dark={effectiveDark} onClose={() => { cliAssociationSessionId = null; }} onLinked={() => refreshSessions(false)} />
+    {/key}
+  {/if}
+  {#if cliContextMenu && expanded && view === "sessions"}
+    <div class="cli-context-menu" bind:this={cliContextMenuNode} role="menu" aria-label={tr("Session actions", "Ações da sessão")} tabindex="-1" style:left={`${cliContextMenu.x}px`} style:top={`${cliContextMenu.y}px`} transition:fade={{ duration: 100 }}>
+      <button type="button" role="menuitem" onclick={() => {
+        cliAssociationSessionId = cliContextMenu?.sessionId ?? null;
+        cliContextMenu = null;
+      }}>
+        <LumeIcon name="split" size={16} />
+        <span>{tr("Link conversation", "Vincular conversa")}</span>
+      </button>
+    </div>
+  {/if}
   {#if !expanded}
     <button
       class="lume-orb status-{shellStatus}"
@@ -3235,8 +3218,8 @@
       <div class="panel-content" class:inspector-content={view === "history"}>
         {#if view === "sessions"}
           <div class="session-list" use:revealScrollbarWhileScrolling>
-            {#if sessions.length}
-              {#each sessions as session (session.id)}
+            {#if visibleAgentSessions.length}
+              {#each visibleAgentSessions as session (session.id)}
                 {@const visibleLastResponse = stripInternalAgentMetadata(session.lastResponse)}
                 <article
                   animate:flip={{ duration: 220 }}
@@ -3244,7 +3227,18 @@
                   class:selected={selectedId === session.id}
                   class="session-row"
                 >
-                  <button class="session-summary" type="button" aria-expanded={selectedId === session.id} onclick={() => openSession(session)}>
+                  <button class="session-summary" type="button" aria-expanded={selectedId === session.id} onclick={() => openSession(session)}
+                    oncontextmenu={(event) => {
+                      if (!canLinkCodexCli(session)) return;
+                      event.preventDefault();
+                      openCliContextMenu(session, event.currentTarget, event.clientX, event.clientY);
+                    }}
+                    onkeydown={(event) => {
+                      if (!canLinkCodexCli(session) || !(event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) return;
+                      event.preventDefault();
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      openCliContextMenu(session, event.currentTarget, rect.left + rect.width / 2, rect.bottom);
+                    }}>
                     <span class="thread-avatar-shell">
                       <ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionDisplayName(session)} size={32} />
                     </span>
@@ -3448,7 +3442,16 @@
                                 {/each}
                               </div>
                             {/if}
-                            {#if queuedPrompts[0]}
+                            {#if queuedPrompts[0]?.kind === "codex_queued_prompt"}
+                              <div class="inline-queue-tray read-only" role="status">
+                                <span class="queue-mark" aria-hidden="true">↳</span>
+                                <span class="queue-copy">
+                                  <small>{queuedPrompts.length > 1 ? tr(`${queuedPrompts.length} queued prompts`, `${queuedPrompts.length} prompts na fila`) : tr("Queued via Codex CLI", "Na fila pela CLI do Codex")}</small>
+                                  <strong>{queuedPrompts[0].detail || tr("Prompt queued in Codex", "Prompt na fila do Codex")}</strong>
+                                </span>
+                                <span class="queue-shortcut"><small>{tr("Read only", "Somente leitura")}</small></span>
+                              </div>
+                            {:else if queuedPrompts[0]}
                               <button
                                 class="inline-queue-tray"
                                 disabled={steeringQueuedActivityId !== null}
@@ -3622,7 +3625,7 @@
             </div>
 
             <div class="terminal-picker" use:revealScrollbarWhileScrolling>
-              {#each sessions as session (session.id)}
+              {#each visibleAgentSessions as session (session.id)}
                 <div class="terminal-picker-row">
                   <span class="terminal-picker-avatar">
                     <ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionDisplayName(session)} size={30} />
@@ -3656,202 +3659,29 @@
           </div>
         {:else if view === "history"}
           <div class="inspector-screen" in:fade={{ duration: 150 }}>
-            <div class="inspector-subnav" role="group" aria-label={tr("Inspector views", "Telas do Inspector")}>
-              <button class:active={inspectorPane === "inspect"} aria-pressed={inspectorPane === "inspect"} type="button" onclick={() => (inspectorPane = "inspect")}>{tr("Inspector", "Inspector")}</button>
-              <button class:active={inspectorPane === "archive"} aria-pressed={inspectorPane === "archive"} type="button" onclick={() => (inspectorPane = "archive")}>{tr("History", "Histórico")}</button>
-            </div>
-            {#if inspectorPane === "inspect"}
-              <div class="orb-inspector-content">
-                {#if sessions.length}
-                  <div class="inspector-session-bar">
-                    <div class="inspector-session-picker">
-                      <span>{tr("Session", "Sessão")}</span>
-                      <LumeSelect
-                        ariaLabel={tr("Session to inspect", "Sessão para inspecionar")}
-                        value={inspectedSession?.id ?? ""}
-                        options={sessions.map((session) => ({ value: session.id, label: `${sessionDisplayName(session)} · ${session.agentLabel}` }))}
-                        minWidth={0}
-                        onValueChange={(value) => (inspectorSessionId = value || null)}
-                      />
-                    </div>
-                    {#if inspectedSession}
-                      <button class="inspector-terminal-action" disabled={openingTerminal !== null} type="button" onclick={() => void openTerminal(inspectedSession)}>
-                        {openingTerminal === inspectedSession.id ? tr("Opening…", "Abrindo…") : terminalIsOpen(inspectedSession) ? tr("Show terminal", "Mostrar terminal") : tr("Open terminal", "Abrir terminal")}
-                      </button>
-                    {/if}
-                  </div>
-                  <WorkspaceInspector session={inspectedSession} language={preferences.language} variant="orb" showCloseButton={false} bind:section={orbInspectorSection} />
-                {:else}
-                  <div class="inspector-no-sessions">
-                    <strong>{tr("No agent sessions to inspect", "Nenhuma sessão de agente para inspecionar")}</strong>
-                    <p>{tr("Start an agent or connect an integration to see its status and activity here.", "Inicie um agente ou conecte uma integração para acompanhar o estado e a atividade aqui.")}</p>
-                    <button type="button" onclick={() => openView("sessions")}>{tr("View sessions", "Ver sessões")}</button>
-                  </div>
-                {/if}
-              </div>
-            {:else}
-              <div class="history-list inspector-archive">
-            <div class="results-intro">
-              <strong>{tr("Saved results and activity history", "Resultados salvos e histórico de atividade")}</strong>
-              <p>{tr("Workflow runs and saved notes stay local on this computer.", "Execuções de workflow e notas salvas permanecem neste computador.")}</p>
-            </div>
-            {#if workflowHistory.length > 0}
-              <div class="settings-section-label history-label">{tr("Workflow runs", "Execuções de workflow")}</div>
-              <div class="workflow-history-list">
-                {#each workflowHistory as record (record.run.id)}
-                  {@const completedSteps = record.run.steps.filter((step) => step.status === "completed" || step.status === "skipped").length}
-                  <details class="workflow-history-card status-{record.run.status}">
-                    <summary>
-                      <span class="workflow-history-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-                      <span>
-                        <strong>{record.run.objective}</strong>
-                        <small>{workflowRunLabel(record.run.status)} · {completedSteps}/{record.run.steps.length} {tr("steps", "etapas")} · {workflowElapsed(record)}</small>
-                      </span>
-                      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
-                    </summary>
-                    <div class="workflow-history-body">
-                      <div class="workflow-history-progress"><i style:width={`${record.run.steps.length ? (completedSteps / record.run.steps.length) * 100 : 0}%`}></i></div>
-                      {#each record.steps as step (step.stepId)}
-                        {@const stepRun = record.run.steps.find((item) => item.stepId === step.stepId)}
-                        <article class="workflow-history-step step-{stepRun?.status ?? 'pending'}">
-                          <span class="workflow-step-state" aria-hidden="true"></span>
-                          <div>
-                            <strong>{step.roleLabel}</strong>
-                            <small>{step.sessionName || step.agentLabel || step.project || tr("Agent session", "Sessão do agente")} · {stepRun?.attempt ?? 0} {tr("attempts", "tentativas")}</small>
-                            {#if stepRun?.error}<p class="workflow-history-error">{stepRun.error}</p>{/if}
-                            {#if step.response}<p>{stripInternalAgentMetadata(step.response)}</p>{/if}
-                            {#if step.files.length || step.tests.length}
-                              <div class="workflow-history-artifacts">
-                                {#if step.files.length}<span>{step.files.length} {tr("files", "arquivos")}</span>{/if}
-                                {#if step.tests.length}<span>{step.tests.length} {tr("checks", "verificações")}</span>{/if}
-                              </div>
-                            {/if}
-                          </div>
-                        </article>
-                      {/each}
-                      {#if record.events.length > 0}
-                        <div class="workflow-history-events">
-                          {#each record.events as event (event.id)}
-                            <span><i></i><small>{relativeTime(event.createdAt)}</small><strong>{event.summary}</strong></span>
-                          {/each}
-                        </div>
-                      {/if}
-                    </div>
-                  </details>
-                {/each}
-              </div>
-            {/if}
-            {#if resultNotes.length > 0}
-              <div class="settings-section-label history-label">{tr("Saved notes", "Notas salvas")}</div>
-              <div class="saved-notes">
-                {#each resultNotes as note (note.id)}
-                  <article class="saved-note">
-                    <span><strong>{note.title}</strong><small>{note.project} · {relativeTime(note.createdAt)}</small></span>
-                    <p>{stripInternalAgentMetadata(note.body)}</p>
-                    {#if note.files.length || note.tests.length}
-                      <div class="artifact-summary">
-                        {#if note.files.length}<span>{note.files.length} {note.files.length === 1 ? tr("file", "arquivo") : tr("files", "arquivos")}</span>{/if}
-                        {#if note.tests.length}<span>{note.tests.length} {note.tests.length === 1 ? tr("check", "verificação") : tr("checks", "verificações")}</span>{/if}
-                      </div>
-                    {/if}
-                    <button type="button" onclick={() => removeResultNote(note.id)}>{tr("Delete", "Excluir")}</button>
-                  </article>
-                {/each}
-              </div>
-            {/if}
-            <div class="results-list">
-              {#each recentResults as item (item.result.id)}
-                {@const capabilities = sessionCapabilities(item.session)}
-                {@const visibleResultResponse = stripInternalAgentMetadata(item.result.response)}
-                <article class="result-card">
-                  <div class="result-card-top">
-                    <div class="result-heading">
-                      <span class="agent-avatar agent-{item.session.agent}"><BrandIcon name={item.session.agent} size={15} /></span>
-                      <span><strong>{sessionDisplayName(item.session)}</strong><small>{item.session.agentLabel} · {item.session.project} · {relativeTime(item.result.createdAt)}</small></span>
-                    </div>
-                    <div class="result-actions" aria-label={tr("Result actions", "Ações do resultado")}>
-                      <button
-                        class="result-action-button"
-                        type="button"
-                        data-label={copiedResultId === item.result.id ? tr("Copied", "Copiado") : tr("Copy", "Copiar")}
-                        aria-label={copiedResultId === item.result.id ? tr("Copied", "Copiado") : tr("Copy", "Copiar")}
-                        onclick={() => copyResult(item.result.id, visibleResultResponse)}
-                      >
-                        {#if copiedResultId === item.result.id}
-                          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 10 3 3 7-7" /></svg>
-                        {:else}
-                          <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="6" width="8" height="9" rx="1.5" /><path d="M12 6V4.5A1.5 1.5 0 0 0 10.5 3h-6A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13H7" /></svg>
-                        {/if}
-                      </button>
-                      <button
-                        class="result-action-button"
-                        disabled={savingNoteId === item.result.id}
-                        type="button"
-                        data-label={savingNoteId === item.result.id ? tr("Saving…", "Salvando…") : tr("Save note", "Salvar nota")}
-                        aria-label={savingNoteId === item.result.id ? tr("Saving…", "Salvando…") : tr("Save note", "Salvar nota")}
-                        onclick={() => keepResultAsNote(item.session, item.result.id)}
-                      >
-                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h10v13l-5-3-5 3v-13Z" /></svg>
-                      </button>
-                      {#if capabilities.canPrompt && canContinueSession(item.session)}
-                        <button
-                          class="result-action-button"
-                          type="button"
-                          data-label={tr("Continue", "Continuar")}
-                          aria-label={tr("Continue", "Continuar")}
-                          onclick={() => continueFromResult(item.session)}
-                        >
-                          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 6l4 4-4 4" /></svg>
-                        </button>
-                      {/if}
-                      {#if capabilities.canOpenSource}
-                        <button
-                          class="result-action-button"
-                          type="button"
-                          data-label={tr("Open source", "Abrir origem")}
-                          aria-label={tr("Open source", "Abrir origem")}
-                          onclick={() => openSessionSource(item.session.id)}
-                        >
-                          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5h8v8M14.5 5.5 6 14" /><path d="M13 15H5V7" /></svg>
-                        </button>
-                      {/if}
-                    </div>
-                  </div>
-                  <details class="result-response">
-                    <summary>{tr("Read response", "Ler resposta")}</summary>
-                    <OrbResponse text={visibleResultResponse} language={preferences.language} />
-                  </details>
-                  {#if item.result.files?.length || item.result.tests?.length}
-                    <div class="result-artifacts">
-                      {#if item.result.files?.length}
-                        <span><strong>{tr("Files", "Arquivos")}</strong>{item.result.files.join(" · ")}</span>
-                      {/if}
-                      {#if item.result.tests?.length}
-                        <span><strong>{tr("Checks", "Verificações")}</strong>{item.result.tests.join(" · ")}</span>
-                      {/if}
-                    </div>
-                  {/if}
-                </article>
-              {/each}
-            </div>
-            <div class="settings-section-label history-label">{tr("Activity", "Atividade")}</div>
-            {#each history as entry (entry.id)}
-              <div class="history-row">
-                <span class="history-dot event-{entry.event}" aria-hidden="true"></span>
-                <div>
-                  <span><strong>{entry.agentLabel}</strong> · {entry.project}</span>
-                  <small>{eventLabel(entry.event)} · {relativeTime(entry.createdAt)}</small>
+            <div class="orb-inspector-content">
+              {#if visibleAgentSessions.length}
+                <WorkspaceInspector
+                  session={inspectedSession}
+                  language={preferences.language}
+                  variant="orb"
+                  showCloseButton={false}
+                  sessionOptions={visibleAgentSessions.map((session) => ({
+                    value: session.id,
+                    label: sessionDisplayName(session),
+                    description: `${session.agentLabel} · ${shown(session.statusLabel)}`,
+                  }))}
+                  onSelectSession={(value) => (inspectorSessionId = value)}
+                  bind:section={orbInspectorSection}
+                />
+              {:else}
+                <div class="inspector-no-sessions">
+                  <strong>{tr("No agent sessions to inspect", "Nenhuma sessão de agente para inspecionar")}</strong>
+                  <p>{tr("Start an agent or connect an integration to see its status and activity here.", "Inicie um agente ou conecte uma integração para acompanhar o estado e a atividade aqui.")}</p>
+                  <button type="button" onclick={() => openView("sessions")}>{tr("View sessions", "Ver sessões")}</button>
                 </div>
-              </div>
-            {:else}
-              <div class="empty-state">
-                <strong>{tr("No activity yet", "Nenhuma atividade")}</strong>
-                <p>{tr("Completions, errors, and decisions will appear here.", "Conclusões, erros e decisões aparecerão aqui.")}</p>
-              </div>
-            {/each}
-            <p class="privacy-note">{tr("Commands, paths, and permission contents are not stored.", "Comandos, caminhos e conteúdos de permissões não são guardados.")}</p>
-          </div>
-            {/if}
+              {/if}
+            </div>
           </div>
         {:else}
           <div class="settings" in:fade={{ duration: 150 }}>
@@ -4796,23 +4626,18 @@
   .shortcut-editor-actions button.primary { color: #fff; border-color: #317e59; background: #317e59; }
   .shortcut-editor-actions button:disabled { opacity: 0.45; cursor: default; }
   .session-list,
-  .history-list,
   .settings { max-height: 431px; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #cad2ce transparent; }
 
   .session-list::-webkit-scrollbar,
-  .history-list::-webkit-scrollbar,
   .settings::-webkit-scrollbar,
   .terminal-picker::-webkit-scrollbar { width: 5px; background: transparent; }
   .session-list::-webkit-scrollbar-button,
-  .history-list::-webkit-scrollbar-button,
   .settings::-webkit-scrollbar-button,
   .terminal-picker::-webkit-scrollbar-button { width: 0; height: 0; display: none; }
   .session-list::-webkit-scrollbar-track,
-  .history-list::-webkit-scrollbar-track,
   .settings::-webkit-scrollbar-track,
   .terminal-picker::-webkit-scrollbar-track { background: transparent; }
   .session-list::-webkit-scrollbar-thumb,
-  .history-list::-webkit-scrollbar-thumb,
   .settings::-webkit-scrollbar-thumb,
   .terminal-picker::-webkit-scrollbar-thumb { border-radius: 999px; background: #cad2ce; }
 
@@ -4823,11 +4648,9 @@
   .terminal-picker::-webkit-scrollbar-thumb { background: transparent; transition: background-color 140ms ease; }
   .session-list.is-scrolling::-webkit-scrollbar-thumb,
   .terminal-picker.is-scrolling::-webkit-scrollbar-thumb { background: #cad2ce; }
-  .final-response > summary, .result-response > summary { padding: 10px; color: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
+  .final-response > summary { padding: 10px; color: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
   .final-response-body { position: relative; padding: 8px 10px 12px; color: inherit; }
   .final-response-body .final-response-copy { position: relative; top: auto; right: auto; margin: 0 0 5px auto; }
-  .result-response { margin-top: 8px; color: inherit; }
-  .result-response > summary { padding: 6px 0; }
   .empty-session-actions button { min-height: 30px; padding: 5px 10px; border: 1px solid rgba(70, 109, 87, .3); border-radius: 7px; color: inherit; background: rgba(72, 131, 97, .08); font: 650 11px Inter, sans-serif; cursor: pointer; }
   .empty-session-actions button:hover { background: rgba(72, 131, 97, .16); }
   .empty-session-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
@@ -4928,6 +4751,11 @@
 
   .session-details { padding: 0 2px 13px 43px; }
   .session-action-bar { position: relative; margin: 0 0 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  .cli-context-menu { position: fixed; z-index: 1200; width: min(196px, calc(100vw - 16px)); box-sizing: border-box; padding: 5px; border-radius: 10px; color: var(--lume-ink-light); background: var(--lume-raised-light); box-shadow: 0 8px 24px rgb(0 0 0 / 18%); }
+  .cli-context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 6px; color: inherit; background: transparent; font: 550 12px Inter, sans-serif; text-align: left; cursor: pointer; }
+  .cli-context-menu button:hover, .cli-context-menu button:focus-visible { background: color-mix(in srgb, var(--lume-accent) 12%, transparent); }
+  .cli-context-menu button:focus-visible { outline: 2px solid var(--lume-accent-strong); outline-offset: -2px; }
+  .overlay-shell.dark .cli-context-menu { color: var(--lume-ink-dark); background: var(--lume-raised-dark); }
   .session-action-button { position: relative; width: 27px; height: 27px; padding: 0; display: grid; place-items: center; border: 1px solid rgba(83, 108, 97, 0.11); border-radius: 8px; color: #65786f; background: rgba(77, 105, 92, 0.035); cursor: pointer; transition: color 130ms ease, background 130ms ease, transform 130ms ease; }
   .session-action-button:hover:not(:disabled),
   .session-action-button.active { color: #3f745d; background: rgba(68, 125, 99, 0.09); transform: translateY(-1px); }
@@ -4983,6 +4811,8 @@
   .inline-composer { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
   .inline-queue-tray { min-width: 0; width: 100%; min-height: 36px; padding: 5px 7px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(80, 119, 160, 0.13); border-radius: 9px; color: #4f6d83; background: rgba(74, 119, 157, 0.055); text-align: left; cursor: pointer; }
   .inline-queue-tray:hover:not(:disabled) { border-color: rgba(67, 119, 164, 0.24); background: rgba(74, 119, 157, 0.09); }
+  .inline-queue-tray.read-only { cursor: default; }
+  .inline-queue-tray.read-only:hover { border-color: rgba(80, 119, 160, 0.13); background: rgba(74, 119, 157, 0.055); }
   .inline-queue-tray:disabled { opacity: 0.58; cursor: default; }
   .inline-queue-tray .queue-mark { width: 18px; height: 18px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 5px; color: #477fa9; background: rgba(66, 127, 174, 0.1); font: 800 11px Inter, sans-serif; }
   .inline-queue-tray .queue-copy { min-width: 0; flex: 1; display: grid; gap: 1px; }
@@ -5103,99 +4933,14 @@
   .quiet-orbit { width: 31px; height: 31px; display: grid; place-items: center; border: 1px solid #aab6b0; border-radius: 50%; }
   .quiet-orbit i { width: 7px; height: 7px; border-radius: 50%; background: #799186; }
 
-  .history-list { padding: 6px 16px 16px; }
   .inspector-screen { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-  .inspector-subnav { min-height: 35px; padding: 3px 12px 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; border-bottom: 1px solid rgba(105, 123, 115, .12); }
-  .inspector-subnav button { min-width: 0; padding: 0 7px; border: 0; border-bottom: 2px solid transparent; color: #849189; background: transparent; font: 700 9px Inter, sans-serif; cursor: pointer; }
-  .inspector-subnav button:hover { color: #4f675a; }
-  .inspector-subnav button.active { border-bottom-color: #54856a; color: #416c53; }
   .orb-inspector-content { min-height: 0; padding: 7px 9px 9px; display: flex; flex: 1 1 auto; flex-direction: column; }
   .orb-inspector-content :global(.workspace-inspector.orb-inspector) { height: auto; min-height: 0; flex: 1 1 auto; }
-  .inspector-session-bar { min-width: 0; margin-bottom: 5px; display: flex; align-items: flex-end; gap: 7px; }
-  .inspector-session-picker { min-width: 0; display: grid; flex: 1 1 auto; gap: 3px; color: #7e8a84; font-size: 8px; font-weight: 700; }
-  .inspector-terminal-action { min-height: 30px; padding: 4px 8px; border: 1px solid rgba(70, 109, 87, .24); border-radius: 7px; color: #52765f; background: rgba(72, 131, 97, .08); font: 650 9px Inter, sans-serif; white-space: nowrap; cursor: pointer; }
-  .inspector-terminal-action:hover { background: rgba(72, 131, 97, .15); }
-  .inspector-terminal-action:disabled { opacity: .55; cursor: wait; }
   .inspector-no-sessions { margin: auto; padding: 16px 12px; display: grid; justify-items: center; gap: 8px; color: #62746a; text-align: center; }
   .inspector-no-sessions strong { font-size: 11px; }
   .inspector-no-sessions p { margin: 0; font-size: 9px; line-height: 1.5; }
   .inspector-no-sessions button { min-height: 29px; padding: 0 9px; border: 1px solid rgba(82, 105, 95, .16); border-radius: 7px; color: #547462; background: transparent; font-size: 9px; font-weight: 700; cursor: pointer; }
-  .inspector-archive { min-height: 0; max-height: none; flex: 1 1 auto; }
-  .results-intro { padding: 8px 1px 12px; border-bottom: 1px solid rgba(105, 123, 115, 0.1); }
-  .results-intro strong { color: #2d3a35; font-size: 12px; }
-  .results-intro p { margin: 4px 0 0; color: #7f8a85; font-size: 9px; }
-  .workflow-history-list { display: grid; gap: 6px; }
-  .workflow-history-card { overflow: hidden; border: 1px solid rgba(86, 116, 102, 0.12); border-radius: 11px; background: rgba(255, 255, 255, 0.22); }
-  .workflow-history-card > summary { min-height: 48px; padding: 7px 9px; display: grid; grid-template-columns: 24px minmax(0, 1fr) 14px; align-items: center; gap: 7px; cursor: pointer; list-style: none; }
-  .workflow-history-card > summary::-webkit-details-marker { display: none; }
-  .workflow-history-card > summary > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
-  .workflow-history-card > summary strong { overflow: hidden; color: #34453d; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-  .workflow-history-card > summary small { color: #829088; font-size: 7px; }
-  .workflow-history-card > summary svg { width: 13px; fill: none; stroke: #7b8a83; stroke-width: 1.5; transition: transform 140ms ease; }
-  .workflow-history-card[open] > summary svg { transform: rotate(180deg); }
-  .workflow-history-mark { position: relative; width: 22px; height: 22px; display: block; }
-  .workflow-history-mark i { position: absolute; width: 5px; height: 5px; border-radius: 50%; background: #668375; }
-  .workflow-history-mark i:nth-child(1) { top: 2px; left: 8px; }.workflow-history-mark i:nth-child(2) { right: 2px; bottom: 3px; }.workflow-history-mark i:nth-child(3) { bottom: 3px; left: 2px; }
-  .workflow-history-mark::before { content: ""; position: absolute; inset: 5px 4px 4px; border: 1px solid rgba(86, 121, 104, 0.45); clip-path: polygon(50% 0, 100% 100%, 0 100%); }
-  .workflow-history-card.status-completed .workflow-history-mark i { background: #4d956c; }
-  .workflow-history-card.status-failed .workflow-history-mark i { background: #b56561; }
-  .workflow-history-card.status-running .workflow-history-mark i { background: #5e8fc3; }
-  .workflow-history-body { padding: 0 9px 9px; display: grid; gap: 7px; }
-  .workflow-history-progress { height: 2px; overflow: hidden; border-radius: 999px; background: rgba(79, 107, 94, 0.1); }
-  .workflow-history-progress i { height: 100%; display: block; border-radius: inherit; background: #57906f; }
-  .workflow-history-step { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 6px; }
-  .workflow-history-step > div { min-width: 0; display: grid; gap: 2px; }
-  .workflow-history-step strong { color: #40534a; font-size: 8px; }.workflow-history-step small { color: #87928d; font-size: 7px; }
-  .workflow-history-step p { margin: 3px 0 0; overflow-wrap: anywhere; color: #627169; font-size: 8px; line-height: 1.4; }
-  .workflow-step-state { width: 6px; height: 6px; margin-top: 3px; border: 1px solid #a1ada7; border-radius: 50%; }
-  .workflow-history-step.step-completed .workflow-step-state { border-color: #57906f; background: #57906f; }.workflow-history-step.step-running .workflow-step-state { border-color: #5e8fc3; background: #5e8fc3; }.workflow-history-step.step-failed .workflow-step-state { border-color: #b56561; background: #b56561; }
-  .workflow-history-error { color: #a45e59 !important; }
-  .workflow-history-artifacts { display: flex; flex-wrap: wrap; gap: 4px; }.workflow-history-artifacts span { padding: 2px 5px; border-radius: 999px; color: #587064; background: rgba(76, 119, 98, 0.08); font-size: 7px; font-weight: 720; }
-  .workflow-history-events { padding-top: 5px; display: grid; gap: 4px; border-top: 1px solid rgba(86, 116, 102, 0.1); }
-  .workflow-history-events span { min-width: 0; display: grid; grid-template-columns: 5px 44px minmax(0, 1fr); align-items: center; gap: 5px; }.workflow-history-events i { width: 4px; height: 4px; border-radius: 50%; background: #789087; }.workflow-history-events small { color: #929d98; font-size: 6px; }.workflow-history-events strong { overflow: hidden; color: #65756d; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
-  .results-list { display: grid; gap: 8px; padding: 10px 0 3px; }
-  .result-card { padding: 9px 10px; border: 1px solid rgba(91, 115, 104, 0.1); border-radius: 11px; background: rgba(75, 105, 91, 0.03); }
-  .result-card-top { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-  .result-heading { min-width: 0; display: flex; align-items: center; gap: 7px; }
-  .result-heading .agent-avatar { width: 25px; height: 25px; border-radius: 8px; }
-  .result-heading > span:last-child { min-width: 0; display: grid; gap: 1px; }
-  .result-heading strong { color: #34443d; font-size: 9px; }
-  .result-heading small { overflow: hidden; color: #87928d; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
-  .result-artifacts { margin: 0 0 8px; display: grid; gap: 4px; }
-  .result-artifacts span { overflow: hidden; color: #78867f; font-size: 8px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-  .result-artifacts strong { margin-right: 5px; color: #60766c; font-size: 7px; text-transform: uppercase; }
-  .result-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
-  .result-action-button { position: relative; width: 25px; height: 25px; padding: 0; display: grid; place-items: center; border: 1px solid rgba(84, 109, 98, 0.12); border-radius: 7px; color: #5e756b; background: rgba(255, 255, 255, 0.36); cursor: pointer; transition: color 130ms ease, background 130ms ease, transform 130ms ease; }
-  .result-action-button:hover:not(:disabled) { color: #3f745d; background: rgba(255, 255, 255, 0.72); transform: translateY(-1px); }
-  .result-action-button:disabled { opacity: 0.42; cursor: default; }
-  .result-action-button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
-  .result-action-button::after { position: absolute; z-index: 25; top: calc(100% + 5px); left: 50%; max-width: 120px; padding: 4px 6px; content: attr(data-label); opacity: 0; pointer-events: none; border: 1px solid rgba(74, 96, 86, 0.12); border-radius: 6px; color: #52635b; background: rgba(249, 251, 250, 0.98); box-shadow: 0 5px 15px rgba(43, 58, 51, 0.12); font-size: 7px; font-weight: 700; line-height: 1.2; text-align: center; white-space: nowrap; transform: translate(-50%, -3px); transition: opacity 110ms ease, transform 110ms ease; }
-  .result-action-button:hover::after,
-  .result-action-button:focus-visible::after { opacity: 1; transform: translate(-50%, 0); }
-  .result-action-button:last-child::after { right: 0; left: auto; transform: translateY(-3px); }
-  .result-action-button:last-child:hover::after,
-  .result-action-button:last-child:focus-visible::after { transform: translateY(0); }
   .results-empty { margin: 8px 2px 4px; color: #89938f; font-size: 9px; }
-  .saved-notes { display: grid; gap: 6px; }
-  .saved-note { position: relative; padding: 9px 34px 9px 10px; border: 1px solid rgba(83, 112, 99, 0.12); border-radius: 10px; background: rgba(244, 239, 198, 0.16); }
-  .saved-note > span { display: grid; gap: 1px; }
-  .saved-note strong { color: #4c5d55; font-size: 9px; }
-  .saved-note small { color: #8a958f; font-size: 8px; }
-  .saved-note p { max-height: 42px; margin: 6px 0; overflow: hidden; color: #65736d; font-size: 8px; line-height: 1.4; }
-  .saved-note > button { position: absolute; top: 7px; right: 7px; padding: 3px; border: 0; color: #9a7771; background: transparent; font-size: 7px; cursor: pointer; }
-  .artifact-summary { display: flex; gap: 5px; }
-  .artifact-summary span { padding: 2px 4px; border-radius: 5px; color: #73837b; background: rgba(77, 105, 92, 0.06); font-size: 7px; }
-  .history-label { margin-top: 7px; }
-  .history-row { min-height: 60px; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid rgba(105, 123, 115, 0.1); }
-  .history-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #6f9b88; }
-  .history-dot.event-failed,
-  .history-dot.event-permission_denied { background: #b95555; }
-  .history-dot.event-permission_allowed { background: #6683a5; }
-  .history-row div { min-width: 0; display: grid; gap: 3px; }
-  .history-row span { overflow: hidden; color: #58665f; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-  .history-row strong { color: #2d3a35; font-size: 10px; }
-  .history-row small { color: #8a9490; font-size: 9px; }
-  .privacy-note { margin: 14px 12px 0; color: #8c9691; font-size: 9px; line-height: 1.45; text-align: center; }
 
   .settings { padding: 5px 16px 20px; }
   .settings-section-label { padding: 9px 0 5px; color: #929c97; font-size: 9px; font-weight: 750; letter-spacing: 0.07em; text-transform: uppercase; }
@@ -5348,7 +5093,6 @@
   .paired-devices { margin-top: 9px; display: grid; gap: 8px; }
   .paired-devices-intro { padding: 1px 2px 3px; }
   .paired-devices-intro strong { color: #35423d; font-size: 9px; }
-  .paired-devices-intro p { margin: 3px 0 0; color: #7d8b84; font-size: 8px; line-height: 1.45; }
   .paired-device-card { padding: 10px; border: 1px solid rgba(92, 111, 103, 0.12); border-radius: 12px; background: rgba(84, 111, 99, 0.03); }
   .paired-device-header { display: flex; align-items: center; gap: 9px; }
   .paired-device-info { min-width: 0; flex: 1; display: grid; gap: 2px; }
@@ -5420,23 +5164,19 @@
   }
   .overlay-shell:not(.dark) .panel-content,
   .overlay-shell:not(.dark) .session-list,
-  .overlay-shell:not(.dark) .history-list,
   .overlay-shell:not(.dark) .settings,
   .overlay-shell:not(.dark) .whiteboard { background: #d7e3d5; }
   .overlay-shell:not(.dark) .session-row,
-  .overlay-shell:not(.dark) .history-row,
   .overlay-shell:not(.dark) .setting-row,
   .overlay-shell:not(.dark) .field-row,
   .overlay-shell:not(.dark) .terminal-picker-row,
   .overlay-shell:not(.dark) .settings-section { border-color: rgba(73, 99, 87, 0.16); }
   .overlay-shell:not(.dark) .session-row:hover:not(.attention),
   .overlay-shell:not(.dark) .session-row.selected:not(.attention) { background: #c8ddcc; }
-  .overlay-shell:not(.dark) .result-card,
   .overlay-shell:not(.dark) .diagnostic-card,
   .overlay-shell:not(.dark) .update-card,
   .overlay-shell:not(.dark) .mobile-access-card,
-  .overlay-shell:not(.dark) .paired-device-card,
-  .overlay-shell:not(.dark) .saved-note {
+  .overlay-shell:not(.dark) .paired-device-card {
     border-color: rgba(70, 98, 85, 0.2);
     background: #ebe8d6;
     box-shadow: 0 1px 3px rgba(42, 67, 55, 0.045);
@@ -5491,7 +5231,6 @@
   .overlay-shell.dark .brand-lockup strong,
   .overlay-shell.dark .session-title-row strong,
   .overlay-shell.dark .terminal-picker-copy strong,
-  .overlay-shell.dark .history-row strong,
   .overlay-shell.dark .setting-row strong,
   .overlay-shell.dark .integration-row strong,
   .overlay-shell.dark .field-row strong,
@@ -5501,18 +5240,12 @@
   .overlay-shell.dark .panel-header,
   .overlay-shell.dark footer,
   .overlay-shell.dark .session-row,
-  .overlay-shell.dark .history-row,
   .overlay-shell.dark .setting-row,
   .overlay-shell.dark .field-row { border-color: rgba(190, 209, 200, 0.09); }
   .overlay-shell.dark .settings-section { border-color: rgba(190, 209, 200, 0.09); }
   .overlay-shell.dark .settings-section[open] > .settings-section-label::after { color: #8eb9a5; }
   .overlay-shell.dark .session-row:hover:not(.attention),
   .overlay-shell.dark .session-row.selected:not(.attention) { background: rgba(198, 218, 208, 0.045); }
-  .overlay-shell.dark .inspector-subnav { border-color: rgba(190, 209, 200, .09); }
-  .overlay-shell.dark .inspector-subnav button { color: #879890; }
-  .overlay-shell.dark .inspector-subnav button.active { border-color: #76ae8b; color: #a5d0b7; }
-  .overlay-shell.dark .inspector-session-picker { color: #9aa9a1; }
-  .overlay-shell.dark .inspector-terminal-action { border-color: rgba(142, 192, 164, .2); color: #a5cbb3; background: rgba(88, 160, 119, .09); }
   .overlay-shell.dark .inspector-no-sessions { color: #a0b0a7; }
   .overlay-shell.dark .inspector-no-sessions button { border-color: rgba(207, 223, 215, .12); color: #b0c3b8; background: rgba(222, 233, 228, .035); }
   .overlay-shell.dark .session-action-button { color: #9caea5; border-color: rgba(207, 223, 215, 0.1); background: rgba(222, 233, 228, 0.035); }
@@ -5524,7 +5257,6 @@
   .overlay-shell.dark .session-name-editor input,
   .overlay-shell.dark .session-name-editor button { color: #c5d0cb; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
   .overlay-shell.dark .session-name-editor button.primary { color: #f4faf7; background: #397b5c; }
-  .overlay-shell.dark .history-row span,
   .overlay-shell.dark .update-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .terminal-picker-copy small { color: #9aaba3; }
   .overlay-shell.dark .project-name { color: #9aaba3; }
@@ -5539,7 +5271,6 @@
   .overlay-shell.dark .paired-devices-intro strong,
   .overlay-shell.dark .paired-device-info strong,
   .overlay-shell.dark .permission-copy strong { color: #dce7e1; }
-  .overlay-shell.dark .paired-devices-intro p,
   .overlay-shell.dark .paired-device-info small,
   .overlay-shell.dark .permission-copy small { color: #aebdb5; }
   .overlay-shell.dark .paired-device-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.03); }
@@ -5550,24 +5281,9 @@
   .overlay-shell.dark .permission-state.allowed { color: #91c7ae; }
   .overlay-shell.dark .preview-badge { color: #91c7ae; border-color: rgba(116, 191, 157, 0.16); background: rgba(92, 161, 130, 0.08); }
   .overlay-shell.dark .paired-devices .revoke-device { color: #d19a9a; border-color: rgba(209, 131, 131, 0.16); }
-  .overlay-shell.dark .diagnostic-card,
-  .overlay-shell.dark .result-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
-  .overlay-shell.dark .diagnostic-check strong,
-  .overlay-shell.dark .result-heading strong,
-  .overlay-shell.dark .results-intro strong { color: #dce7e1; }
-  .overlay-shell.dark .workflow-history-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.025); }
-  .overlay-shell.dark .workflow-history-card > summary strong,
-  .overlay-shell.dark .workflow-history-step strong { color: #d7e4dd; }
-  .overlay-shell.dark .workflow-history-card > summary small,
-  .overlay-shell.dark .workflow-history-step small,
-  .overlay-shell.dark .workflow-history-step p,
-  .overlay-shell.dark .workflow-history-events strong { color: #93a59b; }
-  .overlay-shell.dark .diagnostic-check small,
-  .overlay-shell.dark .result-heading small,
-  .overlay-shell.dark .results-intro p { color: #aebdb5; }
-  .overlay-shell.dark .result-action-button { color: #b9c8c0; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
-  .overlay-shell.dark .result-action-button:hover:not(:disabled) { color: #9fd0b7; background: rgba(100, 180, 143, 0.09); }
-  .overlay-shell.dark .result-action-button::after { color: #c7d5ce; border-color: rgba(205, 222, 213, 0.11); background: rgba(28, 40, 34, 0.98); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24); }
+  .overlay-shell.dark .diagnostic-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
+  .overlay-shell.dark .diagnostic-check strong { color: #dce7e1; }
+  .overlay-shell.dark .diagnostic-check small { color: #aebdb5; }
   .overlay-shell.dark .empty-state strong { color: #c5d0cb; }
   .overlay-shell.dark code,
   .overlay-shell.dark .segmented { color: #bdc8c3; background: rgba(216, 229, 223, 0.06); }
@@ -5581,6 +5297,7 @@
   .overlay-shell.dark .inline-composer textarea { color: #c5d0cb; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
   .overlay-shell.dark .inline-queue-tray { color: #a7bdcd; border-color: rgba(125, 166, 199, 0.13); background: rgba(91, 143, 184, 0.065); }
   .overlay-shell.dark .inline-queue-tray:hover:not(:disabled) { border-color: rgba(128, 177, 216, 0.23); background: rgba(91, 143, 184, 0.1); }
+  .overlay-shell.dark .inline-queue-tray.read-only:hover { border-color: rgba(125, 166, 199, 0.13); background: rgba(91, 143, 184, 0.065); }
   .overlay-shell.dark .inline-queue-tray .queue-mark { color: #87b8dc; background: rgba(105, 166, 210, 0.11); }
   .overlay-shell.dark .inline-queue-tray .queue-copy small,
   .overlay-shell.dark .inline-queue-tray .queue-shortcut { color: #829daa; }
@@ -5637,10 +5354,6 @@
   .overlay-shell.dark .plugin-actions button,
   .overlay-shell.dark .profile-action,
   .overlay-shell.dark .agent-preferences button { color: #bdcbc4; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
-  .overlay-shell.dark .saved-note { border-color: rgba(207, 223, 215, 0.1); background: rgba(226, 211, 121, 0.04); }
-  .overlay-shell.dark .saved-note strong { color: #d7e2dc; }
-  .overlay-shell.dark .saved-note p,
-  .overlay-shell.dark .result-artifacts span { color: #aab8b1; }
   .overlay-shell .switch input:checked + span,
   .overlay-shell .volume-control input,
   .overlay-shell .workflow-setting-toggle.active i { background: var(--lume-accent); accent-color: var(--lume-accent); }
@@ -5648,7 +5361,6 @@
   .overlay-shell .session-action-button.active { color: var(--lume-accent-strong); }
   .overlay-shell:not(.dark)[data-appearance] .panel-content,
   .overlay-shell:not(.dark)[data-appearance] .session-list,
-  .overlay-shell:not(.dark)[data-appearance] .history-list,
   .overlay-shell:not(.dark)[data-appearance] .settings,
   .overlay-shell:not(.dark)[data-appearance] .whiteboard { background: color-mix(in srgb, var(--lume-sidebar-light) 78%, var(--lume-surface-light)); }
   .overlay-shell:not(.dark)[data-appearance] .lume-orb { color: var(--lume-accent-strong); --orb-border: color-mix(in srgb, var(--lume-accent-strong) 30%, transparent); --orb-fill: var(--lume-raised-light); }

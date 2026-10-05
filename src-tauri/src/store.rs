@@ -141,6 +141,11 @@ impl Store {
                     payload TEXT NOT NULL,
                     updated_at INTEGER NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS codex_cli_display_links (
+                    process_key TEXT PRIMARY KEY,
+                    process_id INTEGER NOT NULL UNIQUE,
+                    payload TEXT NOT NULL
+                 );
                  CREATE TABLE IF NOT EXISTS queued_prompt_journal (
                     activity_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
@@ -189,6 +194,45 @@ impl Store {
             }
         }
         Ok(sessions)
+    }
+
+    pub(crate) fn load_codex_cli_display_links(
+        &self,
+    ) -> Result<Vec<crate::codex_cli_identity::DisplayLink>, String> {
+        let mut query = self
+            .connection
+            .prepare("SELECT payload FROM codex_cli_display_links LIMIT 128")
+            .map_err(|error| error.to_string())?;
+        let rows = query
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        Ok(rows
+            .filter_map(Result::ok)
+            .filter_map(|payload| serde_json::from_str(&payload).ok())
+            .collect())
+    }
+
+    pub(crate) fn save_codex_cli_display_link(
+        &self,
+        link: &crate::codex_cli_identity::DisplayLink,
+    ) -> Result<(), String> {
+        let payload = serde_json::to_string(link).map_err(|error| error.to_string())?;
+        self.connection.execute(
+            "INSERT INTO codex_cli_display_links(process_key, process_id, payload) VALUES (?1, ?2, ?3)
+             ON CONFLICT(process_id) DO UPDATE SET process_key = excluded.process_key, payload = excluded.payload",
+            params![link.key(), link.process.pid, payload],
+        ).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_codex_cli_display_link(&self, key: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM codex_cli_display_links WHERE process_key = ?1",
+                [key],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub fn save_session(&self, session: &AgentSession) -> Result<(), String> {

@@ -1,0 +1,365 @@
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index de47e41..b01da5b 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -212,6 +212,7 @@ mod app_server_events;
+ pub(crate) mod app_server_requests;
+ mod backend_banner_fallback;
+ mod background_requests;
++mod client_presence;
+ mod composer_hints;
+ mod config_persistence;
+ mod connector_mentions;
+@@ -621,6 +622,7 @@ pub(crate) struct App {
+     agents_overview: agents_overview::AgentsOverviewState,
+     side_threads: HashMap<ThreadId, SideThreadState>,
+     abandoned_side_threads: HashSet<ThreadId>,
++    pub(crate) client_presence: Option<crate::client_presence::ClientPresence>,
+     active_thread_id: Option<ThreadId>,
+     active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
+     primary_thread_id: Option<ThreadId>,
+@@ -1212,6 +1214,7 @@ impl App {
+
+ impl Drop for App {
+     fn drop(&mut self) {
++        drop(self.client_presence.take());
+         if let Err(err) = self.chat_widget.clear_managed_terminal_title() {
+             tracing::debug!(error = %err, "failed to clear terminal title on app drop");
+         }
+diff --git a/codex-rs/tui/src/app/app_server_events.rs b/codex-rs/tui/src/app/app_server_events.rs
+index 5fb53fd..7e8cd52 100644
+--- a/codex-rs/tui/src/app/app_server_events.rs
++++ b/codex-rs/tui/src/app/app_server_events.rs
+@@ -107,6 +107,7 @@ impl App {
+                 if self.begin_reconnect() {
+                     return;
+                 }
++                self.clear_client_selection();
+                 tracing::warn!("app-server event stream disconnected: {message}");
+                 self.chat_widget.add_error_message(message.clone());
+                 self.app_event_tx.send(AppEvent::FatalExitRequest(message));
+diff --git a/codex-rs/tui/src/app/client_presence.rs b/codex-rs/tui/src/app/client_presence.rs
+new file mode 100644
+index 0000000..9510104
+--- /dev/null
++++ b/codex-rs/tui/src/app/client_presence.rs
+@@ -0,0 +1,41 @@
++//! Fail-open publication of explicit foreground selection, never background history references.
++
++use super::App;
++use codex_protocol::ThreadId;
++
++enum Selection {
++    Foreground(ThreadId),
++    Detached,
++}
++
++impl App {
++    pub(super) fn publish_client_selection(&mut self) {
++        let selection = match (self.reconnect.offline, self.active_thread_id) {
++            (false, Some(thread_id)) => Selection::Foreground(thread_id),
++            (false, None) | (true, _) => Selection::Detached,
++        };
++        self.update_client_presence(selection);
++    }
++
++    pub(super) fn clear_client_selection(&mut self) {
++        self.update_client_presence(Selection::Detached);
++    }
++
++    fn update_client_presence(&mut self, selection: Selection) {
++        let Some(presence) = self.client_presence.as_mut() else {
++            return;
++        };
++        let result = match selection {
++            Selection::Foreground(thread_id) => presence.select_thread(&thread_id.to_string()),
++            Selection::Detached => presence.clear_selection(),
++        };
++        if let Err(error) = result {
++            self.client_presence = None;
++            tracing::warn!(%error, "TUI client presence disabled after an I/O error");
++        }
++    }
++}
++
++#[cfg(all(test, unix))]
++#[path = "client_presence_tests.rs"]
++mod tests;
+diff --git a/codex-rs/tui/src/app/client_presence_tests.rs b/codex-rs/tui/src/app/client_presence_tests.rs
+new file mode 100644
+index 0000000..1af181d
+--- /dev/null
++++ b/codex-rs/tui/src/app/client_presence_tests.rs
+@@ -0,0 +1,135 @@
++use super::*;
++use crate::client_presence::ClientPresence;
++use pretty_assertions::assert_eq;
++use serde_json::Value;
++use std::fs;
++use std::fs::Permissions;
++use std::os::unix::fs::PermissionsExt;
++use std::path::Path;
++use tempfile::TempDir;
++use uuid::Uuid;
++
++fn opted_in_home() -> TempDir {
++    let home = tempfile::tempdir().unwrap();
++    fs::set_permissions(home.path(), Permissions::from_mode(0o700)).unwrap();
++    let root = home.path().join("client-presence-v1");
++    fs::create_dir(&root).unwrap();
++    fs::set_permissions(&root, Permissions::from_mode(0o700)).unwrap();
++    fs::write(root.join("ENABLED"), b"version=1\n").unwrap();
++    fs::set_permissions(root.join("ENABLED"), Permissions::from_mode(0o600)).unwrap();
++    home
++}
++
++fn selection(home: &Path) -> Value {
++    let directory = fs::read_dir(home.join("client-presence-v1"))
++        .unwrap()
++        .map(|entry| entry.unwrap().path())
++        .find(|path| path.is_dir())
++        .unwrap();
++    let state: Value =
++        serde_json::from_slice(&fs::read(directory.join("state.json")).unwrap()).unwrap();
++    state["selectedThreadId"].clone()
++}
++
++#[tokio::test]
++async fn foreground_activation_clear_and_offline_do_not_publish_background_threads() {
++    let home = opted_in_home();
++    let mut app = super::super::test_support::make_test_app().await;
++    app.client_presence = ClientPresence::start(home.path()).unwrap();
++    let foreground = ThreadId::from_string(&Uuid::new_v4().to_string()).unwrap();
++    let background = ThreadId::from_string(&Uuid::new_v4().to_string()).unwrap();
++    let mut selections = vec![selection(home.path())];
++
++    app.ensure_thread_channel(foreground);
++    app.activate_thread_channel(foreground).await;
++    selections.push(selection(home.path()));
++    app.ensure_thread_channel(background);
++    app.publish_client_selection();
++    selections.push(selection(home.path()));
++    app.clear_active_thread().await;
++    selections.push(selection(home.path()));
++    app.activate_thread_channel(background).await;
++    selections.push(selection(home.path()));
++    app.reconnect.offline = true;
++    app.publish_client_selection();
++    selections.push(selection(home.path()));
++    app.reconnect.offline = false;
++    app.publish_client_selection();
++    selections.push(selection(home.path()));
++
++    assert_eq!(
++        selections,
++        vec![
++            Value::Null,
++            Value::String(foreground.to_string()),
++            Value::String(foreground.to_string()),
++            Value::Null,
++            Value::String(background.to_string()),
++            Value::Null,
++            Value::String(background.to_string()),
++        ]
++    );
++    assert_eq!(app.active_thread_id, Some(background));
++    drop(app);
++    assert_eq!(
++        fs::read_dir(home.path().join("client-presence-v1"))
++            .unwrap()
++            .count(),
++        1
++    );
++}
++
++#[tokio::test]
++async fn read_only_foreground_is_published_without_changing_ownership() {
++    let home = opted_in_home();
++    let mut app = super::super::test_support::make_test_app().await;
++    app.client_presence = ClientPresence::start(home.path()).unwrap();
++    let foreground = ThreadId::from_string(&Uuid::new_v4().to_string()).unwrap();
++    app.ensure_thread_channel(foreground);
++    app.upsert_agent_picker_thread(
++        foreground, /*agent_nickname*/ None, /*agent_role*/ None, /*is_closed*/ true,
++    );
++    app.agent_navigation.mark_parent_owned(foreground);
++    app.chat_widget.set_parent_owned_thread();
++    app.chat_widget.show_external_writer_thread();
++
++    app.activate_thread_channel(foreground).await;
++
++    assert_eq!(
++        (
++            selection(home.path()),
++            app.chat_widget.is_external_writer_view(),
++            app.agent_navigation.is_parent_owned(foreground),
++            app.active_thread_id,
++        ),
++        (
++            Value::String(foreground.to_string()),
++            true,
++            true,
++            Some(foreground)
++        )
++    );
++}
++
++#[tokio::test]
++async fn publication_error_disables_presence_without_changing_foreground_state() {
++    let home = opted_in_home();
++    let mut app = super::super::test_support::make_test_app().await;
++    app.client_presence = ClientPresence::start(home.path()).unwrap();
++    let foreground = ThreadId::from_string(&Uuid::new_v4().to_string()).unwrap();
++    app.active_thread_id = Some(foreground);
++    fs::rename(
++        home.path().join("client-presence-v1"),
++        home.path().join("retired-presence"),
++    )
++    .unwrap();
++
++    app.publish_client_selection();
++
++    assert_eq!(
++        (app.client_presence.is_none(), app.active_thread_id),
++        (true, Some(foreground))
++    );
++    app.clear_client_selection();
++    assert_eq!(app.active_thread_id, Some(foreground));
++}
+diff --git a/codex-rs/tui/src/app/reconnect.rs b/codex-rs/tui/src/app/reconnect.rs
+index bf07b73..99f193d 100644
+--- a/codex-rs/tui/src/app/reconnect.rs
++++ b/codex-rs/tui/src/app/reconnect.rs
+@@ -178,6 +178,7 @@ impl App {
+         if matches!(self.app_server_target, AppServerTarget::Embedded) {
+             return false;
+         }
++        self.clear_client_selection();
+         if !self.reconnect.offline {
+             #[cfg(target_os = "windows")]
+             if self.windows_sandbox_setup_is_local()
+@@ -471,6 +472,8 @@ impl App {
+             server.reconnect(app_server.request_handle(), self.app_event_tx.clone());
+         }
+         self.reconnect.offline = false;
++        // A rendered cached/read-only view is still the client's foreground selection.
++        self.publish_client_selection();
+         self.chat_widget.update_account_state(
+             bootstrap.status_account_display,
+             bootstrap.plan_type,
+diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
+index 6e73c00..4679722 100644
+--- a/codex-rs/tui/src/app/session_lifecycle.rs
++++ b/codex-rs/tui/src/app/session_lifecycle.rs
+@@ -628,6 +628,7 @@ impl App {
+             self.active_thread_rx = Some(receiver);
+         }
+         self.store_active_thread_receiver().await;
++        self.clear_client_selection();
+         self.active_thread_id = None;
+         let Some((receiver, mut snapshot)) = self.activate_thread_for_replay(thread_id).await
+         else {
+@@ -703,6 +704,8 @@ impl App {
+         self.schedule_recap_check(thread_id, now);
+
+         self.render_thread_snapshot(tui, app_server, thread_id, snapshot, !is_replay_only)?;
++        // Presence describes the explicit foreground view, not writer ownership.
++        self.publish_client_selection();
+         if is_replay_only
+             && self
+                 .thread_event_channels
+@@ -808,6 +811,7 @@ impl App {
+         self.agents_overview.activity.clear();
+         self.agent_navigation.clear();
+         self.side_threads.clear();
++        self.clear_client_selection();
+         self.active_thread_id = None;
+         self.active_thread_rx = None;
+         self.primary_thread_id = None;
+diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
+index f9da39c..28eaa5b 100644
+--- a/codex-rs/tui/src/app/startup.rs
++++ b/codex-rs/tui/src/app/startup.rs
+@@ -743,6 +743,22 @@ See the Codex keymap documentation for supported actions and examples."
+         #[cfg(not(debug_assertions))]
+         let upgrade_version = crate::updates::get_upgrade_version(&config);
+
++        // The lease belongs to this local TUI, not a remote server or workspace.
++        let client_presence = if matches!(
++            app_server_target,
++            AppServerTarget::Embedded | AppServerTarget::LocalDaemon { .. }
++        ) {
++            match crate::client_presence::ClientPresence::start(config.codex_home.as_path()) {
++                Ok(presence) => presence,
++                Err(error) => {
++                    tracing::warn!(%error, "TUI client presence could not be started");
++                    None
++                }
++            }
++        } else {
++            None
++        };
++
+         let mut app = Self {
+             feature_write_lock: Arc::default(),
+             model_catalog,
+@@ -819,6 +835,7 @@ See the Codex keymap documentation for supported actions and examples."
+             agents_overview: Default::default(),
+             side_threads: HashMap::new(),
+             abandoned_side_threads: HashSet::new(),
++            client_presence,
+             active_thread_id: None,
+             active_thread_rx: None,
+             primary_thread_id: None,
+diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
+index 92b07cd..450cb35 100644
+--- a/codex-rs/tui/src/app/test_support.rs
++++ b/codex-rs/tui/src/app/test_support.rs
+@@ -90,6 +90,7 @@ pub(crate) async fn make_test_app() -> App {
+         agents_overview: Default::default(),
+         side_threads: HashMap::new(),
+         abandoned_side_threads: HashSet::new(),
++        client_presence: None,
+         active_thread_id: None,
+         active_thread_rx: None,
+         primary_thread_id: None,
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index a25fcab..bc22d8d 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -6022,6 +6022,7 @@ async fn make_test_app() -> Box<App> {
+         agents_overview: Default::default(),
+         side_threads: HashMap::new(),
+         abandoned_side_threads: HashSet::new(),
++        client_presence: None,
+         active_thread_id: None,
+         active_thread_rx: None,
+         primary_thread_id: None,
+@@ -6137,6 +6138,7 @@ pub(super) async fn make_test_app_with_channels() -> (
+             agents_overview: Default::default(),
+             side_threads: HashMap::new(),
+             abandoned_side_threads: HashSet::new(),
++            client_presence: None,
+             active_thread_id: None,
+             active_thread_rx: None,
+             primary_thread_id: None,
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+index a3501c3..6568ce0 100644
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -97,6 +97,7 @@ impl App {
+         };
+         self.active_thread_id = Some(thread_id);
+         self.active_thread_rx = receiver;
++        self.publish_client_selection();
+         self.refresh_pending_thread_approvals().await;
+     }
+
+@@ -131,6 +132,7 @@ impl App {
+     }
+
+     pub(super) async fn clear_active_thread(&mut self) {
++        self.clear_client_selection();
+         if let Some(active_id) = self.active_thread_id.take() {
+             self.set_thread_active(active_id, /*active*/ false).await;
+         }

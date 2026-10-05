@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "status": "isolated-prototype-not-installed",
+  "evaluatedAt": "2026-10-01",
+  "source": {
+    "repository": "https://github.com/openai/codex",
+    "tag": "rust-v0.159.2",
+    "commit": "ff6aec96948b70d94983af2641a6b67c94faeff5",
+    "requiredNativeToolchain": "1.95.0"
+  },
+  "artifacts": [
+    {
+      "path": "0001-local-tui-presence.patch",
+      "sha256": "0301fd2e8f6c41881f5310c9252cbde355bd66952eb4058076a9a03a61c08cf5"
+    },
+    {
+      "path": "0002-foreground-lifecycle.patch",
+      "sha256": "f52f3150e0e2ebbbbf82a899b8bd2b92f68df47f266fc1891421505a2b26dcc1"
+    },
+    {
+      "path": "validation/producer/client_presence.rs",
+      "sha256": "5f0ea0f8e3c79ac47de5e8b007469e3e5d376ad2bc7b8d59da6d9b4b00e05de4"
+    },
+    {
+      "path": "validation/producer/client_presence_tests.rs",
+      "sha256": "aa7394dbbebeb019a140dc731554390a7854a32c1eddeed51effdda7b9f979ec"
+    },
+    {
+      "path": "validation/Cargo.lock",
+      "sha256": "18b006545c89466c6a22f6e3f61ff259f0ac8eaaa355711dfcd811a9c95672bf"
+    }
+  ],
+  "validation": {
+    "platform": "Linux",
+    "compiler": "rustc 1.97.1",
+    "standaloneTests": {
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0
+    },
+    "standaloneClippy": "passed, all targets, warnings denied",
+    "standaloneFormat": "passed",
+    "patchesApplyToPinnedSource": "passed, sequentially in a disposable checkout",
+    "producerSourceEquivalence": "passed, byte-identical copies versus applied patches",
+    "nativeTuiBuild": "not completed: offline pinned Git dependencies unavailable",
+    "nativeAppLifecycleTests": "not run",
+    "nativeWholeRepositoryFormatting": "not completed: non-Rust tooling unavailable",
+    "realCliAcceptance": "not run",
+    "windows": "not validated, publisher disabled",
+    "macos": "not validated"
+  },
+  "safety": {
+    "installedCodexModified": false,
+    "userConfigurationModified": false,
+    "realCliOrDaemonRestarted": false,
+    "published": false,
+    "productionLumeConsumerEnabled": false,
+    "assertedPidGrantsAuthority": false
+  },
+  "pending": [
+    "Native pinned toolchain build and App lifecycle tests",
+    "Disposable ordinary CLI start/resume/rename/fork/switch/reconnect/exit acceptance",
+    "Explicit marker UX and permission policy, without silently changing Codex home",
+    "Lume consumer integration and exact native thread deduplication",
+    "Windows ACL, lease and native runtime implementation",
+    "macOS native runtime validation",
+    "Bounded cleanup for stale crash records and scan-limit handling",
+    "Fork without exec can retain a lease; presence must not authorize process actions",
+    "Product decision before distributing a patched Codex"
+  ]
+}

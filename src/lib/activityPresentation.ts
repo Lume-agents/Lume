@@ -38,7 +38,7 @@ export function activityCategory(activity: SessionActivity): ActivityCategory {
 }
 
 export function activityThinkingState(activity: SessionActivity): ActivityThinkingState {
-  if (["prompt", "queued_prompt"].includes(activity.kind)) return "listening";
+  if (["prompt", "queued_prompt", "codex_queued_prompt"].includes(activity.kind)) return "listening";
   if (activity.kind === "message") return "composing";
   if (activity.kind === "analysis") return "breathing";
   switch (activityCategory(activity)) {
@@ -69,13 +69,13 @@ export function activityThinkingLabel(state: ActivityThinkingState, language: La
 }
 
 export function isPresentableTraceActivity(activity: SessionActivity): boolean {
-  if (["prompt", "message", "analysis", "queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
+  if (["prompt", "message", "analysis", "queued_prompt", "codex_queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return !/^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
 }
 
 export function isHiddenAgentActivity(activity: SessionActivity): boolean {
-  if (["plan", "plan_document", "queued_prompt", "warning"].includes(activity.kind)) return true;
+  if (["plan", "plan_document", "queued_prompt", "codex_queued_prompt", "warning"].includes(activity.kind)) return true;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return /^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
 }

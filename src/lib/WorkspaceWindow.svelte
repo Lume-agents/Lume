@@ -12,6 +12,7 @@
   import BrandIcon from "$lib/BrandIcon.svelte";
   import AccentColorPicker from "$lib/AccentColorPicker.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import WorkspaceSidebarToggleIcon from "$lib/WorkspaceSidebarToggleIcon.svelte";
   import { copyResolvedColorTokens } from "$lib/floatingTheme";
@@ -33,6 +34,8 @@
   import { displayText } from "$lib/i18n";
   import {
     beginMobilePairing,
+    canLinkCodexCli,
+    isUnidentifiedCodexCli,
     configureIntegration,
     configureVscode,
     defaultPreferences,
@@ -60,6 +63,7 @@
     revealPluginDirectory,
     revokePairedDevice,
     savePreferences,
+    watchShortcutRegistrationError,
     setNativeFileDialogActive,
     setPairedDeviceScopes,
     takeControlSession,
@@ -114,6 +118,7 @@
   let settingsLoading = $state(false);
   let settingsSaving = $state(false);
   let settingsError = $state("");
+  let shortcutRegistrationError = $state<string | null>(null);
   let settingsMessage = $state("");
   let integrations = $state<IntegrationStatus[]>([]);
   let integrationDiagnostics = $state<Partial<Record<IntegrationStatus["kind"], IntegrationDiagnostic>>>({});
@@ -160,6 +165,7 @@
   let sessionContextError = $state("");
   let sessionContextNode = $state<HTMLDivElement | null>(null);
   let sessionRenameDraft = $state("");
+  let cliAssociationSessionId = $state<string | null>(null);
   let streamMessages = $state(true);
   let workspaceBackgroundImage = $state("");
   let workspaceBackgroundImageOpacity = $state(100);
@@ -405,7 +411,7 @@
       failed: 3,
       waiting_for_input: 4,
     };
-    return [...sessions].sort((left, right) => {
+    return sessions.filter((session) => !isUnidentifiedCodexCli(session)).sort((left, right) => {
       const leftPane = paneOrder.indexOf(left.id);
       const rightPane = paneOrder.indexOf(right.id);
       if (leftPane !== -1 || rightPane !== -1) {
@@ -560,10 +566,16 @@
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
     const items: SystemBannerItem[] = [];
     if (settingsError) items.push({ id: "settings-error", message: settingsError, tone: "error", onDismiss: () => { settingsError = ""; } });
+    if (shortcutRegistrationError) items.push({
+      id: "shortcut-registration-error",
+      message: `${tr("Global shortcuts could not be registered. Review them in Settings.", "Não foi possível registrar os atalhos globais. Revise-os nas Configurações.")} ${shortcutRegistrationError}`,
+      tone: "warning",
+      onDismiss: () => { shortcutRegistrationError = null; },
+    });
     if (launchError) items.push({ id: "launch-error", message: launchError, tone: "error", onDismiss: () => { launchError = ""; } });
     if (sessionContextError) items.push({ id: "session-error", message: sessionContextError, tone: "error", onDismiss: () => { sessionContextError = ""; } });
     const openedSessionIds = new Set([primary?.id, secondary?.id, tertiary?.id].filter(Boolean));
-    for (const alert of collectAgentAlerts(sessions.filter((session) => !openedSessionIds.has(session.id)), language)) {
+    for (const alert of collectAgentAlerts(orderedSessions.filter((session) => !openedSessionIds.has(session.id)), language)) {
       if (dismissedAgentAlertIds.includes(alert.id)) continue;
       items.push({
         id: alert.id,
@@ -2043,6 +2055,9 @@
     };
 
     void startup.run(async () => {
+      await startup.subscribe(() => watchShortcutRegistrationError((error) => {
+        if (startup.active) shortcutRegistrationError = error;
+      }));
       await startup.subscribe(() => listen<ExternalWriterConflict[]>("lume://external-writer-conflicts-changed", ({ payload }) => {
         externalWriterConflicts = Object.fromEntries(payload.map((conflict) => [conflict.sessionId, conflict]));
       }));
@@ -2188,7 +2203,7 @@
       {:else}
         <button class="search-toggle" type="button" aria-label={tr("Search agents", "Buscar agentes")} title={tr("Search agents · /", "Buscar agentes · /")} onclick={() => void openAgentSearch()}><LumeIcon name="search" size={16} /></button>
         <strong>{tr("Agents", "Agentes")}</strong>
-        <span>{sessions.length}</span>
+        <span>{orderedSessions.length}</span>
       {/if}
       <div class="session-launcher" bind:this={launcherRoot}>
         <button class:active={launcherOpen} type="button" aria-label={tr("New or resume chat", "Novo chat ou retomar")} title={tr("New or resume chat", "Novo chat ou retomar")} aria-expanded={launcherOpen} onclick={() => void toggleLauncher()}><LumeIcon name="plus" size={16} /></button>
@@ -2328,6 +2343,12 @@
           <LumeIcon name="rename" size={15} />
           <span>{tr("Rename session", "Renomear sessão")}</span>
         </button>
+        {#if canLinkCodexCli(contextSession)}
+          <button class="session-context-command" type="button" role="menuitem" onclick={() => { cliAssociationSessionId = contextSession.id; sessionContextMenu = null; }}>
+            <LumeIcon name="split" size={15} />
+            <span>{tr("Link conversation", "Vincular conversa")}</span>
+          </button>
+        {/if}
         {#if contextSession.capabilities.canTakeControl}
           <button class="session-context-command" type="button" role="menuitem" disabled={sessionContextBusy} onclick={() => void takeControlFromSidebar(contextSession)}>
             <LumeIcon name="take-control" size={15} />
@@ -2342,6 +2363,12 @@
         {/if}
       {/if}
     </div>
+  {/if}
+
+  {#if cliAssociationSessionId}
+    {#key cliAssociationSessionId}
+      <CodexCliAssociationDialog sessionId={cliAssociationSessionId} language={preferences.language} dark={darkMode} onClose={() => { cliAssociationSessionId = null; }} onLinked={refreshSessionsAfterContextAction} />
+    {/key}
   {/if}
 
   {#if settingsOpen}
@@ -2826,7 +2853,7 @@
         <p>{tr("Open an agent to follow its conversation and work side by side.", "Abra um agente para acompanhar a conversa e trabalhar lado a lado.")}</p>
       </div>
     {/if}
-      {#if error && !sessions.length}<p class="workspace-error">{error}</p>{/if}
+      {#if error && !orderedSessions.length}<p class="workspace-error">{error}</p>{/if}
       {#if draggingSessionId && workspaceDropIntent}
         <div
           class="layout-drop-preview {workspaceDropIntent.kind}"

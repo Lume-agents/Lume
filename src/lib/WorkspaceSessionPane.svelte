@@ -323,13 +323,14 @@
   ));
   const queuedPrompts = $derived(
     session.activities
-      .filter((activity: SessionActivity) => activity.kind === "queued_prompt" && activity.status === "waiting")
+      .filter((activity: SessionActivity) => ["queued_prompt", "codex_queued_prompt"].includes(activity.kind) && activity.status === "waiting")
       .sort((left: SessionActivity, right: SessionActivity) => left.createdAt - right.createdAt),
   );
   const nextQueuedPrompt = $derived(queuedPrompts[0] ?? null);
   const canSteer = $derived(Boolean(
     promptIsRunning
     && nextQueuedPrompt
+    && nextQueuedPrompt.kind === "queued_prompt"
     && session.capabilities.promptDeliveries.includes("steer")
   ));
   const supportsAgentControls = $derived(["codex", "claude_code", "opencode"].includes(session.agent));
@@ -708,7 +709,7 @@
           "Escreva um prompt para assumir o controle desta CLI…",
         );
       }
-      return tr("Open the original source to respond", "Abra a origem original para responder");
+      return tr("Open the source to respond", "Abra a origem para responder");
     }
     if (promptIsRunning && canQueue) return tr("Queue the next prompt…", "Coloque o próximo prompt na fila…");
     if (promptIsRunning) return tr("Agent is working…", "O agente está trabalhando…");
@@ -1871,7 +1872,7 @@
     {/if}
     {#if queuedPrompts.length}
       <div class="queue-tray">
-        <span><i>{queuedPrompts.length}</i><b>{tr("Queued", "Na fila")}</b><small>{nextQueuedPrompt?.detail || nextQueuedPrompt?.title}</small></span>
+        <span><i>{queuedPrompts.length}</i><b>{nextQueuedPrompt?.kind === "codex_queued_prompt" ? tr("Codex CLI · read only", "CLI do Codex · somente leitura") : tr("Queued", "Na fila")}</b><small>{nextQueuedPrompt?.detail || nextQueuedPrompt?.title}</small></span>
         {#if canSteer}
           <button type="button" disabled={steeringQueued} onclick={() => void steerNextPrompt()} title={tr("Steer into the current task", "Enviar para a tarefa atual")}>
             <LumeIcon name="steer" size={14} />

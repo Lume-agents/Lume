@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     io::{BufRead, BufReader},
     path::Path,
@@ -64,6 +64,17 @@ pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
             loop {
                 let plugins = agent_plugins::external_catalog(&app);
                 let scan = scan(&mut system, &plugins, managed_proxy_url.as_deref());
+                let cli_pids = scan
+                    .discovered
+                    .iter()
+                    .filter(|process| process.agent == AgentKind::Codex)
+                    .map(|process| process.process_id)
+                    .collect::<Vec<_>>();
+                crate::codex_identity_probe::observe_runtime(
+                    crate::codex_identity_probe::RuntimeStage::Discovery,
+                    &cli_pids,
+                    false,
+                );
                 let _ = state.observe_external_writer_attempts(
                     &scan.external_writer_attempts,
                     &scan.live_pids,
@@ -78,9 +89,15 @@ pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
                 let internal_changed = state
                     .replace_internal_services(scan.internal_services)
                     .unwrap_or(false);
-                let sessions_changed = state
-                    .reconcile_process_snapshot(scan.discovered, scan.live_pids)
-                    .unwrap_or(false);
+                let reconciliation =
+                    state.reconcile_process_snapshot(scan.discovered, scan.live_pids);
+                let current_pids = state.codex_cli_process_ids();
+                crate::codex_identity_probe::observe_runtime(
+                    crate::codex_identity_probe::RuntimeStage::State,
+                    current_pids.as_deref().unwrap_or_default(),
+                    reconciliation.is_err() || current_pids.is_err(),
+                );
+                let sessions_changed = reconciliation.unwrap_or(false);
                 if internal_changed || sessions_changed {
                     crate::protocol::emit_sessions_changed(&app);
                 }
@@ -100,12 +117,42 @@ fn scan(
         ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing()
-            // A linha de comando de um PID não muda durante sua vida. Reabrir
-            // /proc/<pid>/cmdline para todos os processos a cada dois segundos
-            // monopolizava um núcleo em máquinas com muitos processos/threads.
+            // Keep the all-process inventory cheap. An exec can change a
+            // command line without changing its PID; refresh agent/launcher
+            // arguments below, before infrastructure and ancestry filters.
             .with_cmd(UpdateKind::OnlyIfNotSet)
             .without_tasks(),
     );
+    let command_refresh_pids = system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            let name = process.name().to_string_lossy().to_lowercase();
+            if is_cli_launcher_name(&name) {
+                return Some(*pid);
+            }
+            let arguments = process
+                .cmd()
+                .iter()
+                .map(|part| part.to_string_lossy().to_lowercase())
+                .collect::<Vec<_>>();
+            (arguments
+                .first()
+                .is_some_and(|arg| is_cli_launcher_name(arg))
+                || detect_agent_arguments(&name, &arguments).is_some()
+                || detect_external_agent_arguments(&name, &arguments, external_plugins).is_some())
+            .then_some(*pid)
+        })
+        .collect::<Vec<_>>();
+    if !command_refresh_pids.is_empty() {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&command_refresh_pids),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::Always)
+                .without_tasks(),
+        );
+    }
     let own_pid = get_current_pid().ok();
     let live_pids = system
         .processes()
@@ -278,13 +325,19 @@ fn scan(
                 _ => Vec::new(),
             };
             Some(DiscoveredProcess {
+                // These are actual TUIs. A CLI inside VS Code's integrated
+                // terminal is still a CLI, not the Codex extension server.
+                source: if agent == AgentKind::Codex {
+                    SessionSource::Cli
+                } else {
+                    source_for(&system, pid)
+                },
                 agent,
                 agent_label,
                 process_id: pid.as_u32(),
                 started_at: process.start_time(),
                 native_session_ids,
                 working_directory,
-                source: source_for(&system, pid),
             })
         })
         .collect::<Vec<_>>();
@@ -350,6 +403,32 @@ fn is_lume_managed_codex_process(
                 == Some(proxy_url)
         }
     })
+}
+
+fn is_cli_launcher_name(name: &str) -> bool {
+    let executable = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim_matches(['\'', '"'])
+        .trim_end_matches(".exe");
+    matches!(
+        executable,
+        "node"
+            | "nodejs"
+            | "bun"
+            | "deno"
+            | "python"
+            | "python3"
+            | "bash"
+            | "sh"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+    )
 }
 
 /// Servers and updater loops are shared infrastructure, never a user CLI.
@@ -424,66 +503,289 @@ fn is_lume_codex_infrastructure_process(command: &str) -> bool {
 }
 
 fn native_session_ids_for_process_tree(system: &System, root: sysinfo::Pid) -> Vec<String> {
+    let Some(root_process) = system.process(root) else {
+        return Vec::new();
+    };
     let process_tree = system
         .processes()
         .keys()
         .filter(|pid| **pid == root || process_descends_from(system, **pid, root))
+        .filter(|pid| native_identity_process_belongs_to_cli_tree(system, **pid, root))
         .filter_map(|pid| system.process(*pid))
         .collect::<Vec<_>>();
-    let command_ids = process_tree
-        .iter()
-        .flat_map(|process| native_session_ids_from_command(process.cmd()))
-        .collect::<HashSet<_>>();
-    if command_ids.len() == 1 {
-        return command_ids.into_iter().collect();
+    if process_tree.is_empty() {
+        return Vec::new();
     }
+    // Descendant commands can be unrelated tool calls or nested CLIs. Only the
+    // CLI's own launch arguments are fallback evidence, and /resume can age them.
+    let command_ids = native_session_ids_from_command(root_process.cmd());
 
     #[cfg(target_os = "linux")]
     {
-        // A CLI pode herdar rollouts do agente pai e também abrir rollouts internos
-        // (por exemplo, o guardian). Depois de descartar os internos, o descritor
-        // mais recente representa a conversa visível selecionada nessa CLI.
-        let candidates = system
-            .processes()
-            .keys()
-            .filter(|pid| **pid == root || process_descends_from(system, **pid, root))
-            .flat_map(|pid| native_session_ids_for_pid(*pid))
+        // Descriptor numbers are process-local slots, not recency evidence.
+        // Inherited or multiple user-facing rollouts must remain ambiguous.
+        let rollout_ids = process_tree
+            .iter()
+            .flat_map(|process| native_session_ids_for_pid(process.pid()))
             .collect::<Vec<_>>();
-        return select_native_session_id(candidates).into_iter().collect();
+        return select_native_session_ids(command_ids, rollout_ids);
     }
 
-    #[cfg(not(target_os = "linux"))]
-    Vec::new()
+    #[cfg(target_os = "macos")]
+    {
+        // A descriptor belongs to this CLI tree, unlike a recently modified
+        // rollout or a thread loaded in a daemon shared by unrelated CLIs.
+        // Multiple visible rollouts remain ambiguous; never pick one by time.
+        if process_tree.len() > 64 {
+            return Vec::new();
+        }
+        let mut rollout_ids = Vec::new();
+        for process in &process_tree {
+            let Some(ids) = macos_native_session_ids_for_process(process) else {
+                return Vec::new();
+            };
+            rollout_ids.extend(ids);
+        }
+        return select_native_session_ids(command_ids, rollout_ids);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    select_native_session_ids(command_ids, Vec::new())
+}
+
+fn native_identity_process_belongs_to_cli_tree(
+    system: &System,
+    pid: sysinfo::Pid,
+    root: sysinfo::Pid,
+) -> bool {
+    native_identity_lineage_belongs_to_cli_tree(pid, root, |pid| {
+        let process = system.process(pid)?;
+        let arguments = process
+            .cmd()
+            .iter()
+            .map(|part| part.to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>();
+        let infrastructure = is_codex_infrastructure_arguments(
+            &process.name().to_string_lossy().to_lowercase(),
+            &arguments,
+        );
+        Some((process.parent(), infrastructure))
+    })
+}
+
+fn native_identity_lineage_belongs_to_cli_tree(
+    mut pid: sysinfo::Pid,
+    root: sysinfo::Pid,
+    mut context: impl FnMut(sysinfo::Pid) -> Option<(Option<sysinfo::Pid>, bool)>,
+) -> bool {
+    for _ in 0..=12 {
+        let Some((parent, infrastructure)) = context(pid) else {
+            return false;
+        };
+        if infrastructure {
+            // Even a daemon launched below this CLI may serve other clients.
+            // Neither its descriptors nor those of its children identify it.
+            return false;
+        }
+        if pid == root {
+            return true;
+        }
+        let Some(parent) = parent else {
+            return false;
+        };
+        pid = parent;
+    }
+    false
+}
+
+fn select_native_session_ids(command_ids: Vec<String>, rollout_ids: Vec<String>) -> Vec<String> {
+    // Open rollouts precede launch arguments, but never resolve ambiguity by
+    // falling back to a potentially stale `resume` ID.
+    let ids = if rollout_ids.is_empty() {
+        command_ids
+    } else {
+        rollout_ids
+    }
+    .into_iter()
+    .collect::<HashSet<_>>();
+    if ids.len() == 1 {
+        ids.into_iter().collect()
+    } else {
+        Vec::new()
+    }
 }
 
 #[cfg(target_os = "linux")]
-fn select_native_session_id(candidates: Vec<(u64, String)>) -> Option<String> {
-    candidates
-        .into_iter()
-        .max_by_key(|(descriptor, _)| *descriptor)
-        .map(|(_, id)| id)
-}
-
-#[cfg(target_os = "linux")]
-fn native_session_ids_for_pid(pid: sysinfo::Pid) -> Vec<(u64, String)> {
+fn native_session_ids_for_pid(pid: sysinfo::Pid) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(format!("/proc/{}/fd", pid.as_u32())) else {
         return Vec::new();
     };
     entries
         .flatten()
         .filter_map(|entry| {
-            let descriptor = entry.file_name().to_str()?.parse::<u64>().ok()?;
             let path = std::fs::read_link(entry.path()).ok()?;
             let id = codex_rollout_id_from_path(&path)?;
             if !rollout_is_user_facing(&path) {
                 return None;
             }
-            Some((descriptor, id))
+            Some(id)
         })
         .collect()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+fn macos_native_session_ids_for_process(process: &sysinfo::Process) -> Option<Vec<String>> {
+    use std::{
+        ffi::OsStr,
+        fs::OpenOptions,
+        io::Read,
+        mem::{size_of, MaybeUninit},
+        os::unix::{ffi::OsStrExt, fs::MetadataExt, fs::OpenOptionsExt},
+        ptr,
+    };
+
+    // These public libproc ABI definitions are absent from libc's Apple module.
+    // Layouts/constants: apple-oss-distributions/xnu, bsd/sys/proc_info.h.
+    #[repr(C)]
+    struct ProcFileInfo {
+        open_flags: u32,
+        status: u32,
+        offset: libc::off_t,
+        file_type: i32,
+        guard_flags: u32,
+    }
+    #[repr(C)]
+    struct VnodeFdInfoWithPath {
+        file: ProcFileInfo,
+        vnode: libc::vnode_info_path,
+    }
+    const PROX_FDTYPE_VNODE: u32 = 1;
+    const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+    const MAX_DESCRIPTORS: usize = 4096;
+    const MAX_METADATA_BYTES: u64 = 64 * 1024;
+
+    let pid = process.pid().as_u32();
+    let start = crate::codex_identity_probe::process_start_marker(pid)?;
+    if start / 1_000_000 != process.start_time() {
+        return None;
+    }
+    let native_pid = libc::pid_t::try_from(pid).ok()?;
+    // SAFETY: a null buffer/zero size queries the required byte count.
+    let required =
+        unsafe { libc::proc_pidinfo(native_pid, libc::PROC_PIDLISTFDS, 0, ptr::null_mut(), 0) };
+    let descriptor_size = size_of::<libc::proc_fdinfo>();
+    if required <= 0 || required as usize > MAX_DESCRIPTORS * descriptor_size {
+        return None;
+    }
+    // Extra room handles descriptors opened between the query and the read.
+    let count = ((required as usize).div_ceil(descriptor_size) + 32).min(MAX_DESCRIPTORS);
+    // SAFETY: proc_fdinfo consists solely of integer fields; zero is valid.
+    let mut descriptors = vec![unsafe { std::mem::zeroed::<libc::proc_fdinfo>() }; count];
+    let buffer_size = descriptors.len() * descriptor_size;
+    // SAFETY: this aligned, initialized buffer has exactly buffer_size bytes.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            native_pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            descriptors.as_mut_ptr().cast(),
+            buffer_size as libc::c_int,
+        )
+    };
+    if written <= 0 || written as usize >= buffer_size || written as usize % descriptor_size != 0 {
+        // An incomplete inventory cannot establish a unique conversation.
+        return None;
+    }
+    descriptors.truncate(written as usize / descriptor_size);
+    let mut ids = Vec::new();
+    for descriptor in descriptors {
+        if descriptor.proc_fdtype != PROX_FDTYPE_VNODE || descriptor.proc_fd < 0 {
+            continue;
+        }
+        let mut info = MaybeUninit::<VnodeFdInfoWithPath>::zeroed();
+        let size = size_of::<VnodeFdInfoWithPath>();
+        // SAFETY: the buffer has the vnode_fdinfowithpath C layout and size.
+        let written = unsafe {
+            libc::proc_pidfdinfo(
+                native_pid,
+                descriptor.proc_fd,
+                PROC_PIDFDVNODEPATHINFO,
+                info.as_mut_ptr().cast(),
+                size as libc::c_int,
+            )
+        };
+        if written != size as libc::c_int {
+            return None;
+        }
+        // SAFETY: the complete response initialized every field above.
+        let info = unsafe { info.assume_init() };
+        let stat = &info.vnode.vip_vi.vi_stat;
+        if u32::from(stat.vst_mode) & u32::from(libc::S_IFMT) != u32::from(libc::S_IFREG) {
+            continue;
+        }
+        let bytes = info
+            .vnode
+            .vip_path
+            .iter()
+            .flatten()
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        let Some(end) = bytes.iter().position(|byte| *byte == 0) else {
+            return None;
+        };
+        let path = Path::new(OsStr::from_bytes(&bytes[..end]));
+        let Some(id) = codex_rollout_id_from_path(path).filter(|_| path.is_absolute()) else {
+            continue;
+        };
+        // Never open a terminal/FIFO or follow a replaced symlink. Verify that
+        // the metadata still belongs to the regular file observed via libproc.
+        let Ok(file) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+        else {
+            return None;
+        };
+        let Ok(metadata) = file.metadata() else {
+            return None;
+        };
+        if !metadata.is_file()
+            || metadata.ino() != stat.vst_ino
+            || metadata.dev() != u64::from(stat.vst_dev)
+            || metadata.uid() != stat.vst_uid
+        {
+            return None;
+        }
+        let mut line = String::new();
+        if BufReader::new(file.take(MAX_METADATA_BYTES))
+            .read_line(&mut line)
+            .is_err()
+        {
+            return None;
+        }
+        let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&line) else {
+            return None;
+        };
+        if metadata.get("type").and_then(serde_json::Value::as_str) != Some("session_meta")
+            || metadata
+                .get("payload")
+                .and_then(|payload| payload.get("id"))
+                .and_then(serde_json::Value::as_str)
+                != Some(id.as_str())
+            || !rollout_metadata_is_user_facing(&metadata)
+        {
+            continue;
+        }
+        ids.push(id);
+    }
+    // PID reuse/process exit during the inspection invalidates every result.
+    if crate::codex_identity_probe::process_start_marker(pid) != Some(start) {
+        return None;
+    }
+    Some(ids)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn codex_rollout_id_from_path(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     let stem = name.strip_suffix(".jsonl")?;
@@ -498,28 +800,38 @@ fn codex_rollout_id_from_path(path: &Path) -> Option<String> {
 #[cfg(target_os = "linux")]
 fn rollout_is_user_facing(path: &Path) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
-        return true;
+        return false;
     };
     let mut first_line = String::new();
     if BufReader::new(file).read_line(&mut first_line).is_err() {
-        return true;
+        return false;
     }
     let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&first_line) else {
-        return true;
+        return false;
     };
-    rollout_metadata_is_user_facing(&metadata)
+    metadata.get("type").and_then(serde_json::Value::as_str) == Some("session_meta")
+        && rollout_metadata_is_user_facing(&metadata)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn rollout_metadata_is_user_facing(metadata: &serde_json::Value) -> bool {
-    metadata
-        .get("payload")
-        .and_then(|payload| payload.get("source"))
-        .and_then(serde_json::Value::as_object)
-        .is_none_or(|source| !source.contains_key("subagent"))
+    let Some(payload) = metadata.get("payload") else {
+        return false;
+    };
+    !payload
+        .get("parent_thread_id")
+        .is_some_and(|parent| !parent.is_null())
+        && payload
+            .get("thread_source")
+            .and_then(serde_json::Value::as_str)
+            != Some("subagent")
+        && payload
+            .get("source")
+            .and_then(serde_json::Value::as_object)
+            .is_none_or(|source| !source.contains_key("subagent"))
 }
 
-fn native_session_ids_from_command(command: &[std::ffi::OsString]) -> Vec<String> {
+pub(crate) fn native_session_ids_from_command(command: &[std::ffi::OsString]) -> Vec<String> {
     let parts = command
         .iter()
         .map(|part| part.to_string_lossy())
@@ -1189,6 +1501,77 @@ fn process_depth(system: &System, mut pid: Pid) -> usize {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn warm_process_scan_refreshes_arguments_after_same_pid_exec() {
+        for launcher in ["codex", "node"] {
+            assert_warm_process_scan_after_exec(launcher);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_warm_process_scan_after_exec(launcher: &str) {
+        use std::{
+            io::Write,
+            os::unix::process::CommandExt,
+            process::{Child, Command, Stdio},
+            time::Instant,
+        };
+
+        // Only this disposable child is signalled/killed. An exec can replace
+        // a launcher's command line without changing its PID or birth time.
+        struct Fixture(Child);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut fixture = Fixture(
+            Command::new("/bin/bash")
+                .arg0(launcher)
+                .args([
+                    "-c",
+                    "printf 'ready\\n'; read stage; exec -a codex /bin/sleep 20",
+                    "app-server",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("disposable launcher"),
+        );
+        let pid = Pid::from_u32(fixture.0.id());
+        let mut ready = String::new();
+        BufReader::new(fixture.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .expect("launcher ready");
+        assert_eq!(ready.trim(), "ready");
+
+        let mut warm = System::new();
+        read_only_process_snapshot(&mut warm);
+        let original = warm.process(pid).unwrap().cmd().to_vec();
+        let born = warm.process(pid).unwrap().start_time();
+        writeln!(fixture.0.stdin.as_mut().unwrap()).expect("release owned child");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let command_path = format!("/proc/{}/cmdline", fixture.0.id());
+        while std::fs::read(&command_path).unwrap_or_default() != b"codex\x0020\x00" {
+            assert!(Instant::now() < deadline, "owned child did not exec");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut fresh = System::new();
+        read_only_process_snapshot(&mut fresh);
+        let current = fresh.process(pid).unwrap().cmd().to_vec();
+        assert_ne!(original, current, "the command changed, not the PID");
+        assert_eq!(fresh.process(pid).unwrap().start_time(), born);
+        read_only_process_snapshot(&mut warm);
+        assert_eq!(
+            warm.process(pid).unwrap().cmd(),
+            current,
+            "a long-lived detector must not keep the pre-exec launcher command"
+        );
+    }
+
     #[test]
     fn managed_codex_cli_is_not_an_external_writer_when_terminal_loses_environment() {
         let proxy_url = "ws://127.0.0.1:43131/?token=private-test-token";
@@ -1302,19 +1685,91 @@ mod tests {
         assert!(antigravity_session_ids_from_command(&unrelated).is_empty());
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn inherited_rollout_uses_the_session_opened_last() {
+    fn rollout_descriptors_from_multiple_processes_cannot_resolve_conflicting_ids() {
+        let first = "019f8061-7032-7521-b333-84f84c744fa8";
+        let second = "019fcdac-85c9-77e2-871a-3583aa965a75";
+        // FD 54 in one process is not newer than FD 32 in another. Descriptor
+        // reuse also makes ordering unsafe even within the same process.
+        for descriptors in [
+            [(101_u32, 32_u64, first), (202, 54, second)],
+            [(101_u32, 54_u64, first), (202, 32, second)],
+            [(101_u32, 32_u64, first), (101, 54, second)],
+        ] {
+            assert!(select_native_session_ids(
+                vec![first.into()],
+                descriptors
+                    .into_iter()
+                    .map(|(_, _, id)| id.into())
+                    .collect(),
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn duplicate_rollout_descriptors_keep_the_same_unambiguous_identity() {
+        let id = "019f8061-7032-7521-b333-84f84c744fa8";
+        let descriptors = [(101_u32, 32_u64, id), (202, 54, id), (202, 3, id)];
         assert_eq!(
-            select_native_session_id(vec![
-                (32, "019f8061-7032-7521-b333-84f84c744fa8".into()),
-                (54, "019fcdac-85c9-77e2-871a-3583aa965a75".into()),
-            ]),
-            Some("019fcdac-85c9-77e2-871a-3583aa965a75".into()),
+            select_native_session_ids(
+                Vec::new(),
+                descriptors
+                    .into_iter()
+                    .map(|(_, _, id)| id.into())
+                    .collect(),
+            ),
+            vec![id],
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_rollout_identity_precedes_stale_resume_arguments() {
+        let old = "019f8061-7032-7521-b333-84f84c744fa8";
+        let current = "019fcdac-85c9-77e2-871a-3583aa965a75";
+        let command = ["codex", "resume", old].map(std::ffi::OsString::from);
+        assert_eq!(
+            select_native_session_ids(
+                native_session_ids_from_command(&command),
+                vec![current.into()]
+            ),
+            vec![current],
+        );
+        assert_eq!(
+            select_native_session_ids(native_session_ids_from_command(&command), Vec::new()),
+            vec![old],
+        );
+    }
+
+    #[test]
+    fn codex_infrastructure_and_its_descendants_do_not_supply_cli_identity() {
+        let root = Pid::from_u32(101);
+        let wrapper = Pid::from_u32(102);
+        let daemon = Pid::from_u32(103);
+        let daemon_child = Pid::from_u32(104);
+        let contexts = HashMap::from([
+            (root, (None, false)),
+            (wrapper, (Some(root), false)),
+            (daemon, (Some(root), true)),
+            (daemon_child, (Some(daemon), false)),
+        ]);
+        let belongs = |pid| {
+            native_identity_lineage_belongs_to_cli_tree(pid, root, |pid| {
+                contexts.get(&pid).copied()
+            })
+        };
+        assert!(belongs(root));
+        assert!(belongs(wrapper));
+        assert!(!belongs(daemon));
+        assert!(!belongs(daemon_child));
+        assert!(!native_identity_lineage_belongs_to_cli_tree(
+            daemon,
+            daemon,
+            |pid| contexts.get(&pid).copied()
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn internal_subagent_rollouts_are_not_used_as_visible_session_identity() {
         let guardian = serde_json::json!({
@@ -1327,6 +1782,14 @@ mod tests {
         });
         assert!(!rollout_metadata_is_user_facing(&guardian));
         assert!(rollout_metadata_is_user_facing(&cli));
+        for payload in [
+            serde_json::json!({ "parent_thread_id": "019f8061-7032-7521-b333-84f84c744fa8", "source": "cli" }),
+            serde_json::json!({ "thread_source": "subagent", "source": "cli" }),
+        ] {
+            assert!(!rollout_metadata_is_user_facing(&serde_json::json!({
+                "type": "session_meta", "payload": payload
+            })));
+        }
     }
 
     #[cfg(target_os = "linux")]

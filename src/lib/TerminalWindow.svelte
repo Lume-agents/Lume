@@ -721,7 +721,8 @@
   function pendingQueuedPrompts(item: AgentSession | null) {
     return (item?.activities ?? [])
       .filter((activity) =>
-        activity.kind === "queued_prompt" && activity.status === "waiting"
+        ["queued_prompt", "codex_queued_prompt"].includes(activity.kind)
+        && activity.status === "waiting"
       )
       .sort((left, right) => left.createdAt - right.createdAt);
   }
@@ -2681,7 +2682,7 @@
   }
 
   async function steerNextQueuedPrompt() {
-    if (!session || !nextQueuedPrompt || !canSendWhileRunning || steeringQueued) return;
+    if (!session || !nextQueuedPrompt || nextQueuedPrompt.kind !== "queued_prompt" || !canSendWhileRunning || steeringQueued) return;
     steeringQueued = true;
     message = null;
     try {
@@ -2820,6 +2821,7 @@
       && !event.shiftKey
       && !event.isComposing
       && nextQueuedPrompt
+      && nextQueuedPrompt.kind === "queued_prompt"
       && canSendWhileRunning
     ) {
       event.preventDefault();
@@ -3923,7 +3925,16 @@
             {/each}
           </div>
         {/if}
-        {#if nextQueuedPrompt}
+        {#if nextQueuedPrompt?.kind === "codex_queued_prompt"}
+          <div class="queued-prompt-tray read-only" role="status" aria-label={tr("Prompt queued through Codex CLI", "Prompt na fila pela CLI do Codex")}>
+            <span class="queue-mark" aria-hidden="true">↳</span>
+            <span class="queue-copy">
+              <small>{queuedPrompts.length > 1 ? tr(`${queuedPrompts.length} queued prompts`, `${queuedPrompts.length} prompts na fila`) : tr("Queued via Codex CLI", "Na fila pela CLI do Codex")}</small>
+              <strong>{nextQueuedPrompt.detail || tr("Prompt queued in Codex", "Prompt na fila do Codex")}</strong>
+            </span>
+            <span class="queue-shortcut"><small>{tr("Read only", "Somente leitura")}</small></span>
+          </div>
+        {:else if nextQueuedPrompt}
           <button
             class="queued-prompt-tray"
             disabled={steeringQueued || !canSendWhileRunning}
@@ -4646,6 +4657,8 @@
   .terminal-composer .interrupt-submit:hover:not(:disabled) { background: #aa4d44; }
   .terminal-composer .queued-prompt-tray { width: 100%; height: 35px; padding: 0 7px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(80, 119, 160, 0.13); border-radius: 9px; color: #4f6d83; background: rgba(74, 119, 157, 0.055); text-align: left; }
   .queued-prompt-tray:hover:not(:disabled) { border-color: rgba(67, 119, 164, 0.24); background: rgba(74, 119, 157, 0.09); }
+  .queued-prompt-tray.read-only { cursor: default; }
+  .queued-prompt-tray.read-only:hover { border-color: rgba(80, 119, 160, 0.13); background: rgba(74, 119, 157, 0.055); }
   .queue-mark { width: 17px; height: 17px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 5px; color: #477fa9; background: rgba(66, 127, 174, 0.1); font: 800 11px Inter, sans-serif; }
   .queue-copy { min-width: 0; flex: 1; display: grid; gap: 1px; }
   .queue-copy small { color: #7790a1; font: 760 var(--chat-tiny-font-size) Inter, sans-serif; letter-spacing: 0.035em; text-transform: uppercase; }
@@ -4916,6 +4929,7 @@
   .terminal-window.dark .slash-command-menu code { color: #8dceb0; }
   .terminal-window.dark .terminal-composer .queued-prompt-tray { color: #a7bdcd; border-color: rgba(125, 166, 199, 0.13); background: rgba(91, 143, 184, 0.065); }
   .terminal-window.dark .terminal-composer .queued-prompt-tray:hover:not(:disabled) { border-color: rgba(128, 177, 216, 0.23); background: rgba(91, 143, 184, 0.1); }
+  .terminal-window.dark .terminal-composer .queued-prompt-tray.read-only:hover { border-color: rgba(125, 166, 199, 0.13); background: rgba(91, 143, 184, 0.065); }
   .terminal-window.dark .queue-mark { color: #87b8dc; background: rgba(105, 166, 210, 0.11); }
   .terminal-window.dark .queue-copy small,
   .terminal-window.dark .queue-shortcut { color: #829daa; }

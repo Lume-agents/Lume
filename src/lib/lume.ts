@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type {
   HubCommandRequest,
   HubCommandResponse,
@@ -100,6 +101,31 @@ export async function loadSessions(): Promise<AgentSession[]> {
 
 export async function renameSession(sessionId: string, name: string): Promise<string> {
   return invoke<string>("rename_session", { sessionId, name });
+}
+
+export interface CodexCliConversationChoices {
+  processKey: string;
+  linkedNativeSessionId?: string | null;
+  candidates: Array<{ nativeSessionId: string; name: string }>;
+  hasMore: boolean;
+}
+
+export function canLinkCodexCli(session: AgentSession): boolean {
+  return session.agent === "codex" && session.controlOrigin === "external"
+    && session.source === "cli" && Boolean(session.processId) && !session.nativeSessionId;
+}
+
+export function isUnidentifiedCodexCli(session: AgentSession): boolean {
+  const name = session.sessionName?.trim() ?? "";
+  return canLinkCodexCli(session) && /^CLI não identificada(?: \(\d+\))?$/.test(name);
+}
+
+export async function loadCodexCliConversations(sessionId: string, query = ""): Promise<CodexCliConversationChoices> {
+  return invoke("list_codex_cli_conversations", { sessionId, query });
+}
+
+export async function linkCodexCliConversation(sessionId: string, processKey: string, nativeSessionId: string): Promise<void> {
+  return invoke("link_codex_cli_conversation", { sessionId, processKey, nativeSessionId });
 }
 
 export async function forkSessionFromMessage(
@@ -788,6 +814,32 @@ export async function loadOverlayPosition(): Promise<{ x: number; y: number }> {
 export async function savePreferences(preferences: Preferences): Promise<void> {
   if (!("__TAURI_INTERNALS__" in window)) return;
   await invoke("set_preferences", { preferences });
+}
+
+export async function watchShortcutRegistrationError(
+  onChange: (error: string | null) => void,
+): Promise<() => void> {
+  if (!inDesktop()) return () => {};
+  let revision = 0;
+  let active = true;
+  const stop = await listen<string | null>(
+    "lume://shortcut-registration-error",
+    ({ payload }) => {
+      revision += 1;
+      if (active) onChange(payload);
+    },
+  );
+  const initialRevision = revision;
+  try {
+    const error = await invoke<string | null>("get_shortcut_registration_error");
+    if (active && revision === initialRevision) onChange(error);
+  } catch {
+    // A development webview may still be connected to an older app process.
+  }
+  return () => {
+    active = false;
+    stop();
+  };
 }
 
 export async function takePendingShortcutAction(): Promise<

@@ -3,6 +3,9 @@ mod agent_plugins;
 mod antigravity_stream;
 mod browser_server;
 mod codex_bridge;
+mod codex_cli_identity;
+mod codex_daemon_observer;
+mod codex_identity_probe;
 mod codex_sessions;
 mod context_builder;
 mod control;
@@ -14,6 +17,8 @@ mod event_server;
 mod executables;
 mod integrations;
 mod launcher;
+#[cfg(target_os = "macos")]
+mod macos_process_supervisor;
 mod legacy_cli_gateway_cleanup;
 mod mobile_gateway;
 mod mobile_server;
@@ -114,6 +119,20 @@ fn workspace_frontend_failed(
 
 struct PendingShortcutAction(Mutex<Option<String>>);
 
+#[derive(Default)]
+struct ShortcutRegistrationStatus(Mutex<Option<String>>);
+
+#[tauri::command]
+fn get_shortcut_registration_error(
+    status: State<'_, ShortcutRegistrationStatus>,
+) -> Result<Option<String>, String> {
+    status
+        .0
+        .lock()
+        .map_err(|_| "Não foi possível ler o estado dos atalhos".to_string())
+        .map(|error| error.clone())
+}
+
 fn shortcut_action_from_args(args: &[String]) -> Option<&str> {
     (args.get(1).map(String::as_str) == Some("shortcut"))
         .then(|| args.get(2).map(String::as_str))
@@ -211,7 +230,7 @@ fn register_global_shortcuts(app: &AppHandle, preferences: &Preferences) -> Resu
 }
 
 fn apply_global_shortcuts(app: &AppHandle, preferences: &Preferences) -> Result<(), String> {
-    match desktop_shortcuts::configure(preferences) {
+    let result = match desktop_shortcuts::configure(preferences) {
         Ok(true) => app
             .global_shortcut()
             .unregister_all()
@@ -219,15 +238,74 @@ fn apply_global_shortcuts(app: &AppHandle, preferences: &Preferences) -> Result<
         Ok(false) => register_global_shortcuts(app, preferences),
         Err(desktop_error) => register_global_shortcuts(app, preferences)
             .map_err(|native_error| format!("{native_error}. {desktop_error}")),
+    };
+    if let Some(status) = app.try_state::<ShortcutRegistrationStatus>() {
+        let Ok(mut error) = status.0.lock() else {
+            return result;
+        };
+        let next = result.as_ref().err().cloned();
+        if *error != next {
+            *error = next.clone();
+            drop(error);
+            let _ = app.emit("lume://shortcut-registration-error", next);
+        }
     }
+    result
 }
 
 #[tauri::command]
 async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<AgentSession>, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.bounded_sessions(60))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = state.bounded_sessions(60);
+        let pids = sessions
+            .as_ref()
+            .map(|sessions| {
+                sessions.iter()
+                    .filter(|session| session.agent == AgentKind::Codex)
+                    .filter_map(|session| session.process_id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        codex_identity_probe::observe_runtime(
+            codex_identity_probe::RuntimeStage::Orb, &pids, sessions.is_err(),
+        );
+        sessions
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn list_codex_cli_conversations(
+    state: State<'_, AppState>,
+    session_id: String,
+    query: String,
+) -> Result<codex_cli_identity::ConversationChoices, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.codex_cli_conversation_choices(&session_id, &query)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn link_codex_cli_conversation(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    process_key: String,
+    native_session_id: String,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.link_codex_cli_conversation(&session_id, &process_key, &native_session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    protocol::emit_sessions_changed(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -281,8 +359,21 @@ async fn fork_session_from_message(
 async fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSnapshot, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let sessions = state.bounded_sessions(60);
+        let pids = sessions
+            .as_ref()
+            .map(|sessions| {
+                sessions.iter()
+                    .filter(|session| session.agent == AgentKind::Codex)
+                    .filter_map(|session| session.process_id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        codex_identity_probe::observe_runtime(
+            codex_identity_probe::RuntimeStage::Workspace, &pids, sessions.is_err(),
+        );
         Ok(
-            protocol::HubSnapshot::with_activity_limit(state.bounded_sessions(60)?, 60)
+            protocol::HubSnapshot::with_activity_limit(sessions?, 60)
                 .with_internal_services(state.internal_services()?),
         )
     })
@@ -291,9 +382,22 @@ async fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSna
 }
 
 fn repository_directory(state: &AppState, session_id: &str) -> Result<String, String> {
-    state
-        .connected_session(session_id)?
-        .working_directory
+    let session = state.connected_session(session_id)?;
+    let kind = match session.agent {
+        AgentKind::Codex => Some(IntegrationKind::Codex),
+        AgentKind::ClaudeCode => Some(IntegrationKind::Claude),
+        _ => None,
+    };
+    // A shared VS Code/CLI process may expose its own cwd until the chat emits
+    // an event. Resolve this particular native chat before falling back to it.
+    let native_directory = kind.as_ref().and_then(|kind| {
+        session
+            .native_session_id
+            .as_deref()
+            .and_then(|id| integrations::native_session_working_directory(kind, id))
+    });
+    native_directory
+        .or(session.working_directory)
         .filter(|path| !path.is_empty())
         .ok_or_else(|| "no_working_directory".into())
 }
@@ -304,10 +408,13 @@ async fn get_session_repository(
     session_id: String,
     refresh: bool,
 ) -> Result<repository::RepositorySnapshot, String> {
-    let directory = repository_directory(state.inner(), &session_id)?;
-    tauri::async_runtime::spawn_blocking(move || repository::snapshot(&directory, refresh))
-        .await
-        .map_err(|error| error.to_string())?
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = repository_directory(&state, &session_id)?;
+        repository::snapshot(&directory, refresh)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -316,10 +423,13 @@ async fn get_session_repository_diff(
     session_id: String,
     path: String,
 ) -> Result<repository::RepositoryDiff, String> {
-    let directory = repository_directory(state.inner(), &session_id)?;
-    tauri::async_runtime::spawn_blocking(move || repository::diff(&directory, &path))
-        .await
-        .map_err(|error| error.to_string())?
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = repository_directory(&state, &session_id)?;
+        repository::diff(&directory, &path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -328,10 +438,13 @@ async fn get_session_github(
     session_id: String,
     refresh: bool,
 ) -> Result<serde_json::Value, String> {
-    let directory = repository_directory(state.inner(), &session_id)?;
-    tauri::async_runtime::spawn_blocking(move || repository::github_repository(&directory, refresh))
-        .await
-        .map_err(|error| error.to_string())?
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = repository_directory(&state, &session_id)?;
+        repository::github_repository(&directory, refresh)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2381,8 +2494,11 @@ pub fn run() {
             app.manage(PendingShortcutAction(Mutex::new(
                 startup_shortcut_action.clone(),
             )));
+            app.manage(ShortcutRegistrationStatus::default());
             app.manage(workspace_windows::WorkspaceWindows::default());
-            let _ = apply_global_shortcuts(app.handle(), &state.preferences()?);
+            if let Err(error) = apply_global_shortcuts(app.handle(), &state.preferences()?) {
+                eprintln!("Could not register global shortcuts: {error}");
+            }
             app.manage(state.clone());
             app.manage(opencode_acp::OpenCodeBridge::new(
                 state.clone(),
@@ -2432,6 +2548,7 @@ pub fn run() {
             );
             app.manage(workflow_runtime);
             discovery::start(state.clone(), app.handle().clone())?;
+            codex_daemon_observer::start(state.clone(), app.handle().clone())?;
             overlay::start_fullscreen_guard(state.clone(), app.handle().clone())?;
 
             if let Some(window) = app.get_webview_window("main") {
@@ -2500,6 +2617,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
+            list_codex_cli_conversations,
+            link_codex_cli_conversation,
             rename_session,
             fork_session_from_message,
             get_hub_snapshot,
@@ -2576,6 +2695,7 @@ pub fn run() {
             cancel_workflow_run,
             rebind_workflow_session,
             take_pending_shortcut_action,
+            get_shortcut_registration_error,
             display_backend,
             get_overlay_position,
             set_preferences,
@@ -2657,6 +2777,15 @@ pub fn run_ingest_client() -> i32 {
 
 pub fn run_node_cli(arguments: &[String]) -> i32 {
     node_service::run_cli(arguments)
+}
+
+pub fn run_identity_probe_cli(arguments: &[String]) -> i32 {
+    codex_identity_probe::run_cli(arguments)
+}
+
+#[cfg(target_os = "macos")]
+pub fn run_codex_process_supervisor_cli(arguments: &[String]) -> i32 {
+    macos_process_supervisor::run_cli(arguments)
 }
 
 pub fn run_hook_client(provider: &str) -> i32 {

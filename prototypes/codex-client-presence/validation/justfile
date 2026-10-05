@@ -1,0 +1,10 @@
+set shell := ["bash", "-eu", "-c"]
+
+test:
+    cargo test --locked -- --test-threads=2
+
+check:
+    cargo clippy --locked --all-targets -- -D warnings
+
+fmt:
+    cargo fmt --all -- --check

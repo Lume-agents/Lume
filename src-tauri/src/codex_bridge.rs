@@ -14,6 +14,8 @@ use std::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Serialize;
 use serde_json::{json, Value};
+#[cfg(target_os = "macos")]
+use std::io::Write;
 use sysinfo::{get_current_pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind};
 use tauri::AppHandle;
 use tungstenite::{
@@ -52,7 +54,14 @@ struct ManagedChild {
 }
 
 impl ManagedChild {
-    fn spawn(mut command: Command) -> Result<Self, String> {
+    fn spawn(command: Command) -> Result<Self, String> {
+        #[cfg(target_os = "macos")]
+        {
+            return crate::macos_process_supervisor::spawn(command).map(|child| Self { child });
+        }
+        #[cfg(not(target_os = "macos"))]
+        let mut command = command;
+        #[cfg(not(target_os = "macos"))]
         let child = command.spawn().map_err(|error| error.to_string())?;
         #[cfg(target_os = "windows")]
         {
@@ -67,8 +76,30 @@ impl ManagedChild {
             };
             return Ok(Self { child, _job: job });
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         Ok(Self { child })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn kill(&mut self) -> std::io::Result<()> {
+        // Send an explicit stop before closing the lifetime pipe. This also
+        // works if an unrelated concurrent spawn briefly inherited a writer;
+        // EOF alone would then wait for that process while Lume stays alive.
+        if let Some(mut lifetime_pipe) = self.child.stdin.take() {
+            let _ = lifetime_pipe.write_all(&[1]);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        // Startup can fail before the process enters the shared slot. Child
+        // does not reap on drop, so close its lifetime pipe and collect the
+        // supervisor here as well as during the normal bridge shutdown.
+        let _ = self.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -293,6 +324,7 @@ impl CodexBridge {
             .map_err(|error| error.to_string())?;
         let queued_prompts = Arc::new(Mutex::new(HashMap::new()));
         let collaboration_modes = Arc::new(Mutex::new(HashMap::new()));
+        start_codex_cli_queue_observer(process.clone(), state.clone(), app.clone())?;
         start_queue_dispatcher(process.clone(), queued_prompts.clone(), state, app)?;
         Ok(Self {
             process,
@@ -943,11 +975,14 @@ fn cleanup_orphaned_server() -> Result<(), String> {
                 .parent()
                 .and_then(|parent| system.process(parent))
                 .is_some_and(|parent| {
-                    parent
+                    let is_lume = parent
                         .name()
                         .to_string_lossy()
                         .trim_end_matches(".exe")
-                        .eq_ignore_ascii_case("lume")
+                        .eq_ignore_ascii_case("lume");
+                    #[cfg(target_os = "macos")]
+                    let is_lume = is_lume || is_process_supervisor_command(parent.cmd());
+                    is_lume
                 });
             (!owned_by_live_lume).then_some(*pid)
         })
@@ -991,7 +1026,20 @@ fn cleanup_orphaned_server() -> Result<(), String> {
     Err("Could not release the orphaned Codex app-server from the previous Lume instance".into())
 }
 
+#[cfg(target_os = "macos")]
+fn is_process_supervisor_command(command: &[std::ffi::OsString]) -> bool {
+    command
+        .get(1)
+        .is_some_and(|argument| argument == crate::macos_process_supervisor::CLI_COMMAND)
+}
+
 fn is_lume_server_command(command: &[std::ffi::OsString]) -> bool {
+    #[cfg(target_os = "macos")]
+    if is_process_supervisor_command(command) {
+        // The supervisor's arguments contain the app-server command too, but
+        // it must stay alive long enough to kill and reap its own child.
+        return false;
+    }
     let command = command
         .iter()
         .map(|part| part.to_string_lossy())
@@ -1198,6 +1246,157 @@ fn start_queue_dispatcher(
         })
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+const CODEX_CLI_QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const CODEX_CLI_QUEUE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_CODEX_CLI_QUEUE_THREADS: usize = 128;
+const MAX_CODEX_CLI_QUEUE_PAGES: usize = 5;
+
+fn start_codex_cli_queue_observer(
+    process: Arc<Mutex<Option<ManagedChild>>>,
+    state: AppState,
+    app: AppHandle,
+) -> Result<(), String> {
+    thread::Builder::new()
+        .name("lume-codex-cli-queue".into())
+        .spawn(move || loop {
+            thread::sleep(CODEX_CLI_QUEUE_POLL_INTERVAL);
+            let mut targets = match state.connected_sessions() {
+                Ok(sessions) => sessions
+                    .into_iter()
+                    .filter(|session| session.agent == AgentKind::Codex)
+                    .filter_map(|session| {
+                        session
+                            .native_session_id
+                            .map(|thread_id| (thread_id, session.updated_at))
+                    })
+                    .collect::<Vec<_>>(),
+                Err(_) => continue,
+            };
+            targets.sort_by(|left, right| right.1.cmp(&left.1));
+            let mut seen_targets = HashMap::new();
+            targets.retain(|(thread_id, _)| seen_targets.insert(thread_id.clone(), ()).is_none());
+            targets.truncate(MAX_CODEX_CLI_QUEUE_THREADS);
+            if targets.is_empty() {
+                continue;
+            }
+
+            let Ok(mut server) = connect_managed_server(&process) else {
+                continue;
+            };
+            let initialized = send_json(
+                &mut server,
+                json!({
+                    "method": "initialize",
+                    "id": 1,
+                    "params": {
+                        "clientInfo": { "name": "lume", "title": "Lume", "version": env!("CARGO_PKG_VERSION") },
+                        "capabilities": { "experimentalApi": true }
+                    }
+                }),
+            )
+            .and_then(|()| {
+                wait_for_plain_value_response_until(
+                    &mut server,
+                    1,
+                    CODEX_CLI_QUEUE_RESPONSE_TIMEOUT,
+                )
+                .map(|_| ())
+            })
+            .and_then(|()| {
+                send_json(
+                    &mut server,
+                    json!({ "method": "initialized", "params": {} }),
+                )
+            });
+            if initialized.is_err() {
+                continue;
+            }
+
+            let mut request_id = 2;
+            for (thread_id, _) in targets {
+                let submissions = match list_codex_cli_queue(&mut server, &thread_id, &mut request_id)
+                {
+                    Ok(submissions) => submissions,
+                    Err(error) if error.contains("did not respond within") => break,
+                    Err(_) => continue,
+                };
+                if let Ok(Some((session_id, true))) =
+                    state.sync_codex_cli_queued_prompts(&thread_id, &submissions)
+                {
+                    crate::protocol::emit_session_changed(
+                        &app,
+                        &session_id,
+                        Some(&thread_id),
+                    );
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn list_codex_cli_queue(
+    server: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    thread_id: &str,
+    request_id: &mut i64,
+) -> Result<Vec<(String, String)>, String> {
+    let mut submissions = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_CODEX_CLI_QUEUE_PAGES {
+        let mut params = json!({ "threadId": thread_id, "limit": 100 });
+        if let Some(cursor) = cursor.as_deref() {
+            params["cursor"] = Value::String(cursor.to_string());
+        }
+        let current_id = *request_id;
+        *request_id += 1;
+        send_json(
+            server,
+            json!({ "method": "thread/queue/list", "id": current_id, "params": params }),
+        )?;
+        let response = wait_for_plain_value_response_until(
+            server,
+            current_id,
+            CODEX_CLI_QUEUE_RESPONSE_TIMEOUT,
+        )?;
+        let result = response
+            .get("result")
+            .ok_or_else(|| "Codex returned an invalid queue response".to_string())?;
+        let page = result
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Codex returned an invalid queue page".to_string())?;
+        for submission in page {
+            let Some(id) = submission.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let prompt = submission
+                .get("input")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| {
+                    (item.get("type").and_then(Value::as_str) == Some("text"))
+                        .then(|| item.get("text").and_then(Value::as_str))
+                        .flatten()
+                })
+                .map(str::to_string)
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            submissions.push((id.to_string(), prompt));
+        }
+        cursor = result
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    Ok(submissions)
 }
 
 fn proxy_connection(

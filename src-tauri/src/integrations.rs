@@ -218,37 +218,6 @@ pub(crate) fn indexed_session_names(
     })
 }
 
-/// Returns a small, recent slice of Codex rollouts for process discovery.
-///
-/// Unlike the resume picker, this deliberately inspects only the newest date
-/// directories and files. Windows process arguments do not expose the thread
-/// id for a newly-opened TUI, so discovery correlates these records with the
-/// process start time without repeatedly walking the complete history.
-#[cfg(target_os = "windows")]
-pub(crate) fn recent_codex_sessions_for_discovery(limit: usize) -> Vec<ResumableSession> {
-    let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) else {
-        return Vec::new();
-    };
-    let root = env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(home).join(".codex"))
-        .join("sessions");
-    let names = cached_codex_session_names(&root);
-    recent_codex_resume_files(&root, limit)
-        .into_iter()
-        .filter_map(|path| {
-            let file = fs::File::open(&path).ok()?;
-            let first_line = BufReader::new(file).lines().next()?.ok()?;
-            let value = serde_json::from_str::<Value>(&first_line).ok()?;
-            let mut session = codex_resume_metadata(&value, file_updated_at(&path))?;
-            if let Some(name) = names.get(&session.id) {
-                session.name = name.clone();
-            }
-            Some(session)
-        })
-        .collect()
-}
-
 pub(crate) fn native_session_title(kind: &IntegrationKind, session_id: &str) -> Option<String> {
     if *kind == IntegrationKind::Codex {
         if let Some(name) = indexed_session_names(kind).ok()?.remove(session_id) {
@@ -265,6 +234,69 @@ pub(crate) fn native_session_title(kind: &IntegrationKind, session_id: &str) -> 
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini => None,
     }
+}
+
+/// Recover chat context without requiring another provider event or resuming it.
+pub(crate) fn native_session_working_directory(
+    kind: &IntegrationKind,
+    session_id: &str,
+) -> Option<String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    if *kind == IntegrationKind::Codex {
+        let home = env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("HOME")
+                    .or_else(|| env::var_os("USERPROFILE"))
+                    .map(|home| PathBuf::from(home).join(".codex"))
+            })?;
+        if let Some(directory) = codex_state_database(&home.join("sessions"))
+            .and_then(|path| codex_state_session_directory(&path, session_id))
+        {
+            return Some(directory);
+        }
+    }
+    let path = resume_path(kind, session_id)?;
+    // Inspect bounded metadata only; old, idle transcripts can be very large.
+    let file = fs::File::open(path).ok()?;
+    for line in BufReader::new(file.take(512 * 1024))
+        .lines()
+        .map_while(Result::ok)
+        .take(128)
+    {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let metadata = match kind {
+            IntegrationKind::Codex
+                if value.get("type").and_then(Value::as_str) == Some("session_meta") =>
+            {
+                let payload = value.get("payload")?;
+                if payload.get("id").and_then(Value::as_str) != Some(session_id) {
+                    continue;
+                }
+                payload
+            }
+            IntegrationKind::Claude
+                if value.get("sessionId").and_then(Value::as_str) == Some(session_id) =>
+            {
+                &value
+            }
+            _ => continue,
+        };
+        if let Some(directory) = metadata
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|directory| !directory.is_empty())
+        {
+            return Some(directory.to_string());
+        }
+    }
+    None
 }
 
 pub fn resume_preview(kind: &IntegrationKind, session_id: &str) -> Option<ResumePreview> {
@@ -485,6 +517,21 @@ fn codex_state_session_names(path: &Path) -> Option<HashMap<String, String>> {
         })
         .ok()?;
     Some(rows.filter_map(Result::ok).collect())
+}
+
+fn codex_state_session_directory(path: &Path, session_id: &str) -> Option<String> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    connection.busy_timeout(Duration::from_millis(25)).ok()?;
+    connection
+        .query_row("SELECT cwd FROM threads WHERE id = ?1", [session_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok()
+        .filter(|directory| !directory.trim().is_empty())
 }
 
 fn codex_session_name_entries(reader: impl BufRead) -> HashMap<String, String> {

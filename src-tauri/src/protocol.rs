@@ -72,6 +72,7 @@ pub struct SessionCapabilities {
 
 impl SessionCapabilities {
     pub fn for_session(session: &AgentSession) -> Self {
+        let monitor_only = is_unbound_codex_cli_monitor(session);
         let prompt_unavailable_reason = if session.source == SessionSource::Web
             && matches!(
                 session.status,
@@ -100,8 +101,9 @@ impl SessionCapabilities {
             can_prompt: prompt_unavailable_reason.is_none(),
             prompt_unavailable_reason,
             can_approve: session.pending_permission.is_some()
-                && session.permission_profile.can_respond_from_lume,
-            can_answer_question: session.pending_question.is_some(),
+                && session.permission_profile.can_respond_from_lume
+                && !monitor_only,
+            can_answer_question: session.pending_question.is_some() && !monitor_only,
             can_terminate: (session.source == SessionSource::Cli && session.process_id.is_some())
                 || (matches!(
                     session.agent,
@@ -113,6 +115,7 @@ impl SessionCapabilities {
             can_read_results: !session.results.is_empty() || session.last_response.is_some(),
             can_attach_images: session.source != SessionSource::Web
                 && session.agent != AgentKind::Unknown
+                && !monitor_only
                 && !(session.agent == AgentKind::Antigravity
                     && session.source == SessionSource::Desktop),
             can_interrupt: matches!(
@@ -140,6 +143,14 @@ impl SessionCapabilities {
             },
         }
     }
+}
+
+/// A native thread observed through hooks is not evidence of a controllable CLI.
+pub(crate) fn is_unbound_codex_cli_monitor(session: &AgentSession) -> bool {
+    session.agent == AgentKind::Codex
+        && session.source == SessionSource::Cli
+        && session.control_origin == SessionControlOrigin::External
+        && session.process_id.is_none()
 }
 
 fn can_interrupt_session(session: &AgentSession) -> bool {
@@ -1891,6 +1902,65 @@ mod tests {
         external.working_directory = Some("/work/lume".into());
         external.agent = AgentKind::ClaudeCode;
         assert!(!SessionCapabilities::for_session(&external).can_take_control);
+    }
+
+    #[test]
+    fn unbound_codex_cli_monitor_keeps_results_without_authorizing_control() {
+        let mut external = session();
+        external.control_origin = SessionControlOrigin::External;
+        external.process_id = None;
+        external.last_response = Some("Observed response".into());
+        external.pending_permission = Some(crate::domain::PermissionRequest {
+            id: "approval".into(),
+            kind: "command".into(),
+            summary: "Observed approval".into(),
+            resource: "command".into(),
+            risk: "low".into(),
+            requested_at: "1".into(),
+        });
+        external.pending_question = Some(crate::domain::PendingQuestion {
+            id: "question".into(),
+            questions: Vec::new(),
+            requested_at: "1".into(),
+        });
+
+        let snapshot = HubSnapshot::new(vec![external.clone()]);
+        assert_eq!(snapshot.sessions.len(), 1);
+        let capabilities = &snapshot.sessions[0].capabilities;
+        assert!(capabilities.can_read_results);
+        assert!(!capabilities.can_prompt);
+        assert!(!capabilities.can_approve);
+        assert!(!capabilities.can_answer_question);
+        assert!(!capabilities.can_terminate);
+        assert!(!capabilities.can_interrupt);
+        assert!(!capabilities.can_take_control);
+        assert!(!capabilities.can_attach_images);
+
+        external.process_id = Some(42);
+        let bound = SessionCapabilities::for_session(&external);
+        assert!(bound.can_approve);
+        assert!(bound.can_answer_question);
+        assert!(bound.can_take_control);
+    }
+
+    #[test]
+    fn unbound_monitor_guard_does_not_change_other_session_sources() {
+        let mut candidate = session();
+        candidate.process_id = None;
+        assert!(!is_unbound_codex_cli_monitor(&candidate));
+        candidate.control_origin = SessionControlOrigin::External;
+        assert!(is_unbound_codex_cli_monitor(&candidate));
+        for source in [
+            SessionSource::Desktop,
+            SessionSource::Vscode,
+            SessionSource::Web,
+        ] {
+            candidate.source = source;
+            assert!(!is_unbound_codex_cli_monitor(&candidate));
+        }
+        candidate.source = SessionSource::Cli;
+        candidate.agent = AgentKind::ClaudeCode;
+        assert!(!is_unbound_codex_cli_monitor(&candidate));
     }
 
     #[test]

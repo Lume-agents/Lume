@@ -116,6 +116,13 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("node") {
         std::process::exit(lume_lib::run_node_cli(&args[2..]));
     }
+    if args.get(1).map(String::as_str) == Some("identity-probe") {
+        std::process::exit(lume_lib::run_identity_probe_cli(&args[2..]));
+    }
+    #[cfg(target_os = "macos")]
+    if args.get(1).map(String::as_str) == Some("codex-process-supervisor") {
+        std::process::exit(lume_lib::run_codex_process_supervisor_cli(&args[2..]));
+    }
     if args.get(1).map(String::as_str) == Some("hook") {
         let provider = args.get(2).map(String::as_str).unwrap_or("");
         std::process::exit(lume_lib::run_hook_client(provider));

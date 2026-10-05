@@ -2439,6 +2439,8 @@ dependencies = [
  "libloading 0.8.9",
  "mdns-sd",
  "notify",
+ "objc2",
+ "objc2-app-kit",
  "rcgen",
  "ring",
  "rusqlite",

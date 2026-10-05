@@ -276,7 +276,7 @@
   });
 </script>
 
-<section class="subagent-portals" bind:this={root} aria-label={tr("Subagent activity", "Atividade dos subagentes")}
+<section class:compact={railCollapsed} class="subagent-portals" bind:this={root} aria-label={tr("Subagent activity", "Atividade dos subagentes")}
   style={`--portal-origin:${portalOrigin}px`}>
   {#if railCollapsed}
     <div class="portal-compact" role="group" aria-label={tr("Subagents", "Subagentes")}>
@@ -452,15 +452,18 @@
 
 <style>
   .subagent-portals { position: relative; z-index: 4; min-width: 0; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); background: color-mix(in srgb, var(--workspace-pane) 94%, transparent); }
+  .subagent-portals.compact { border-bottom: 0; background: transparent; }
   .portal-rail-toolbar { min-height: 24px; padding: 2px 10px 0; display: flex; align-items: center; justify-content: space-between; color: var(--workspace-faint); font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
   .portal-rail-toolbar b { margin-left: 4px; color: var(--workspace-muted); font-size: 8px; font-variant-numeric: tabular-nums; }
   .portal-rail-toolbar button { width: 24px; height: 20px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 5px; color: var(--workspace-accent); background: transparent; cursor: pointer; }
   .portal-rail-toolbar button:hover, .portal-rail-toolbar button:focus-visible { background: var(--workspace-subtle); }
   .portal-rail-toolbar button:focus-visible, .compact-expand:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 1px; }
   .portal-rail-toolbar svg, .compact-expand svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-  .portal-compact { width: max-content; min-width: 48px; margin: 5px 10px 7px; padding: 4px 8px 1px; display: flex; flex-direction: column; align-items: center; gap: 1px; border: 1px solid color-mix(in srgb, var(--workspace-line) 72%, transparent); border-radius: 13px; background: color-mix(in srgb, var(--workspace-raised) 88%, transparent); box-shadow: 0 5px 15px rgba(0, 0, 0, .12); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
-  .compact-avatar-stack { min-height: 30px; display: flex; align-items: flex-start; gap: 3px; }
-  .compact-agent { position: relative; z-index: calc(4 - var(--stack-index)); width: 27px; height: 29px; padding: 0; display: grid; place-items: start center; border: 0; color: var(--workspace-text); background: transparent; cursor: pointer; transform: translateY(calc(var(--stack-index) * 3px)); }
+  .portal-compact { position: relative; z-index: 0; isolation: isolate; width: max-content; margin: 5px auto 7px; padding: 0; display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .portal-compact::before { position: absolute; z-index: -1; inset: -11px -18px -13px; pointer-events: none; border-radius: 50%; background: radial-gradient(ellipse at center, color-mix(in srgb, #07110f 23%, transparent), color-mix(in srgb, #07110f 10%, transparent) 48%, transparent 78%); content: ""; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); -webkit-mask-image: radial-gradient(ellipse at center, #000 18%, transparent 78%); mask-image: radial-gradient(ellipse at center, #000 18%, transparent 78%); }
+  .compact-avatar-stack { min-height: 26px; display: flex; align-items: center; gap: 0; }
+  .compact-agent { position: relative; z-index: calc(1 + var(--stack-index)); width: 26px; height: 26px; margin-left: -7px; padding: 0; display: grid; place-items: center; border: 0; color: var(--workspace-text); background: transparent; cursor: pointer; }
+  .compact-agent:first-child { margin-left: 0; }
   .compact-agent-avatar { width: 24px; height: 24px; display: grid; place-items: center; overflow: hidden; border: 1px solid color-mix(in srgb, var(--portal-color) 62%, var(--workspace-line)); border-radius: 50%; background: var(--workspace-raised); box-shadow: 0 2px 6px rgba(0, 0, 0, .2); transition: border-color 150ms ease, transform 150ms ease; }
   .compact-agent-avatar :global(svg), .compact-agent-avatar :global(img) { width: 100%; height: 100%; }
   .compact-agent > i { position: absolute; right: 0; bottom: 3px; width: 6px; height: 6px; border: 1px solid var(--workspace-raised); border-radius: 50%; background: var(--portal-color); }
@@ -471,9 +474,9 @@
   .compact-agent.status-interrupted { --portal-color: var(--workspace-muted); }
   .compact-agent:hover .compact-agent-avatar, .compact-agent:focus-visible .compact-agent-avatar { border-color: var(--portal-color); transform: scale(1.08); }
   .compact-agent:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 1px; border-radius: 50%; }
-  .compact-more { min-width: 25px; height: 22px; padding: 0 5px; display: grid; place-items: center; align-self: center; border: 1px solid color-mix(in srgb, var(--workspace-accent) 25%, var(--workspace-line)); border-radius: 12px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 10%, var(--workspace-raised)); font-size: 9px; font-weight: 750; font-variant-numeric: tabular-nums; }
+  .compact-more { margin-left: 3px; color: var(--workspace-muted); font-size: 9px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .compact-expand { width: 26px; height: 18px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 5px; color: var(--workspace-accent); background: transparent; cursor: pointer; }
-  .compact-expand:hover { background: var(--workspace-subtle); }
+  .compact-expand:hover { color: var(--workspace-strong); transform: translateY(1px); }
   .portal-rail-shell { position: relative; min-width: 0; }
   .portal-rail-shell.collapsed { display: none; }
   .portal-rail { min-width: 0; min-height: 81px; padding: 9px 12px 7px; display: flex; align-items: start; gap: 10px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }

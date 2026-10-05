@@ -50,7 +50,9 @@
       }
     },
     "macOS": {
-      "minimumSystemVersion": "15.0"
+      "minimumSystemVersion": "15.0",
+      "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist"
     },
     "icon": [
       "icons/32x32.png",

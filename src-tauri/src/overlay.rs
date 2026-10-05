@@ -1018,7 +1018,25 @@ pub fn monitor_work_area(
     {
         linux::monitor_work_area(window, monitor_id)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // Tauri converts NSScreen.visibleFrame to physical desktop coordinates,
+        // accounting for the Dock, menu bar and display scale.
+        let monitors = window.available_monitors().ok()?;
+        let monitor = select_monitor(
+            &monitors,
+            window.primary_monitor().ok().flatten(),
+            monitor_id,
+        )?;
+        let area = monitor.work_area();
+        Some((
+            area.position.x,
+            area.position.y,
+            area.size.width,
+            area.size.height,
+        ))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (window, monitor_id);
         None
@@ -1273,9 +1291,9 @@ pub fn set_file_dialog_active(
     if linux::set_file_dialog_active(window, active, show_over_fullscreen) {
         return Ok(());
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let topmost = !active && (show_over_fullscreen || !foreground_is_fullscreen().unwrap_or(false));
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let topmost = !active;
     window
         .set_always_on_top(topmost)
@@ -1340,25 +1358,66 @@ pub fn start_fullscreen_guard(
     std::thread::Builder::new()
         .name("lume-fullscreen-guard".into())
         .spawn(move || loop {
-            let show_over_fullscreen = state
-                .preferences()
-                .map(|preferences| preferences.show_over_fullscreen)
-                .unwrap_or(false);
-            if let Some(fullscreen) = foreground_is_fullscreen() {
-                let topmost = !native_dialog_active() && (show_over_fullscreen || !fullscreen);
-                for (label, window) in tauri::Manager::webview_windows(&app) {
-                    if label == "main"
-                        || label.starts_with("terminal-")
-                        || label.starts_with("workflow-bridge-")
-                    {
-                        let _ = window.set_always_on_top(topmost);
-                    }
-                }
+            #[cfg(target_os = "macos")]
+            {
+                // AppKit must be sampled on the UI thread. The system options
+                // describe the active application, including other apps.
+                let sample_state = state.clone();
+                let sample_app = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    update_fullscreen_visibility(&sample_state, &sample_app);
+                });
             }
+            #[cfg(not(target_os = "macos"))]
+            update_fullscreen_visibility(&state, &app);
             std::thread::sleep(std::time::Duration::from_millis(900));
         })
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn update_fullscreen_visibility(state: &crate::state::AppState, app: &tauri::AppHandle) {
+    let show_over_fullscreen = state
+        .preferences()
+        .map(|preferences| preferences.show_over_fullscreen)
+        .unwrap_or(false);
+    if let Some(fullscreen) = foreground_is_fullscreen() {
+        let topmost = !native_dialog_active() && (show_over_fullscreen || !fullscreen);
+        for (label, window) in tauri::Manager::webview_windows(app) {
+            if label == "main"
+                || label.starts_with("terminal-")
+                || label.starts_with("workflow-bridge-")
+            {
+                let _ = window.set_always_on_top(topmost);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+static MACOS_FULLSCREEN_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(target_os = "macos")]
+fn foreground_is_fullscreen() -> Option<bool> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationPresentationOptions};
+    use std::sync::atomic::Ordering;
+
+    if let Some(main_thread) = MainThreadMarker::new() {
+        let application = NSApplication::sharedApplication(main_thread);
+        let fullscreen = application
+            .currentSystemPresentationOptions()
+            .contains(NSApplicationPresentationOptions::FullScreen);
+        MACOS_FULLSCREEN_STATE.store(if fullscreen { 2 } else { 1 }, Ordering::Release);
+        return Some(fullscreen);
+    }
+    // File-dialog commands may run outside the UI thread; reuse the last
+    // sample rather than calling AppKit there.
+    match MACOS_FULLSCREEN_STATE.load(Ordering::Acquire) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1419,7 +1478,7 @@ fn foreground_is_fullscreen() -> Option<bool> {
     Some(String::from_utf8_lossy(&state.stdout).contains("_NET_WM_STATE_FULLSCREEN"))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn foreground_is_fullscreen() -> Option<bool> {
     None
 }

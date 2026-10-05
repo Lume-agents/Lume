@@ -45,6 +45,47 @@ jobs:
       - name: Runtime do AppImage
         if: runner.os == 'Linux'
         run: curl --fail --location --silent --show-error --output "$RUNNER_TEMP/runtime-x86_64" https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+      - name: Configuração de assinatura macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          LUME_INPUT_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          LUME_INPUT_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          LUME_INPUT_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          LUME_INPUT_APPLE_ID: ${{ secrets.APPLE_ID }}
+          LUME_INPUT_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          LUME_INPUT_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          names=(APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID)
+          configured=0
+          missing=()
+          for name in "${names[@]}"; do
+            input="LUME_INPUT_$name"
+            value="${!input}"
+            if [[ -z "$value" ]]; then
+              missing+=("$name")
+            else
+              configured=$((configured + 1))
+              if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+                echo "::error::$name must contain a single line."
+                exit 1
+              fi
+            fi
+          done
+          if [[ "$configured" -eq 0 ]]; then
+            echo "::warning::Apple signing is not configured; macOS artifacts will not have Developer ID signing or notarization."
+            exit 0
+          fi
+          if [[ "${#missing[@]}" -gt 0 ]]; then
+            echo "::error::Incomplete Apple signing configuration. Missing secrets: ${missing[*]}"
+            exit 1
+          fi
+          # Tauri imports the certificate into a temporary keychain, signs and
+          # notarizes the app. Leave these variables unset for unsigned builds.
+          for name in "${names[@]}"; do
+            input="LUME_INPUT_$name"
+            printf '%s=%s\n' "$name" "${!input}" >> "$GITHUB_ENV"
+          done
       - run: npm ci
       - uses: tauri-apps/tauri-action@v1
         env:

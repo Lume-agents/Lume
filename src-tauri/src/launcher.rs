@@ -9,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use crate::state::now_millis;
 use crate::{domain::AccessMode, integrations::IntegrationKind};
 
@@ -378,7 +378,62 @@ fn windows_terminal_arguments(
     ]
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn launch_terminal(
+    payload: TerminalPayload,
+    executable: &Path,
+    app_data_dir: &Path,
+) -> Result<(), String> {
+    let payload_path = persist_terminal_payload(&payload, app_data_dir)?;
+    let shell_command = format!(
+        "cd -- {} && exec {} terminal-run {}",
+        shell_quote(&payload.working_directory),
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&payload_path.to_string_lossy()),
+    );
+    let script = format!(
+        "with timeout of 30 seconds\ntell application \"Terminal\"\ndo script {}\nactivate\nend tell\nend timeout",
+        applescript_string(&shell_command),
+    );
+    let opened = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|error| format!("Não foi possível abrir o Terminal.app: {error}"))
+        .and_then(|output| {
+            if output.status.success() {
+                return Ok(());
+            }
+            let detail = String::from_utf8_lossy(&output.stderr);
+            if detail.contains("-1743") {
+                return Err("Permita que o Lume controle o Terminal em Ajustes do Sistema → Privacidade e Segurança → Automação.".into());
+            }
+            Err(format!("Não foi possível abrir o Terminal.app: {}", detail.trim()))
+        });
+    if opened.is_err() {
+        let _ = fs::remove_file(&payload_path);
+    }
+    opened
+}
+
+#[cfg(target_os = "macos")]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_string(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\r', "\\r")
+            .replace('\n', "\\n"),
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn persist_terminal_payload(
     payload: &TerminalPayload,
     app_data_dir: &Path,
@@ -395,7 +450,7 @@ fn persist_terminal_payload(
     Ok(payload_path)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn launch_terminal(
     _payload: TerminalPayload,
     _executable: &Path,

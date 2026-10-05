@@ -43,7 +43,8 @@ export interface GitHubAccountSnapshot {
 export interface RepositoryState { loading: boolean; value: RepositorySnapshot | null; error: string }
 export const inDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-// One observer per working directory. Only visible, mounted consumers keep it alive.
+// Share within a chat, not between chats whose provisional process cwd may match.
+// Only visible, mounted consumers keep the observer alive.
 const observers = new Map<string, ReturnType<typeof createObserver>>();
 function createObserver(sessionId: string) {
   const store = writable<RepositoryState>({ loading: true, value: null, error: "" });
@@ -92,8 +93,8 @@ function createObserver(sessionId: string) {
   };
 }
 
-export function observeRepository(session: Pick<AgentSession, "id" | "workingDirectory">) {
-  const key = session.workingDirectory || session.id;
+export function observeRepository(session: Pick<AgentSession, "id" | "workingDirectory" | "nativeSessionId">) {
+  const key = JSON.stringify([session.id, session.nativeSessionId, session.workingDirectory]);
   let observer = observers.get(key);
   if (!observer) {
     if (observers.size >= 64) { for (const [cachedKey, cached] of observers) { if (!cached.active()) observers.delete(cachedKey); if (observers.size < 64) break; } }

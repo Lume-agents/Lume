@@ -17,6 +17,8 @@
     ariaLabel,
     onValueChange,
     minWidth = 120,
+    menuMinWidth = minWidth,
+    variant = "field",
     disabled = false,
   }: {
     value: string;
@@ -24,6 +26,8 @@
     ariaLabel: string;
     onValueChange: (value: string) => void;
     minWidth?: number;
+    menuMinWidth?: number;
+    variant?: "field" | "heading";
     disabled?: boolean;
   } = $props();
 
@@ -67,7 +71,7 @@
     const above = bounds.top - 8;
     const placeAbove = below < Math.min(150, estimatedHeight) && above > below;
     menuAbove = placeAbove;
-    menuWidth = Math.min(Math.max(bounds.width, minWidth), window.innerWidth - 16);
+    menuWidth = Math.min(Math.max(bounds.width, menuMinWidth), window.innerWidth - 16);
     menuLeft = Math.max(8, Math.min(window.innerWidth - menuWidth - 8, bounds.right - menuWidth));
     menuMaxHeight = Math.max(92, Math.min(230, placeAbove ? above - 5 : below - 5));
     menuTop = placeAbove
@@ -131,13 +135,13 @@
   });
 </script>
 
-<div class="lume-select" bind:this={root} style:min-width="{minWidth}px">
+<div class="lume-select" class:heading={variant === "heading"} bind:this={root} style:min-width="{minWidth}px">
   <button
     bind:this={trigger}
     class:open
     class="lume-select-trigger"
     type="button"
-    aria-label={ariaLabel}
+    aria-label={variant === "heading" && selected ? `${ariaLabel}: ${selected.label}` : ariaLabel}
     aria-haspopup="listbox"
     aria-expanded={open}
     {disabled}
@@ -193,6 +197,10 @@
   .lume-select-trigger:hover,
   .lume-select-trigger.open { border-color: color-mix(in srgb, var(--select-accent) 35%, var(--select-line)); background: color-mix(in srgb, var(--select-accent) 5%, var(--select-surface)); }
   .lume-select-trigger > span:first-child { min-width: 0; flex: 1; overflow: hidden; font: 700 9px Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+  .heading .lume-select-trigger { min-height: 22px; padding: 2px 4px; border: 0; border-radius: 4px; color: var(--workspace-strong, var(--select-text)); background: transparent; }
+  .heading .lume-select-trigger > span:first-child { flex: 0 1 auto; font: inherit; font-size: 11px; font-weight: 700; letter-spacing: -.015em; }
+  .heading .lume-select-trigger:hover,
+  .heading .lume-select-trigger.open { background: var(--select-hover); }
   .select-chevron { min-width: 13px; display: grid; place-items: center; flex: 0 0 auto; color: var(--select-muted); transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }
   .lume-select-trigger.open > .select-chevron { transform: rotate(180deg); }
   .lume-select-trigger:focus-visible { outline: 2px solid color-mix(in srgb, var(--select-accent) 45%, transparent); outline-offset: 2px; }

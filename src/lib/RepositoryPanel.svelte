@@ -71,11 +71,14 @@
   $effect(() => {
     const id = session.id;
     const directory = session.workingDirectory;
+    const nativeSessionId = session.nativeSessionId;
     generation += 1;
     fileLimit = 100;
     previewGeneration += 1;
     github = null; requestedGitHub = ""; preview = null; previewPath = ""; previewError = ""; actionError = "";
-    const observer = observeRepository({ id, workingDirectory: directory });
+    githubLoading = false;
+    githubError = "";
+    const observer = observeRepository({ id, nativeSessionId, workingDirectory: directory });
     return observer.subscribe((state) => { repository = state; });
   });
   $effect(() => {

@@ -4,7 +4,7 @@
   import { observeRepository, type RepositoryState } from "$lib/repositories";
   let { session, language = "en", onOpen } = $props<{ session: AgentSession; language?: "en" | "pt-BR"; onOpen?: () => void }>();
   let repository = $state<RepositoryState>({ loading: true, value: null, error: "" });
-  $effect(() => observeRepository({ id: session.id, workingDirectory: session.workingDirectory }).subscribe((value) => { repository = value; }));
+  $effect(() => observeRepository({ id: session.id, nativeSessionId: session.nativeSessionId, workingDirectory: session.workingDirectory }).subscribe((value) => { repository = value; }));
 </script>
 
 {#if repository.value}

@@ -1,7 +1,10 @@
 import type { SessionActivity } from "$lib/domain";
 import type { Language } from "$lib/i18n";
+// Node executes this module directly in the focused presentation test; Vite resolves the same source in the app.
+// @ts-expect-error TypeScript's bundler mode disallows the explicit source extension used by Node.
+import { gitActivityInfo, gitEventTitle } from "./gitEvents.ts";
 
-export type ActivityCategory = "edit" | "read" | "search" | "test" | "command" | "tool" | "plan";
+export type ActivityCategory = "edit" | "git" | "read" | "search" | "test" | "command" | "tool" | "plan";
 export type ActivityThinkingState = "working" | "searching" | "solving" | "listening" | "connecting" | "weaving" | "composing" | "breathing" | "shaping";
 
 function firstLine(value?: string): string {
@@ -21,6 +24,8 @@ export function activityCategory(activity: SessionActivity): ActivityCategory {
   const searchable = `${title} ${detail}`;
   if (activity.kind === "plan" || /(?:^|[._/-])update_plan$/.test(title)) return "plan";
   if (activity.kind === "file" || /apply_patch|patch|edit(?:ed)?\s+file/.test(title)) return "edit";
+  // Before test/search/read: `git grep` and `git diff` are git work first.
+  if (gitActivityInfo(activity)) return "git";
   if (activity.kind === "test") return "test";
   if (/web.?search|search_query|pesquisa na web/.test(searchable)) return "search";
   if (/^\s*(?:cat|sed\s+-n|head|tail|bat|type|ls|stat)\b/.test(title)) return "read";
@@ -47,6 +52,7 @@ export function activityThinkingState(activity: SessionActivity): ActivityThinki
     case "search": return "searching";
     case "test": return "solving";
     case "command": return "working";
+    case "git": return "working";
     case "plan": return "weaving";
     default: return "connecting";
   }
@@ -132,6 +138,10 @@ export function activityPreview(activity: SessionActivity): string {
 export function activityDisplayTitle(activity: SessionActivity, language: Language): string {
   const pt = language === "pt-BR";
   const category = activityCategory(activity);
+  if (category === "git") {
+    const git = gitActivityInfo(activity);
+    if (git) return gitEventTitle(git, language);
+  }
   if (category === "edit") {
     const count = new Set(activity.files).size;
     if (count > 0) return pt ? `${count} arquivo${count === 1 ? " alterado" : "s alterados"}` : `${count} file${count === 1 ? " edited" : "s edited"}`;
@@ -182,7 +192,8 @@ export function groupConsecutiveTraceActivities(activities: SessionActivity[]): 
   const runs: ActivityRun[] = [];
   for (const activity of activities) {
     const category = activity.kind === "analysis" ? "analysis" : activityCategory(activity);
-    const groupable = !["analysis", "plan"].includes(category)
+    // Each git operation is worth seeing on its own: a commit is not "2 commands".
+    const groupable = !["analysis", "plan", "git"].includes(category)
       && !["permission", "question", "subagent"].includes(activity.kind)
       && activity.status !== "failed";
     const previous = runs.at(-1);
@@ -208,6 +219,7 @@ export function activityRunTitle(run: ActivityRun, language: Language): string {
   if (count === 1) return activityDisplayTitle(run.activities[0], language);
   const pt = language === "pt-BR";
   if (run.category === "command") return pt ? `${count} comandos executados` : `${count} commands run`;
+  if (run.category === "git") return pt ? `${count} operações git` : `${count} git operations`;
   if (run.category === "test") return pt ? `${count} validações executadas` : `${count} checks run`;
   if (run.category === "edit") {
     const total = files.length || count;
@@ -228,6 +240,7 @@ function phrase(language: Language, category: ActivityCategory, count: number, f
   if (category === "search") return pt ? "projeto pesquisado" : "searched the project";
   if (category === "test") return pt ? `${count} validaç${count === 1 ? "ão" : "ões"}` : `${count} check${count === 1 ? "" : "s"}`;
   if (category === "command") return pt ? `${count} comando${count === 1 ? "" : "s"}` : `${count} command${count === 1 ? "" : "s"}`;
+  if (category === "git") return pt ? `${count} operaç${count === 1 ? "ão" : "ões"} git` : `${count} git operation${count === 1 ? "" : "s"}`;
   return pt ? `${count} ferramenta${count === 1 ? "" : "s"}` : `${count} tool${count === 1 ? "" : "s"}`;
 }
 
@@ -240,7 +253,7 @@ export function activityGroupSummary(activities: SessionActivity[], language: La
     counts.set(category, (counts.get(category) ?? 0) + 1);
     if (category === "edit") activity.files.forEach((file) => files.add(file));
   }
-  const order: ActivityCategory[] = ["edit", "read", "search", "test", "command", "tool"];
+  const order: ActivityCategory[] = ["edit", "git", "read", "search", "test", "command", "tool"];
   const parts = order.flatMap((category) => {
     const count = counts.get(category) ?? 0;
     return count ? [phrase(language, category, count, files.size)] : [];

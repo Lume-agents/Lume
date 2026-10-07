@@ -20,6 +20,11 @@
   {:else if category === "analysis"}
     <path d="M7 7.5a6.5 6.5 0 0 1 10 0M6 13a6 6 0 0 0 12 0M9 19h6" />
     <circle cx="12" cy="10" r="2" />
+  {:else if category === "git"}
+    <path d="M6 3v12" />
+    <circle cx="18" cy="6" r="2.6" />
+    <circle cx="6" cy="18" r="2.6" />
+    <path d="M18 8.6A9 9 0 0 1 8.7 17.6" />
   {:else if category === "plan"}
     <path d="M5 3.5h14v17H5zM8 8h8M8 12h8M8 16h5" />
   {:else}

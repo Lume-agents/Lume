@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildReviewTurns, collectReviewFiles, parseReviewDiff } from "../src/lib/reviewDiffs.ts";
+import { buildLatestReviewTurn, buildReviewTurns, collectReviewFiles, parseReviewDiff } from "../src/lib/reviewDiffs.ts";
 
 const detail = `diff --git a/src/example.ts b/src/example.ts
 index 111..222 100644
@@ -65,6 +65,16 @@ assert.deepEqual(turns[0].files.map((file) => file.path), ["src/second.ts"]);
 assert.deepEqual(turns[1].files.map((file) => file.path), ["src/example.ts"]);
 assert.deepEqual(turns[0].checks, []);
 assert.deepEqual(turns[1].checks, ["First check passed"]);
+assert.deepEqual(buildLatestReviewTurn([
+  activity("prompt-one", "prompt", 100, "First request"),
+  activity("file-one", "file", 110, detail, ["src/example.ts"]),
+  activity("check-one", "test", 115, "First check passed"),
+  activity("prompt-two", "prompt", 200, "Second request"),
+  activity("file-two", "file", 210, detail.replaceAll("example.ts", "second.ts"), ["src/second.ts"]),
+], [
+  result("result-one", 130, "First response", ["First check passed"]),
+  result("result-two", 230, "Second response"),
+], "/work/project"), turns[0]);
 
 const partialHistory = buildReviewTurns([
   activity("prompt-current", "prompt", 400, "Still working"),
@@ -72,6 +82,11 @@ const partialHistory = buildReviewTurns([
 assert.equal(partialHistory[0].result, undefined);
 assert.equal(partialHistory[1].activityAvailable, false);
 assert.deepEqual(partialHistory[1].files, []);
+assert.deepEqual(buildLatestReviewTurn([
+  activity("prompt-current", "prompt", 400, "Still working"),
+], [result("archived", 300, "Earlier result")]), partialHistory[0]);
+const equalTimeResults = [result("first", 300, "First"), result("second", 300, "Second")];
+assert.deepEqual(buildLatestReviewTurn([], equalTimeResults), buildReviewTurns([], equalTimeResults)[0]);
 
 const revisedResult = buildReviewTurns([
   activity("prompt-revised", "prompt", 500, "One task"),
@@ -80,5 +95,11 @@ const revisedResult = buildReviewTurns([
   result("final-result", 520, "Final"),
 ]);
 assert.deepEqual(revisedResult.map((turn) => turn.result?.id), ["final-result"]);
+assert.deepEqual(buildLatestReviewTurn([
+  activity("prompt-revised", "prompt", 500, "One task"),
+], [
+  result("draft-result", 510, "Draft"),
+  result("final-result", 520, "Final"),
+]), revisedResult[0]);
 
 console.log("review diff test suite passed");

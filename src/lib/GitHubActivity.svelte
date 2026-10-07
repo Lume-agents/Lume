@@ -141,7 +141,7 @@
         {/each}
       </div>
     </div>
-    <p class="calendar-caption" aria-live="polite">{selected ? description(selected) : `${kind === "commits" ? tr("Local branch", "Branch local") : "GitHub"} · ${periodLabel}`}</p>
+    <p class="calendar-caption" aria-live="polite">{selected ? description(selected) : `${kind === "commits" ? tr("Local branch ·", "Branch local ·") : ""} ${periodLabel}`}</p>
   </div>
   {#if topRepositories.length}
     <div class="repository-overlay" class:expanded>

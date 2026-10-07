@@ -12,7 +12,7 @@
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
   import { loadWorkspacePromptIndexPage, refreshAgentRateLimits, type WorkspacePromptIndexEntry } from "$lib/lume";
-  import { buildReviewTurns } from "$lib/reviewDiffs";
+  import { buildLatestReviewTurn } from "$lib/reviewDiffs";
   import { subagentsForSession } from "$lib/workspaceAgents";
 
   let {
@@ -59,7 +59,7 @@
       .slice(0, 5);
   });
 
-  const latestTurn = $derived(session ? buildReviewTurns(session.activities, session.results, session.workingDirectory)[0] : null);
+  const latestTurn = $derived(session ? buildLatestReviewTurn(session.activities, session.results, session.workingDirectory) : null);
   const changes = $derived(latestTurn?.files ?? []);
   const visibleChanges = $derived(changes.slice(0, 6));
   const subagents = $derived(session ? subagentsForSession(session) : []);
@@ -74,7 +74,10 @@
   const fullAccess = $derived(session?.permissionProfile.mode === "full_access");
 
   $effect(() => {
-    const key = session?.agent === "codex" ? `${session.agent}:${session.nativeSessionId ?? session.id}` : "";
+    // Claude does not push its limits, so they are refreshed after every turn.
+    const key = session && hasUsage(session.agent)
+      ? `${session.agent}:${session.nativeSessionId ?? session.id}${session.agent === "claude_code" ? `:${session.status}` : ""}`
+      : "";
     if (!key || key === requestedUsageKey) return;
     requestedUsageKey = key;
     void refreshUsage();
@@ -148,11 +151,15 @@
     return tr("Finished", "Concluído");
   }
 
+  function hasUsage(agent: AgentSession["agent"]) {
+    return agent === "codex" || agent === "claude_code";
+  }
+
   async function refreshUsage() {
-    if (!session || session.agent !== "codex" || usageRefreshing) return;
+    if (!session || !hasUsage(session.agent) || usageRefreshing) return;
     usageRefreshing = true;
     try {
-      await refreshAgentRateLimits("codex");
+      await refreshAgentRateLimits(session.agent);
     } catch { /* Keep the last known usage without adding noisy inspector copy. */ }
     finally {
       usageRefreshing = false;
@@ -210,8 +217,8 @@
       <div class="inspector-scroll" use:transientScrollbar><RepositoryPanel {session} {language} compact /></div>
     {:else}
     <div class="inspector-scroll" use:transientScrollbar>
-      {#if session.agent === "codex"}
-        <section class="usage-section" aria-label={tr("Codex usage", "Uso do Codex")}>
+      {#if hasUsage(session.agent)}
+        <section class="usage-section" aria-label={tr(`${session.agentLabel} usage`, `Uso do ${session.agentLabel}`)}>
           <div class="usage-gauges" class:loading={usageRefreshing && !session.rateLimits?.length}>
             {#each session.rateLimits ?? [] as limit (limit.id)}
               {@const remaining = remainingRate(Number(limit.usedPercent))}

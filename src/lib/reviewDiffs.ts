@@ -177,6 +177,65 @@ export function buildReviewTurns(
   return turns.sort((left, right) => right.createdAt - left.createdAt);
 }
 
+/** Builds only the newest turn without partitioning the full conversation history. */
+export function buildLatestReviewTurn(
+  activities: SessionActivity[],
+  results: SessionResult[],
+  workingDirectory?: string,
+): ReviewTurn | null {
+  const prompts = activities
+    .filter((activity) => activity.kind === "prompt")
+    .sort((left, right) => left.createdAt - right.createdAt)
+    .filter((prompt, index, sorted) => {
+      const previous = sorted[index - 1];
+      return !previous || prompt.detail?.trim() !== previous.detail?.trim()
+        || prompt.createdAt - previous.createdAt >= 2_000;
+    });
+  const prompt = prompts.at(-1);
+
+  if (!prompt) {
+    const latestResultAt = results.reduce((latest, item) => Math.max(latest, item.createdAt), Number.NEGATIVE_INFINITY);
+    const result = results.find((item) => item.createdAt === latestResultAt);
+    return result ? {
+      id: result.id,
+      result,
+      responseAttachments: [],
+      files: [],
+      checks: [...new Set(result.tests.filter(Boolean))],
+      createdAt: result.createdAt,
+      activityAvailable: false,
+    } : null;
+  }
+
+  const segment = activities.filter((activity) => activity.createdAt >= prompt.createdAt);
+  const result = results
+    .filter((item) => item.createdAt >= prompt.createdAt)
+    .sort((left, right) => left.createdAt - right.createdAt)
+    .at(-1);
+  const responseActivity = result
+    ? [...segment].reverse().find((activity) =>
+      activity.kind === "message" && activity.detail?.trim() === result.response.trim()
+    )
+    : undefined;
+  const files = collectReviewFiles(segment, workingDirectory);
+  const checks = [...new Set([
+    ...(result?.tests ?? []),
+    ...segment.filter((activity) => activity.kind === "test")
+      .map((activity) => activity.detail?.trim() || activity.title.trim()),
+  ].filter(Boolean))];
+
+  return {
+    id: result?.id ?? `prompt:${prompt.id}`,
+    prompt,
+    result,
+    responseAttachments: responseActivity?.attachments ?? [],
+    files,
+    checks,
+    createdAt: result?.createdAt ?? prompt.createdAt,
+    activityAvailable: true,
+  };
+}
+
 export function parseReviewDiff(diff: string): ReviewDiffLine[] {
   const result: ReviewDiffLine[] = [];
   let oldLine: number | undefined;

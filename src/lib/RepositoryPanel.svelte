@@ -196,10 +196,6 @@
     {#if tab === "activity"}
       <div class="activity-scope" role="group" aria-label={tr("Activity source", "Origem da atividade")}><button type="button" class:active={activityScope === "repository"} aria-pressed={activityScope === "repository"} onclick={() => (activityScope = "repository")}><LumeIcon name="branch" size={13} />{tr("This repository", "Este repositório")}</button><button type="button" class:active={activityScope === "account"} aria-pressed={activityScope === "account"} onclick={() => (activityScope = "account")}><BrandIcon name="github" size={13} />{tr("My account", "Minha conta")}</button></div>
       {#if activityScope === "repository"}
-      <button class="working-summary" class:clean={!local.files.length} type="button" onclick={() => (tab = "changes")}>
-        <LumeIcon name={local.files.length ? "diff" : "check"} size={19} />
-        <span><strong>{local.files.length ? tr(`${local.files.length} changed ${local.files.length === 1 ? "file" : "files"}`, `${local.files.length} ${local.files.length === 1 ? "arquivo alterado" : "arquivos alterados"}`) : tr("Working tree clean", "Árvore de trabalho limpa")}</strong><small>{local.files.length ? tr(`${local.staged} staged · ${local.modified} modified · ${local.untracked} new`, `${local.staged} ${local.staged === 1 ? "preparado" : "preparados"} · ${local.modified} ${local.modified === 1 ? "modificado" : "modificados"} · ${local.untracked} ${local.untracked === 1 ? "novo" : "novos"}`) : tr("No pending local changes", "Sem mudanças locais pendentes")}{local.conflicts ? ` · ${local.conflicts} ${tr("conflicts", "conflitos")}` : ""}</small></span><LumeIcon name="arrow-right" size={14} />
-      </button>
       <GitHubActivity days={local.days} {language} kind="commits" rangeDays={90} compact />
       {#if local.activityLimited || local.shallow}<p class="source-note">{local.shallow ? tr("Shallow clone: activity covers downloaded history.", "Clone raso: a atividade cobre o histórico baixado.") : tr("Activity is limited to 20,000 recent commits.", "A atividade está limitada aos 20.000 commits mais recentes.")}</p>{/if}
       <div class="section-heading"><h3>{tr("Recent commits", "Commits recentes")}</h3><button type="button" onclick={() => (tab = "commits")}>{tr("View history", "Ver histórico")}<LumeIcon name="arrow-right" size={12} /></button></div>
@@ -300,12 +296,6 @@
   .account-identity strong { color: var(--workspace-strong); font-size: 12px; font-weight: 550; }
   .account-identity small { font-size: 10px; }
   .create-item { min-height: 29px; padding: 0 7px; display: flex; align-items: center; gap: 4px; border: 0; border-radius: 6px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 10px; }
-  .working-summary { width: 100%; min-width: 0; margin: 0 0 15px; display: flex; align-items: center; gap: 10px; padding: 12px 9px; border: 0; border-block: 1px solid var(--workspace-line); color: var(--workspace-muted); background: transparent; text-align: left; }
-  .working-summary > span { min-width: 0; flex: 1; display: grid; gap: 5px; }
-  .working-summary strong { color: var(--workspace-strong); font-size: 12px; font-weight: 550; }
-  .working-summary small { color: var(--workspace-muted); font-size: 10px; line-height: 1.5; }
-  .working-summary.clean { color: var(--workspace-accent); }
-  .working-summary:hover { background: var(--workspace-subtle); }
   .section-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 20px 0 4px; }
   .section-heading h3 > small { margin-left: 5px; color: var(--workspace-muted); font-size: 10px; font-weight: 400; }
   .section-heading h3 { margin: 0; color: var(--workspace-strong); font-size: 11px; font-weight: 600; }

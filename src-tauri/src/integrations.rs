@@ -1308,7 +1308,82 @@ fn codex_work_activities(reader: impl BufRead, session_id: &str) -> Vec<SessionA
 }
 
 fn claude_work_activities(reader: impl BufRead, session_id: &str) -> Vec<SessionActivity> {
+    claude_work_activities_with(reader, session_id, || claude_task_list_detail(session_id))
+}
+
+/// Claude Code keeps its task list (TaskCreate/TaskUpdate) as one JSON file per
+/// task under `<config>/tasks/<session id>/`.
+fn claude_tasks_directory(session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.contains("..") {
+        return None;
+    }
+    let root = env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .or_else(|| env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".claude"))
+        })?;
+    Some(root.join("tasks").join(session_id))
+}
+
+pub(crate) fn is_claude_task_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "TaskCreate" | "TaskUpdate")
+}
+
+/// The current task list of a Claude conversation, in the shape of a `TodoWrite` call.
+pub(crate) fn claude_task_list_detail(session_id: &str) -> Option<String> {
+    claude_task_list_detail_in(&claude_tasks_directory(session_id)?)
+}
+
+fn claude_task_list_detail_in(directory: &Path) -> Option<String> {
+    let mut tasks = fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|entry| {
+            let task =
+                serde_json::from_str::<Value>(&fs::read_to_string(entry.path()).ok()?).ok()?;
+            let id = task.get("id").and_then(|id| {
+                id.as_u64()
+                    .or_else(|| id.as_str().and_then(|id| id.parse().ok()))
+            })?;
+            let subject = task
+                .get("subject")
+                .and_then(Value::as_str)?
+                .trim()
+                .to_string();
+            let status = task
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("pending")
+                .to_string();
+            (!subject.is_empty() && status != "deleted").then_some((id, subject, status))
+        })
+        .collect::<Vec<_>>();
+    if tasks.is_empty() {
+        return None;
+    }
+    tasks.sort_by_key(|(id, _, _)| *id);
+    let todos = tasks
+        .into_iter()
+        .map(|(_, subject, status)| json!({ "content": subject, "status": status }))
+        .collect::<Vec<_>>();
+    Some(json!({ "todos": todos }).to_string())
+}
+
+fn claude_work_activities_with(
+    reader: impl BufRead,
+    session_id: &str,
+    task_list: impl FnOnce() -> Option<String>,
+) -> Vec<SessionActivity> {
     let mut activities = Vec::new();
+    let mut last_task_tool_at = None;
     for (line_index, line) in reader.lines().map_while(Result::ok).enumerate() {
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -1324,6 +1399,10 @@ fn claude_work_activities(reader: impl BufRead, session_id: &str) -> Vec<Session
             let Some(name) = block.get("name").and_then(Value::as_str) else {
                 continue;
             };
+            if is_claude_task_tool(name) {
+                last_task_tool_at = Some(created_at);
+                continue;
+            }
             if !name.to_ascii_lowercase().contains("todo") {
                 continue;
             }
@@ -1338,6 +1417,17 @@ fn claude_work_activities(reader: impl BufRead, session_id: &str) -> Vec<Session
                 "tool",
                 name,
                 detail,
+                created_at,
+            ));
+        }
+    }
+    if let Some(created_at) = last_task_tool_at {
+        if let Some(detail) = task_list() {
+            activities.push(work_activity(
+                format!("claude:{session_id}:todo:tasks"),
+                "tool",
+                "TodoWrite",
+                Some(detail),
                 created_at,
             ));
         }
@@ -3316,6 +3406,74 @@ mod tests {
             .detail
             .as_deref()
             .is_some_and(|detail| detail.contains("Inspect workflow")));
+    }
+
+    #[test]
+    fn claude_task_tools_rebuild_the_todo_from_the_task_list() {
+        let transcript = "{\"timestamp\":\"2026-10-07T12:00:00Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"TaskCreate\",\"input\":{\"subject\":\"Inspect\"}}]}}\n";
+        let activities =
+            claude_work_activities_with(std::io::Cursor::new(transcript), "session-1", || {
+                Some("{\"todos\":[]}".into())
+            });
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].title, "TodoWrite");
+        assert_eq!(activities[0].id, "claude:session-1:todo:tasks");
+        let none = claude_work_activities_with(std::io::Cursor::new("{}\n"), "session-1", || {
+            panic!("the task list is only read when the transcript used task tools")
+        });
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn claude_task_list_is_read_in_task_order_without_deleted_tasks() {
+        let directory =
+            std::env::temp_dir().join(format!("lume-claude-tasks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("tasks dir");
+        for (file, body) in [
+            (
+                "10.json",
+                r#"{"id":"10","subject":"Last","status":"pending"}"#,
+            ),
+            (
+                "2.json",
+                r#"{"id":"2","subject":"Second","status":"in_progress"}"#,
+            ),
+            (
+                "1.json",
+                r#"{"id":"1","subject":"First","status":"completed"}"#,
+            ),
+            (
+                "3.json",
+                r#"{"id":"3","subject":"Gone","status":"deleted"}"#,
+            ),
+            ("notes.txt", "ignored"),
+        ] {
+            fs::write(directory.join(file), body).expect("task file");
+        }
+        let detail = claude_task_list_detail_in(&directory).expect("task list");
+        let value: Value = serde_json::from_str(&detail).expect("json");
+        let labels = value["todos"]
+            .as_array()
+            .expect("todos")
+            .iter()
+            .map(|item| {
+                (
+                    item["content"].as_str().unwrap().to_string(),
+                    item["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                ("First".to_string(), "completed".to_string()),
+                ("Second".to_string(), "in_progress".to_string()),
+                ("Last".to_string(), "pending".to_string()),
+            ]
+        );
+        assert!(claude_tasks_directory("../other").is_none());
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]

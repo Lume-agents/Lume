@@ -489,6 +489,28 @@ fn hook_activity(
         return None;
     }
 
+    // Claude's task list is incremental (create, then update by id), so the whole list is read back
+    // from disk once the tool has run and shown as a single todo.
+    if provider == "claude"
+        && string(raw, "tool_name")
+            .is_some_and(|name| crate::integrations::is_claude_task_tool(&name))
+    {
+        if hook_name != "PostToolUse" {
+            return None;
+        }
+        return Some(SessionActivity {
+            id: format!("{provider}:{session_id}:todo:tasks"),
+            kind: "tool".into(),
+            title: "TodoWrite".into(),
+            detail: Some(crate::integrations::claude_task_list_detail(session_id)?),
+            status: "completed".into(),
+            created_at: now_millis(),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        });
+    }
+
     let tool_call = raw.get("toolCall");
     let tool_name = string(raw, "tool_name")
         .or_else(|| string(raw, "tool"))

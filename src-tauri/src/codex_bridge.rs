@@ -4489,6 +4489,7 @@ mod tests {
             queued_prompts: Arc::new(Mutex::new(HashMap::new())),
             collaboration_modes: Arc::new(Mutex::new(HashMap::new())),
             active_proxy_threads: Arc::new(Mutex::new(HashMap::new())),
+            thread_settings: Arc::new(Mutex::new(HashMap::new())),
             proxy_url: PROXY_BASE_URL.into(),
             owns_process: true,
         };
@@ -4506,6 +4507,7 @@ mod tests {
             queued_prompts: Arc::new(Mutex::new(HashMap::new())),
             collaboration_modes: Arc::new(Mutex::new(HashMap::new())),
             active_proxy_threads: Arc::new(Mutex::new(HashMap::new())),
+            thread_settings: Arc::new(Mutex::new(HashMap::new())),
             proxy_url: PROXY_BASE_URL.into(),
             owns_process: true,
         };
@@ -4543,6 +4545,7 @@ mod tests {
             queued_prompts: Arc::new(Mutex::new(HashMap::new())),
             collaboration_modes: Arc::new(Mutex::new(HashMap::new())),
             active_proxy_threads: Arc::new(Mutex::new(HashMap::new())),
+            thread_settings: Arc::new(Mutex::new(HashMap::new())),
             proxy_url: PROXY_BASE_URL.into(),
             owns_process: true,
         };

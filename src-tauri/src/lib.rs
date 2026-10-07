@@ -2789,6 +2789,7 @@ pub fn run() {
             overlay::start_fullscreen_guard(state.clone(), app.handle().clone())?;
 
             if let Some(window) = app.get_webview_window("main") {
+                overlay::neutralize_text_scaling(&window);
                 let preferences = state.preferences()?;
                 let configured = overlay::configure(
                     &window,

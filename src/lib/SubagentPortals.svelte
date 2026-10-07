@@ -531,7 +531,7 @@
   .portal-button.chosen .portal-name { color: var(--portal-color); }
   .portal-panel { position: absolute; z-index: 1; top: calc(100% - 4px); left: 8px; width: min(520px, calc(100% - 16px)); max-height: min(600px, 70vh); box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; border: 1px solid color-mix(in srgb, var(--workspace-accent) 25%, var(--workspace-line)); border-radius: 19px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 48px rgba(3, 19, 14, .23); opacity: 0; pointer-events: none; clip-path: circle(24px at var(--portal-origin) 0); transform: translateY(-8px) scale(.96); transform-origin: var(--portal-origin) 0; transition: clip-path 220ms cubic-bezier(.2, .8, .2, 1), transform 220ms cubic-bezier(.2, .8, .2, 1), opacity 160ms ease; }
   .portal-panel.has-final { width: min(560px, calc(100% - 16px)); max-height: min(650px, 76vh); }
-  .portal-panel.open { opacity: 1; pointer-events: auto; clip-path: circle(1000px at var(--portal-origin) 0); transform: translateY(0) scale(1); transition-duration: 320ms; }
+  .portal-panel.open { opacity: 1; pointer-events: auto; z-index: 6; clip-path: circle(1000px at var(--portal-origin) 0); transform: translateY(0) scale(1); transition-duration: 320ms; }
   .portal-panel-header { min-height: 52px; padding: 10px 12px; display: flex; align-items: center; gap: 9px; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); }
   .panel-avatar { flex: 0 0 auto; }
   .panel-heading { min-width: 0; display: grid; gap: 2px; flex: 1; }

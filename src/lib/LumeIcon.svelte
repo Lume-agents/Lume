@@ -38,6 +38,7 @@
     | "plus"
     | "rename"
     | "refresh"
+    | "reset"
     | "repository"
     | "branch"
     | "pull-request"
@@ -191,6 +192,8 @@
   {:else if name === "rename"}
     <path d="m4 20 1.3-5.2L15.6 4.5a2.1 2.1 0 0 1 3 0l.9.9a2.1 2.1 0 0 1 0 3L9.2 18.7Z" />
     <path d="m14 6.1 3.9 3.9M5.3 14.8l3.9 3.9" />
+  {:else if name === "reset"}
+    <path d="M4.5 12a7.5 7.5 0 1 1 2.2 5.3M4.5 6.5V12H10" />
   {:else if name === "refresh"}
     <path d="M19 8a7.5 7.5 0 1 0 .4 7M19 4v4h-4" />
   {:else if name === "trash"}

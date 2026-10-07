@@ -4436,15 +4436,19 @@ fn reported_file_candidate(token: &str, extensions: &[&str]) -> Option<String> {
             candidate = path;
         }
     }
-    let extension = Path::new(candidate)
-        .extension()
-        .and_then(|extension| extension.to_str())?
-        .to_ascii_lowercase();
+    let candidate = candidate.replace('\\', "/");
+    let candidate = candidate.as_str();
+    let name = candidate.rsplit('/').next()?;
+    let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
     if !extensions.contains(&extension.as_str()) {
         return None;
     }
-    let sanitized = if Path::new(candidate).is_absolute() {
-        Path::new(candidate).file_name()?.to_str()?.to_string()
+    let is_absolute = candidate.starts_with('/')
+        || (candidate.as_bytes().get(1) == Some(&b':')
+            && candidate.as_bytes()[0].is_ascii_alphabetic()
+            && candidate.as_bytes().get(2) == Some(&b'/'));
+    let sanitized = if is_absolute {
+        name.to_string()
     } else {
         candidate.trim_start_matches("./").to_string()
     };
@@ -6652,6 +6656,11 @@ mod tests {
 
         assert_eq!(files, vec!["source.txt", "result.txt", "test_content.py"]);
         assert!(files.iter().all(|file| !file.contains("](")));
+
+        let (windows_files, _) = extract_result_artifacts(
+            r"- [source.txt](C:\workspace\sample-project\source.txt): atualizado",
+        );
+        assert_eq!(windows_files, vec!["source.txt"]);
     }
 
     #[test]

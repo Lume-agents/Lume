@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 
 use serde::Serialize;
 
@@ -872,45 +872,69 @@ fn safe_path(path: &str, working_directory: Option<&str>) -> Result<(String, boo
     if sensitive_path(path) {
         return Err(PathRejection::Sensitive);
     }
-    let candidate = Path::new(path);
-    if candidate.is_absolute() {
-        if let Some(root) = working_directory.map(Path::new) {
-            if let Ok(relative) = candidate.strip_prefix(root) {
-                let relative = normalize_relative_path(relative)?;
-                return Ok((relative, false));
+    let (absolute, prefix, parts) = normalized_path(path)?;
+    if absolute {
+        if let Some(root) = working_directory {
+            let (root_absolute, root_prefix, root_parts) = normalized_path(root)?;
+            let same_prefix = if cfg!(windows) {
+                prefix.eq_ignore_ascii_case(&root_prefix)
+            } else {
+                prefix == root_prefix
+            };
+            let root_matches = root_absolute
+                && same_prefix
+                && parts.len() > root_parts.len()
+                && parts.iter().zip(&root_parts).all(|(part, root_part)| {
+                    if cfg!(windows) {
+                        part.eq_ignore_ascii_case(root_part)
+                    } else {
+                        part == root_part
+                    }
+                });
+            if root_matches {
+                return Ok((parts[root_parts.len()..].join("/"), false));
             }
         }
-        let name = candidate
-            .file_name()
-            .ok_or(PathRejection::Invalid)?
-            .to_string_lossy();
+        let name = parts.last().ok_or(PathRejection::Invalid)?;
         return Ok((format!("[external]/{name}"), true));
     }
-    Ok((normalize_relative_path(candidate)?, false))
+    Ok((parts.join("/"), false))
 }
 
-fn normalize_relative_path(path: &Path) -> Result<String, PathRejection> {
-    use std::path::Component;
+fn normalized_path(path: &str) -> Result<(bool, String, Vec<String>), PathRejection> {
+    let path = path.replace('\\', "/");
+    let drive_prefix =
+        path.as_bytes().get(1) == Some(&b':') && path.as_bytes()[0].is_ascii_alphabetic();
+    if drive_prefix && !path.as_bytes().get(2).is_some_and(|byte| *byte == b'/') {
+        return Err(PathRejection::Invalid);
+    }
 
+    let (absolute, prefix, rest) = if drive_prefix {
+        (true, path[..2].to_string(), &path[3..])
+    } else if path.starts_with("//") {
+        (true, "//".to_string(), path.trim_start_matches('/'))
+    } else if path.starts_with('/') {
+        (true, "/".to_string(), path.trim_start_matches('/'))
+    } else {
+        (false, String::new(), path.as_str())
+    };
     let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(value) => parts.push(value.to_string_lossy()),
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(PathRejection::Invalid);
-            }
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => return Err(PathRejection::Invalid),
+            value => parts.push(value.to_string()),
         }
     }
     if parts.is_empty() {
         return Err(PathRejection::Invalid);
     }
-    Ok(parts.join("/"))
+    Ok((absolute, prefix, parts))
 }
 
 fn sensitive_path(path: &str) -> bool {
-    Path::new(path).components().any(|component| {
-        let value = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+    path.split(['/', '\\']).any(|component| {
+        let value = component.to_ascii_lowercase();
         value == ".env"
             || value.starts_with(".env.")
             || matches!(value.as_str(), ".ssh" | ".aws" | ".gnupg")
@@ -1193,6 +1217,30 @@ mod tests {
     use crate::domain::{
         AccessMode, AgentKind, PermissionProfile, SessionSource, SessionStatus, WorkflowAdvanceMode,
     };
+
+    #[test]
+    fn safe_paths_normalize_posix_and_windows_paths_independent_of_host() {
+        assert_eq!(
+            safe_path("/workspace/project/src/lib.rs", Some("/workspace/project")),
+            Ok(("src/lib.rs".into(), false))
+        );
+        assert_eq!(
+            safe_path(
+                r"C:\Users\dev\project\src\lib.rs",
+                Some(r"C:\Users\dev\project")
+            ),
+            Ok(("src/lib.rs".into(), false))
+        );
+        assert_eq!(
+            safe_path(
+                r"\\server\share\project\src\lib.rs",
+                Some(r"\\server\share\project")
+            ),
+            Ok(("src/lib.rs".into(), false))
+        );
+        assert!(safe_path(r"C:\Users\dev\project\.env", Some(r"C:\Users\dev\project")).is_err());
+        assert!(safe_path("../outside.rs", None).is_err());
+    }
 
     fn connection(policy: WorkflowContextPolicy) -> WorkflowConnectionDefinition {
         WorkflowConnectionDefinition {

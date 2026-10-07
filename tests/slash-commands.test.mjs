@@ -42,7 +42,7 @@ test("slash browses everything and dollar narrows to Codex skills", () => {
     "codex",
   );
   assert.deepEqual(filterSlashCommands(commands, null), []);
-  assert.equal(filterSlashCommands(commands, slashCommandQuery("/")).length, 2);
+  assert.equal(filterSlashCommands(commands, slashCommandQuery("/")).length, 3, "model and plan are Lume's, plus the skill");
   assert.deepEqual(
     filterSlashCommands(commands, slashCommandQuery("$")).map((command) => command.name),
     ["lint"],
@@ -53,6 +53,20 @@ test("slash browses everything and dollar narrows to Codex skills", () => {
   );
   assert.equal(slashCommandText(findSlashCommand(commands, "$lint")), "$lint ");
   assert.equal(slashCommandText(findSlashCommand(commands, "/model")), "/model");
+});
+
+test("Plan mode is Lume's /plan for Codex, once, and the agent's own /plan is not repeated", () => {
+  const reported = [
+    { name: "plan", description: "Switch to Plan mode", prefix: "/", kind: "command" },
+    { name: "review", description: "Review the changes", prefix: "/", kind: "command" },
+  ];
+  const codex = agentSlashCommands(reported, "codex");
+  assert.deepEqual(codex.filter((command) => command.name === "plan").map((command) => command.source), ["lume"]);
+  assert.equal(findSlashCommand(codex, "/plan").action, "plan");
+  assert.ok(findSlashCommand(codex, "/review"), "the other commands the agent reports stay");
+  // Claude has no Plan toggle of Lume's: its own /plan is simply forwarded.
+  const claude = agentSlashCommands(reported, "claude_code");
+  assert.deepEqual(claude.filter((command) => command.name === "plan").map((command) => command.source), ["agent"]);
 });
 
 test("each session asks the agent once and retries after a failure", async () => {

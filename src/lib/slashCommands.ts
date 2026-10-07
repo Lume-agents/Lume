@@ -37,8 +37,11 @@ const lumeModelAgents: AgentKind[] = ["codex", "claude_code", "opencode"];
 
 export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKind | undefined): SlashCommand[] {
   const lumeModel = agent !== undefined && lumeModelAgents.includes(agent);
+  // Codex's Plan mode is switched by Lume itself, so its own `/plan` is not offered twice.
+  const lumePlan = agent === "codex";
   const reported = commands
     .filter((command) => !(lumeModel && command.prefix === "/" && command.name === "model"))
+    .filter((command) => !(lumePlan && command.prefix === "/" && command.name === "plan"))
     .map((command): SlashCommand => ({
       name: command.name,
       description: command.description,
@@ -46,9 +49,14 @@ export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKi
       prefix: command.prefix || "/",
       argumentHint: command.argumentHint || undefined,
     }));
-  return lumeModel
-    ? [{ name: "model", description: "Choose the model and reasoning effort", source: "lume", prefix: "/", action: "model" }, ...reported]
-    : reported;
+  const owned: SlashCommand[] = [];
+  if (lumeModel) {
+    owned.push({ name: "model", description: "Choose the model and reasoning effort", source: "lume", prefix: "/", action: "model" });
+  }
+  if (lumePlan) {
+    owned.push({ name: "plan", description: "Switch Plan mode on or off", source: "lume", prefix: "/", action: "plan" });
+  }
+  return [...owned, ...reported];
 }
 
 export function slashCommandQuery(prompt: string): { prefix: string; query: string } | null {

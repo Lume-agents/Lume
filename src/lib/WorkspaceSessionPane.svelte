@@ -12,6 +12,7 @@
   import StreamedMessage from "$lib/StreamedMessage.svelte";
   import { MAX_HOLD_MS } from "$lib/streamPacing";
   import { interruptNoticeText } from "$lib/interruptNotice";
+  import { controlsDiffer, type ControlsSnapshot } from "$lib/agentControls";
   import ThinkingOrb from "$lib/ThinkingOrb.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SubagentPortals from "$lib/SubagentPortals.svelte";
@@ -200,7 +201,9 @@
   let conversationElement = $state<HTMLDivElement | null>(null);
   let conversationContentElement = $state<HTMLDivElement | null>(null);
   let composerElement = $state<HTMLFormElement | null>(null);
+  let composerHeight = $state(0);
   let introDismissed = $state(false);
+  let composerTransition = $state<"idle" | "out" | "in">("idle");
   let controlsRoot = $state<HTMLDivElement | null>(null);
   let controlsOpen = $state(false);
   let alertsRoot = $state<HTMLDivElement | null>(null);
@@ -395,6 +398,7 @@
     return chatActivities.findLast((activity) => activity.kind === "prompt" && activity.createdAt > latestFinalAt)?.createdAt ?? null;
   });
   const freshChat = $derived(!hasConversationMessage && !promptIsRunning && !introDismissed);
+  const composerInIntroPosition = $derived(freshChat || composerTransition === "out");
   const canQueue = $derived(session.capabilities.promptDeliveries.includes("queue"));
   const canCompose = $derived(Boolean(
     session.capabilities.canPrompt || session.capabilities.canTakeControl
@@ -492,6 +496,12 @@
     zoomOpen = false;
     controlsError = "";
     modelSettings = null;
+    claudeModels = [];
+    claudeModel = "";
+    claudeEffort = "";
+    selectedModel = "";
+    selectedEffort = "";
+    originalControls = null;
     fastMode = false;
     sourceEntryId = null;
     actionNotice = "";
@@ -910,13 +920,12 @@
       return;
     }
     const delivery = promptIsRunning ? "queue" : "new_turn";
+    const transitionFromFresh = freshChat;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const sourceRect = composerElement?.querySelector("textarea")?.getBoundingClientRect() ?? null;
-    const previousTop = freshChat ? composerElement?.getBoundingClientRect().top : undefined;
     sending = true;
     sendError = "";
-    if (freshChat) {
-      introDismissed = true;
-    }
+    if (transitionFromFresh) composerTransition = reducedMotion ? "in" : "out";
     let outgoing: OutgoingPrompt | null = null;
     if (delivery === "new_turn") {
       outgoing = {
@@ -935,12 +944,19 @@
       followingTail = true;
     }
     await tick();
-    if (previousTop !== undefined && composerElement && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      const distance = previousTop - composerElement.getBoundingClientRect().top;
-      composerElement.animate(
-        [{ transform: `translateY(${distance}px)` }, { transform: "translateY(0)" }],
-        { duration: 420, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
-      );
+    if (transitionFromFresh) {
+      if (!reducedMotion) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 110));
+      }
+      introDismissed = true;
+      composerTransition = "in";
+      await tick();
+      if (reducedMotion) {
+        composerTransition = "idle";
+      } else {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        composerTransition = "idle";
+      }
     }
     if (outgoing) void animateOutgoingPrompt(outgoing, sourceRect);
     if (planeLaunchTimer) window.clearTimeout(planeLaunchTimer);
@@ -1068,10 +1084,7 @@
     void saveAgentControls();
   }
 
-  async function loadAgentControls() {
-    controlsLoading = true;
-    controlsError = "";
-    try {
+  async function fetchAgentControls() {
       if (session.agent === "codex" || session.agent === "opencode") {
         const [mode, settings] = await Promise.all([
           session.agent === "codex" ? getSessionCollaborationMode(session.id) : Promise.resolve("default" as CollaborationMode),
@@ -1092,12 +1105,64 @@
         claudeModel = settings.model;
         claudeEffort = settings.reasoningEffort ?? "";
       }
+      originalControls ??= session.agent === "claude_code"
+        ? { model: claudeModel, effort: claudeEffort, fast: false }
+        : { model: selectedModel, effort: selectedEffort, fast: fastMode };
+  }
+
+  // The settings the conversation had when this pane first read them: what "reset" returns to.
+  let originalControls = $state<ControlsSnapshot | null>(null);
+
+  const controlsChanged = $derived(
+    controlsDiffer(
+      originalControls,
+      session.agent === "claude_code"
+        ? { model: claudeModel, effort: claudeEffort, fast: false }
+        : { model: selectedModel, effort: selectedEffort, fast: fastMode },
+      session.agent === "codex",
+    ),
+  );
+
+  async function resetAgentControls() {
+    const original = originalControls;
+    if (!original || modelControlsDisabled || controlsSaving) return;
+    if (session.agent === "claude_code") {
+      claudeModel = original.model;
+      claudeEffort = original.effort;
+      await saveAgentControls();
+      return;
+    }
+    selectedModel = original.model;
+    selectedEffort = original.effort;
+    await saveAgentControls();
+    if (session.agent === "codex" && fastMode !== original.fast) await toggleFastMode();
+  }
+
+  async function loadAgentControls() {
+    controlsLoading = true;
+    controlsError = "";
+    try {
+      await fetchAgentControls();
     } catch (error) {
       controlsError = String(error).replace(/^Error:\s*/, "");
     } finally {
       controlsLoading = false;
     }
   }
+
+  // The picker names the model from the start. Reading is quiet: no spinner, and a
+  // failure only leaves the label generic until the picker is opened.
+  let preloadedControlsSessionId = "";
+  $effect(() => {
+    if (!visible || !supportsAgentControls || session.id === preloadedControlsSessionId) return;
+    // Codex and OpenCode only answer for conversations Lume controls; Claude's read works for any.
+    if (session.agent !== "claude_code" && session.controlOrigin !== "lume") return;
+    const sessionId = session.id;
+    preloadedControlsSessionId = sessionId;
+    void fetchAgentControls().catch(() => {
+      if (preloadedControlsSessionId === sessionId) preloadedControlsSessionId = "";
+    });
+  });
 
   async function toggleAgentControls() {
     controlsOpen = !controlsOpen;
@@ -1266,7 +1331,6 @@
     const lumeCommands: SlashCommand[] = [];
     if (session.agent === "codex" && !promptIsRunning) {
       lumeCommands.push(
-        { name: "lume-plan", description: "Switch Codex to Plan mode", source: "lume", prefix: "/", action: "plan" },
         { name: "lume-default", description: "Switch Codex to Default mode", source: "lume", prefix: "/", action: "default" },
       );
     }
@@ -1324,7 +1388,8 @@
         if (!controlsOpen) await toggleAgentControls();
         break;
       case "plan":
-        await setCollaborationMode("plan");
+        // The button is gone, so the one command both enters Plan mode and leaves it.
+        await toggleCollaborationMode();
         break;
       case "default":
         await setCollaborationMode("default");
@@ -1384,6 +1449,14 @@
       permissionMenuSaving = false;
     }
   }
+
+  // Plan mode no longer has a button, so its state is read when the conversation opens.
+  let loadedCollaborationSessionId = "";
+  $effect(() => {
+    if (session.agent !== "codex" || session.controlOrigin !== "lume" || session.id === loadedCollaborationSessionId) return;
+    loadedCollaborationSessionId = session.id;
+    void getSessionCollaborationMode(session.id).then((mode) => { collaborationMode = mode; }).catch(() => undefined);
+  });
 
   // Each conversation reads its mode once; opening the menu refreshes it.
   $effect(() => {
@@ -2065,7 +2138,7 @@
 
   <WorkspaceWorkBookmarks {session} {language} hasSubagents={subagents.length > 0} />
 
-  <div class="conversation-shell">
+  <div class="conversation-shell" style:--composer-overlap={composerInIntroPosition ? "0px" : `${composerHeight}px`}>
   <div class="conversation" role="region" aria-label={tr("Conversation", "Conversa")} bind:this={conversationElement} onscroll={trackConversationScroll}>
     <div class="conversation-content" bind:this={conversationContentElement}>
     {#if canLoadEarlier}
@@ -2363,8 +2436,8 @@
     </div>
   {/if}
 
-  <form bind:this={composerElement} class:fresh={freshChat} class:unavailable={!canCompose} class="composer" onpaste={(event) => void pasteAttachments(event)} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
-    {#if freshChat}
+  <form bind:this={composerElement} bind:clientHeight={composerHeight} class:fresh={composerInIntroPosition} class:crossfade-out={composerTransition === "out"} class:crossfade-in={composerTransition === "in"} class:unavailable={!canCompose} class="composer" onpaste={(event) => void pasteAttachments(event)} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
+    {#if composerInIntroPosition}
       <div class="composer-welcome"><LumeMascot status="idle" awake size={45} /><strong>{tr("Hello. What shall we work on?", "Olá. No que vamos trabalhar?")}</strong></div>
     {/if}
     {#if queuedPrompts.length}
@@ -2448,7 +2521,8 @@
         {/each}
       </div>
     {/if}
-    <div class:beam={freshChat && canCompose} class="composer-field">
+    <div class:beam={composerInIntroPosition && canCompose} class="composer-field">
+      <div class="composer-input-row">
       {#if canAttach}
         <button
           class="attach-button"
@@ -2535,9 +2609,9 @@
           {/if}
         </button>
       {/if}
-      {#if freshChat && canCompose}<span class="composer-beam-bloom" aria-hidden="true"></span>{/if}
-    </div>
-    {#if supportsAgentControls}
+      </div>
+      {#if composerInIntroPosition && canCompose}<span class="composer-beam-bloom" aria-hidden="true"></span>{/if}
+      {#if supportsAgentControls}
       <div class="composer-tools">
         <div class="agent-controls" bind:this={controlsRoot}>
           <button class:active={controlsOpen} class="model-trigger" type="button"
@@ -2547,6 +2621,7 @@
             <span>{session.agent === "codex" || session.agent === "opencode"
               ? (modelSettings?.models.find((option) => option.model === selectedModel)?.displayName || selectedModel || "Model")
               : (claudeModels.find((option) => option.model === claudeModel)?.displayName || claudeModel || tr("Model", "Modelo"))}</span>
+            {#if session.agent === "codex" && fastMode}<span class="fast-indicator" title={tr("Fast mode is on", "Modo Fast ligado")}><WorkspaceChatIcon name="fast" size={13} active /></span>{/if}
             <LumeIcon name="chevron-down" size={12} />
           </button>
           {#if controlsOpen}
@@ -2556,19 +2631,46 @@
               {:else if controlsLoading}
                 <div class="controls-loading"><i></i>{tr("Loading settings…", "Carregando ajustes…")}</div>
               {:else}
+                {#snippet modelResetButton()}
+                  <button class="controls-icon-button model-reset" type="button" disabled={!controlsChanged || modelControlsDisabled}
+                    aria-label={tr("Restore the original settings", "Restaurar as configurações originais")}
+                    title={tr("Restore the original settings", "Restaurar as configurações originais")}
+                    onclick={() => void resetAgentControls()}>
+                    <LumeIcon name="reset" size={15} />
+                  </button>
+                {/snippet}
+                {#snippet modelFastButton()}
+                  {#if session.agent === "codex"}
+                    <button class="controls-icon-button model-fast" class:enabled={fastMode} type="button"
+                      disabled={runtimeControlsDisabled || fastSaving || !modelSettings} aria-pressed={fastMode}
+                      aria-label={fastMode ? tr("Disable Fast mode", "Desativar modo Fast") : tr("Enable Fast mode", "Ativar modo Fast")}
+                      title={tr("Fast mode · higher credit usage", "Modo Fast · maior consumo de créditos")}
+                      onclick={() => void toggleFastMode()}>
+                      {#key fastMode}<WorkspaceChatIcon name="fast" size={18} active={fastMode} />{/key}
+                    </button>
+                  {/if}
+                {/snippet}
                 {#if session.agent === "codex" || session.agent === "opencode"}
                   {#if modelSettings}
-                    <label class="controls-field"><span>{tr("Model", "Modelo")}</span>
+                    <div class="controls-model-row">
+                      {@render modelResetButton()}
+                      <div class="model-picker">
                       <LumeSelect value={selectedModel}
                         options={modelSettings.models.map((option) => ({ value: option.model, label: option.displayName, description: option.isDefault ? tr("Default", "Padrão") : option.description }))}
-                        ariaLabel={tr("Model", "Modelo")} disabled={modelControlsDisabled} minWidth={190} onValueChange={chooseModel} />
-                    </label>
+                        ariaLabel={tr("Model", "Modelo")} disabled={modelControlsDisabled} minWidth={0} variant="heading" onValueChange={chooseModel} />
+                      </div>
+                      {@render modelFastButton()}
+                    </div>
                   {/if}
                 {:else}
-                  <label class="controls-field"><span>{tr("Model", "Modelo")}</span>
-                    <LumeSelect value={claudeModel} options={claudeModelOptions(claudeModels, tr)}
-                      ariaLabel={tr("Model", "Modelo")} disabled={modelControlsDisabled} minWidth={190} onValueChange={chooseClaudeModel} />
-                  </label>
+                  <div class="controls-model-row">
+                    {@render modelResetButton()}
+                    <div class="model-picker">
+                      <LumeSelect value={claudeModel} options={claudeModelOptions(claudeModels, tr)}
+                        ariaLabel={tr("Model", "Modelo")} disabled={modelControlsDisabled} minWidth={0} variant="heading" onValueChange={chooseClaudeModel} />
+                    </div>
+                    <span class="model-control-spacer" aria-hidden="true"></span>
+                  </div>
                 {/if}
                 {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
                   <label class="controls-field"><span>{tr("Agent mode", "Modo do agente")}</span>
@@ -2623,24 +2725,12 @@
             {/if}
           </div>
         {/if}
-        {#if session.agent === "codex"}
-          <button class="tool-icon fast-toggle" class:enabled={fastMode} type="button"
-            disabled={runtimeControlsDisabled || fastSaving || !modelSettings} aria-pressed={fastMode}
-            aria-label={fastMode ? tr("Disable Fast mode", "Desativar modo Fast") : tr("Enable Fast mode", "Ativar modo Fast")}
-            title={tr("Fast mode · higher credit usage", "Modo Fast · maior consumo de créditos")}
-            onclick={() => void toggleFastMode()}>
-            {#key fastMode}<WorkspaceChatIcon name="fast" size={18} active={fastMode} />{/key}
-          </button>
-          <button class="tool-icon mode-toggle" class:enabled={collaborationMode === "plan"} type="button"
-            disabled={runtimeControlsDisabled || modeSaving || !modelSettings} aria-pressed={collaborationMode === "plan"}
-            aria-label={collaborationMode === "plan" ? tr("Switch to Default mode", "Mudar para modo padrão") : tr("Switch to Plan mode", "Mudar para modo planejamento")}
-            title={collaborationMode === "plan" ? "Plan" : tr("Default", "Padrão")}
-            onclick={() => void toggleCollaborationMode()}>
-            {#key collaborationMode}<WorkspaceChatIcon name={collaborationMode === "plan" ? "mode-plan" : "mode-default"} size={18} active={collaborationMode === "plan"} />{/key}
-          </button>
+        {#if session.agent === "codex" && collaborationMode === "plan"}
+          <span class="plan-chip" title={tr("Plan mode · /plan switches back", "Modo Plan · /plan volta ao padrão")}><WorkspaceChatIcon name="mode-plan" size={13} active />Plan</span>
         {/if}
       </div>
-    {/if}
+      {/if}
+    </div>
   </form>
 </article>
 
@@ -2698,7 +2788,7 @@
   .text-zoom-popover button { width: 30px; height: 28px; border: 0; border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-subtle); font-size: 16px; cursor: pointer; }
   .text-zoom-popover button:disabled { opacity: .35; cursor: default; }
   .text-zoom-popover output { color: var(--workspace-muted); font-size: 10px; font-weight: 720; text-align: center; font-variant-numeric: tabular-nums; }
-  .agent-controls { position: relative; }
+  .agent-controls { position: static; }
   .agent-controls-popover { position: absolute; z-index: 12; bottom: calc(100% + 9px); left: 0; width: min(320px, calc(100cqw - 20px)); max-height: min(450px, calc(100vh - 115px)); padding: 15px; overflow: visible; border: 1px solid var(--workspace-line); border-radius: 16px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(8, 18, 13, .2); animation: controls-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
   .controls-field { margin-top: 11px; display: grid; gap: 7px; }
   .agent-controls-popover .controls-field:first-child { margin-top: 0; }
@@ -2724,13 +2814,27 @@
   .effort-field.ultra .effort-track::before { background: linear-gradient(90deg, color-mix(in srgb, #7652c6 32%, transparent), color-mix(in srgb, #b48aff 54%, transparent), color-mix(in srgb, #7652c6 32%, transparent)); background-size: 220% 100%; box-shadow: inset 0 1px 2px rgba(50, 31, 83, .18), 0 3px 12px rgba(154, 112, 232, .2); animation: ultra-slider-flow 2.4s linear infinite; }
   .effort-field.ultra .effort-progress { background: linear-gradient(90deg, #7652c6, #c6a9ff, #8d62df); background-size: 180% 100%; box-shadow: 0 3px 12px rgba(154, 112, 232, .35); animation: ultra-slider-flow 2.4s linear infinite; }
   .effort-field.ultra .effort-thumb { box-shadow: 0 0 0 1px #9a70e8, 0 0 12px rgba(154, 112, 232, .48); }
+  .controls-model-row { min-width: 0; min-height: 34px; margin-top: 0; display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; align-items: center; gap: 5px; }
+  .model-picker { min-width: 0; width: 100%; }
+  .model-picker :global(.lume-select) { width: 100%; }
+  .model-picker :global(.lume-select.heading .lume-select-trigger) { box-sizing: border-box; position: relative; width: 100%; height: 32px; min-height: 32px; padding: 0 12px; justify-content: center; border: 1px solid transparent; border-radius: 9px; color: var(--workspace-strong); background: transparent; text-align: center; transition: border-color 150ms ease, background 150ms ease, color 150ms ease; }
+  .model-picker :global(.lume-select.heading .lume-select-trigger:hover), .model-picker :global(.lume-select.heading .lume-select-trigger.open) { border-color: color-mix(in srgb, var(--workspace-accent) 24%, var(--workspace-line)); background: var(--workspace-subtle); }
+  .model-picker :global(.lume-select.heading .lume-select-trigger > span:first-child) { min-width: 0; flex: 1; overflow: hidden; text-align: center; text-overflow: ellipsis; }
+  .model-picker :global(.select-chevron) { display: none; }
+  .composer .controls-icon-button { width: 32px; height: 32px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 9px; color: var(--workspace-muted); background: transparent; }
+  .composer .controls-icon-button:hover:not(:disabled), .composer .controls-icon-button.enabled { transform: none; color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .composer .controls-icon-button:disabled { opacity: .32; }
+  .model-control-spacer { width: 32px; height: 32px; }
+  .composer .controls-icon-button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+  .fast-indicator { display: inline-flex; flex: 0 0 auto; color: var(--workspace-accent); }
+  .plan-chip { height: 22px; margin-left: 2px; padding: 0 8px 0 5px; display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 9px; font-weight: 740; }
   .controls-note { margin: 10px 0 0; color: var(--workspace-muted); font-size: 8px; line-height: 1.5; }
   .controls-loading { min-height: 68px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--workspace-muted); font-size: 9px; }
   .controls-loading i { width: 12px; height: 12px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 650ms linear infinite; }
   .controls-saving { margin: 10px 0 0; color: var(--workspace-muted); font-size: 8px; }
   .agent-controls-popover input:disabled { opacity: .45; cursor: default; }
   .conversation-shell { position: relative; min-width: 0; min-height: 0; display: flex; flex: 1 1 auto; overflow: hidden; }
-  .conversation { --chat-edge-gutter: clamp(28px, 5cqw, 54px); min-width: 0; min-height: 0; width: 100%; padding: 25px var(--chat-edge-gutter) 26px; display: flex; flex-direction: column-reverse; flex: 1 1 auto; overflow: auto; overflow-anchor: none; overscroll-behavior: none; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .conversation { --chat-edge-gutter: clamp(28px, 5cqw, 54px); min-width: 0; min-height: 0; width: 100%; padding: 25px var(--chat-edge-gutter) calc(26px + var(--composer-overlap, 0px)); display: flex; flex-direction: column-reverse; flex: 1 1 auto; overflow: auto; overflow-anchor: none; overscroll-behavior: none; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   .conversation-content { min-width: 0; display: flex; flex-direction: column; gap: 15px; flex: 1 0 auto; }
   .conversation::-webkit-scrollbar { width: 9px; height: 9px; }.conversation::-webkit-scrollbar-track { background: transparent; }.conversation::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: var(--workspace-scroll-thumb); background-clip: content-box; }
   .load-earlier-chat { max-width: min(240px, 100%); min-height: 30px; margin: 0 auto 7px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: var(--workspace-chat-tiny-size); font-weight: 700; cursor: pointer; }
@@ -2835,7 +2939,7 @@
   .agent-typing { width: fit-content; min-height: 46px; padding: 0 3px; display: flex; align-items: center; gap: 10px; color: #4e98ca; }
   .agent-typing .typing-label { color: transparent; background: linear-gradient(90deg, #67837a 10%, #5aa1ce 44%, #a3d2ef 53%, #5aa1ce 62%, #67837a 90%); background-size: 240% 100%; background-clip: text; font-size: 12px; font-weight: 720; letter-spacing: -.01em; animation: thinking-label-shimmer 1.75s linear infinite; }
   .typing-elapsed { padding-left: 9px; border-left: 1px solid var(--workspace-line); color: var(--workspace-muted); font-size: 10px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .latest-button { position: absolute; right: 18px; bottom: 30px; z-index: 3; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 5px 16px rgba(17, 35, 27, .09); cursor: pointer; animation: latest-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
+  .latest-button { position: absolute; right: 18px; bottom: calc(30px + var(--composer-overlap, 0px)); z-index: 3; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 5px 16px rgba(17, 35, 27, .09); cursor: pointer; animation: latest-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
   .latest-button:hover { transform: translateY(-1px); }
   .sources-scrim { position: absolute; z-index: 5; inset: 64px 0 0; padding: 0; border: 0; background: color-mix(in srgb, var(--workspace-pane) 28%, transparent); backdrop-filter: blur(1px); cursor: default; animation: sources-fade 150ms ease-out both; }
   .sources-sidebar { position: absolute; z-index: 6; top: 64px; right: 0; bottom: 0; width: min(340px, 88%); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--workspace-line); color: var(--workspace-text); background: var(--workspace-raised); box-shadow: -16px 0 46px rgba(8, 18, 13, .13); animation: sources-arrive 220ms cubic-bezier(.16, 1, .3, 1) both; }
@@ -2899,7 +3003,13 @@
   .writer-conflict-dialog footer button:hover:not(:disabled) { color: var(--workspace-strong); background: var(--workspace-subtle); transform: translateY(-1px); }
   .writer-conflict-dialog footer .writer-conflict-primary { border-color: transparent; color: #f5fbf7; background: var(--workspace-accent); }
   .writer-conflict-dialog footer button:disabled { opacity: .55; cursor: default; }
-  .composer { position: relative; z-index: 2; min-width: 0; flex: 0 0 auto; padding: 12px clamp(14px, 4cqw, 28px) 15px; border-top: 1px solid var(--workspace-line); background: var(--workspace-pane); }
+  /* Only the field is solid. The form floats over the chat; the chat fades out behind it. */
+  .composer { position: relative; z-index: 2; min-width: 0; flex: 0 0 auto; padding: 12px clamp(14px, 4cqw, 28px) 15px; border-top: 0; background: transparent; transition: opacity 160ms ease; }
+  .composer.crossfade-out { opacity: 0; pointer-events: none; transition-duration: 110ms; }
+  .composer.crossfade-in { opacity: 0; pointer-events: none; transition: none; }
+  .composer:not(.fresh) { position: absolute; right: 0; bottom: 0; left: 0; padding-top: 6px; pointer-events: none; }
+  .composer:not(.fresh) > :global(*) { pointer-events: auto; }
+  .composer:not(.fresh)::before { position: absolute; z-index: -1; top: -34px; right: 0; bottom: 0; left: 0; background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--workspace-pane) 74%, transparent) 64%); content: ""; pointer-events: none; -webkit-backdrop-filter: blur(7px); backdrop-filter: blur(7px); -webkit-mask-image: linear-gradient(to bottom, transparent, #000 60%); mask-image: linear-gradient(to bottom, transparent, #000 60%); }
   .composer.fresh { position: absolute; top: 50%; right: 0; left: 0; z-index: 3; border-top: 0; background: transparent; transform: translateY(-50%); }
   .composer-welcome { max-width: 760px; margin: 0 auto 24px; display: flex; align-items: center; justify-content: center; gap: 13px; }
   .composer-welcome strong { color: var(--workspace-strong); font-size: clamp(15px, 2.2cqw, 22px); font-weight: 710; letter-spacing: -.025em; }
@@ -2915,7 +3025,7 @@
   .pending-attachments > span.file { width: min(170px, 44cqw); padding: 0 26px 0 9px; }
   .pending-attachments small { min-width: 0; overflow: hidden; font-size: 8px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
   .composer .pending-attachments button { position: absolute; top: 3px; right: 3px; width: 18px; height: 18px; padding: 0; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--workspace-line) 75%, transparent); border-radius: 6px; color: var(--workspace-strong); background: color-mix(in srgb, var(--workspace-raised) 90%, transparent); font-size: 13px; cursor: pointer; }
-  .composer-field { position: relative; max-width: 760px; min-height: 45px; margin: 0 auto; padding: 6px 6px 6px 12px; display: flex; align-items: flex-end; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 13px; background: var(--workspace-raised); box-shadow: 0 5px 18px rgba(17, 35, 27, .055); transition: border-color 140ms ease, box-shadow 140ms ease; }
+  .composer-field { --field-radius: 18px; --field-inset: 7px; --field-button-radius: calc(var(--field-radius) - var(--field-inset)); position: relative; max-width: 760px; min-height: 47px; margin: 0 auto; padding: var(--field-inset); display: flex; flex-direction: column; align-items: stretch; gap: 3px; border: 1px solid var(--workspace-line); border-radius: var(--field-radius); background: var(--workspace-raised); box-shadow: 0 5px 18px rgba(17, 35, 27, .055); transition: border-color 140ms ease, box-shadow 140ms ease; }
   @property --composer-beam-angle { syntax: "<angle>"; inherits: true; initial-value: 0deg; }
   /* The three-layer md/colorful beam is adapted for Svelte from Libraries.dev BorderBeam (MIT). */
   .composer-field.beam {
@@ -2980,16 +3090,17 @@
   .composer textarea::placeholder { color: var(--workspace-faint); }.composer textarea:disabled { cursor: default; }
   .composer.unavailable .composer-field { background: var(--workspace-subtle); box-shadow: none; }
   .queue-label { margin-bottom: 8px; padding: 3px 6px; border-radius: 5px; color: #4d8cb8; background: rgba(78, 152, 202, .1); font-size: 7px; font-weight: 800; text-transform: uppercase; }
-  .composer button { width: 33px; height: 33px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 10px; color: #f5fbf7; background: var(--workspace-accent); cursor: pointer; transition: transform 180ms cubic-bezier(.16, 1, .3, 1), opacity 120ms ease; }
+  .composer button { width: 33px; height: 33px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: var(--field-button-radius, 11px); color: #f5fbf7; background: var(--workspace-accent); cursor: pointer; transition: transform 180ms cubic-bezier(.16, 1, .3, 1), opacity 120ms ease; }
   .composer .send-button { position: relative; overflow: hidden; isolation: isolate; }
   .composer .attach-button { color: var(--workspace-muted); background: transparent; }
   .composer .attach-button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .composer .stop-button { color: #fff7f6; background: #b96862; }
-  .composer-tools { max-width: 760px; min-height: 31px; margin: 6px auto 0; display: flex; align-items: center; gap: 3px; }
-  .composer-tools .model-trigger, .composer-tools .tool-icon { width: auto; min-width: 30px; height: 28px; padding: 0 7px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 680; }
-  .composer-tools .model-trigger { max-width: min(180px, 42cqw); padding-left: 4px; }
-  .permission-picker { position: relative; display: inline-flex; }
-  .composer-tools .permission-trigger { padding-left: 7px; }
+  .composer-input-row { min-width: 0; display: flex; align-items: flex-end; gap: 7px; }
+  .composer-field .composer-input-row > textarea { padding-left: 5px; }
+  .composer-tools { min-height: 30px; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 3px; }
+  .composer-tools .model-trigger { width: auto; min-width: 30px; height: 28px; padding: 0 9px 0 8px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: var(--field-button-radius); color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 680; }
+  .composer-tools .model-trigger { max-width: min(180px, 42cqw); }
+  .permission-picker { position: static; display: inline-flex; }
   .composer-tools .permission-trigger.tone-auto { color: var(--workspace-accent); }
   .composer-tools .permission-trigger.tone-danger { color: #d85c64; }
   .permission-menu { position: absolute; z-index: 13; bottom: calc(100% + 8px); left: 0; width: min(330px, calc(100cqw - 24px)); padding: 5px; display: grid; gap: 2px; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 44px rgba(8, 18, 13, .18); }
@@ -3002,10 +3113,8 @@
   .permission-menu button > :global(.lume-icon) { flex: 0 0 auto; color: var(--workspace-accent); }
   .permission-note { margin: 2px 9px 4px; color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); }
   .model-trigger span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .composer-tools .model-trigger:hover:not(:disabled), .composer-tools .tool-icon:hover:not(:disabled), .composer-tools .model-trigger.active, .composer-tools .tool-icon.enabled { color: var(--workspace-accent); background: var(--workspace-subtle); }
-  .composer-tools .tool-icon { width: 30px; padding: 0; }
-  .composer-tools .tool-icon:focus-visible, .composer-tools .model-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
-  .composer-tools .tool-icon :global(.workspace-chat-icon) { animation: control-icon-arrive 210ms cubic-bezier(.16, 1, .3, 1) both; }
+  .composer-tools .model-trigger:hover:not(:disabled), .composer-tools .model-trigger.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .composer-tools .model-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
   .composer button:hover:not(:disabled) { transform: translateY(-1px) scale(1.03); }.composer button:disabled { opacity: .28; cursor: default; }
   .composer button.launching:disabled { opacity: 1; }
   .usage-notices { max-width: 760px; margin: 0 auto 8px; display: grid; gap: 5px; }
@@ -3076,6 +3185,6 @@
     .conversation { --chat-edge-gutter: 28px; }.message { width: 94%; }.user-message { width: fit-content; max-width: 94%; }.composer { padding-right: 10px; padding-left: 10px; }
   }
   @media (max-height: 640px) { .conversation { padding-top: 17px; padding-bottom: 18px; }.pane-header { min-height: 56px; }.composer { padding-top: 9px; padding-bottom: 10px; } }
-  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .writer-conflict-backdrop, .writer-conflict-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .writer-conflict-dialog footer button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
-  @media (prefers-reduced-motion: reduce) { .composer-tools .tool-icon :global(.workspace-chat-icon), .effort-field.max .effort-thumb, .effort-field.ultra .effort-track::before, .effort-field.ultra .effort-progress { animation: none; }.effort-thumb, .effort-thumb::before, .effort-progress { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .writer-conflict-backdrop, .writer-conflict-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .writer-conflict-dialog footer button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer, .composer.crossfade-out, .composer.crossfade-in, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .effort-field.max .effort-thumb, .effort-field.ultra .effort-track::before, .effort-field.ultra .effort-progress { animation: none; }.effort-thumb, .effort-thumb::before, .effort-progress { transition: none; } }
 </style>

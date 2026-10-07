@@ -383,7 +383,7 @@
     const items: SystemBannerItem[] = [];
     if (workflowDraftError) items.push({ id: "workflow-error", message: workflowDraftError, tone: "error", onDismiss: () => { workflowDraftError = null; } });
     if (handoffError) items.push({ id: "handoff-error", message: handoffError, tone: "error", onDismiss: () => { handoffError = null; } });
-    if (modelError) items.push({ id: "model-error", message: modelError, tone: "error", onDismiss: () => { modelError = null; } });
+    if (modelError && !modelDialogOpen) items.push({ id: "model-error", message: modelError, tone: "error", onDismiss: () => { modelError = null; } });
     for (const alert of agentAlerts) {
       if (alert.usage || dismissedAgentAlertIds.includes(alert.id)) continue;
       items.push({
@@ -889,7 +889,6 @@
     const lumeCommands: SlashCommand[] = [];
     if (session?.agent === "codex" && !promptIsRunning) {
       lumeCommands.push(
-        { name: "lume-plan", description: "Switch Codex to Plan mode", source: "lume", prefix: "/", action: "plan" },
         { name: "lume-default", description: "Switch Codex to Default mode", source: "lume", prefix: "/", action: "default" },
       );
     }
@@ -2400,6 +2399,7 @@
 
   async function openModelDialog() {
     if (!session || !["codex", "claude_code", "opencode"].includes(session.agent)) return false;
+    if (modelLoading || modelSaving) return true;
     composerToolsOpen = false;
     if (session.controlOrigin !== "lume") {
       message = tr(
@@ -2459,7 +2459,7 @@
 
   async function saveModelSettings() {
     if (!session || modelSaving) return;
-    if (session.agent === "codex" && (!selectedModel || !selectedEffort)) return;
+    if (session.agent === "codex" && (!modelSettings || !selectedModel || !selectedEffort)) return;
     modelSaving = true;
     modelError = null;
     const deferredUntilPromptEnds = session.agent === "codex" && promptIsRunning;
@@ -3740,6 +3740,15 @@
               </div>
             </header>
 
+            {#if modelError}
+              <div class="model-settings-error" role="alert">
+                <span>{modelError}</span>
+                {#if session.agent === "codex" && !modelLoading && !modelSettings}
+                  <button type="button" onclick={() => void openModelDialog()}>{tr("Retry", "Tentar novamente")}</button>
+                {/if}
+              </div>
+            {/if}
+
             {#snippet permissionSection()}
               {#if sessionPermission}
                 <section class="model-settings-section claude-model-settings">
@@ -3818,7 +3827,7 @@
 
             <footer>
               <button disabled={modelSaving} type="button" onclick={() => (modelDialogOpen = false)}>{tr("Cancel", "Cancelar")}</button>
-              <button class="takeover" disabled={modelLoading || modelSaving || (session.agent === "codex" && (!selectedModel || !selectedEffort))} type="button" onclick={() => void saveModelSettings()}>
+              <button class="takeover" disabled={modelLoading || modelSaving || (session.agent === "codex" && (!modelSettings || !selectedModel || !selectedEffort))} type="button" onclick={() => void saveModelSettings()}>
                 {modelSaving ? tr("Saving…", "Salvando…") : tr("Save", "Salvar")}
               </button>
             </footer>
@@ -4572,6 +4581,9 @@
   .model-settings-icon svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
   .model-settings-section { min-height: 0; display: grid; gap: 6px; }
   .model-settings-section:first-of-type { overflow: hidden; }
+  .model-settings-error { min-width: 0; padding: 8px; display: flex; align-items: center; gap: 8px; border: 1px solid rgba(184, 95, 89, 0.2); border-radius: 9px; color: #9e514c; background: rgba(184, 95, 89, 0.07); font: 620 var(--chat-tiny-font-size)/1.45 Inter, sans-serif; }
+  .model-settings-error > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  .model-settings-error > button { flex: 0 0 auto; color: #9e514c; border-color: rgba(184, 95, 89, 0.22); background: rgba(184, 95, 89, 0.06); }
   .claude-model-settings label { display: grid; gap: 6px; }
   .claude-model-settings > small { color: #7b8982; font: 550 var(--chat-tiny-font-size)/1.4 Inter, sans-serif; }
   .model-settings-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #718078; font: 800 var(--chat-tiny-font-size) Inter, sans-serif; letter-spacing: 0.06em; text-transform: uppercase; }
@@ -4895,6 +4907,8 @@
   .terminal-window.dark .model-settings-icon { color: #8ed0b0; background: rgba(99, 181, 141, 0.1); }
   .terminal-window.dark .model-settings-label,
   .terminal-window.dark .model-settings-loading { color: #91a299; }
+  .terminal-window.dark .model-settings-error { color: #e0a39d; border-color: rgba(211, 128, 121, 0.19); background: rgba(211, 128, 121, 0.08); }
+  .terminal-window.dark .model-settings-error > button { color: #e0a39d; border-color: rgba(211, 128, 121, 0.22); background: rgba(211, 128, 121, 0.07); }
   .terminal-window.dark .model-settings-label b { color: #8fd0af; background: rgba(91, 177, 136, 0.1); }
   .terminal-window.dark .effort-scale span { color: #71847a; }
   .terminal-window.dark .effort-scale span.active { color: #8fd0af; }

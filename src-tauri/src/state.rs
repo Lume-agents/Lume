@@ -77,6 +77,8 @@ pub struct AppState {
     session_aliases: Arc<Mutex<HashMap<String, String>>>,
     archived_conversations: Arc<Mutex<HashMap<String, Vec<SessionActivity>>>>,
     session_model_overrides: Arc<Mutex<HashMap<(AgentKind, String), SessionModelOverride>>>,
+    /// The permission mode picked in Lume for a conversation, by agent and native id.
+    permission_mode_overrides: Arc<Mutex<HashMap<(AgentKind, String), String>>>,
     active_codex_turns: Arc<Mutex<HashMap<String, String>>>,
     hub_command_responses: Arc<Mutex<HashMap<String, (i64, crate::protocol::HubCommandResponse)>>>,
 }
@@ -159,6 +161,7 @@ impl AppState {
             session_aliases: Arc::new(Mutex::new(preferences.session_aliases)),
             archived_conversations: Arc::new(Mutex::new(HashMap::new())),
             session_model_overrides: Arc::new(Mutex::new(HashMap::new())),
+            permission_mode_overrides: Arc::new(Mutex::new(HashMap::new())),
             active_codex_turns: Arc::new(Mutex::new(HashMap::new())),
             hub_command_responses: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -1480,6 +1483,65 @@ impl AppState {
         Ok(settings)
     }
 
+    pub fn permission_mode_override(&self, session_id: &str) -> Result<Option<String>, String> {
+        let session = self.connected_session(session_id)?;
+        let key = (
+            session.agent,
+            session.native_session_id.unwrap_or(session.id),
+        );
+        self.permission_mode_overrides
+            .lock()
+            .map_err(|_| "Could not read the session permission mode".to_string())
+            .map(|modes| modes.get(&key).cloned())
+    }
+
+    /// For the Codex bridge, which only knows the thread id.
+    pub(crate) fn permission_mode_override_for_native_id(
+        &self,
+        agent: AgentKind,
+        native_session_id: &str,
+    ) -> Result<Option<String>, String> {
+        self.permission_mode_overrides
+            .lock()
+            .map_err(|_| "Could not read the session permission mode".to_string())
+            .map(|modes| modes.get(&(agent, native_session_id.to_string())).cloned())
+    }
+
+    pub fn set_permission_mode_override(&self, session_id: &str, mode: &str) -> Result<(), String> {
+        let session = self.connected_session(session_id)?;
+        let key = (
+            session.agent,
+            session.native_session_id.unwrap_or(session.id),
+        );
+        self.permission_mode_overrides
+            .lock()
+            .map_err(|_| "Could not save the session permission mode".to_string())?
+            .insert(key, mode.to_string());
+        Ok(())
+    }
+
+    /// Shows a newly picked permission scope at once, before the agent reports it.
+    pub fn set_permission_scope(
+        &self,
+        session_id: &str,
+        scope: PermissionProfile,
+    ) -> Result<(), String> {
+        let target = self.connected_session(session_id)?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Não foi possível atualizar as permissões".to_string())?;
+        for session in sessions.iter_mut().filter(|session| {
+            session.id == session_id
+                || (session.agent == target.agent
+                    && target.native_session_id.is_some()
+                    && session.native_session_id == target.native_session_id)
+        }) {
+            copy_permission_scope(&mut session.permission_profile, &scope);
+        }
+        Ok(())
+    }
+
     pub fn record_queued_prompt_activity(
         &self,
         session_id: &str,
@@ -1668,6 +1730,22 @@ impl AppState {
             .save_session(&snapshot)
     }
 
+    /// A prompt taken from the queue is now running.
+    pub fn mark_prompt_started(&self, session_id: &str) -> Result<(), String> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Não foi possível atualizar o prompt da sessão".to_string())?;
+        let session = sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| "Sessão não encontrada".to_string())?;
+        session.status = SessionStatus::Running;
+        session.status_label = "Executando".into();
+        session.updated_at = now_millis();
+        Ok(())
+    }
+
     pub fn mark_prompt_interrupted(&self, session_id: &str) -> Result<(), String> {
         let now = now_millis();
         let mut sessions = self
@@ -1693,10 +1771,10 @@ impl AppState {
             session,
             SessionActivity {
                 id: format!("local:{session_id}:interrupted:{now}"),
-                kind: "activity".into(),
+                kind: "interrupt".into(),
                 title: "Prompt interrupted".into(),
                 detail: None,
-                status: "completed".into(),
+                status: "interrupted".into(),
                 created_at: now,
                 files: Vec::new(),
                 attachments: Vec::new(),
@@ -2225,6 +2303,17 @@ impl AppState {
                 .is_some_and(crate::session_filters::is_codex_internal_workspace)
         {
             return Ok(None);
+        }
+
+        if event.agent == AgentKind::Codex {
+            if let Some(origin) = event
+                .native_session_id
+                .as_deref()
+                .and_then(crate::integrations::codex_fork_origin)
+            {
+                let activity = crate::adapters::fork_origin_activity(&event.session_id, origin);
+                event.activities.push(activity);
+            }
         }
 
         let now = now_millis();
@@ -3426,6 +3515,7 @@ impl AppState {
                     .unwrap_or_default(),
                 rate_limits: Vec::new(),
                 prompt_token_usage: Vec::new(),
+                forked_from: None,
             };
             snapshots.push(session.clone());
             sessions.push(session);
@@ -3571,10 +3661,17 @@ fn session_from_event(event: &HookEvent, now: i64) -> AgentSession {
         activities: Vec::new(),
         rate_limits: Vec::new(),
         prompt_token_usage: Vec::new(),
+        forked_from: None,
     }
 }
 
 fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) {
+    if activity.kind == "fork_origin" {
+        if let Some(origin) = activity.detail.filter(|origin| !origin.trim().is_empty()) {
+            session.forked_from = Some(origin);
+        }
+        return;
+    }
     if activity.kind == "token_usage" {
         if let Some(usage) = activity
             .detail
@@ -4441,7 +4538,7 @@ fn apply_metadata(session: &mut AgentSession, event: &HookEvent) {
         && event.native_session_id.is_some();
     let keeps_managed_desktop_source = matches!(
         session.agent,
-        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
+        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity | AgentKind::ClaudeCode
     ) && session.control_origin == SessionControlOrigin::Lume
         && session.source == SessionSource::Desktop
         && event.process_id.is_none();

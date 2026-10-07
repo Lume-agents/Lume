@@ -446,6 +446,7 @@ impl CliIdentities {
                     card.activities = source.activities.clone();
                     card.results = source.results.clone();
                     card.prompt_token_usage = source.prompt_token_usage.clone();
+                    card.forked_from = source.forked_from.clone();
                     card.last_response = source.last_response.clone();
                     // Do not turn an old rollout's interrupted/running state into
                     // the status of a newly opened CLI.

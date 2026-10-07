@@ -1,7 +1,8 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    path::Path,
     sync::mpsc,
     thread,
     time::Duration,
@@ -169,6 +170,27 @@ fn map_event_with_context(
     } else {
         hook_name
     };
+    // The CLI's agent view starts background sessions that nobody has used yet.
+    // Their start and idle events say nothing worth a card; the first real activity does.
+    if provider == "claude"
+        && matches!(
+            hook_name.as_str(),
+            "SessionStart" | "SessionEnd" | "Notification"
+        )
+        && string(raw, "session_id").is_some_and(|session_id| {
+            crate::integrations::claude_background_session_unused(&session_id)
+        })
+    {
+        return None;
+    }
+    // Claude's internal forks (recap, prompt suggestion) also fire SubagentStop,
+    // but without an agent_type; only real subagents carry one.
+    if provider == "claude"
+        && matches!(hook_name.as_str(), "SubagentStart" | "SubagentStop")
+        && string(raw, "agent_type").is_none_or(|agent_type| agent_type.trim().is_empty())
+    {
+        return None;
+    }
     // Antigravity and legacy Gemini hooks are observation-only. Their payloads
     // already contain a provider-native session identity, while traversing all
     // processes for every tool hook is both expensive and prone to associating
@@ -177,6 +199,8 @@ fn map_event_with_context(
         provider,
         std::env::var("LUME_ANTIGRAVITY_STREAM").ok().as_deref(),
     );
+    let managed_claude_prompt =
+        provider == "claude" && std::env::var("LUME_CLAUDE_PROMPT_CAPTURE").as_deref() == Ok("1");
     let (process_id, source, headless_resume) =
         if matches!(&agent, AgentKind::Antigravity | AgentKind::Gemini) {
             (None, SessionSource::Cli, false)
@@ -184,7 +208,7 @@ fn map_event_with_context(
             let (pid, source) = codex_context?;
             (pid, source, false)
         } else {
-            agent_process_context(provider)
+            agent_process_context(provider, string(raw, "session_id").as_deref())
         };
     let event = match (provider, hook_name.as_str()) {
         (_, "SessionStart") => HookEventKind::SessionStarted,
@@ -219,13 +243,16 @@ fn map_event_with_context(
         ("claude", "Notification")
             if string(raw, "notification_type").as_deref() == Some("agent_completed") =>
         {
-            if notification_reports_failure(raw) {
+            if managed_claude_prompt {
+                HookEventKind::Activity
+            } else if notification_reports_failure(raw) {
                 HookEventKind::Failed
             } else {
                 HookEventKind::Completed
             }
         }
         ("antigravity", "Stop") => antigravity_stop_event(raw),
+        ("claude", "Stop" | "SessionEnd") if managed_claude_prompt => HookEventKind::Activity,
         ("codex", "Stop") | ("claude", "Stop") | ("gemini", "AfterAgent") => {
             HookEventKind::Completed
         }
@@ -304,9 +331,15 @@ fn map_event_with_context(
         },
         agent,
         agent_label: None,
-        session_name: ["session_name", "thread_name", "conversation_name", "slug"]
-            .into_iter()
-            .find_map(|key| string(raw, key)),
+        session_name: (provider == "claude")
+            .then(|| string(raw, "transcript_path"))
+            .flatten()
+            .and_then(|path| crate::integrations::claude_transcript_title(Path::new(&path)))
+            .or_else(|| {
+                ["session_name", "thread_name", "conversation_name", "slug"]
+                    .into_iter()
+                    .find_map(|key| string(raw, key))
+            }),
         project: cwd.as_deref().and_then(project_name),
         source: Some(source),
         source_app: None,
@@ -559,6 +592,18 @@ fn is_test_command(command: &str) -> bool {
     ]
     .iter()
     .any(|pattern| command.contains(pattern))
+}
+
+/// The profile of a Claude conversation Lume opens with the given access mode;
+/// later hooks of each prompt keep it current.
+pub(crate) fn claude_launch_profile(mode: Option<&AccessMode>) -> PermissionProfile {
+    let mode = match mode {
+        Some(AccessMode::Plan | AccessMode::ReadOnly) => Some("plan"),
+        Some(AccessMode::WorkspaceWrite) => Some("acceptEdits"),
+        Some(AccessMode::FullAccess) => Some("bypassPermissions"),
+        Some(AccessMode::Custom) | None => None,
+    };
+    permission_profile("claude", mode, &Value::Null, true)
 }
 
 fn permission_profile(
@@ -888,7 +933,10 @@ fn status_label(hook: &str, event: &HookEventKind) -> Option<&'static str> {
     }
 }
 
-fn agent_process_context(provider: &str) -> (Option<u32>, SessionSource, bool) {
+fn agent_process_context(
+    provider: &str,
+    session_id: Option<&str>,
+) -> (Option<u32>, SessionSource, bool) {
     if provider == "codex" {
         let (pid, source) = crate::codex_identity_probe::hook_process_context();
         return (pid, source, false);
@@ -913,7 +961,7 @@ fn agent_process_context(provider: &str) -> (Option<u32>, SessionSource, bool) {
     else {
         return (None, SessionSource::Cli, false);
     };
-    let mut agent_pid = None;
+    let mut chain: Vec<(u32, String, Vec<String>)> = Vec::new();
     let mut source = SessionSource::Cli;
     let mut headless_resume = false;
     for _ in 0..10 {
@@ -934,16 +982,12 @@ fn agent_process_context(provider: &str) -> (Option<u32>, SessionSource, bool) {
             .map(|part| part.to_string_lossy().to_lowercase())
             .collect::<Vec<_>>();
         let command = arguments.join(" ");
-        // Hooks de Codex/Gemini podem passar por um shell efêmero cujo comando
-        // também contém o provider. Continua subindo para guardar o processo
-        // estável mais externo da sessão, em vez do wrapper que termina logo
-        // após enviar o evento ao Lume.
-        if hook_parent_is_user_agent(provider, &name, &arguments) {
-            agent_pid = Some(pid.as_u32());
-        }
+        chain.push((pid.as_u32(), name.clone(), arguments.clone()));
         if provider == "claude"
             && command.split_whitespace().any(|part| part == "--print")
-            && command.split_whitespace().any(|part| part == "--resume")
+            && command
+                .split_whitespace()
+                .any(|part| matches!(part, "--resume" | "--session-id"))
         {
             headless_resume = true;
         }
@@ -959,7 +1003,54 @@ fn agent_process_context(provider: &str) -> (Option<u32>, SessionSource, bool) {
         };
         pid = parent;
     }
-    (agent_pid, source, headless_resume)
+    // Claude's own registry says which process holds this conversation.
+    let registered_pids = session_id
+        .filter(|_| provider == "claude")
+        .map(crate::integrations::claude_registered_pids)
+        .unwrap_or_default();
+    (
+        pick_agent_pid(provider, &chain, &registered_pids),
+        source,
+        headless_resume,
+    )
+}
+
+/// The process a hook reports as its conversation, from the hook's ancestors
+/// (nearest first).
+///
+/// Hooks of Codex/Gemini can pass through an ephemeral shell whose command also
+/// names the provider, so the outermost matching process wins: the stable one,
+/// not the wrapper that exits right after sending the event.
+///
+/// Claude's background sessions break that rule. The daemon's processes sit
+/// between the conversation and the CLI that launched the daemon, and that CLI
+/// is "the outermost claude" for every conversation. So Claude's registry wins
+/// when it names an ancestor, and the search never climbs past the daemon.
+fn pick_agent_pid(
+    provider: &str,
+    chain: &[(u32, String, Vec<String>)],
+    registered: &[u32],
+) -> Option<u32> {
+    let chain = if provider == "claude" {
+        let end = chain
+            .iter()
+            .position(|(_, _, arguments)| crate::discovery::is_claude_daemon_arguments(arguments))
+            .unwrap_or(chain.len());
+        &chain[..end]
+    } else {
+        chain
+    };
+    chain
+        .iter()
+        .find(|(pid, _, _)| registered.contains(pid))
+        .map(|(pid, _, _)| *pid)
+        .or_else(|| {
+            chain
+                .iter()
+                .filter(|(_, name, arguments)| hook_parent_is_user_agent(provider, name, arguments))
+                .map(|(pid, _, _)| *pid)
+                .next_back()
+        })
 }
 
 fn hook_parent_is_user_agent(provider: &str, name: &str, arguments: &[String]) -> bool {
@@ -987,7 +1078,203 @@ fn hook_parent_is_user_agent(provider: &str, name: &str, arguments: &[String]) -
 
 #[cfg(test)]
 mod process_context_tests {
-    use super::hook_parent_is_user_agent;
+    use super::{hook_parent_is_user_agent, pick_agent_pid};
+
+    // `argv` as the OS gives it. Claude retitles its daemon processes, so their
+    // `argv[0]` is one string such as "claude bg-pty-host".
+    fn ancestor(pid: u32, name: &str, argv: &[&str]) -> (u32, String, Vec<String>) {
+        (
+            pid,
+            name.to_string(),
+            argv.iter().map(|element| element.to_lowercase()).collect(),
+        )
+    }
+
+    // The tree `claude` builds for its background sessions: each conversation
+    // runs under the daemon's pty host, and the daemon under the CLI panel.
+    fn daemon_tree(conversation: (u32, &str, &[&str])) -> Vec<(u32, String, Vec<String>)> {
+        vec![
+            ancestor(conversation.0, conversation.1, conversation.2),
+            ancestor(
+                3_329_806,
+                "2.1.292",
+                &[
+                    "claude bg-pty-host",
+                    "--bg-pty-host",
+                    "/tmp/p.sock",
+                    "120",
+                    "30",
+                    "--",
+                    "/v/2.1.292",
+                    "--agent",
+                    "claude",
+                ],
+            ),
+            ancestor(
+                3_329_776,
+                "claude",
+                &[
+                    "/home/user/.local/bin/claude",
+                    "daemon",
+                    "run",
+                    "--origin",
+                    "transient",
+                ],
+            ),
+            ancestor(3_329_380, "claude", &["claude"]),
+            ancestor(3_329_132, "bash", &["bash"]),
+        ]
+    }
+
+    #[test]
+    fn background_sessions_do_not_borrow_the_pid_of_the_cli_that_started_the_daemon() {
+        // With Claude's registry: every conversation reports its own process.
+        let claimed_spare: &[&str] = &[
+            "claude bg-spare",
+            "--bg-spare",
+            "/tmp/spare/527fcebf.claim.sock",
+        ];
+        let background: &[&str] = &[
+            "/v/2.1.292",
+            "--session-id",
+            "929e9dc1",
+            "--agent",
+            "claude",
+            "--inherit-permission-mode",
+            "auto",
+        ];
+        let fork: &[&str] = &[
+            "/v/2.1.292",
+            "--session-id",
+            "b2750109",
+            "--fork-session",
+            "--resume",
+            "x.jsonl",
+        ];
+        for (pid, name, argv, session) in [
+            (3_329_829, "2.1.292", claimed_spare, "analysis-fork"),
+            (3_329_828, "2.1.292", background, "bg-user"),
+            (3_329_834, "2.1.292", fork, "bg-fork"),
+        ] {
+            let chain = daemon_tree((pid, name, argv));
+            assert_eq!(
+                pick_agent_pid("claude", &chain, &[pid]),
+                Some(pid),
+                "{session}"
+            );
+        }
+        // Without it (the registry file is written a moment after SessionStart)
+        // neither the pty host nor the CLI panel is taken for the conversation.
+        assert_eq!(
+            pick_agent_pid("claude", &daemon_tree((3_329_834, "2.1.292", fork)), &[]),
+            None
+        );
+        assert_eq!(
+            pick_agent_pid(
+                "claude",
+                &daemon_tree((3_329_828, "2.1.292", background)),
+                &[]
+            ),
+            Some(3_329_828)
+        );
+    }
+
+    // Runs the real choice over this machine's live Claude processes:
+    // cargo test live_claude_sessions -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn live_claude_sessions_report_their_own_process() {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+        let home = std::env::var("HOME").expect("HOME");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(format!("{home}/.claude/sessions"))
+            .expect("registro")
+            .flatten()
+        {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(entry.path()).unwrap_or_default(),
+            ) else {
+                continue;
+            };
+            let (Some(pid), Some(session)) = (
+                record["pid"].as_u64().map(|pid| pid as u32),
+                record["sessionId"].as_str(),
+            ) else {
+                continue;
+            };
+            if system.process(Pid::from_u32(pid)).is_none()
+                || record["cwd"]
+                    .as_str()
+                    .is_some_and(|cwd| cwd.starts_with("/tmp"))
+            {
+                continue;
+            }
+            let mut chain = Vec::new();
+            let mut next = Some(Pid::from_u32(pid));
+            while let (Some(current), true) = (next, chain.len() < 10) {
+                let Some(process) = system.process(current) else {
+                    break;
+                };
+                chain.push((
+                    current.as_u32(),
+                    process.name().to_string_lossy().to_lowercase(),
+                    process
+                        .cmd()
+                        .iter()
+                        .map(|part| part.to_string_lossy().to_lowercase())
+                        .collect::<Vec<_>>(),
+                ));
+                next = process.parent();
+            }
+            let registered = crate::integrations::claude_registered_pids(session);
+            let picked = pick_agent_pid("claude", &chain, &registered);
+            let without_registry = pick_agent_pid("claude", &chain, &[]);
+            println!(
+                "{} {:<11} real={pid:<8} com registro={picked:?} sem registro={without_registry:?}",
+                &session[..8],
+                record["kind"].as_str().unwrap_or("?"),
+            );
+            assert_eq!(picked, Some(pid), "{session}");
+            assert_ne!(
+                without_registry,
+                Some(3_329_806),
+                "o pty host não é a conversa"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "nenhuma sessão Claude viva para conferir");
+    }
+
+    #[test]
+    fn a_plain_claude_cli_keeps_its_outermost_process() {
+        // Not under a daemon: the stable CLI beats an ephemeral wrapper.
+        let chain = vec![
+            ancestor(30, "sh", &["sh", "-c", "claude-hook-wrapper", "claude"]),
+            ancestor(20, "claude", &["claude"]),
+            ancestor(10, "bash", &["bash"]),
+        ];
+        assert_eq!(pick_agent_pid("claude", &chain, &[]), Some(20));
+        assert_eq!(pick_agent_pid("claude", &chain, &[20]), Some(20));
+    }
+
+    #[test]
+    fn other_providers_keep_choosing_the_outermost_match() {
+        let chain = vec![
+            ancestor(30, "sh", &["sh", "-c", "codex", "hook"]),
+            ancestor(20, "codex", &["codex"]),
+        ];
+        assert_eq!(pick_agent_pid("claude", &chain, &[]), None);
+        assert_eq!(
+            pick_agent_pid("gemini", &[ancestor(5, "gemini", &["gemini"])], &[]),
+            Some(5)
+        );
+    }
 
     #[test]
     fn codex_hooks_skip_servers_but_recognize_the_standalone_tui() {
@@ -1163,6 +1450,8 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
         }
     }
 
+    let mut turn: Option<ClaudeTurnTokens> = None;
+    let mut fork_origin: Option<String> = None;
     for line in reader.lines().map_while(Result::ok) {
         if line.len() > CLAUDE_TRANSCRIPT_LINE_LIMIT {
             continue;
@@ -1176,6 +1465,15 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
             .and_then(Value::as_str);
         if !matches!(role, Some("assistant" | "user")) {
             continue;
+        }
+        track_claude_turn_tokens(&entry, session_id, &mut turn, activities);
+        if fork_origin.is_none() && entry.get("isSidechain").and_then(Value::as_bool) != Some(true)
+        {
+            fork_origin = entry
+                .pointer("/forkedFrom/sessionId")
+                .and_then(Value::as_str)
+                .filter(|origin| !origin.is_empty())
+                .map(str::to_string);
         }
         if role == Some("user")
             && (entry.get("isMeta").and_then(Value::as_bool) == Some(true)
@@ -1197,14 +1495,11 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
         };
         match content {
             Value::String(text) => {
-                let (kind, title) = if role == Some("user") {
-                    ("prompt", "You")
+                if role == Some("user") {
+                    push_claude_user_text(activities, session_id, &entry_id, 0, text, created_at);
                 } else {
-                    ("message", "Claude")
-                };
-                if role != Some("user") || visible_claude_user_text(text) {
                     push_claude_transcript_activity(
-                        activities, session_id, &entry_id, 0, kind, title, text, created_at,
+                        activities, session_id, &entry_id, 0, "message", "Claude", text, created_at,
                     );
                 }
             }
@@ -1213,23 +1508,23 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
                     match string(block, "type").as_deref() {
                         Some("text") => {
                             if let Some(text) = string(block, "text") {
-                                let (kind, title) = if role == Some("user") {
-                                    ("prompt", "You")
+                                if role == Some("user") {
+                                    push_claude_user_text(
+                                        activities, session_id, &entry_id, index, &text, created_at,
+                                    );
                                 } else {
-                                    ("message", "Claude")
-                                };
-                                if role != Some("user") || visible_claude_user_text(&text) {
                                     push_claude_transcript_activity(
-                                        activities, session_id, &entry_id, index, kind, title,
-                                        &text, created_at,
+                                        activities, session_id, &entry_id, index, "message",
+                                        "Claude", &text, created_at,
                                     );
                                 }
                             }
                         }
+                        // The CLI shows this text between tool calls as a message, not as a tool event.
                         Some("thinking") if role == Some("assistant") => {
                             if let Some(thinking) = string(block, "thinking") {
                                 push_claude_transcript_activity(
-                                    activities, session_id, &entry_id, index, "thinking",
+                                    activities, session_id, &entry_id, index, "message",
                                     "Thinking", &thinking, created_at,
                                 );
                             }
@@ -1240,6 +1535,179 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
             }
             _ => {}
         }
+    }
+    if let Some(turn) = turn {
+        activities.extend(turn.finish(session_id));
+    }
+    activities.extend(fork_origin.map(|origin| fork_origin_activity(session_id, origin)));
+}
+
+/// Carries a conversation's fork origin to the session (see `remember_activity`).
+pub(crate) fn fork_origin_activity(session_id: &str, origin: String) -> SessionActivity {
+    SessionActivity {
+        id: format!("{session_id}:fork-origin"),
+        kind: "fork_origin".into(),
+        title: "Fork".into(),
+        detail: Some(origin),
+        status: "completed".into(),
+        created_at: now_millis(),
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    }
+}
+
+/// Token usage of one prompt: every API response between a user prompt and the next.
+struct ClaudeTurnTokens {
+    turn_id: String,
+    // A response is split into one entry per content block, all repeating the
+    // same usage, so each message id is counted once.
+    responses: HashMap<String, (u64, u64)>,
+    last_at: i64,
+}
+
+impl ClaudeTurnTokens {
+    fn finish(self, session_id: &str) -> Option<SessionActivity> {
+        let input = self.responses.values().map(|(input, _)| input).sum::<u64>();
+        let output = self
+            .responses
+            .values()
+            .map(|(_, output)| output)
+            .sum::<u64>();
+        if input + output == 0 {
+            return None;
+        }
+        let detail = json!({
+            "turnId": self.turn_id,
+            "totalTokens": input + output,
+            "inputTokens": input,
+            "outputTokens": output,
+            "createdAt": self.last_at,
+        });
+        Some(SessionActivity {
+            id: format!("claude:{session_id}:token-usage:{}", self.turn_id),
+            kind: "token_usage".into(),
+            title: "Uso de tokens".into(),
+            detail: Some(detail.to_string()),
+            status: "completed".into(),
+            created_at: self.last_at,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        })
+    }
+}
+
+fn track_claude_turn_tokens(
+    entry: &Value,
+    session_id: &str,
+    turn: &mut Option<ClaudeTurnTokens>,
+    activities: &mut Vec<SessionActivity>,
+) {
+    if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    let created_at = string(entry, "timestamp")
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(&timestamp).ok())
+        .map(|timestamp| timestamp.timestamp_millis());
+    let message = &entry["message"];
+    if message["role"] == "user" {
+        if !is_claude_user_prompt(entry) {
+            return;
+        }
+        if let Some(previous) = turn.take() {
+            activities.extend(previous.finish(session_id));
+        }
+        *turn = string(entry, "uuid").map(|turn_id| ClaudeTurnTokens {
+            turn_id,
+            responses: HashMap::new(),
+            last_at: created_at.unwrap_or_else(now_millis),
+        });
+        return;
+    }
+    // Responses before the first prompt in the tail belong to a turn that
+    // started outside it; counting them would understate that turn.
+    let (Some(turn), Some(usage), Some(id)) = (
+        turn.as_mut(),
+        message.get("usage"),
+        message.get("id").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    let tokens = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let input = tokens("input_tokens")
+        + tokens("cache_creation_input_tokens")
+        + tokens("cache_read_input_tokens");
+    turn.responses
+        .insert(id.to_string(), (input, tokens("output_tokens")));
+    if let Some(created_at) = created_at {
+        turn.last_at = turn.last_at.max(created_at);
+    }
+}
+
+fn is_claude_user_prompt(entry: &Value) -> bool {
+    if entry.get("isMeta").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    match entry.pointer("/message/content") {
+        Some(Value::String(text)) => visible_claude_user_text(text),
+        Some(Value::Array(blocks)) => blocks.iter().any(|block| {
+            string(block, "type").as_deref() == Some("text")
+                && string(block, "text").is_some_and(|text| visible_claude_user_text(&text))
+        }),
+        _ => false,
+    }
+}
+
+/// The CLI records a cancelled request as a user message that starts with this marker,
+/// followed by whatever was typed next. It is a notice, not something the user said.
+fn claude_interruption(text: &str) -> Option<(&'static str, &str)> {
+    let rest = text
+        .trim_start()
+        .strip_prefix("[Request interrupted by user")?;
+    if let Some(rest) = rest.strip_prefix(" for tool use]") {
+        Some(("tool_use", rest.trim()))
+    } else {
+        rest.strip_prefix(']').map(|rest| ("user", rest.trim()))
+    }
+}
+
+fn push_claude_user_text(
+    activities: &mut Vec<SessionActivity>,
+    session_id: &str,
+    entry_id: &str,
+    block_index: usize,
+    text: &str,
+    created_at: i64,
+) {
+    let text = match claude_interruption(text) {
+        Some((reason, rest)) => {
+            activities.push(SessionActivity {
+                id: format!("claude:{session_id}:transcript:{entry_id}:{block_index}:interrupt"),
+                kind: "interrupt".into(),
+                title: "Prompt interrupted".into(),
+                detail: Some(reason.into()),
+                status: "interrupted".into(),
+                created_at,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            });
+            rest
+        }
+        None => text,
+    };
+    if visible_claude_user_text(text) {
+        push_claude_transcript_activity(
+            activities,
+            session_id,
+            entry_id,
+            block_index,
+            "prompt",
+            "You",
+            text,
+            created_at,
+        );
     }
 }
 
@@ -1713,6 +2181,67 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_request_is_a_notice_and_keeps_what_was_typed_next() {
+        assert_eq!(
+            claude_interruption("[Request interrupted by user]"),
+            Some(("user", ""))
+        );
+        assert_eq!(
+            claude_interruption("[Request interrupted by user for tool use]"),
+            Some(("tool_use", ""))
+        );
+        assert_eq!(
+            claude_interruption("[Request interrupted by user]\n\nfaça outra coisa"),
+            Some(("user", "faça outra coisa"))
+        );
+        assert_eq!(
+            claude_interruption("faça isso [Request interrupted by user]"),
+            None
+        );
+
+        let mut activities = Vec::new();
+        push_claude_user_text(
+            &mut activities,
+            "s",
+            "e1",
+            0,
+            "[Request interrupted by user]\n\nfaça outra coisa",
+            5,
+        );
+        let kinds = activities
+            .iter()
+            .map(|a| (a.kind.as_str(), a.status.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [("interrupt", "interrupted"), ("prompt", "completed")]
+        );
+        assert_eq!(activities[1].detail.as_deref(), Some("faça outra coisa"));
+        // Alone, the marker is only a notice: nothing the user said.
+        let mut alone = Vec::new();
+        push_claude_user_text(&mut alone, "s", "e2", 0, "[Request interrupted by user]", 6);
+        assert_eq!(alone.len(), 1);
+        assert_eq!(alone[0].kind, "interrupt");
+    }
+
+    #[test]
+    fn claude_internal_fork_recap_is_not_a_subagent_activity() {
+        for agent_type in [json!(""), Value::Null] {
+            let mut raw = json!({
+                "session_id": "claude-session",
+                "cwd": "/work/project",
+                "hook_event_name": "SubagentStop",
+                "agent_id": "fork-1",
+                "last_assistant_message": "Você pediu uma análise do projeto."
+            });
+            if !agent_type.is_null() {
+                raw["agent_type"] = agent_type;
+            }
+            assert!(map_event("claude", &raw).is_none());
+        }
+    }
+
+    #[test]
     fn claude_agent_completed_notification_finishes_or_fails_the_session() {
         let completed = map_event(
             "claude",
@@ -1737,6 +2266,118 @@ mod tests {
         )
         .expect("notificação de falha");
         assert!(matches!(failed.event, HookEventKind::Failed));
+    }
+
+    #[test]
+    fn claude_fork_origin_reaches_the_session() {
+        let path = std::env::temp_dir().join(format!("lume-claude-fork-{}.jsonl", now_millis()));
+        let entry = json!({
+            "type": "user",
+            "uuid": "copied-prompt",
+            "sessionId": "forked-session",
+            "forkedFrom": { "sessionId": "original-session", "messageUuid": "copied-prompt" },
+            "message": { "role": "user", "content": "Original question" }
+        });
+        std::fs::write(&path, entry.to_string()).expect("transcript");
+        let raw = json!({
+            "session_id": "forked-session",
+            "cwd": "/work/project",
+            "hook_event_name": "Stop",
+            "transcript_path": path.to_string_lossy()
+        });
+        let event = map_event("claude", &raw).expect("evento");
+        let _ = std::fs::remove_file(&path);
+        let state = crate::state::AppState::new(std::path::Path::new(":memory:")).expect("estado");
+        state.ingest(event).expect("ingest");
+        let sessions = state.sessions().expect("sessões");
+        assert_eq!(sessions[0].forked_from.as_deref(), Some("original-session"));
+        assert!(sessions[0]
+            .activities
+            .iter()
+            .all(|activity| activity.kind != "fork_origin"));
+    }
+
+    #[test]
+    fn claude_transcript_reports_token_usage_per_prompt() {
+        let path = std::env::temp_dir().join(format!("lume-claude-tokens-{}.jsonl", now_millis()));
+        let assistant = |id: &str, at: &str, input: u64, cached: u64, output: u64| {
+            json!({
+                "type": "assistant",
+                "uuid": format!("{id}-{at}"),
+                "timestamp": at,
+                "message": {
+                    "id": id,
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "ok" }],
+                    "usage": {
+                        "input_tokens": input,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": cached,
+                        "output_tokens": output
+                    }
+                }
+            })
+        };
+        let user = |uuid: &str, at: &str, content: Value| json!({ "type": "user", "uuid": uuid, "timestamp": at, "message": { "role": "user", "content": content } });
+        let transcript = [
+            // Before the first prompt in view: its turn is incomplete, so it is skipped.
+            assistant("msg-0", "2026-07-28T11:59:00.000Z", 50, 0, 5),
+            user("prompt-1", "2026-07-28T12:00:00.000Z", json!("First task")),
+            assistant("msg-1", "2026-07-28T12:00:01.000Z", 10, 100, 20),
+            // Same response, next content block: counted once.
+            assistant("msg-1", "2026-07-28T12:00:02.000Z", 10, 100, 20),
+            user(
+                "tool-result",
+                "2026-07-28T12:00:03.000Z",
+                json!([{ "type": "tool_result", "content": "done" }]),
+            ),
+            assistant("msg-2", "2026-07-28T12:00:04.000Z", 5, 130, 7),
+            user(
+                "prompt-2",
+                "2026-07-28T12:01:00.000Z",
+                json!([{ "type": "text", "text": "Second task" }]),
+            ),
+            assistant("msg-3", "2026-07-28T12:01:05.000Z", 3, 0, 4),
+        ];
+        std::fs::write(
+            &path,
+            transcript
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .expect("transcript");
+        let activities = claude_transcript_activities(
+            &json!({ "transcript_path": path.to_string_lossy() }),
+            "claude-session",
+        );
+        let _ = std::fs::remove_file(&path);
+        let usage = activities
+            .iter()
+            .filter(|activity| activity.kind == "token_usage")
+            .map(|activity| {
+                serde_json::from_str::<crate::domain::PromptTokenUsage>(
+                    activity.detail.as_deref().unwrap_or_default(),
+                )
+                .expect("uso")
+            })
+            .map(|usage| {
+                (
+                    usage.turn_id,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.total_tokens,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            usage,
+            [
+                ("prompt-1".to_string(), 245, 27, 272),
+                ("prompt-2".to_string(), 3, 4, 7),
+            ]
+        );
     }
 
     #[test]
@@ -1801,7 +2442,9 @@ mod tests {
 
         assert_eq!(event.activities.len(), 3);
         assert_eq!(event.activities[0].kind, "prompt");
-        assert_eq!(event.activities[1].kind, "thinking");
+        // Reasoning text is part of the conversation, outside the tool events.
+        assert_eq!(event.activities[1].kind, "message");
+        assert_eq!(event.activities[1].title, "Thinking");
         assert_eq!(
             event.activities[2].detail.as_deref(),
             Some("The hook is connected.")

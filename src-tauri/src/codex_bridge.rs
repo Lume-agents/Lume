@@ -41,6 +41,7 @@ const MAX_LOCAL_CODEX_MESSAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LOCAL_CODEX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const PROXY_SESSION_STABLE_FOR: Duration = Duration::from_millis(1_200);
 const CODEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const CODEX_MODEL_SETTINGS_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(90);
 const CODEX_PROMPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_PROXY_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -461,6 +462,20 @@ impl CodexBridge {
             .ok_or_else(|| "Codex App Server did not return the forked thread id".into())
     }
 
+    pub fn list_skills(&self, cwd: &str) -> Result<Value, String> {
+        self.ensure_server()?;
+        let mut server = connect_initialized_plain()?;
+        send_json(
+            &mut server,
+            json!({
+                "method": "skills/list",
+                "id": 100,
+                "params": { "cwds": [cwd] }
+            }),
+        )?;
+        wait_for_plain_value_response(&mut server, 100)
+    }
+
     pub fn thread_model_settings(
         &self,
         thread_id: &str,
@@ -615,6 +630,7 @@ impl CodexBridge {
         let profiles = HashMap::from([(thread_id.clone(), profile)]);
         let mut turn = prompt_turn_request(&thread_id, prompt, attachment_paths);
         apply_model_override_to_turn_request(&mut turn, &model_settings);
+        apply_permission_override(&state, &mut turn, &thread_id)?;
         send_json(&mut server, turn)?;
         if let Err(error) = wait_for_response_until(
             &mut server,
@@ -1444,6 +1460,7 @@ fn proxy_connection(
                 let settings = state
                     .session_model_override_for_native_id(AgentKind::Codex, &request.thread_id)?;
                 apply_model_override_to_turn_request(&mut turn, &settings);
+                apply_permission_override(&state, &mut turn, &request.thread_id)?;
                 server
                     .send(Message::Text(turn.to_string().into()))
                     .map_err(|error| error.to_string())?;
@@ -1720,6 +1737,7 @@ fn prompt_connection(
     let mut turn = prompt_turn_request(thread_id, prompt, attachment_paths);
     let model_settings = state.session_model_override_for_native_id(AgentKind::Codex, thread_id)?;
     apply_model_override_to_turn_request(&mut turn, &model_settings);
+    apply_permission_override(state, &mut turn, thread_id)?;
     observe_client_message(&Message::Text(turn.to_string().into()), &mut profiles);
     send_json(&mut server, turn)?;
     wait_for_response_until(
@@ -1903,6 +1921,33 @@ fn apply_model_override_to_turn_request(
     changed
 }
 
+/// Runs the turn in the permission mode picked in Lume, replacing what the thread had.
+fn apply_permission_override_to_turn_request(request: &mut Value, mode: Option<&str>) -> bool {
+    let Some(params) = mode
+        .and_then(crate::codex_permissions::turn_params)
+        .zip(request.get_mut("params").and_then(Value::as_object_mut))
+    else {
+        return false;
+    };
+    let (permission, turn) = params;
+    for (key, value) in permission {
+        turn.insert(key.into(), value);
+    }
+    true
+}
+
+fn apply_permission_override(
+    state: &AppState,
+    request: &mut Value,
+    thread_id: &str,
+) -> Result<bool, String> {
+    let mode = state.permission_mode_override_for_native_id(AgentKind::Codex, thread_id)?;
+    Ok(apply_permission_override_to_turn_request(
+        request,
+        mode.as_deref(),
+    ))
+}
+
 fn apply_client_model_override(message: Message, state: &AppState) -> Result<Message, String> {
     let Message::Text(text) = message else {
         return Ok(message);
@@ -1913,11 +1958,17 @@ fn apply_client_model_override(message: Message, state: &AppState) -> Result<Mes
     if request.get("method").and_then(Value::as_str) != Some("turn/start") {
         return Ok(Message::Text(text));
     }
-    let Some(thread_id) = request.pointer("/params/threadId").and_then(Value::as_str) else {
+    let Some(thread_id) = request
+        .pointer("/params/threadId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
         return Ok(Message::Text(text));
     };
-    let settings = state.session_model_override_for_native_id(AgentKind::Codex, thread_id)?;
-    if !apply_model_override_to_turn_request(&mut request, &settings) {
+    let settings = state.session_model_override_for_native_id(AgentKind::Codex, &thread_id)?;
+    let model_changed = apply_model_override_to_turn_request(&mut request, &settings);
+    let permission_changed = apply_permission_override(state, &mut request, &thread_id)?;
+    if !model_changed && !permission_changed {
         return Ok(Message::Text(text));
     }
     Ok(Message::Text(request.to_string().into()))
@@ -1927,6 +1978,7 @@ fn prompt_input(prompt: &str, attachment_paths: &[String]) -> Vec<Value> {
     let mut input = Vec::new();
     if !prompt.is_empty() {
         input.push(json!({ "type": "text", "text": prompt }));
+        input.extend(crate::agent_commands::codex_skill_inputs(prompt));
     }
     input.extend(
         attachment_paths
@@ -1937,6 +1989,14 @@ fn prompt_input(prompt: &str, attachment_paths: &[String]) -> Vec<Value> {
 }
 
 fn connect_initialized_plain() -> Result<WebSocket<MaybeTlsStream<TcpStream>>, String> {
+    let timeout_message = rpc_timeout_message(CODEX_REQUEST_TIMEOUT);
+    connect_initialized_plain_with_timeout(CODEX_REQUEST_TIMEOUT, &timeout_message)
+}
+
+fn connect_initialized_plain_with_timeout(
+    timeout: Duration,
+    timeout_message: &str,
+) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, String> {
     let mut server = connect_server()?;
     set_server_timeout(&mut server, Duration::from_secs(5))?;
     send_json(
@@ -1950,7 +2010,7 @@ fn connect_initialized_plain() -> Result<WebSocket<MaybeTlsStream<TcpStream>>, S
             }
         }),
     )?;
-    wait_for_plain_value_response(&mut server, 1)?;
+    wait_for_plain_value_response_with_timeout_message(&mut server, 1, timeout, timeout_message)?;
     send_json(
         &mut server,
         json!({ "method": "initialized", "params": {} }),
@@ -1959,8 +2019,16 @@ fn connect_initialized_plain() -> Result<WebSocket<MaybeTlsStream<TcpStream>>, S
 }
 
 fn thread_model_settings_connection(thread_id: &str) -> Result<CodexThreadModelSettings, String> {
-    let mut server = connect_initialized_plain()?;
-    load_thread_model_settings(&mut server, thread_id).map(|(settings, _)| settings)
+    let timeout_message = codex_model_settings_timeout_message();
+    let mut server =
+        connect_initialized_plain_with_timeout(CODEX_MODEL_SETTINGS_TIMEOUT, &timeout_message)?;
+    load_thread_model_settings(
+        &mut server,
+        thread_id,
+        CODEX_MODEL_SETTINGS_TIMEOUT,
+        &timeout_message,
+    )
+    .map(|(settings, _)| settings)
 }
 
 fn set_thread_model_settings_connection(
@@ -1995,7 +2063,9 @@ fn apply_thread_model_settings(
 }
 
 fn default_model_settings_connection() -> Result<CodexThreadModelSettings, String> {
-    let mut server = connect_initialized_plain()?;
+    let timeout_message = codex_model_settings_timeout_message();
+    let mut server =
+        connect_initialized_plain_with_timeout(CODEX_MODEL_SETTINGS_TIMEOUT, &timeout_message)?;
     send_json(
         &mut server,
         json!({
@@ -2004,7 +2074,12 @@ fn default_model_settings_connection() -> Result<CodexThreadModelSettings, Strin
             "params": { "limit": 100, "includeHidden": false }
         }),
     )?;
-    let catalog = wait_for_plain_value_response(&mut server, 2)?;
+    let catalog = wait_for_plain_value_response_with_timeout_message(
+        &mut server,
+        2,
+        CODEX_MODEL_SETTINGS_TIMEOUT,
+        &timeout_message,
+    )?;
     default_model_settings_from_catalog(&catalog)
 }
 
@@ -2031,12 +2106,15 @@ fn confirmed_fast_mode(response: &Value, enabled: bool) -> Result<bool, String> 
 fn load_thread_model_settings(
     server: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     thread_id: &str,
+    timeout: Duration,
+    timeout_message: &str,
 ) -> Result<(CodexThreadModelSettings, Value), String> {
     send_json(
         server,
         json!({ "method": "thread/resume", "id": 2, "params": { "threadId": thread_id, "excludeTurns": true } }),
     )?;
-    let resumed = wait_for_plain_value_response(server, 2)?;
+    let resumed =
+        wait_for_plain_value_response_with_timeout_message(server, 2, timeout, timeout_message)?;
     send_json(
         server,
         json!({
@@ -2045,7 +2123,8 @@ fn load_thread_model_settings(
             "params": { "limit": 100, "includeHidden": false }
         }),
     )?;
-    let models = wait_for_plain_value_response(server, 3)?;
+    let models =
+        wait_for_plain_value_response_with_timeout_message(server, 3, timeout, timeout_message)?;
     let settings = model_settings_from_responses(&resumed, &models)?;
     Ok((settings, resumed))
 }
@@ -2435,6 +2514,13 @@ fn rpc_timeout_message(timeout: Duration) -> String {
     )
 }
 
+fn codex_model_settings_timeout_message() -> String {
+    format!(
+        "Codex did not respond while loading model settings within {} seconds. No prompt was sent; try opening the model selector again.",
+        CODEX_MODEL_SETTINGS_TIMEOUT.as_secs()
+    )
+}
+
 fn read_message_until(
     deadline: Instant,
     timeout_error: &str,
@@ -2510,10 +2596,19 @@ fn wait_for_plain_value_response_until(
     expected_id: i64,
     timeout: Duration,
 ) -> Result<Value, String> {
-    let deadline = Instant::now() + timeout;
     let timeout_error = rpc_timeout_message(timeout);
+    wait_for_plain_value_response_with_timeout_message(socket, expected_id, timeout, &timeout_error)
+}
+
+fn wait_for_plain_value_response_with_timeout_message(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    expected_id: i64,
+    timeout: Duration,
+    timeout_error: &str,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
     loop {
-        let message = read_rpc_message(socket, deadline, &timeout_error)?;
+        let message = read_rpc_message(socket, deadline, timeout_error)?;
         if let Some(value) = rpc_response_value(&message, expected_id)? {
             return Ok(value);
         }
@@ -4662,6 +4757,47 @@ mod tests {
             Ok(false)
         );
         assert!(confirmed_fast_mode(&json!({"result": {"serviceTier": "default"}}), true).is_err());
+    }
+
+    #[test]
+    fn selected_permission_mode_is_applied_to_each_turn_start() {
+        let mut request = prompt_turn_request("thread-1", "Continue", &[]);
+        assert!(apply_permission_override_to_turn_request(
+            &mut request,
+            Some("auto_review")
+        ));
+        let params = &request["params"];
+        assert_eq!(params["approvalsReviewer"], json!("auto_review"));
+        assert_eq!(params["approvalPolicy"], json!("on-request"));
+        assert_eq!(params["sandboxPolicy"]["type"], json!("workspaceWrite"));
+        // The prompt itself is left alone.
+        assert_eq!(params["threadId"], json!("thread-1"));
+        assert_eq!(params["input"][0]["text"], json!("Continue"));
+
+        // Going back to full access replaces the whole scope, not just the reviewer.
+        assert!(apply_permission_override_to_turn_request(
+            &mut request,
+            Some("full_access")
+        ));
+        let params = &request["params"];
+        assert_eq!(params["approvalPolicy"], json!("never"));
+        assert_eq!(params["approvalsReviewer"], json!("user"));
+        assert_eq!(
+            params["sandboxPolicy"],
+            json!({ "type": "dangerFullAccess" })
+        );
+
+        // With no mode picked, or one Lume does not offer, the turn is untouched.
+        let mut untouched = prompt_turn_request("thread-1", "Continue", &[]);
+        assert!(!apply_permission_override_to_turn_request(
+            &mut untouched,
+            None
+        ));
+        assert!(!apply_permission_override_to_turn_request(
+            &mut untouched,
+            Some("read_only")
+        ));
+        assert_eq!(untouched, prompt_turn_request("thread-1", "Continue", &[]));
     }
 
     #[test]

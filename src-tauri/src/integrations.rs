@@ -99,6 +99,76 @@ pub fn lume_executable() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|error| error.to_string())
 }
 
+pub fn ensure_claude_connected() -> Result<(), String> {
+    if ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
+        .into_iter()
+        .any(|name| env::var_os(name).is_some_and(|value| !value.is_empty()))
+        || [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+        ]
+        .into_iter()
+        .any(|name| env::var(name).as_deref() == Ok("1"))
+    {
+        // Enterprise gateways can authenticate without a Claude account login.
+        return Ok(());
+    }
+    let mut command = crate::executables::command("claude")?;
+    command.args(["auth", "status", "--json"]);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x0800_0000);
+    let output = command
+        .output()
+        .map_err(|error| format!("Não foi possível verificar a conexão do Claude: {error}"))?;
+    let logged_in = serde_json::from_slice::<Value>(&output.stdout)
+        .ok()
+        .and_then(|status| status["loggedIn"].as_bool());
+    match (output.status.code(), logged_in) {
+        (Some(0), Some(true)) => Ok(()),
+        (Some(1), _) | (_, Some(false)) => Err(
+            "AGENT_CONNECTION_REQUIRED:Claude Code não está conectado. Execute `claude auth login` e tente novamente."
+                .into(),
+        ),
+        _ => Err(
+            "Não foi possível verificar a conexão do Claude Code; confira `claude auth status` no terminal."
+                .into(),
+        ),
+    }
+}
+
+pub fn managed_claude_hook_settings(
+    executable: &str,
+    working_directory: &str,
+) -> Result<Option<String>, String> {
+    let kind = IntegrationKind::Claude;
+    let globally_configured = config_path(&kind)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .is_some_and(|content| configured_content(&content, &kind, executable));
+    let project_configured = Path::new(working_directory)
+        .ancestors()
+        .take(8)
+        .any(|directory| {
+            ["settings.json", "settings.local.json"]
+                .into_iter()
+                .any(|name| {
+                    fs::read_to_string(directory.join(".claude").join(name))
+                        .ok()
+                        .is_some_and(|content| configured_content(&content, &kind, executable))
+                })
+        });
+    if globally_configured || project_configured {
+        return Ok(None);
+    }
+    let mut hooks = Value::Object(Map::new());
+    for event in events(&kind) {
+        add_handler(&mut hooks, event, &kind, executable)?;
+    }
+    serde_json::to_string(&json!({ "hooks": hooks }))
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
 pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
     crate::agent_plugins::catalog()
         .into_iter()
@@ -225,6 +295,9 @@ pub(crate) fn native_session_title(kind: &IntegrationKind, session_id: &str) -> 
         }
     }
     let path = resume_path(kind, session_id)?;
+    if *kind == IntegrationKind::Claude {
+        return claude_transcript_title(&path);
+    }
     let file = fs::File::open(path).ok()?;
     match kind {
         IntegrationKind::Codex => codex_session_title(BufReader::new(file)),
@@ -246,13 +319,11 @@ pub(crate) fn native_session_working_directory(
         return None;
     }
     if *kind == IntegrationKind::Codex {
-        let home = env::var_os("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| {
-                env::var_os("HOME")
-                    .or_else(|| env::var_os("USERPROFILE"))
-                    .map(|home| PathBuf::from(home).join(".codex"))
-            })?;
+        let home = env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
+            env::var_os("HOME")
+                .or_else(|| env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".codex"))
+        })?;
         if let Some(directory) = codex_state_database(&home.join("sessions"))
             .and_then(|path| codex_state_session_directory(&path, session_id))
         {
@@ -345,6 +416,392 @@ fn read_file_tail(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
         bytes.drain(..first_complete_line);
     }
     Some(bytes)
+}
+
+/// The thread a Codex conversation was forked from, read once from its rollout.
+/// Subagents are forks of their parent too, so they are excluded.
+pub fn codex_fork_origin(thread_id: &str) -> Option<String> {
+    type Origins = Mutex<HashMap<String, Result<Option<String>, Instant>>>;
+    static ORIGINS: OnceLock<Origins> = OnceLock::new();
+    let origins = ORIGINS.get_or_init(|| Mutex::new(HashMap::new()));
+    match origins.lock().ok()?.get(thread_id) {
+        Some(Ok(origin)) => return origin.clone(),
+        // A new thread writes its rollout lazily; look again a minute later.
+        Some(Err(missed_at)) if missed_at.elapsed() < Duration::from_secs(60) => return None,
+        _ => {}
+    }
+    let resolved = resume_path(&IntegrationKind::Codex, thread_id)
+        .map(|path| {
+            fs::File::open(path)
+                .ok()
+                .and_then(|file| BufReader::new(file).lines().next()?.ok())
+                .and_then(|line| serde_json::from_str::<Value>(&line).ok())
+                .and_then(|record| codex_user_fork_origin(&record))
+        })
+        .ok_or_else(Instant::now);
+    let origin = resolved.clone().ok().flatten();
+    if let Ok(mut origins) = origins.lock() {
+        origins.insert(thread_id.into(), resolved);
+    }
+    origin
+}
+
+fn codex_user_fork_origin(record: &Value) -> Option<String> {
+    let payload = record.get("payload")?;
+    if record.get("type").and_then(Value::as_str) != Some("session_meta")
+        || payload
+            .get("parent_thread_id")
+            .is_some_and(|parent| !parent.is_null())
+        || payload.pointer("/source/subagent").is_some()
+    {
+        return None;
+    }
+    payload
+        .get("forked_from_id")
+        .and_then(Value::as_str)
+        .filter(|origin| !origin.is_empty())
+        .map(str::to_string)
+}
+
+pub fn claude_transcript_can_resume(session_id: &str) -> bool {
+    let Some(path) = resume_path(&IntegrationKind::Claude, session_id) else {
+        return false;
+    };
+    let transcript_may_be_truncated = fs::metadata(&path)
+        .map(|metadata| metadata.len() > 8 * 1024 * 1024)
+        .unwrap_or(false);
+    let Some(transcript) = read_file_tail(&path, 8 * 1024 * 1024) else {
+        return transcript_may_be_truncated;
+    };
+    transcript
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .any(|entry| claude_transcript_entry_is_conversation(&entry))
+        || transcript_may_be_truncated
+}
+
+fn claude_transcript_entry_is_conversation(entry: &Value) -> bool {
+    if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    let Some(role) = entry.pointer("/message/role").and_then(Value::as_str) else {
+        return false;
+    };
+    match role {
+        "assistant" => entry.pointer("/message/content").is_some_and(|content| {
+            content_text(content, "text").is_some()
+                || content.as_array().is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                })
+        }),
+        "user" if entry.get("isMeta").and_then(Value::as_bool) != Some(true) => {
+            let content = entry.pointer("/message/content");
+            match content {
+                Some(Value::String(text)) => claude_user_text_is_conversation(text),
+                Some(Value::Array(blocks)) => {
+                    blocks
+                        .iter()
+                        .any(|block| match block.get("type").and_then(Value::as_str) {
+                            Some("text") => block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .is_some_and(claude_user_text_is_conversation),
+                            Some("image" | "document") => true,
+                            _ => false,
+                        })
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn claude_user_text_is_conversation(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty() && !text.starts_with("<command-name>") && !text.starts_with("<local-command")
+}
+
+// Claude registers each live process in ~/.claude/sessions/<pid>.json. Resuming
+// a conversation that an interactive process still holds makes Claude start a
+// copy with a new session ID instead of continuing it.
+pub fn claude_session_open_interactively(session_id: &str) -> bool {
+    let Some(home) = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(home.join(".claude/sessions")) else {
+        return false;
+    };
+    let mut system = sysinfo::System::new();
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter_map(|record| interactive_claude_pid(&record, session_id))
+        .any(|pid| {
+            let pid = sysinfo::Pid::from_u32(pid);
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing(),
+            );
+            system.process(pid).is_some()
+        })
+}
+
+/// Processes Claude registered for this conversation, whatever their kind
+/// (interactive CLI, background session of the daemon, headless prompt).
+pub fn claude_registered_pids(session_id: &str) -> Vec<u32> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(|home| {
+            claude_registered_pids_in(&PathBuf::from(home).join(".claude/sessions"), session_id)
+        })
+        .unwrap_or_default()
+}
+
+fn claude_registered_pids_in(directory: &Path, session_id: &str) -> Vec<u32> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(|record| record.get("sessionId").and_then(Value::as_str) == Some(session_id))
+        .filter_map(|record| record.get("pid").and_then(Value::as_u64))
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .collect()
+}
+
+/// A background session of Claude's daemon that has no conversation yet: a pool
+/// spare, or an idle job nobody has prompted (the CLI's agent view starts them).
+/// It is not an agent until it is used.
+fn unused_background_record(record: &Value, has_transcript: impl Fn(&str) -> bool) -> bool {
+    if record.get("kind").and_then(Value::as_str) != Some("bg") {
+        return false;
+    }
+    if record.get("spare").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    if record.get("status").and_then(Value::as_str) == Some("busy") {
+        return false;
+    }
+    record
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .is_some_and(|session_id| !has_transcript(session_id))
+}
+
+fn claude_sessions_directory() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".claude/sessions"))
+}
+
+/// For a hook: whether this conversation is such an unused background session.
+pub(crate) fn claude_background_session_unused(session_id: &str) -> bool {
+    let Some(entries) =
+        claude_sessions_directory().and_then(|directory| fs::read_dir(directory).ok())
+    else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(|record| record.get("sessionId").and_then(Value::as_str) == Some(session_id))
+        .any(|record| unused_background_record(&record, claude_transcript_can_resume))
+}
+
+/// For the process scan: whether this process is such an unused background session.
+pub(crate) fn claude_background_pid_unused(pid: u32) -> bool {
+    claude_sessions_directory()
+        .and_then(|directory| fs::read_to_string(directory.join(format!("{pid}.json"))).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .is_some_and(|record| unused_background_record(&record, claude_transcript_can_resume))
+}
+
+fn interactive_claude_pid(record: &Value, session_id: &str) -> Option<u32> {
+    (record.get("sessionId").and_then(Value::as_str) == Some(session_id)
+        && record.get("kind").and_then(Value::as_str) == Some("interactive"))
+    .then(|| record.get("pid").and_then(Value::as_u64))
+    .flatten()
+    .and_then(|pid| u32::try_from(pid).ok())
+}
+
+const CLAUDE_METADATA_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Claude keeps re-appending its title records; a `/rename` beats the AI title.
+pub(crate) fn claude_transcript_title(path: &Path) -> Option<String> {
+    let recent = read_file_tail(path, CLAUDE_METADATA_TAIL_BYTES)?;
+    claude_title_from_records(std::io::Cursor::new(recent))
+}
+
+fn claude_title_from_records(reader: impl BufRead) -> Option<String> {
+    let mut custom = None;
+    let mut generated = None;
+    for line in reader.lines().map_while(Result::ok) {
+        if !line.contains("-title\"") {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let (slot, key) = match record.get("type").and_then(Value::as_str) {
+            Some("custom-title") => (&mut custom, "customTitle"),
+            Some("ai-title") => (&mut generated, "aiTitle"),
+            _ => continue,
+        };
+        if let Some(title) = record
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            *slot = Some(title.to_string());
+        }
+    }
+    custom.or(generated)
+}
+
+/// The permission mode the CLI is in for this conversation (it records every change).
+pub(crate) fn claude_session_permission_mode(session_id: &str) -> Option<String> {
+    let path = resume_path(&IntegrationKind::Claude, session_id)?;
+    let recent = read_file_tail(&path, CLAUDE_METADATA_TAIL_BYTES)?;
+    claude_permission_mode_from_records(std::io::Cursor::new(recent))
+}
+
+fn claude_permission_mode_from_records(reader: impl BufRead) -> Option<String> {
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| line.contains("\"permission-mode\""))
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .filter(|record| record.get("type").and_then(Value::as_str) == Some("permission-mode"))
+        .filter_map(|record| {
+            record
+                .get("permissionMode")
+                .and_then(Value::as_str)
+                .filter(|mode| !mode.is_empty())
+                .map(str::to_string)
+        })
+        .last()
+}
+
+/// The model the CLI last answered with in this conversation.
+pub(crate) fn claude_session_model(session_id: &str) -> Option<String> {
+    let path = resume_path(&IntegrationKind::Claude, session_id)?;
+    claude_transcript_model(&path)
+}
+
+fn claude_transcript_model(path: &Path) -> Option<String> {
+    let recent = read_file_tail(path, CLAUDE_METADATA_TAIL_BYTES)?;
+    claude_model_from_records(std::io::Cursor::new(recent))
+}
+
+fn claude_model_from_records(reader: impl BufRead) -> Option<String> {
+    reader
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| line.contains("\"assistant\""))
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .filter(|record| {
+            record.get("type").and_then(Value::as_str) == Some("assistant")
+                && record.get("isSidechain").and_then(Value::as_bool) != Some(true)
+        })
+        .filter_map(|record| {
+            record
+                .pointer("/message/model")
+                .and_then(Value::as_str)
+                .filter(|model| !model.is_empty() && !model.starts_with('<'))
+                .map(str::to_string)
+        })
+        .last()
+}
+
+/// The model of the most recently active Claude conversation other than `except`.
+pub(crate) fn claude_latest_session_model(except: Option<&str>) -> Option<String> {
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
+    let mut transcripts = fs::read_dir(home.join(".claude/projects"))
+        .ok()?
+        .flatten()
+        .filter_map(|project| fs::read_dir(project.path()).ok())
+        .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_none_or(|stem| Some(stem) != except)
+        })
+        .map(|path| (file_updated_at(&path), path))
+        .collect::<Vec<_>>();
+    transcripts.sort_by_key(|(updated_at, _)| std::cmp::Reverse(*updated_at));
+    transcripts
+        .into_iter()
+        .take(12)
+        .find_map(|(_, path)| claude_transcript_model(&path))
+}
+
+/// Claude's settings with project files layered over the user's, as the CLI reads them.
+pub(crate) fn claude_settings(working_directory: Option<&str>) -> Value {
+    let mut layers = Vec::new();
+    if let Some(home) = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
+        layers.push(home.join(".claude/settings.json"));
+    }
+    if let Some(directory) = working_directory {
+        let directory = Path::new(directory).join(".claude");
+        layers.push(directory.join("settings.json"));
+        layers.push(directory.join("settings.local.json"));
+    }
+    let mut merged = Map::new();
+    for layer in layers {
+        let Some(Value::Object(settings)) = fs::read_to_string(layer)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            continue;
+        };
+        for (key, value) in settings {
+            match (merged.get_mut(&key), value) {
+                (Some(Value::Object(existing)), Value::Object(value)) if key == "modelSettings" => {
+                    existing.extend(value);
+                }
+                (_, value) => {
+                    merged.insert(key, value);
+                }
+            }
+        }
+    }
+    Value::Object(merged)
 }
 
 fn resume_path(kind: &IntegrationKind, session_id: &str) -> Option<PathBuf> {
@@ -527,9 +984,11 @@ fn codex_state_session_directory(path: &Path, session_id: &str) -> Option<String
     .ok()?;
     connection.busy_timeout(Duration::from_millis(25)).ok()?;
     connection
-        .query_row("SELECT cwd FROM threads WHERE id = ?1", [session_id], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT cwd FROM threads WHERE id = ?1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
         .ok()
         .filter(|directory| !directory.trim().is_empty())
 }
@@ -684,7 +1143,9 @@ fn claude_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
             Some(ResumableSession {
                 id,
                 agent: IntegrationKind::Claude,
-                name: name.unwrap_or_else(|| project.clone()),
+                name: claude_transcript_title(&path)
+                    .or(name)
+                    .unwrap_or_else(|| project.clone()),
                 project,
                 working_directory,
                 source: "CLI".into(),
@@ -2547,6 +3008,155 @@ mod tests {
             codex_session_title(BufReader::new(records.as_bytes())).as_deref(),
             Some("Prepare o jogo Invicto para lançamento")
         );
+    }
+
+    #[test]
+    fn only_user_forks_count_as_codex_fork_origins() {
+        let meta = |payload: Value| json!({ "type": "session_meta", "payload": payload });
+        assert_eq!(
+            codex_user_fork_origin(&meta(
+                json!({ "id": "b", "forked_from_id": "a", "originator": "codex-tui" })
+            ))
+            .as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            codex_user_fork_origin(&meta(
+                json!({ "id": "b", "forked_from_id": "a", "parent_thread_id": "a" })
+            )),
+            None
+        );
+        assert_eq!(
+            codex_user_fork_origin(&meta(
+                json!({ "id": "b", "forked_from_id": "a", "source": { "subagent": {} } })
+            )),
+            None
+        );
+        assert_eq!(codex_user_fork_origin(&meta(json!({ "id": "b" }))), None);
+    }
+
+    #[test]
+    fn claude_title_prefers_rename_over_ai_title() {
+        let records = |lines: &[&str]| std::io::Cursor::new(lines.join("\n"));
+        let ai = r#"{"type":"ai-title","aiTitle":"Análise do projeto","sessionId":"s"}"#;
+        let newer_ai = r#"{"type":"ai-title","aiTitle":"Correções do Claude","sessionId":"s"}"#;
+        let custom = r#"{"type":"custom-title","customTitle":"Minha thread","sessionId":"s"}"#;
+        let message = r#"{"type":"user","message":{"role":"user","content":"ai-title\""}}"#;
+        assert_eq!(
+            claude_title_from_records(records(&[ai, message, newer_ai])).as_deref(),
+            Some("Correções do Claude")
+        );
+        assert_eq!(
+            claude_title_from_records(records(&[custom, newer_ai])).as_deref(),
+            Some("Minha thread")
+        );
+        assert_eq!(claude_title_from_records(records(&[message])), None);
+    }
+
+    #[test]
+    fn claude_permission_mode_is_the_last_recorded_change() {
+        let records = [
+            r#"{"type":"permission-mode","permissionMode":"default","sessionId":"s"}"#,
+            r#"{"type":"user","message":{"content":"\"permission-mode\""}}"#,
+            r#"{"type":"permission-mode","permissionMode":"auto","sessionId":"s"}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            claude_permission_mode_from_records(std::io::Cursor::new(records)).as_deref(),
+            Some("auto")
+        );
+        assert_eq!(
+            claude_permission_mode_from_records(std::io::Cursor::new("")),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_current_model_is_the_last_main_thread_answer() {
+        let records = [
+            r#"{"type":"assistant","message":{"model":"claude-opus-5-5"}}"#,
+            r#"{"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-4-5"}}"#,
+            r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#,
+            r#"{"type":"user","message":{"content":"\"assistant\""}}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            claude_model_from_records(std::io::Cursor::new(records)).as_deref(),
+            Some("claude-opus-5-5")
+        );
+    }
+
+    #[test]
+    fn claude_registry_maps_each_conversation_to_its_own_process() {
+        let root =
+            std::env::temp_dir().join(format!("lume-claude-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        for (pid, session, kind) in [
+            (10, "panel", "interactive"),
+            (11, "analysis", "bg"),
+            (12, "claim", "bg"),
+            (13, "analysis", "bg"),
+        ] {
+            fs::write(
+                root.join(format!("{pid}.json")),
+                json!({ "pid": pid, "sessionId": session, "kind": kind }).to_string(),
+            )
+            .unwrap();
+        }
+        fs::write(root.join("10.key"), "not a record").unwrap();
+        fs::write(root.join("broken.json"), "{").unwrap();
+        let mut analysis = claude_registered_pids_in(&root, "analysis");
+        analysis.sort();
+        assert_eq!(analysis, [11, 13]);
+        assert_eq!(claude_registered_pids_in(&root, "claim"), [12]);
+        assert!(claude_registered_pids_in(&root, "missing").is_empty());
+        assert!(claude_registered_pids_in(&root.join("absent"), "claim").is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_background_session_without_a_conversation_is_not_an_agent() {
+        let record = |kind: &str, status: &str, spare: bool| json!({ "kind": kind, "status": status, "sessionId": "s", "spare": spare });
+        let never = |_: &str| false;
+        let always = |_: &str| true;
+        // A pool spare, and an idle job nobody prompted: not agents yet.
+        assert!(unused_background_record(
+            &record("bg", "idle", true),
+            always
+        ));
+        assert!(unused_background_record(
+            &record("bg", "idle", false),
+            never
+        ));
+        // Working, or already holding a conversation: agents.
+        assert!(!unused_background_record(
+            &record("bg", "busy", false),
+            never
+        ));
+        assert!(!unused_background_record(
+            &record("bg", "idle", false),
+            always
+        ));
+        // A fresh interactive CLI is shown at once, before its first message.
+        assert!(!unused_background_record(
+            &record("interactive", "idle", false),
+            never
+        ));
+    }
+
+    #[test]
+    fn only_interactive_claude_records_hold_a_conversation() {
+        let record = |kind: &str| json!({ "pid": 4242, "sessionId": "session-id", "kind": kind, "entrypoint": "cli" });
+        assert_eq!(
+            interactive_claude_pid(&record("interactive"), "session-id"),
+            Some(4242)
+        );
+        assert_eq!(
+            interactive_claude_pid(&record("interactive"), "another"),
+            None
+        );
+        assert_eq!(interactive_claude_pid(&record("print"), "session-id"), None);
     }
 
     #[test]

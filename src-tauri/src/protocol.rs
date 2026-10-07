@@ -1686,6 +1686,7 @@ mod tests {
             activities: Vec::new(),
             rate_limits: Vec::new(),
             prompt_token_usage: Vec::new(),
+            forked_from: None,
         }
     }
 

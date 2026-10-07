@@ -105,6 +105,14 @@ pub struct PermissionProfile {
     pub available_actions: Vec<PermissionAction>,
 }
 
+/// How an agent asks before acting: the modes on offer and the one in effect.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionSettings {
+    pub mode: String,
+    pub modes: Vec<String>,
+}
+
 impl PermissionProfile {
     pub fn automatically_approves(&self) -> bool {
         if self.mode == AccessMode::FullAccess {
@@ -335,6 +343,9 @@ pub struct AgentSession {
     pub rate_limits: Vec<AgentRateLimit>,
     #[serde(default)]
     pub prompt_token_usage: Vec<PromptTokenUsage>,
+    /// Native id of the conversation this one was forked from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
 }
 
 /// Process-owned helpers are reported separately from user-facing chats.

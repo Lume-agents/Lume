@@ -252,6 +252,7 @@
   let draggingSessionId = $state<string | null>(null);
   let headerRelocatingSessionId = $state<string | null>(null);
   let workspaceDropIntent = $state<WorkspaceDropIntent | null>(null);
+  let sidebarReleaseIntent = $state(false);
   let showDragPreview = $state(false);
   let dragPreviewElement = $state<HTMLDivElement | null>(null);
   let dragPreviewFrame = 0;
@@ -1092,6 +1093,40 @@
     draggingSessionId = null;
     workspaceDropIntent = null;
     workspaceDropGeometry = null;
+    sidebarReleaseIntent = false;
+  }
+
+  // Dragging a visible chat out of the connected group in the sidebar hides it again.
+  function sidebarReleaseTarget(event: DragEvent) {
+    const sourceId = draggingSessionId;
+    if (!sourceId || headerRelocatingSessionId || currentPaneIds().length < 2 || !currentPaneIds().includes(sourceId)) return false;
+    const target = event.target instanceof Element ? event.target : null;
+    return !target?.closest(".session-tree-item.connected");
+  }
+
+  function trackSidebarRelease(event: DragEvent) {
+    const releasing = sidebarReleaseTarget(event);
+    sidebarReleaseIntent = releasing;
+    if (!releasing) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  }
+
+  function dropSidebarRelease(event: DragEvent) {
+    if (sidebarReleaseTarget(event) && draggingSessionId) {
+      event.preventDefault();
+      removePane(draggingSessionId);
+    }
+    finishSidebarSessionDrag();
+  }
+
+  function removePane(sessionId: string) {
+    const remaining = currentPaneIds().filter((id) => id !== sessionId);
+    if (!remaining.length) return;
+    [primaryId, secondaryId, tertiaryId] = [remaining[0] ?? null, remaining[1] ?? null, remaining[2] ?? null];
+    if (!remaining.includes(focusedPaneId ?? "")) focusedPaneId = primaryId;
+    if (maximizedPaneId === sessionId) maximizedPaneId = null;
+    persistWorkspaceLayout();
   }
 
   function trackSidebarDragPreview(event: DragEvent) {
@@ -2484,7 +2519,7 @@
       <button class:active={filter === "attention"} type="button" onclick={() => filter = "attention"}>{tr("Attention", "Atenção")}</button>
     </div>
 
-    <nav class="session-list" aria-label={tr("Agent sessions", "Sessões de agentes")}>
+    <nav class:releasing={sidebarReleaseIntent} class="session-list" aria-label={tr("Agent sessions", "Sessões de agentes")} ondragover={trackSidebarRelease} ondrop={dropSidebarRelease}>
       {#if loading}
         {#each [1, 2, 3] as item}
           <div class="session-skeleton" aria-hidden="true"><i></i><span></span></div>
@@ -3441,6 +3476,7 @@
   .session-filters button:hover { color: var(--workspace-strong); }
   .session-filters button.active { color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(26, 42, 34, .08); }
   .session-filters button:active { transform: scale(.97); }
+  .session-list.releasing { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 35%, transparent); }
   .session-list { min-height: 0; padding: 0 8px 14px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   .session-row { position: relative; display: flex; align-items: stretch; border-radius: 10px; cursor: grab; transition: background 140ms ease, opacity 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .session-tree-item { position: relative; min-width: 0; margin-bottom: 2px; border-radius: 10px; transition: background 140ms ease; }

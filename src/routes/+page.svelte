@@ -39,6 +39,7 @@
   } from "$lib/orbDocking";
   import LumeSelect from "$lib/LumeSelect.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import { sessionLauncherTransition } from "$lib/sessionLauncherTransition";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
   import { agentConnectionMessage } from "$lib/agentConnection";
@@ -209,6 +210,8 @@
   let configuringVscode = $state(false);
   let launcherOpen = $state(false);
   let launching = $state<IntegrationStatus["kind"] | null>(null);
+  let launchingSessionId = $state<string | null>(null);
+  let launchingPhase = $state<"choosing" | "opening" | null>(null);
   let launchError = $state<string | null>(null);
   let connectionAgent = $state<IntegrationStatus["kind"] | null>(null);
   let connectionMessage = $state("");
@@ -2462,16 +2465,19 @@
       launcherOpen = false;
       return;
     }
-    const selected = await openDialog({
-      directory: true,
-      multiple: false,
-      title: tr("Project for the new session", "Projeto da nova sessão"),
-    });
-    if (!selected || Array.isArray(selected)) return;
-
     launching = agent;
+    launchingSessionId = null;
+    launchingPhase = "choosing";
     launchError = null;
     try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: tr("Project for the new session", "Projeto da nova sessão"),
+      });
+      if (!selected || Array.isArray(selected)) return;
+
+      launchingPhase = "opening";
       const profile = preferences.projectProfiles[projectKey(selected)];
       await launchAgentSession(
         agent,
@@ -2489,6 +2495,8 @@
       else launchError = String(error).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
+      launchingSessionId = null;
+      launchingPhase = null;
     }
   }
 
@@ -2513,6 +2521,8 @@
 
   async function resumeStoredSession(stored: ResumableSession) {
     launching = stored.agent;
+    launchingSessionId = stored.id;
+    launchingPhase = "opening";
     launchError = null;
     try {
       const liveSession = resolveLiveResumableSession(stored, sessions);
@@ -2541,6 +2551,8 @@
       else launchError = String(error).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
+      launchingSessionId = null;
+      launchingPhase = null;
     }
   }
 
@@ -3024,7 +3036,15 @@
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="4.5" /><path d="m12 12 4 4" /></svg>
           </button>
           {#if view === "sessions"}
-            <button class:active={launcherOpen} class="add-button" type="button" onclick={toggleLauncher} aria-label={tr("Open or resume session", "Abrir ou retomar sessão")}>
+            <button
+              class:active={launcherOpen}
+              class="add-button"
+              type="button"
+              onclick={toggleLauncher}
+              aria-expanded={launcherOpen}
+              aria-controls="session-launcher"
+              aria-label={launcherOpen ? tr("Close session launcher", "Fechar iniciador de sessões") : tr("Open or resume session", "Abrir ou retomar sessão")}
+            >
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 5v10M5 10h10" /></svg>
             </button>
           {/if}
@@ -3051,7 +3071,7 @@
       {/if}
 
       {#if launcherOpen}
-        <div class="launcher-popover" transition:fade={{ duration: 100 }}>
+        <div id="session-launcher" class="launcher-popover" transition:sessionLauncherTransition={{ duration: 190 }}>
           <div class="launcher-popover-scroll">
             <span class="launcher-title">{tr("Open session", "Abrir sessão")}</span>
             {#each launcherIntegrations() as integration}
@@ -3059,37 +3079,76 @@
                 <div class="launcher-row">
                   <span class="agent-avatar agent-{integration.kind}"><BrandIcon name={integration.kind} size={17} /></span>
                   <strong>{integration.label}</strong>
-                  <button disabled={launching !== null} type="button" onclick={() => startSession(integration.kind)}>{tr("New", "Nova")}</button>
+                  <button
+                    class:loading={launching === integration.kind && launchingSessionId === null}
+                    disabled={launching !== null}
+                    type="button"
+                    onclick={() => startSession(integration.kind)}
+                    aria-busy={launching === integration.kind && launchingSessionId === null}
+                  >
+                    <span class="launcher-button-content">
+                      {#if launching === integration.kind && launchingSessionId === null}
+                        <span class="launcher-spinner" aria-hidden="true"></span>
+                      {/if}
+                      <span>
+                        {#if launching === integration.kind && launchingSessionId === null}
+                          {launchingPhase === "choosing" ? tr("Select project…", "Escolher projeto…") : tr("Opening…", "Abrindo…")}
+                        {:else}
+                          {tr("New", "Nova")}
+                        {/if}
+                      </span>
+                    </span>
+                  </button>
                   {#if integration.kind !== "gemini"}
                     <button
                       class:active={resumeAgent === integration.kind}
+                      class:loading={loadingResumeAgent === integration.kind}
                       disabled={launching !== null || loadingResumeAgent !== null}
                       type="button"
                       onclick={() => toggleResumeSessions(integration.kind)}
-                    >{loadingResumeAgent === integration.kind ? "…" : tr("Resume", "Retomar")}</button>
+                      aria-busy={loadingResumeAgent === integration.kind}
+                    >
+                      <span class="launcher-button-content">
+                        {#if loadingResumeAgent === integration.kind}
+                          <span class="launcher-spinner" aria-hidden="true"></span>
+                        {/if}
+                        <span>{loadingResumeAgent === integration.kind ? tr("Loading…", "Buscando…") : tr("Resume", "Retomar")}</span>
+                      </span>
+                    </button>
                   {/if}
                 </div>
                 {#if resumeAgent === integration.kind}
-                  <div class="resume-session-list">
-                    {#each resumableSessions as stored (stored.id)}
-                      <button
-                        class="resume-session"
-                        disabled={launching !== null}
-                        type="button"
-                        title={stored.workingDirectory}
-                        onclick={() => resumeStoredSession(stored)}
-                      >
-                        <span>
-                          <strong>{stored.name}</strong>
-                          <small>{stored.source} · {relativeTime(stored.updatedAt)}</small>
-                        </span>
-                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 5h8v8M13.5 5.5 5 14" /></svg>
-                      </button>
+                  <div class="resume-session-list" transition:slide={{ duration: 145, easing: cubicOut }}>
+                    {#if loadingResumeAgent === integration.kind}
+                      <div class="launcher-loading-note" role="status" aria-live="polite" transition:fade={{ duration: 120 }}>
+                        <span class="launcher-spinner" aria-hidden="true"></span>
+                        <span>{tr("Finding recent sessions…", "Buscando sessões recentes…")}</span>
+                      </div>
+                    {:else if resumableSessions.length > 0}
+                      {#each resumableSessions as stored (stored.id)}
+                        <button
+                          class:loading={launchingSessionId === stored.id}
+                          class="resume-session"
+                          disabled={launching !== null}
+                          type="button"
+                          title={stored.workingDirectory}
+                          onclick={() => resumeStoredSession(stored)}
+                          aria-busy={launchingSessionId === stored.id}
+                        >
+                          <span>
+                            <strong>{stored.name}</strong>
+                            <small>{launchingSessionId === stored.id ? tr("Opening session…", "Abrindo sessão…") : `${stored.source} · ${relativeTime(stored.updatedAt)}`}</small>
+                          </span>
+                          {#if launchingSessionId === stored.id}
+                            <span class="launcher-spinner" aria-hidden="true"></span>
+                          {:else}
+                            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 5h8v8M13.5 5.5 5 14" /></svg>
+                          {/if}
+                        </button>
+                      {/each}
                     {:else}
-                      {#if loadingResumeAgent !== integration.kind}
-                        <p>{tr("No resumable sessions were found.", "Nenhuma sessão retomável foi encontrada.")}</p>
-                      {/if}
-                    {/each}
+                      <p>{tr("No resumable sessions were found.", "Nenhuma sessão retomável foi encontrada.")}</p>
+                    {/if}
                   </div>
                 {/if}
               </div>
@@ -4572,6 +4631,9 @@
   .add-button, .workspace-button, .palette-button { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 10px; }
   .add-button:hover,
   .add-button.active { color: #486d5e; background: rgba(80, 103, 94, 0.07); }
+  .add-button svg { transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1); }
+  .add-button.active svg { transform: rotate(45deg); }
+  .add-button:active { transform: scale(0.96); }
 
   .add-button:hover,
   .workspace-button:hover,
@@ -4596,15 +4658,23 @@
   .launcher-row { min-height: 45px; display: flex; align-items: center; gap: 7px; border-top: 1px solid rgba(105, 123, 115, 0.08); }
   .launcher-row .agent-avatar { width: 25px; height: 25px; border-radius: 8px; font-size: 9px; }
   .launcher-row strong { min-width: 0; flex: 1; color: #35423d; font-size: 10px; }
-  .launcher-row button { height: 25px; padding: 0 7px; border: 0; border-radius: 7px; color: #60736a; background: rgba(78, 105, 93, 0.055); font-size: 9px; font-weight: 700; cursor: pointer; }
+  .launcher-row button { box-sizing: border-box; min-width: 64px; height: 27px; padding: 0 8px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 7px; color: #60736a; background: rgba(78, 105, 93, 0.055); font-size: 9px; font-weight: 700; cursor: pointer; transition: color 120ms ease, background-color 120ms ease, transform 120ms cubic-bezier(0.16, 1, 0.3, 1); }
   .launcher-row button:hover { background: rgba(78, 105, 93, 0.1); }
   .launcher-row button.active { color: #327a58; background: rgba(57, 139, 96, 0.1); }
-  .launcher-row button:disabled { opacity: 0.45; }
+  .launcher-row button.loading { color: #327a58; background: rgba(57, 139, 96, 0.1); opacity: 0.92; }
+  .launcher-row button:disabled:not(.loading) { opacity: 0.45; cursor: default; }
+  .launcher-row button:not(:disabled):active { transform: scale(0.96); }
+  .launcher-row button:focus-visible, .resume-session:focus-visible { outline: 2px solid rgba(73, 133, 103, 0.48); outline-offset: 2px; }
+  .launcher-button-content { display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; }
+  .launcher-spinner { width: 9px; height: 9px; flex: 0 0 auto; border: 1.4px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: launcher-spin 720ms linear infinite; }
+  @keyframes launcher-spin { to { transform: rotate(360deg); } }
   .resume-session-list { padding: 2px 0 7px 32px; display: grid; gap: 3px; overflow: visible; }
   .resume-session-list > p { margin: 8px 2px; color: #89938f; font-size: 9px; }
+  .launcher-loading-note { min-height: 30px; display: flex; align-items: center; gap: 7px; color: #718078; font-size: 8px; }
   .resume-session { width: 100%; min-height: 39px; padding: 5px 7px 5px 8px; display: flex; align-items: center; gap: 8px; overflow: hidden; border: 0; border-radius: 9px; color: #51665c; background: rgba(76, 104, 91, 0.045); text-align: left; cursor: pointer; }
   .resume-session:hover { background: rgba(61, 132, 96, 0.09); }
   .resume-session:disabled { opacity: 0.45; cursor: default; }
+  .resume-session.loading { color: #327a58; background: rgba(57, 139, 96, 0.1); opacity: 0.9; }
   .resume-session > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
   .resume-session strong, .resume-session small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .resume-session strong { color: #3e5048; font-size: 9px; }
@@ -5224,6 +5294,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+    .launcher-spinner { animation: none !important; }
   }
 
   .overlay-shell.dark { color-scheme: dark; }
@@ -5231,6 +5302,9 @@
   .overlay-shell.dark .launcher-popover { color: #dfe8e3; border-color: rgba(190, 209, 200, 0.13); background: #1b221f; }
   .overlay-shell.dark .resume-session { color: #afc0b7; background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .resume-session:hover { background: rgba(101, 180, 141, 0.08); }
+  .overlay-shell.dark .resume-session.loading,
+  .overlay-shell.dark .launcher-row button.loading { color: #a3d8ba; background: rgba(101, 180, 141, 0.12); }
+  .overlay-shell.dark .launcher-loading-note { color: #93a89c; }
   .overlay-shell.dark .resume-session strong { color: #dbe7e1; }
   .overlay-shell.dark .resume-session small { color: #899a91; }
   .overlay-shell.dark .panel { color: #dfe8e3; border-color: rgba(190, 209, 200, 0.13); background: #1b221f; }

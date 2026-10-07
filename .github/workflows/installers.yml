@@ -208,4 +208,4 @@ jobs:
       - name: Publicar artefatos validados
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit "$LUME_RELEASE_TAG" --draft=false
+        run: gh release edit "$LUME_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -200,6 +200,7 @@
   let appVersion = $state("0.15.0");
   let dismissedAgentAlertIds = $state<string[]>([]);
   let rateLimitRefreshRequested = false;
+  let antigravityRateLimitRefreshRequested = false;
   let updateState = $state<"idle" | "checking" | "available" | "up_to_date" | "downloading" | "ready" | "error">("idle");
   let availableVersion = $state<string | null>(null);
   let updateDetail = $state("");
@@ -2174,6 +2175,10 @@
           if (!rateLimitRefreshRequested && sessions.some((session) => session.agent === "codex")) {
             rateLimitRefreshRequested = true;
             void refreshAgentRateLimits("codex").catch(() => undefined);
+          }
+          if (!antigravityRateLimitRefreshRequested && sessions.some((session) => session.agent === "antigravity")) {
+            antigravityRateLimitRefreshRequested = true;
+            void refreshAgentRateLimits("antigravity").catch(() => undefined);
           }
           error = "";
           reconcileSelection();

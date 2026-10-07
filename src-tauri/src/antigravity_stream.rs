@@ -17,8 +17,8 @@ use tauri::AppHandle;
 use crate::{
     codex_bridge::{CodexModelOption, CodexReasoningEffortOption, CodexThreadModelSettings},
     domain::{
-        AccessMode, AgentKind, HookEvent, HookEventKind, PermissionProfile, SessionActivity,
-        SessionControlOrigin, SessionSource,
+        AccessMode, AgentKind, AgentRateLimit, HookEvent, HookEventKind, PermissionProfile,
+        SessionActivity, SessionControlOrigin, SessionSource,
     },
     event_server,
     opencode_acp::read_bounded_line,
@@ -31,6 +31,7 @@ pub const PERMISSION_PLAN: &str = "agy_plan";
 pub const PERMISSION_ALLOW_ALL: &str = "agy_allow_all";
 
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+const USAGE_TIMEOUT: Duration = Duration::from_secs(15);
 const EFFORT_LEVELS: [&str; 3] = ["low", "medium", "high"];
 
 struct ManagedSession {
@@ -397,6 +398,112 @@ impl AntigravityStream {
         }
         Ok(())
     }
+}
+
+/// Quota windows of the `agy` CLI, read from `/usage` (zero tokens).
+pub fn fetch_rate_limits() -> Result<Vec<AgentRateLimit>, String> {
+    let mut command = crate::executables::command("agy")?;
+    command
+        .args(["-p", "/usage", "--output-format", "stream-json"])
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    // Drain stdout while waiting so a large payload cannot fill the pipe and stall the child.
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or("Antigravity stdout unavailable")?;
+    let reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut buffer);
+        buffer
+    });
+    let started = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            break;
+        }
+        if started.elapsed() >= USAGE_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("O consumo do Antigravity demorou demais para responder".into());
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
+    let output = reader.join().unwrap_or_default();
+    let listing = String::from_utf8_lossy(&output);
+    let limits = listing
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|message| {
+            message["event"] == "command_result" && message["command"]["name"] == "usage"
+        })
+        .map(|message| parse_usage_rate_limits(&message))
+        .unwrap_or_default();
+    if limits.is_empty() {
+        return Err("A CLI do Antigravity não retornou o consumo de quota".into());
+    }
+    Ok(limits)
+}
+
+/// Turns the `command_result` of `/usage` into one limit per group and window.
+pub fn parse_usage_rate_limits(output: &Value) -> Vec<AgentRateLimit> {
+    let mut limits = Vec::new();
+    let Some(groups) = output
+        .pointer("/command/data/groups")
+        .and_then(Value::as_array)
+    else {
+        return limits;
+    };
+    for group in groups {
+        let name = group.get("name").and_then(Value::as_str).unwrap_or("");
+        let group_label = if name.to_lowercase().contains("gemini") {
+            "Gemini"
+        } else {
+            "3P Models"
+        };
+        let Some(buckets) = group.get("buckets").and_then(Value::as_array) else {
+            continue;
+        };
+        for bucket in buckets {
+            let Some(id) = bucket.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let window = bucket.get("window").and_then(Value::as_str).unwrap_or("");
+            let remaining = bucket
+                .get("remaining_fraction")
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0);
+            let (window_minutes, window_label) = match window {
+                "5h" => (Some(300), "5h"),
+                "weekly" => (Some(10080), "Semanal"),
+                other => (None, other),
+            };
+            limits.push(AgentRateLimit {
+                id: format!("antigravity:{id}"),
+                label: format!("{group_label} · {window_label}"),
+                used_percent: ((1.0 - remaining).clamp(0.0, 1.0) * 100.0).round() as u8,
+                resets_at: bucket
+                    .get("reset_time")
+                    .and_then(Value::as_str)
+                    .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                    .map(|stamp| stamp.timestamp_millis()),
+                window_minutes,
+            });
+        }
+    }
+    limits
 }
 
 /// The `<id>\t<label>` lines of `agy models`, without headings or anything else.
@@ -1000,5 +1107,73 @@ mod tests {
             activity.detail.map(|text| text.chars().count()),
             Some(32 * 1024)
         );
+    }
+
+    const AGY_USAGE: &str = r#"{"event":"command_result","command":{"name":"usage","data":{"groups":[
+        {"name":"Gemini Models","buckets":[
+            {"id":"gemini-weekly","window":"weekly","remaining_fraction":0.9723,"reset_time":"2026-10-14T02:32:39Z"},
+            {"id":"gemini-5h","window":"5h","remaining_fraction":0.98,"reset_time":"2026-10-07T23:31:41Z"}]},
+        {"name":"Claude and GPT models","buckets":[
+            {"id":"3p-weekly","window":"weekly","remaining_fraction":0.12,"reset_time":"2026-10-11T19:08:56Z"},
+            {"id":"3p-5h","window":"5h","remaining_fraction":1,"reset_time":"2026-10-08T00:59:49Z"}]}]}}}"#;
+
+    #[test]
+    fn usage_buckets_become_labelled_rate_limits() {
+        let limits = parse_usage_rate_limits(&serde_json::from_str(AGY_USAGE).unwrap());
+        let shown: Vec<_> = limits
+            .iter()
+            .map(|limit| {
+                (
+                    limit.id.as_str(),
+                    limit.label.as_str(),
+                    limit.used_percent,
+                    limit.window_minutes,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                (
+                    "antigravity:gemini-weekly",
+                    "Gemini · Semanal",
+                    3,
+                    Some(10080)
+                ),
+                ("antigravity:gemini-5h", "Gemini · 5h", 2, Some(300)),
+                (
+                    "antigravity:3p-weekly",
+                    "3P Models · Semanal",
+                    88,
+                    Some(10080)
+                ),
+                ("antigravity:3p-5h", "3P Models · 5h", 0, Some(300)),
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_reset_time_is_unix_milliseconds() {
+        let limits = parse_usage_rate_limits(&serde_json::from_str(AGY_USAGE).unwrap());
+        assert_eq!(limits[1].resets_at, Some(1_791_415_901_000));
+    }
+
+    #[test]
+    fn usage_tolerates_missing_fields_and_foreign_payloads() {
+        assert!(parse_usage_rate_limits(&json!({ "event": "result" })).is_empty());
+        let limits = parse_usage_rate_limits(&json!({
+            "command": { "data": { "groups": [
+                { "name": "Gemini Models", "buckets": [
+                    { "id": "x", "window": "monthly", "remaining_fraction": -0.5, "reset_time": "soon" },
+                    { "window": "5h" }
+                ] },
+                { "name": "Empty" }
+            ] } }
+        }));
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].used_percent, 100);
+        assert_eq!(limits[0].label, "Gemini · monthly");
+        assert_eq!(limits[0].resets_at, None);
+        assert_eq!(limits[0].window_minutes, None);
     }
 }

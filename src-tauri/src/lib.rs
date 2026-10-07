@@ -830,8 +830,30 @@ fn refresh_agent_rate_limits(
             refresh_claude_rate_limits(app, state.inner().clone());
             Ok(())
         }
+        AgentKind::Antigravity => {
+            refresh_antigravity_rate_limits(app, state.inner().clone());
+            Ok(())
+        }
         _ => Ok(()),
     }
+}
+
+fn refresh_antigravity_rate_limits(app: AppHandle, state: AppState) {
+    static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        if let Ok(limits) = antigravity_stream::fetch_rate_limits() {
+            if state
+                .set_agent_rate_limits(AgentKind::Antigravity, limits)
+                .unwrap_or(false)
+            {
+                protocol::emit_sessions_changed(&app);
+            }
+        }
+        REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
 fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {

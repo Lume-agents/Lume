@@ -1741,6 +1741,18 @@
     catch { /* Opening the board is still available when storage is disabled. */ }
   }
 
+  async function deleteWorkflowBoardGroup(id: string) {
+    const deadline = Date.now() + 15_000;
+    while (settingsSaving && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+    if (settingsSaving) throw new Error(tr("Preferences are still being saved. Try again.", "Os ajustes ainda estão sendo salvos. Tente novamente."));
+    if (!preferences.workflowGroups.some((item) => item.id === id)) return;
+    if (!await updatePreference("workflowGroups", preferences.workflowGroups.filter((item) => item.id !== id))) {
+      throw new Error(settingsError || tr("Could not delete the workflow.", "Não foi possível excluir o workflow."));
+    }
+  }
+
   async function saveWorkflowBoardGroup(group: WorkflowGroupDefinition) {
     const deadline = Date.now() + 15_000;
     while (settingsSaving && Date.now() < deadline) {
@@ -3218,6 +3230,7 @@
         active={boardOpen}
         keyboardEnabled={!settingsOpen && !launcherOpen && !sessionContextMenu && !headerControl && !searchOpen}
         onSaveGroup={saveWorkflowBoardGroup}
+        onDeleteGroup={deleteWorkflowBoardGroup}
         onOpenChat={(session) => { showWorkflowBoard(false); selectSession(session); }}
         onClose={() => showWorkflowBoard(false)}
         onFinishSidebarDrag={finishSidebarSessionDrag}

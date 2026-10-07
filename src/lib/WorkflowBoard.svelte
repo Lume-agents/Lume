@@ -17,13 +17,14 @@
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
 
-  let { sessions, preferences, language, active, keyboardEnabled = true, onSaveGroup, onOpenChat, onClose, onFinishSidebarDrag }: {
+  let { sessions, preferences, language, active, keyboardEnabled = true, onSaveGroup, onDeleteGroup, onOpenChat, onClose, onFinishSidebarDrag }: {
     sessions: HubSession[];
     preferences: Preferences;
     language: Language;
     active: boolean;
     keyboardEnabled?: boolean;
     onSaveGroup: (group: WorkflowGroupDefinition) => Promise<void>;
+    onDeleteGroup: (id: string) => Promise<void>;
     onOpenChat: (session: HubSession) => void;
     onClose: () => void;
     onFinishSidebarDrag: () => void;
@@ -69,6 +70,10 @@
   let connectionPoint = $state<BoardPoint | null>(null);
   let connectionTarget = $state<string | null>(null);
   let dropActive = $state(false);
+  let cardOutside = $state(false);
+  let confirmingDelete = $state(false);
+  let deleting = $state(false);
+  let confirmTimer: ReturnType<typeof setTimeout> | undefined;
   let problemStepIds = $state<string[]>([]);
 
   const queue = new WorkflowBoardSaveQueue((next) => onSaveGroup(next));
@@ -258,15 +263,52 @@
         : defaultContextSelection();
     editConnection({ contextPolicy: policy, contextSelection: selected, includeResponse: selected.response, includeFiles: selected.files, includeTests: selected.checks });
   }
+  function removeStepCard(id: string) {
+    if (!group || locked) return;
+    const positions = { ...layout.positions };
+    delete positions[id];
+    patchLayout({ positions });
+    edit(removeStep(group, id));
+    choose(null);
+  }
   function removeSelected() {
     if (!group || !selection || locked) return;
-    if (selection.kind === "step") {
-      const positions = { ...layout.positions };
-      delete positions[selection.id];
-      patchLayout({ positions });
-      edit(removeStep(group, selection.id));
-    } else edit(removeConnection(group, selection.id));
+    if (selection.kind === "step") { removeStepCard(selection.id); return; }
+    edit(removeConnection(group, selection.id));
     choose(null);
+  }
+  function requestDeleteGroup() {
+    if (!group || locked || deleting) return;
+    if (!confirmingDelete) {
+      confirmingDelete = true;
+      clearTimeout(confirmTimer);
+      confirmTimer = setTimeout(() => { confirmingDelete = false; }, 4000);
+      return;
+    }
+    void deleteGroup();
+  }
+  async function deleteGroup() {
+    if (!group) return;
+    const id = group.id;
+    clearTimeout(confirmTimer);
+    confirmingDelete = false;
+    deleting = true;
+    try {
+      queue.discard(id);
+      await queue.settle();
+      await onDeleteGroup(id);
+      const without = <T,>(record: Record<string, T>) => Object.fromEntries(Object.entries(record).filter(([key]) => key !== id));
+      drafts = without(drafts);
+      layouts = without(layouts);
+      objectives = without(objectives);
+      runs = without(runs);
+      saveFailed = false;
+      activeId = "";
+      cancelGesture();
+      choose(null);
+      persistLayout();
+    } catch (error) { notify(errorMessage(error)); }
+    finally { if (!disposed) deleting = false; }
   }
   function invalidatePreview() { previewRevision++; preview = null; previewLoading = false; }
   async function showPreview() {
@@ -330,17 +372,27 @@
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     const dx = event.clientX - gesture.start.x;
     const dy = event.clientY - gesture.start.y;
+    if (gesture.kind === "card") {
+      const bounds = viewport.getBoundingClientRect();
+      cardOutside = event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
+    }
     if (gesture.kind === "pan") patchLayout({ view: { ...view, x: gesture.origin.x + dx, y: gesture.origin.y + dy } });
     else if (gesture.kind === "card" && gesture.stepId) patchLayout({ positions: { ...layout.positions, [gesture.stepId]: { x: gesture.origin.x + dx / view.zoom, y: gesture.origin.y + dy / view.zoom } } });
   }
   function endPointer(event: PointerEvent) {
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     if (gesture.kind === "connection" && connectionTarget) connectTo(connectionTarget);
+    if (gesture.kind === "card" && gesture.stepId && cardOutside) {
+      // Dropping a card outside the canvas takes it out of the workflow; a running workflow only gets its card back.
+      if (locked) patchLayout({ positions: { ...layout.positions, [gesture.stepId]: gesture.origin } });
+      else { const id = gesture.stepId; cancelGesture(); removeStepCard(id); return; }
+    }
     cancelGesture();
   }
   function cancelGesture() {
     const previous = gesture;
     gesture = null;
+    cardOutside = false;
     connectionSource = null;
     connectionPoint = null;
     connectionTarget = null;
@@ -540,7 +592,7 @@
         {@const session = sessionFor(step)}
         {@const state = stepVisualState(run, step.id)}
         {@const order = chain?.order.indexOf(step.id) ?? -1}
-        <article class="board-card" class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-state={state === "idle" ? session?.status : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"}>
+        <article class="board-card" class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-state={state === "idle" ? session?.status : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"}>
           <button class="card-body" type="button" onpointerdown={(event) => beginCard(event, step.id)} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleName(step.role)}>
             <span class="card-identity">
               <ThreadAvatar seed={session?.nativeSessionId || step.sessionNativeId} label={name(session)} size={38} />
@@ -561,6 +613,7 @@
     {#if groups.length}<LumeSelect value={activeId} options={groups.map((item, index) => ({ value: item.id, label: groupName(item, index) }))} ariaLabel={tr("Select workflow", "Selecionar workflow")} minWidth={132} variant="heading" onValueChange={activate} />{/if}
     <span class="toolbar-divider"></span>
     <button type="button" title={tr("New workflow", "Novo workflow")} aria-label={tr("New workflow", "Novo workflow")} onclick={createGroup}><LumeIcon name="plus" size={16} /></button>
+    <button class:confirm={confirmingDelete} class="delete-workflow" type="button" disabled={!group || locked || deleting} title={confirmingDelete ? tr("Click again to delete this workflow", "Clique de novo para excluir este workflow") : tr("Delete workflow", "Excluir workflow")} aria-label={confirmingDelete ? tr("Confirm deleting this workflow", "Confirmar exclusão deste workflow") : tr("Delete workflow", "Excluir workflow")} onclick={requestDeleteGroup}><LumeIcon name="trash" size={15} />{#if confirmingDelete}<span>{tr("Delete?", "Excluir?")}</span>{/if}</button>
     <button class="add-agent" type="button" disabled={locked || adding} onclick={() => openPicker()}><LumeIcon name="plus" size={14} />{tr("Agent", "Agente")}</button>
     <span class="save-state" aria-live="polite">{saving ? tr("Saving…", "Salvando…") : saveFailed ? tr("Not saved", "Não salvo") : ""}</span>
     {#if saveFailed}<button type="button" title={tr("Retry saving", "Tentar salvar novamente")} aria-label={tr("Retry saving", "Tentar salvar novamente")} onclick={() => void retrySave()}><LumeIcon name="refresh" size={15} /></button>{/if}
@@ -720,6 +773,10 @@
   .board-toolbar button:hover, .board-navigation button:hover, .board-panel > header button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .board-toolbar .add-agent { width: auto; display: flex; gap: 5px; padding: 0 8px; font-size: 11px; }
   .board-toolbar .close-board { margin-left: auto; }
+  .board-toolbar .delete-workflow:hover:not(:disabled) { color: var(--board-danger); }
+  .board-toolbar .delete-workflow:disabled { opacity: .4; }
+  .board-toolbar .delete-workflow.confirm { width: auto; padding: 0 9px; display: flex; gap: 5px; color: var(--board-danger); background: color-mix(in srgb, var(--board-danger) 12%, transparent); font-size: 10px; font-weight: 700; }
+  .board-card.leaving { opacity: .55; outline: 2px dashed var(--board-danger); outline-offset: 3px; }
   .save-state { margin-left: auto; color: var(--workspace-muted); font-size: 10px; }
   .save-state:empty { display: none; }
   .board-panel { position: absolute; z-index: 6; top: 70px; right: 18px; bottom: 157px; width: min(292px, calc(100% - 36px)); display: grid; grid-template-rows: auto minmax(0, 1fr); border: 1px solid var(--workspace-line); border-radius: 14px; background: var(--workspace-raised); overflow: hidden; }

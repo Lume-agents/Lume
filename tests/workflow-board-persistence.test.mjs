@@ -46,3 +46,19 @@ releaseFinalWrite();
 await completed;
 assert.deepEqual(lateWrites, [1, 2], "edits at the end of a write are not stranded in the queue");
 console.log("Workflow board persistence tests passed");
+
+const discarded = [];
+let unblock;
+const discardQueue = new WorkflowBoardSaveQueue(async (value) => {
+  discarded.push(value);
+  if (discarded.length === 1) await new Promise((resolve) => { unblock = resolve; });
+});
+const running = discardQueue.enqueue(group("a", 1));
+discardQueue.enqueue(group("a", 2));
+discardQueue.discard("a");
+assert.equal(discardQueue.hasPending("a"), false, "a deleted group has no queued edits");
+const settled = discardQueue.settle();
+unblock();
+await settled;
+await running;
+assert.deepEqual(discarded.map(({ id, version }) => [id, version]), [["a", 1]], "discarded edits are never written");

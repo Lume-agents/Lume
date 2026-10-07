@@ -20,6 +20,16 @@ export class WorkflowBoardSaveQueue {
     return this.flush();
   }
 
+  /** Drop unsaved edits for a group that is being deleted. */
+  discard(id: string): void {
+    this.pending.delete(id);
+  }
+
+  /** Wait for any write already in flight, ignoring its outcome. */
+  async settle(): Promise<void> {
+    try { await this.running; } catch { /* The caller only needs the queue to be idle. */ }
+  }
+
   flush(): Promise<void> {
     if (this.running) return this.running;
     if (!this.pending.size) return Promise.resolve();

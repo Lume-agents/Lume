@@ -598,7 +598,14 @@
           {@const session = sessionFor(selectedStep)}
           <div class="selected-identity"><ThreadAvatar seed={selectedStep.sessionNativeId} label={name(session)} size={36} /><span><strong>{name(session)}</strong><small>{session?.agentLabel} · {session?.project}</small></span></div>
           {#if !session || !session.capabilities.canPrompt}<p class="session-warning"><LumeIcon name="warning" size={15} />{session?.controlOrigin === "external" ? tr("Take control in the chat before running this workflow.", "Assuma o controle no chat antes de executar este workflow.") : tr("Connect this session before running the workflow.", "Conecte esta sessão antes de executar o workflow.")}</p>{/if}
-          <label class="field"><span>{tr("Role", "Papel")}</span><LumeSelect value={selectedStep.role} options={roles.map((role) => ({ value: role, label: roleName(role) }))} ariaLabel={tr("Step role", "Papel da etapa")} minWidth={0} disabled={locked || changingRole} onValueChange={(value) => void changeRole(value as WorkflowRole)} /></label>
+          <div class="field" role="radiogroup" aria-label={tr("Step role", "Papel da etapa")}>
+            <span>{tr("Role", "Papel")}</span>
+            <div class="role-picker">
+              {#each roles as role (role)}
+                <button class:selected={selectedStep.role === role} class="role-option role-{role}" type="button" role="radio" aria-checked={selectedStep.role === role} disabled={locked || changingRole} onclick={() => { if (selectedStep.role !== role) void changeRole(role); }}><WorkflowRoleIcon {role} /><span>{roleName(role)}</span></button>
+              {/each}
+            </div>
+          </div>
           {#if selectedStep.role === "custom"}<label class="field"><span>{tr("Role name", "Nome do papel")}</span><input value={selectedStep.customRoleLabel} disabled={locked} maxlength="80" oninput={(event) => editStep({ customRoleLabel: event.currentTarget.value })} /></label>{/if}
           <label class="field"><span>{tr("Instruction", "Instrução")}</span><textarea rows="3" disabled={locked || changingRole} value={selectedStep.instruction} oninput={(event) => editStep({ instruction: event.currentTarget.value })}></textarea></label>
           <label class="field"><span>{tr("Expected input", "Entrada esperada")}</span><textarea rows="2" disabled={locked || changingRole} value={selectedStep.expectedInput} oninput={(event) => editStep({ expectedInput: event.currentTarget.value })}></textarea></label>
@@ -730,6 +737,14 @@
   .field { min-width: 0; display: grid; gap: 7px; font-size: 11px; }
   .field > span { color: var(--workspace-muted); }
   .field :global(.lume-select) { width: 100%; }
+  .role-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+  .role-option { min-width: 0; min-height: 52px; padding: 7px 4px 6px; display: grid; justify-items: center; align-content: center; gap: 4px; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-muted); background: var(--workspace-subtle); font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; transition: color 120ms ease, border-color 120ms ease, background 120ms ease; }
+  .role-option > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .role-option :global(.workflow-role-icon) { width: 18px; height: 18px; }
+  .role-option:hover:not(:disabled) { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 40%, var(--workspace-line)); }
+  .role-option.selected { color: var(--workspace-accent); border-color: var(--workspace-accent); background: var(--workspace-accent-soft); }
+  .role-option:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+  .role-option:disabled { opacity: .5; cursor: default; }
   .field input, .field textarea, .run-controls textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-subtle); font: inherit; line-height: 1.5; resize: vertical; caret-color: var(--workspace-accent); }
   .field textarea { min-height: 56px; max-height: 220px; }
   .switch-field { display: flex; gap: 10px; align-items: center; justify-content: space-between; font-size: 11px; line-height: 1.5; }

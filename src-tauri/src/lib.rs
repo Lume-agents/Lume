@@ -3181,6 +3181,9 @@ mod tests {
                     can_respond_from_lume: true,
                     available_actions: vec![PermissionAction::AllowOnce],
                 },
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
             },
             None,
         );
@@ -3243,6 +3246,9 @@ mod tests {
                     can_respond_from_lume: true,
                     available_actions: vec![PermissionAction::AllowOnce],
                 },
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
             },
             None,
         );

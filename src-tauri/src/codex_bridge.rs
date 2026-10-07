@@ -41,7 +41,7 @@ const MAX_LOCAL_CODEX_MESSAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LOCAL_CODEX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const PROXY_SESSION_STABLE_FOR: Duration = Duration::from_millis(1_200);
 const CODEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const CODEX_MODEL_SETTINGS_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_MODEL_SETTINGS_TIMEOUT: Duration = Duration::from_secs(15);
 const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(90);
 const CODEX_PROMPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_PROXY_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -210,11 +210,62 @@ struct ActiveProxyConnection {
 
 type ActiveProxyThreads = Arc<Mutex<HashMap<String, ActiveProxyConnection>>>;
 
+#[derive(Clone, Debug, Default)]
+struct CachedCodexThreadSettings {
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+}
+
+fn update_cached_thread_settings(
+    cache: &Arc<Mutex<HashMap<String, CachedCodexThreadSettings>>>,
+    thread_id: &str,
+    update: CachedCodexThreadSettings,
+) -> Result<(), String> {
+    let mut settings = cache
+        .lock()
+        .map_err(|_| "Could not save the Codex thread model settings".to_string())?;
+    let cached = settings.entry(thread_id.to_string()).or_default();
+    if update.model.is_some() {
+        cached.model = update.model;
+    }
+    if update.reasoning_effort.is_some() {
+        cached.reasoning_effort = update.reasoning_effort;
+    }
+    if update.service_tier.is_some() {
+        cached.service_tier = update.service_tier;
+    }
+    Ok(())
+}
+
+fn cached_thread_settings_from_response(response: &Value) -> Option<CachedCodexThreadSettings> {
+    let result = response.get("result")?;
+    let settings = CachedCodexThreadSettings {
+        model: result
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        reasoning_effort: result
+            .get("reasoningEffort")
+            .map(|value| value.as_str().unwrap_or_default().to_string()),
+        service_tier: result
+            .get("serviceTier")
+            .map(|value| value.as_str().unwrap_or("default").to_string()),
+    };
+    (settings.model.is_some()
+        || settings.reasoning_effort.is_some()
+        || settings.service_tier.is_some())
+    .then_some(settings)
+}
+
 #[derive(Clone, Debug)]
 pub struct PreparedThread {
     pub thread_id: String,
     pub thread_name: Option<String>,
     pub permission_profile: PermissionProfile,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -265,6 +316,7 @@ pub struct CodexBridge {
     queued_prompts: Arc<Mutex<HashMap<String, VecDeque<QueuedPrompt>>>>,
     collaboration_modes: Arc<Mutex<HashMap<String, String>>>,
     active_proxy_threads: ActiveProxyThreads,
+    thread_settings: Arc<Mutex<HashMap<String, CachedCodexThreadSettings>>>,
     proxy_url: Arc<str>,
     owns_process: bool,
 }
@@ -276,6 +328,7 @@ impl Clone for CodexBridge {
             queued_prompts: self.queued_prompts.clone(),
             collaboration_modes: self.collaboration_modes.clone(),
             active_proxy_threads: self.active_proxy_threads.clone(),
+            thread_settings: self.thread_settings.clone(),
             proxy_url: self.proxy_url.clone(),
             owns_process: false,
         }
@@ -292,10 +345,12 @@ impl CodexBridge {
             .map_err(|error| format!("Could not start the Codex bridge: {error}"))?;
         let process = Arc::new(Mutex::new(None));
         let active_proxy_threads = Arc::new(Mutex::new(HashMap::new()));
+        let thread_settings = Arc::new(Mutex::new(HashMap::new()));
         let proxy_state = state.clone();
         let proxy_app = app.clone();
         let proxy_threads = active_proxy_threads.clone();
         let proxy_process = process.clone();
+        let proxy_thread_settings = thread_settings.clone();
         let listener_token = proxy_token.clone();
         thread::Builder::new()
             .name("lume-codex-proxy".into())
@@ -305,6 +360,7 @@ impl CodexBridge {
                     let app = proxy_app.clone();
                     let active_threads = proxy_threads.clone();
                     let process = proxy_process.clone();
+                    let thread_settings = proxy_thread_settings.clone();
                     let token = listener_token.clone();
                     let _ = thread::Builder::new()
                         .name("lume-codex-client".into())
@@ -315,6 +371,7 @@ impl CodexBridge {
                                 app,
                                 active_threads,
                                 process,
+                                thread_settings,
                                 &token,
                             ) {
                                 eprintln!("Ponte do Codex encerrada: {error}");
@@ -332,6 +389,7 @@ impl CodexBridge {
             queued_prompts,
             collaboration_modes,
             active_proxy_threads,
+            thread_settings,
             proxy_url,
             owns_process: true,
         })
@@ -343,6 +401,14 @@ impl CodexBridge {
 
     pub fn ensure_server(&self) -> Result<(), String> {
         ensure_server_process(&self.process)
+    }
+
+    fn update_thread_settings(
+        &self,
+        thread_id: &str,
+        update: CachedCodexThreadSettings,
+    ) -> Result<(), String> {
+        update_cached_thread_settings(&self.thread_settings, thread_id, update)
     }
 
     pub fn wait_for_proxy_thread(&self, thread_id: &str, timeout: Duration) -> Result<(), String> {
@@ -371,12 +437,21 @@ impl CodexBridge {
         approval_policy: Option<&str>,
     ) -> Result<PreparedThread, String> {
         self.ensure_server()?;
-        prepare_thread_connection(
+        let prepared = prepare_thread_connection(
             working_directory,
             resume_id,
             permission_mode,
             approval_policy,
-        )
+        )?;
+        self.update_thread_settings(
+            &prepared.thread_id,
+            CachedCodexThreadSettings {
+                model: prepared.model.clone(),
+                reasoning_effort: prepared.reasoning_effort.clone(),
+                service_tier: prepared.service_tier.clone(),
+            },
+        )?;
+        Ok(prepared)
     }
 
     pub fn prepare_existing_thread_launch(
@@ -393,6 +468,9 @@ impl CodexBridge {
             thread_id: thread_id.to_string(),
             thread_name,
             permission_profile: profile_from_params(&params, direct_profile()),
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
         })
     }
 
@@ -481,7 +559,34 @@ impl CodexBridge {
         thread_id: &str,
     ) -> Result<CodexThreadModelSettings, String> {
         self.ensure_server()?;
-        thread_model_settings_connection(thread_id)
+        // Do not resume a live thread just to read its model. The model is cached
+        // from the session's existing start/resume response instead.
+        let mut settings = default_model_settings_connection()?;
+        let cached = self
+            .thread_settings
+            .lock()
+            .map_err(|_| "Could not read the Codex thread model settings".to_string())?
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(model) = cached.model {
+            if let Some(option) = settings.models.iter().find(|option| option.model == model) {
+                settings.model = model;
+                settings.reasoning_effort = cached
+                    .reasoning_effort
+                    .filter(|effort| {
+                        option
+                            .supported_reasoning_efforts
+                            .iter()
+                            .any(|supported| supported.value == *effort)
+                    })
+                    .or_else(|| Some(option.default_reasoning_effort.clone()));
+            }
+        }
+        if cached.service_tier.is_some() {
+            settings.service_tier = cached.service_tier;
+        }
+        Ok(settings)
     }
 
     pub fn set_thread_model_settings(
@@ -492,7 +597,16 @@ impl CodexBridge {
         models: &[CodexModelOption],
     ) -> Result<CodexThreadModelSettings, String> {
         self.ensure_server()?;
-        set_thread_model_settings_connection(thread_id, model, effort, models)
+        let settings = set_thread_model_settings_connection(thread_id, model, effort, models)?;
+        self.update_thread_settings(
+            thread_id,
+            CachedCodexThreadSettings {
+                model: Some(settings.model.clone()),
+                reasoning_effort: settings.reasoning_effort.clone(),
+                service_tier: settings.service_tier.clone(),
+            },
+        )?;
+        Ok(settings)
     }
 
     pub fn default_model_settings(&self) -> Result<CodexThreadModelSettings, String> {
@@ -505,7 +619,15 @@ impl CodexBridge {
         let mut server = connect_initialized_plain()?;
         send_json(&mut server, thread_fast_mode_request(thread_id, enabled))?;
         let response = wait_for_plain_value_response(&mut server, 2)?;
-        confirmed_fast_mode(&response, enabled)
+        let enabled = confirmed_fast_mode(&response, enabled)?;
+        self.update_thread_settings(
+            thread_id,
+            CachedCodexThreadSettings {
+                service_tier: Some(if enabled { "fast" } else { "default" }.into()),
+                ..CachedCodexThreadSettings::default()
+            },
+        )?;
+        Ok(enabled)
     }
 
     pub fn set_collaboration_mode(
@@ -1421,6 +1543,7 @@ fn proxy_connection(
     app: AppHandle,
     active_proxy_threads: ActiveProxyThreads,
     process: Arc<Mutex<Option<ManagedChild>>>,
+    thread_settings: Arc<Mutex<HashMap<String, CachedCodexThreadSettings>>>,
     expected_token: &str,
 ) -> Result<(), String> {
     let mut client = accept_hdr(
@@ -1503,6 +1626,15 @@ fn proxy_connection(
                     let closing = matches!(message, Message::Close(_));
                     if let Some((request_id, accepted)) = proxy_response_outcome(&message) {
                         if let Some(thread_id) = pending_resumes.remove(&request_id) {
+                            if accepted {
+                                if let Some(settings) = proxy_thread_settings_response(&message) {
+                                    let _ = update_cached_thread_settings(
+                                        &thread_settings,
+                                        &thread_id,
+                                        settings,
+                                    );
+                                }
+                            }
                             if let Ok(mut threads) = active_proxy_threads.lock() {
                                 if accepted {
                                     if let Some(connection) = threads.get_mut(&thread_id) {
@@ -1628,6 +1760,14 @@ fn proxy_response_outcome(message: &Message) -> Option<(String, bool)> {
         proxy_request_id(value.get("id")?)?,
         value.get("error").is_none(),
     ))
+}
+
+fn proxy_thread_settings_response(message: &Message) -> Option<CachedCodexThreadSettings> {
+    let Message::Text(text) = message else {
+        return None;
+    };
+    let response = serde_json::from_str::<Value>(text).ok()?;
+    cached_thread_settings_from_response(&response)
 }
 
 fn proxy_request_id(value: &Value) -> Option<String> {
@@ -1808,11 +1948,15 @@ fn prepare_thread_connection(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let settings = cached_thread_settings_from_response(&response).unwrap_or_default();
 
     Ok(PreparedThread {
         thread_id,
         thread_name,
         permission_profile,
+        model: settings.model,
+        reasoning_effort: settings.reasoning_effort,
+        service_tier: settings.service_tier,
     })
 }
 
@@ -1997,6 +2141,13 @@ fn connect_initialized_plain_with_timeout(
     timeout: Duration,
     timeout_message: &str,
 ) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, String> {
+    connect_initialized_plain_until(Instant::now() + timeout, timeout_message)
+}
+
+fn connect_initialized_plain_until(
+    deadline: Instant,
+    timeout_message: &str,
+) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, String> {
     let mut server = connect_server()?;
     set_server_timeout(&mut server, Duration::from_secs(5))?;
     send_json(
@@ -2010,25 +2161,12 @@ fn connect_initialized_plain_with_timeout(
             }
         }),
     )?;
-    wait_for_plain_value_response_with_timeout_message(&mut server, 1, timeout, timeout_message)?;
+    wait_for_plain_value_response_until_deadline(&mut server, 1, deadline, timeout_message)?;
     send_json(
         &mut server,
         json!({ "method": "initialized", "params": {} }),
     )?;
     Ok(server)
-}
-
-fn thread_model_settings_connection(thread_id: &str) -> Result<CodexThreadModelSettings, String> {
-    let timeout_message = codex_model_settings_timeout_message();
-    let mut server =
-        connect_initialized_plain_with_timeout(CODEX_MODEL_SETTINGS_TIMEOUT, &timeout_message)?;
-    load_thread_model_settings(
-        &mut server,
-        thread_id,
-        CODEX_MODEL_SETTINGS_TIMEOUT,
-        &timeout_message,
-    )
-    .map(|(settings, _)| settings)
 }
 
 fn set_thread_model_settings_connection(
@@ -2064,8 +2202,8 @@ fn apply_thread_model_settings(
 
 fn default_model_settings_connection() -> Result<CodexThreadModelSettings, String> {
     let timeout_message = codex_model_settings_timeout_message();
-    let mut server =
-        connect_initialized_plain_with_timeout(CODEX_MODEL_SETTINGS_TIMEOUT, &timeout_message)?;
+    let deadline = Instant::now() + CODEX_MODEL_SETTINGS_TIMEOUT;
+    let mut server = connect_initialized_plain_until(deadline, &timeout_message)?;
     send_json(
         &mut server,
         json!({
@@ -2074,12 +2212,8 @@ fn default_model_settings_connection() -> Result<CodexThreadModelSettings, Strin
             "params": { "limit": 100, "includeHidden": false }
         }),
     )?;
-    let catalog = wait_for_plain_value_response_with_timeout_message(
-        &mut server,
-        2,
-        CODEX_MODEL_SETTINGS_TIMEOUT,
-        &timeout_message,
-    )?;
+    let catalog =
+        wait_for_plain_value_response_until_deadline(&mut server, 2, deadline, &timeout_message)?;
     default_model_settings_from_catalog(&catalog)
 }
 
@@ -2101,32 +2235,6 @@ fn confirmed_fast_mode(response: &Value, enabled: bool) -> Result<bool, String> 
         None if !enabled => Ok(false),
         _ => Err("Codex did not confirm the requested Fast mode".into()),
     }
-}
-
-fn load_thread_model_settings(
-    server: &mut WebSocket<MaybeTlsStream<TcpStream>>,
-    thread_id: &str,
-    timeout: Duration,
-    timeout_message: &str,
-) -> Result<(CodexThreadModelSettings, Value), String> {
-    send_json(
-        server,
-        json!({ "method": "thread/resume", "id": 2, "params": { "threadId": thread_id, "excludeTurns": true } }),
-    )?;
-    let resumed =
-        wait_for_plain_value_response_with_timeout_message(server, 2, timeout, timeout_message)?;
-    send_json(
-        server,
-        json!({
-            "method": "model/list",
-            "id": 3,
-            "params": { "limit": 100, "includeHidden": false }
-        }),
-    )?;
-    let models =
-        wait_for_plain_value_response_with_timeout_message(server, 3, timeout, timeout_message)?;
-    let settings = model_settings_from_responses(&resumed, &models)?;
-    Ok((settings, resumed))
 }
 
 fn thread_model_settings_update_request(thread_id: &str, model: &str, effort: &str) -> Value {
@@ -2607,6 +2715,15 @@ fn wait_for_plain_value_response_with_timeout_message(
     timeout_error: &str,
 ) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
+    wait_for_plain_value_response_until_deadline(socket, expected_id, deadline, timeout_error)
+}
+
+fn wait_for_plain_value_response_until_deadline(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    expected_id: i64,
+    deadline: Instant,
+    timeout_error: &str,
+) -> Result<Value, String> {
     loop {
         let message = read_rpc_message(socket, deadline, timeout_error)?;
         if let Some(value) = rpc_response_value(&message, expected_id)? {

@@ -50,7 +50,7 @@
   import { animatedDisclosure } from "$lib/animatedDisclosure";
   import OrbNavigationIcon from "$lib/OrbNavigationIcon.svelte";
   import { TerminalOpeningTimeoutError, waitForTerminalWindow } from "$lib/terminalOpening";
-  import { createSurfaceSizeQueue } from "$lib/surfaceSizing";
+  import { createSurfaceSizeQueue, settleSurfaceSize } from "$lib/surfaceSizing";
   import StartupModeChooser from "$lib/StartupModeChooser.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
@@ -114,6 +114,8 @@
     loadVscodeStatus,
     moveOverlay,
     resizeOverlaySurface,
+    activateOverlayWindow,
+    reportOverlayGeometry,
     installExternalPlugin,
     interruptPrompt,
     removeExternalPlugin,
@@ -558,8 +560,34 @@
       void Promise.all([
         setOverlaySurfaceSize(target.width, target.height),
         moveOverlay(position.x, position.y, false, preferences.monitorId),
-      ]).catch(() => undefined);
+      ]).then(() => settleOverlaySize(target)).catch(() => undefined);
     }
+  }
+
+  // X11 applies resizes asynchronously, so the window can end up at a size from the middle of
+  // the open/close animation and cut the panel. Check the real sizes and ask again if needed.
+  let overlaySettleToken = 0;
+  async function settleOverlaySize(target: { width: number; height: number }) {
+    if (!isTauri || !isLinux) return;
+    const token = ++overlaySettleToken;
+    await settleSurfaceSize({
+      target,
+      shouldStop: () => token !== overlaySettleToken || morphing !== null,
+      wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+      measure: async () => {
+        const window = getCurrentWindow();
+        const [outer, scale] = await Promise.all([window.outerSize(), window.scaleFactor()]);
+        return [
+          { width: globalThis.innerWidth, height: globalThis.innerHeight },
+          { width: outer.width / scale, height: outer.height / scale },
+        ];
+      },
+      apply: () => setOverlaySurfaceSize(target.width, target.height, true),
+      onMismatch: ({ attempt, measured }) => {
+        const sizes = measured.map((size) => `${Math.round(size.width)}x${Math.round(size.height)}`).join(" / ");
+        void reportOverlayGeometry(`esperado ${target.width}x${target.height}, viewport/janela ${sizes} (tentativa ${attempt + 1})`).catch(() => undefined);
+      },
+    });
   }
 
   function observePanelSize(node: HTMLElement) {
@@ -687,7 +715,7 @@
     syncSystemTheme(colorScheme);
     colorScheme.addEventListener("change", syncSystemTheme);
     window.addEventListener("keydown", handleAppShortcut);
-    window.addEventListener("pointerdown", bringOverlayToFront, true);
+    window.addEventListener("pointerdown", focusOverlayOnPointerDown, true);
     window.addEventListener("pointerup", finishOverlayDragFromWindow, true);
     window.addEventListener("pointercancel", finishOverlayDragFromWindow, true);
     let disposed = false;
@@ -841,7 +869,7 @@
       window.removeEventListener("pageshow", refreshAfterResume);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       window.removeEventListener("keydown", handleAppShortcut);
-      window.removeEventListener("pointerdown", bringOverlayToFront, true);
+      window.removeEventListener("pointerdown", focusOverlayOnPointerDown, true);
       window.removeEventListener("pointerup", finishOverlayDragFromWindow, true);
       window.removeEventListener("pointercancel", finishOverlayDragFromWindow, true);
       if (pollTimer) clearInterval(pollTimer);
@@ -1174,6 +1202,7 @@
       const panel = document.querySelector<HTMLElement>(".panel");
       if (panel) applyExpandedHeight(panel.offsetHeight, true);
     }
+    void settleOverlaySize(opening ? currentExpandedSize() : compactSize);
   }
 
   async function animateCapsule(
@@ -1337,9 +1366,20 @@
     dragging = false;
   }
 
-  async function bringOverlayToFront() {
+  // The listener must not pass its event as `force`.
+  function focusOverlayOnPointerDown() {
+    void bringOverlayToFront();
+  }
+
+  async function bringOverlayToFront(force = false) {
     if (!isTauri) return;
-    await getCurrentWindow().setFocus().catch(() => undefined);
+    // A click on a window that already has the keyboard needs no request.
+    if (!force && document.hasFocus()) return;
+    // In the XWayland fallback the window manager decides who has the keyboard (the terminal
+    // behind the Orb keeps it otherwise), so ask the way a user's action asks. Elsewhere,
+    // or if that is not available, the ordinary focus request is used.
+    const activated = isLinux ? await activateOverlayWindow().catch(() => false) : false;
+    if (!activated) await getCurrentWindow().setFocus().catch(() => undefined);
   }
 
   function wakeMascot() {
@@ -1497,7 +1537,7 @@
   }
 
   function beginSessionRename(session: AgentSession) {
-    void bringOverlayToFront();
+    void bringOverlayToFront(true);
     renamingSessionId = session.id;
     renameDraft = sessionDisplayName(session);
     renameError = null;
@@ -1585,7 +1625,7 @@
     composerAttachments = [];
     composerMessage = null;
     if (opening) {
-      void bringOverlayToFront();
+      void bringOverlayToFront(true);
       void focusOrbField(".inline-composer textarea");
     }
   }

@@ -1783,6 +1783,36 @@ fn move_overlay(
         .map_err(|error| error.to_string())
 }
 
+/// Gives the Orb the keyboard when a text box opens. In the XWayland fallback the window
+/// manager decides who has the keyboard, so it is asked the way a user action asks.
+#[tauri::command]
+async fn activate_overlay_window(app: AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Janela do Lume não encontrada".to_string())?;
+    let window_for_focus = window.clone();
+    let (completed, completion) = std::sync::mpsc::sync_channel(1);
+    window
+        .run_on_main_thread(move || {
+            let _ = completed.send(overlay::activate_window(&window_for_focus));
+        })
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        completion.recv_timeout(std::time::Duration::from_secs(2))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|_| "O gerenciador de janelas não respondeu ao pedido de foco".to_string())
+}
+
+/// With `LUME_ORB_DEBUG=1`, notes when the window had to be resized again to match the panel.
+#[tauri::command]
+fn report_overlay_geometry(report: String) {
+    if std::env::var_os("LUME_ORB_DEBUG").is_some() {
+        eprintln!("Lume orb: {}", report.chars().take(300).collect::<String>());
+    }
+}
+
 #[tauri::command]
 async fn resize_overlay_surface(app: AppHandle, width: i32, height: i32) -> Result<(), String> {
     let window = app
@@ -2911,6 +2941,8 @@ pub fn run() {
             set_preferences,
             move_overlay,
             resize_overlay_surface,
+            activate_overlay_window,
+            report_overlay_geometry,
             open_workspace_window,
             workspace_frontend_ready,
             workspace_frontend_failed,

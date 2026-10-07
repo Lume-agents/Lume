@@ -284,6 +284,16 @@ export async function moveOverlay(
   await invoke("move_overlay", { x: Math.round(x), y: Math.round(y), persist, monitorId });
 }
 
+/** Asks the window manager for the keyboard (XWayland fallback). False when it is not needed. */
+export async function activateOverlayWindow(): Promise<boolean> {
+  return invoke<boolean>("activate_overlay_window");
+}
+
+/** Logged only when Lume starts with LUME_ORB_DEBUG=1. */
+export async function reportOverlayGeometry(report: string): Promise<void> {
+  await invoke("report_overlay_geometry", { report });
+}
+
 export async function resizeOverlaySurface(width: number, height: number): Promise<void> {
   await invoke("resize_overlay_surface", {
     width: Math.max(1, Math.round(width)),

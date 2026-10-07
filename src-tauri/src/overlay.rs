@@ -122,6 +122,73 @@ mod linux {
         .as_ref()
     }
 
+    /// Asks the window manager to give this window the keyboard. GTK's own `present()` is
+    /// an application request, which GNOME may refuse while a native Wayland window (a
+    /// terminal) holds the focus. This is the pager's `_NET_ACTIVE_WINDOW`, stamped with the
+    /// current server time, the form `wmctrl -a` uses: a user's action.
+    pub fn activate_xwayland_window(window: &WebviewWindow) -> bool {
+        if std::env::var("LUME_LINUX_BACKEND").ok().as_deref() != Some("xwayland-fallback") {
+            return false;
+        }
+        let Ok(gtk_window) = window.gtk_window() else {
+            return false;
+        };
+        let Some(surface) = gtk_window.window() else {
+            return false;
+        };
+        let surface_pointer: *mut gtk::gdk::ffi::GdkWindow = surface.to_glib_none().0;
+        let (client, server_time) = unsafe {
+            (
+                gdkx11::ffi::gdk_x11_window_get_xid(surface_pointer.cast()),
+                gdkx11::ffi::gdk_x11_get_server_time(surface_pointer.cast()),
+            )
+        };
+        if client == 0 {
+            return false;
+        }
+        gtk_window.present_with_time(server_time);
+        let Some(api) = x11_api() else {
+            return true;
+        };
+        let Ok(api) = api.lock() else {
+            return true;
+        };
+        unsafe {
+            let atom = (api.functions.XInternAtom)(
+                api.display,
+                c"_NET_ACTIVE_WINDOW".as_ptr(),
+                xlib::False,
+            );
+            let root = (api.functions.XDefaultRootWindow)(api.display);
+            let mut message = xlib::XClientMessageEvent {
+                type_: xlib::ClientMessage,
+                serial: 0,
+                send_event: xlib::True,
+                display: api.display,
+                window: client as xlib::Window,
+                message_type: atom,
+                format: 32,
+                data: xlib::ClientMessageData::new(),
+            };
+            // [source indication (2 = pager), timestamp, the currently active window]
+            message.data.set_long(0, 2);
+            message.data.set_long(1, server_time as std::ffi::c_long);
+            message.data.set_long(2, 0);
+            let mut event = xlib::XEvent {
+                client_message: message,
+            };
+            (api.functions.XSendEvent)(
+                api.display,
+                root,
+                xlib::False,
+                xlib::SubstructureNotifyMask | xlib::SubstructureRedirectMask,
+                &mut event,
+            );
+            (api.functions.XFlush)(api.display);
+        }
+        true
+    }
+
     pub fn xwayland_drag_target(window: &WebviewWindow) -> Option<super::XwaylandDragTarget> {
         if std::env::var("LUME_LINUX_BACKEND").ok().as_deref() != Some("xwayland-fallback") {
             return None;
@@ -1049,6 +1116,20 @@ pub fn monitor_work_area(
     {
         let _ = (window, monitor_id);
         None
+    }
+}
+
+/// Whether the window was asked to take keyboard focus the way a window manager accepts.
+/// Only the XWayland fallback needs it; elsewhere the ordinary focus request is enough.
+pub fn activate_window(window: &tauri::WebviewWindow) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::activate_xwayland_window(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        false
     }
 }
 

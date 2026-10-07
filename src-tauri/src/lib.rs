@@ -2359,6 +2359,7 @@ fn launch_session_impl(
                 .then_some(request.resume_id.as_deref())
                 .flatten(),
             request.model.as_deref(),
+            request.reasoning_effort.as_deref(),
             antigravity_stream::PERMISSION_DEFAULT,
         )?;
         if let Some(prompt) = request

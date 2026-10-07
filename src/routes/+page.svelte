@@ -3092,7 +3092,7 @@
                       {/if}
                       <span>
                         {#if launching === integration.kind && launchingSessionId === null}
-                          {launchingPhase === "choosing" ? tr("Select project…", "Escolher projeto…") : tr("Opening…", "Abrindo…")}
+                          {launchingPhase === "choosing" ? tr("Choose…", "Escolher…") : tr("Opening…", "Abrindo…")}
                         {:else}
                           {tr("New", "Nova")}
                         {/if}

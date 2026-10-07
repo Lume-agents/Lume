@@ -628,18 +628,9 @@ pub fn session_model_settings(
         .native_session_id
         .as_deref()
         .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
-    match bridge.thread_model_settings(thread_id) {
-        Ok(mut settings) => {
-            apply_pending_model_override(state, session_id, &mut settings)?;
-            Ok(settings)
-        }
-        Err(error) if is_missing_codex_rollout(&error) => {
-            let mut settings = bridge.default_model_settings()?;
-            apply_pending_model_override(state, session_id, &mut settings)?;
-            Ok(settings)
-        }
-        Err(error) => Err(error),
-    }
+    let mut settings = bridge.thread_model_settings(thread_id)?;
+    apply_pending_model_override(state, session_id, &mut settings)?;
+    Ok(settings)
 }
 
 pub fn set_session_model_settings(
@@ -811,9 +802,8 @@ pub fn claude_session_model_settings(
     if session.agent != AgentKind::ClaudeCode {
         return Err("These model settings are only available for Claude Code sessions".into());
     }
-    if session.control_origin != SessionControlOrigin::Lume {
-        return Err("Take control of this external CLI before changing its model".into());
-    }
+    // Reading is safe for any session, so the picker can show the model in use; only
+    // changing it needs Lume to own the conversation.
     effective_claude_model_settings(state, &session)
 }
 

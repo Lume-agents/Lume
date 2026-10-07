@@ -31,7 +31,9 @@ const MAX_RECORD_BYTES: usize = 4096;
 const MAX_DATABASE_BYTES: u64 = 2 * 1024 * 1024;
 const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const ROOT_ACTIVITY_TTL_MS: i64 = 24 * 60 * 60 * 1000;
-const IO_WAIT: Duration = Duration::from_millis(25);
+// CLI hooks may initialize/write the private SQLite store concurrently.
+// Keep the wait bounded, but allow ordinary filesystem scheduling contention.
+const IO_WAIT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -368,10 +368,8 @@ mod unix {
         fn fixture_transaction_limits_metadata_and_does_not_promote_presence() {
             let mut nonce = [0u8; 8];
             getrandom::getrandom(&mut nonce).unwrap();
-            let directory = std::env::temp_dir().join(format!(
-                "lume-daemon-observer-{:x}",
-                u64::from_ne_bytes(nonce)
-            ));
+            let directory =
+                std::env::temp_dir().join(format!("lume-{:x}", u64::from_ne_bytes(nonce)));
             std::fs::create_dir(&directory).unwrap();
             std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
             let path = directory.join("observer.sock");
@@ -438,7 +436,12 @@ mod unix {
             });
             let control = directory.join("control.sock");
             std::os::unix::fs::symlink(&path, &control).unwrap();
-            let snapshot = observe_socket(&control).unwrap();
+            let snapshot = observe_socket(&control).unwrap_or_else(|error| {
+                panic!(
+                    "fixture socket observation failed ({error}); socket path was {} bytes",
+                    path.to_string_lossy().len()
+                )
+            });
             let methods = server.join().unwrap();
             assert_eq!(
                 methods,

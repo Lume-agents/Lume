@@ -2614,7 +2614,6 @@
         </button>
       {/if}
       </div>
-      {#if composerInIntroPosition && canCompose}<span class="composer-beam-bloom" aria-hidden="true"></span>{/if}
       {#if supportsAgentControls}
       <div class="composer-tools">
         <div class="agent-controls" bind:this={controlsRoot}>
@@ -3036,9 +3035,6 @@
     --composer-beam-strength: .9;
     --composer-beam-stroke-opacity: .4;
     --composer-beam-inner-opacity: .42;
-    --composer-beam-bloom-opacity: .44;
-    --composer-beam-highlight: conic-gradient(from var(--composer-beam-angle), transparent 0% 54%, rgba(0, 0, 0, .08) 57%, rgba(0, 0, 0, .2) 60%, rgba(0, 0, 0, .4) 63%, rgba(0, 0, 0, .55) 66%, rgba(0, 0, 0, .4) 69%, rgba(0, 0, 0, .2) 72%, rgba(0, 0, 0, .08) 75%, transparent 78% 100%);
-    --composer-beam-halo: conic-gradient(from var(--composer-beam-angle), transparent 0% 58%, rgba(0, 0, 0, .08) 65%, rgba(0, 0, 0, .4) 69%, rgba(0, 0, 0, .6) 70% 70.5%, rgba(0, 0, 0, .4) 71.5%, rgba(0, 0, 0, .08) 75%, transparent 82% 100%);
     --composer-beam-window: conic-gradient(from var(--composer-beam-angle), transparent 0% 30%, rgba(255, 255, 255, .1) 36%, rgba(255, 255, 255, .35) 44%, white 52% 80%, rgba(255, 255, 255, .35) 86%, rgba(255, 255, 255, .1) 92%, transparent 95% 100%);
     --composer-beam-colors: radial-gradient(ellipse 70px 40px at 33% -7.4%, rgb(255, 50, 100), transparent), radial-gradient(ellipse 60px 35px at 12% -5%, rgb(40, 140, 255), transparent), radial-gradient(ellipse 40px 70px at 2.1% 68.3%, rgb(50, 200, 80), transparent), radial-gradient(ellipse 20px 35px at 2.1% 68.3%, rgb(30, 185, 170), transparent), radial-gradient(ellipse 180px 32px at 74.4% 100%, rgb(100, 70, 255), transparent), radial-gradient(ellipse 85px 26px at 55% 100%, rgb(40, 140, 255), transparent), radial-gradient(ellipse 74px 32px at 93.9% 0%, rgb(255, 120, 40), transparent), radial-gradient(ellipse 26px 42px at 100% 27.1%, rgb(240, 50, 180), transparent), radial-gradient(ellipse 52px 48px at 100% 27.1%, rgb(180, 40, 240), transparent);
     isolation: isolate;
@@ -3047,15 +3043,12 @@
   :global(.workspace.dark) .composer-field.beam {
     --composer-beam-stroke-opacity: .54;
     --composer-beam-inner-opacity: .56;
-    --composer-beam-bloom-opacity: .36;
-    --composer-beam-highlight: conic-gradient(from var(--composer-beam-angle), transparent 0% 54%, rgba(255, 255, 255, .1) 57%, rgba(255, 255, 255, .3) 60%, rgba(255, 255, 255, .6) 63%, rgba(255, 255, 255, .75) 66%, rgba(255, 255, 255, .6) 69%, rgba(255, 255, 255, .3) 72%, rgba(255, 255, 255, .1) 75%, transparent 78% 100%);
-    --composer-beam-halo: conic-gradient(from var(--composer-beam-angle), transparent 0% 58%, rgba(255, 255, 255, .08) 65%, rgba(255, 255, 255, .45) 69%, rgba(255, 255, 255, .85) 70% 70.5%, rgba(255, 255, 255, .45) 71.5%, rgba(255, 255, 255, .08) 75%, transparent 82% 100%);
   }
-  .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom { position: absolute; inset: 0; border-radius: inherit; clip-path: inset(0 round var(--field-radius)); content: ""; pointer-events: none; animation: composer-beam-appear .6s ease-out both, composer-beam-hue 12s ease-in-out infinite; }
+  .composer-field.beam::before, .composer-field.beam::after { position: absolute; inset: 0; border-radius: inherit; clip-path: inset(0 round var(--field-radius)); content: ""; pointer-events: none; animation: composer-beam-appear .6s ease-out both, composer-beam-hue 12s ease-in-out infinite; }
   .composer-field.beam::after {
     z-index: 2;
     padding: 1px;
-    background: var(--composer-beam-highlight), var(--composer-beam-colors);
+    background: var(--composer-beam-colors);
     -webkit-mask: var(--composer-beam-window), linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
     -webkit-mask-composite: source-in, xor;
     mask: var(--composer-beam-window), linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
@@ -3072,22 +3065,10 @@
     mask-composite: intersect, add;
     opacity: calc(var(--composer-beam-strength) * var(--composer-beam-inner-opacity) * .45);
   }
-  .composer-beam-bloom {
-    z-index: 3;
-    padding: 1px;
-    background: var(--composer-beam-halo);
-    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    -webkit-mask-composite: xor;
-    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    mask-composite: exclude;
-    opacity: calc(var(--composer-beam-strength) * var(--composer-beam-bloom-opacity));
-    animation-name: composer-beam-appear, composer-beam-hue-bloom;
-  }
   @keyframes composer-beam-orbit { to { --composer-beam-angle: 360deg; } }
   @keyframes composer-beam-appear { from { opacity: 0; } }
   @keyframes composer-beam-hue { 0%, 100% { filter: hue-rotate(-30deg) brightness(1.3) saturate(1.2); } 50% { filter: hue-rotate(30deg) brightness(1.3) saturate(1.2); } }
-  @keyframes composer-beam-hue-bloom { 0%, 100% { filter: blur(8px) hue-rotate(-30deg) brightness(1.3) saturate(1.2); } 50% { filter: blur(8px) hue-rotate(30deg) brightness(1.3) saturate(1.2); } }
-  .composer-field:focus-within { border-color: color-mix(in srgb, var(--workspace-accent) 48%, transparent); box-shadow: 0 7px 22px rgba(17, 35, 27, .075), 0 0 0 3px color-mix(in srgb, var(--workspace-accent) 8%, transparent); }
+    .composer-field:focus-within { border-color: color-mix(in srgb, var(--workspace-accent) 48%, transparent); box-shadow: 0 7px 22px rgba(17, 35, 27, .075), 0 0 0 3px color-mix(in srgb, var(--workspace-accent) 8%, transparent); }
   .composer-field.beam:focus-within { border-color: var(--workspace-line); }
   .composer textarea { field-sizing: content; min-width: 0; max-height: 130px; min-height: 31px; padding: 7px 0 5px; flex: 1; resize: none; overflow-y: auto; border: 0; outline: 0; color: var(--workspace-strong); background: transparent; font-size: 11px; line-height: 1.5; }
   .composer textarea::placeholder { color: var(--workspace-faint); }.composer textarea:disabled { cursor: default; }
@@ -3188,6 +3169,6 @@
     .conversation { --chat-edge-gutter: 28px; }.message { width: 94%; }.user-message { width: fit-content; max-width: 94%; }.composer { padding-right: 10px; padding-left: 10px; }
   }
   @media (max-height: 640px) { .conversation { padding-top: 17px; padding-bottom: 18px; }.pane-header { min-height: 56px; }.composer { padding-top: 9px; padding-bottom: 10px; } }
-  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .writer-conflict-backdrop, .writer-conflict-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .writer-conflict-dialog footer button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer, .composer.crossfade-out, .composer.crossfade-in, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .writer-conflict-backdrop, .writer-conflict-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .writer-conflict-dialog footer button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer, .composer.crossfade-out, .composer.crossfade-in, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
   @media (prefers-reduced-motion: reduce) { .effort-field.max .effort-thumb, .effort-field.ultra .effort-track::before, .effort-field.ultra .effort-progress { animation: none; }.effort-thumb, .effort-thumb::before, .effort-progress { transition: none; } }
 </style>

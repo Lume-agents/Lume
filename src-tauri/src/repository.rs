@@ -167,7 +167,7 @@ fn run(mut command: Command, timeout: Duration) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut command = crate::executables::command("git").map_err(|_| "git_missing")?;
     command
         .current_dir(root)

@@ -1,11 +1,14 @@
 mod adapters;
+mod agent_commands;
 mod agent_plugins;
 mod antigravity_stream;
 mod browser_server;
+mod claude_control;
 mod codex_bridge;
 mod codex_cli_identity;
 mod codex_daemon_observer;
 mod codex_identity_probe;
+mod codex_permissions;
 mod codex_sessions;
 mod context_builder;
 mod control;
@@ -17,9 +20,9 @@ mod event_server;
 mod executables;
 mod integrations;
 mod launcher;
+mod legacy_cli_gateway_cleanup;
 #[cfg(target_os = "macos")]
 mod macos_process_supervisor;
-mod legacy_cli_gateway_cleanup;
 mod mobile_gateway;
 mod mobile_server;
 pub mod node_client;
@@ -31,6 +34,7 @@ pub mod node_pairing;
 pub mod node_service;
 mod opencode_acp;
 mod overlay;
+mod path_mentions;
 mod protocol;
 mod repository;
 mod session_filters;
@@ -261,14 +265,17 @@ async fn list_sessions(state: State<'_, AppState>) -> Result<Vec<AgentSession>, 
         let pids = sessions
             .as_ref()
             .map(|sessions| {
-                sessions.iter()
+                sessions
+                    .iter()
                     .filter(|session| session.agent == AgentKind::Codex)
                     .filter_map(|session| session.process_id)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         codex_identity_probe::observe_runtime(
-            codex_identity_probe::RuntimeStage::Orb, &pids, sessions.is_err(),
+            codex_identity_probe::RuntimeStage::Orb,
+            &pids,
+            sessions.is_err(),
         );
         sessions
     })
@@ -363,19 +370,20 @@ async fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSna
         let pids = sessions
             .as_ref()
             .map(|sessions| {
-                sessions.iter()
+                sessions
+                    .iter()
                     .filter(|session| session.agent == AgentKind::Codex)
                     .filter_map(|session| session.process_id)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         codex_identity_probe::observe_runtime(
-            codex_identity_probe::RuntimeStage::Workspace, &pids, sessions.is_err(),
+            codex_identity_probe::RuntimeStage::Workspace,
+            &pids,
+            sessions.is_err(),
         );
-        Ok(
-            protocol::HubSnapshot::with_activity_limit(sessions?, 60)
-                .with_internal_services(state.internal_services()?),
-        )
+        Ok(protocol::HubSnapshot::with_activity_limit(sessions?, 60)
+            .with_internal_services(state.internal_services()?))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -400,6 +408,21 @@ fn repository_directory(state: &AppState, session_id: &str) -> Result<String, St
         .or(session.working_directory)
         .filter(|path| !path.is_empty())
         .ok_or_else(|| "no_working_directory".into())
+}
+
+#[tauri::command]
+async fn search_session_paths(
+    state: State<'_, AppState>,
+    session_id: String,
+    query: String,
+) -> Result<Vec<path_mentions::PathMention>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = repository_directory(&state, &session_id)?;
+        path_mentions::search(&directory, &query, 40)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -801,11 +824,33 @@ fn refresh_agent_rate_limits(
     bridge: State<'_, codex_bridge::CodexBridge>,
     agent: AgentKind,
 ) -> Result<(), String> {
-    if agent == AgentKind::Codex {
-        bridge.refresh_rate_limits(state.inner(), &app)
-    } else {
-        Ok(())
+    match agent {
+        AgentKind::Codex => bridge.refresh_rate_limits(state.inner(), &app),
+        AgentKind::ClaudeCode => {
+            refresh_claude_rate_limits(app, state.inner().clone());
+            Ok(())
+        }
+        _ => Ok(()),
     }
+}
+
+fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
+    static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let working_directory = std::env::temp_dir().to_string_lossy().into_owned();
+        if let Ok(limits) = claude_control::usage(&working_directory) {
+            if state
+                .set_agent_rate_limits(AgentKind::ClaudeCode, limits)
+                .unwrap_or(false)
+            {
+                protocol::emit_sessions_changed(&app);
+            }
+        }
+        REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
 #[tauri::command]
@@ -929,6 +974,22 @@ fn set_session_collaboration_mode(
 }
 
 #[tauri::command]
+async fn list_session_slash_commands(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    bridge: State<'_, codex_bridge::CodexBridge>,
+    session_id: String,
+) -> Result<Vec<agent_commands::AgentSlashCommand>, String> {
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::session_slash_commands(&app, &state, &bridge, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_session_model_settings(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -987,29 +1048,68 @@ fn set_session_fast_mode(
     control::set_session_fast_mode(state.inner(), bridge.inner(), &session_id, enabled)
 }
 
+// Both may start a short Claude probe, so they stay off the main thread.
 #[tauri::command]
-fn get_claude_session_model_settings(
+async fn get_claude_session_model_settings(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<domain::SessionModelOverride, String> {
-    control::claude_session_model_settings(state.inner(), &session_id)
+) -> Result<claude_control::ClaudeModelSettings, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::claude_session_model_settings(&state, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn set_claude_session_model_settings(
+async fn set_claude_session_model_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     model: Option<String>,
     effort: Option<String>,
-) -> Result<domain::SessionModelOverride, String> {
-    control::set_claude_session_model_settings(
-        &app,
-        state.inner(),
-        &session_id,
-        model.as_deref(),
-        effort.as_deref(),
-    )
+) -> Result<claude_control::ClaudeModelSettings, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::set_claude_session_model_settings(
+            &app,
+            &state,
+            &session_id,
+            model.as_deref(),
+            effort.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_session_permission_mode(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<domain::PermissionSettings, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::session_permission_settings(&state, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn set_session_permission_mode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    mode: String,
+) -> Result<domain::PermissionSettings, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::set_session_permission_mode(&app, &state, &session_id, &mode)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2179,6 +2279,9 @@ fn launch_session_impl(
     bridge: &codex_bridge::CodexBridge,
     mut request: LaunchRequest,
 ) -> Result<(), String> {
+    if request.agent == IntegrationKind::Claude {
+        integrations::ensure_claude_connected()?;
+    }
     if request.agent == IntegrationKind::OpenCode {
         if request.resume {
             ensure_native_session_not_external(
@@ -2239,6 +2342,9 @@ fn launch_session_impl(
             )?;
         }
         return Ok(());
+    }
+    if request.agent == IntegrationKind::Claude && request.target == "auto" {
+        return launch_lume_claude_session(app, state, request);
     }
     if request.target == "vscode" && !integrations::vscode_status().configured {
         return Err("Conecte o Lume Companion ao VS Code nos Ajustes".into());
@@ -2305,6 +2411,104 @@ fn launch_session_impl(
         event_server::publish_event(&state, &app, event)?;
     }
     Ok(())
+}
+
+/// Opens a Claude conversation that Lume owns: no terminal holds it, so the
+/// chat is its only writer and every message runs `claude --print` on it.
+fn launch_lume_claude_session(
+    app: &AppHandle,
+    state: &AppState,
+    mut request: LaunchRequest,
+) -> Result<(), String> {
+    let native_id = match request.resume_id.clone().filter(|_| request.resume) {
+        Some(id) => {
+            ensure_native_session_not_external(state, &domain::AgentKind::ClaudeCode, Some(&id))?;
+            if integrations::claude_session_open_interactively(&id) {
+                return Err("Esta conversa do Claude está aberta no terminal. Feche o terminal para continuá-la pelo Lume.".into());
+            }
+            id
+        }
+        None => new_claude_session_id()?,
+    };
+    request.resume_id = Some(native_id.clone());
+    let preview = integrations::resume_preview(&request.agent, &native_id);
+    let event = lume_claude_session_event(&request, &native_id, preview.as_ref());
+    let session_id = event.session_id.clone();
+    event_server::publish_event(state, app, event)?;
+    if let Some(prompt) = request
+        .initial_prompt
+        .clone()
+        .filter(|prompt| !prompt.trim().is_empty())
+    {
+        state.record_prompt_activity(&session_id, &prompt, Vec::new())?;
+        // The project profile's own flags apply until a mode is picked in the chat.
+        launcher::launch_claude_prompt(
+            request,
+            app.clone(),
+            state.clone(),
+            session_id.clone(),
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+fn new_claude_session_id() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|error| error.to_string())?;
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    ))
+}
+
+fn lume_claude_session_event(
+    request: &LaunchRequest,
+    native_id: &str,
+    preview: Option<&integrations::ResumePreview>,
+) -> HookEvent {
+    let project = std::path::Path::new(&request.working_directory)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string);
+    HookEvent {
+        event: HookEventKind::SessionStarted,
+        // Matches the id the Claude hooks of each prompt report.
+        session_id: format!("claude:{native_id}"),
+        agent: AgentKind::ClaudeCode,
+        agent_label: Some("Claude Code".into()),
+        session_name: None,
+        project,
+        source: Some(SessionSource::Desktop),
+        source_app: None,
+        control_origin: SessionControlOrigin::Lume,
+        status_label: Some("Esperando ação".into()),
+        started_at: None,
+        process_id: None,
+        native_session_id: Some(native_id.into()),
+        working_directory: Some(request.working_directory.clone()),
+        permission_profile: Some(adapters::claude_launch_profile(
+            request.permission_mode.as_ref(),
+        )),
+        permission: None,
+        question: None,
+        last_response: preview.map(|preview| preview.response.clone()),
+        activity: None,
+        activities: preview
+            .map(|preview| vec![resume_preview_activity(native_id, preview)])
+            .unwrap_or_default(),
+        wait_for_decision: false,
+    }
 }
 
 fn ensure_native_session_not_external(
@@ -2624,6 +2828,7 @@ pub fn run() {
             get_hub_snapshot,
             get_session_repository,
             get_session_repository_diff,
+            search_session_paths,
             get_session_github,
             get_github_account,
             get_workspace_conversation_page,
@@ -2650,12 +2855,15 @@ pub fn run() {
             interrupt_prompt,
             get_session_collaboration_mode,
             set_session_collaboration_mode,
+            list_session_slash_commands,
             get_session_model_settings,
             set_session_model_settings,
             set_session_agent_mode,
             set_session_fast_mode,
             get_claude_session_model_settings,
             set_claude_session_model_settings,
+            get_session_permission_mode,
+            set_session_permission_mode,
             steer_queued_prompt,
             terminate_session,
             take_control_session,
@@ -3042,6 +3250,47 @@ mod tests {
         assert_eq!(event.source, Some(SessionSource::Desktop));
         assert_eq!(event.control_origin, domain::SessionControlOrigin::Lume);
         assert_eq!(event.process_id, None);
+    }
+
+    #[test]
+    fn lume_owned_claude_session_stays_a_desktop_chat_across_prompt_hooks() {
+        let native_id = new_claude_session_id().expect("id");
+        assert_eq!(native_id.len(), 36);
+        assert_eq!(native_id.as_bytes()[14], b'4');
+        assert_ne!(native_id, new_claude_session_id().expect("id"));
+        let request = LaunchRequest {
+            agent: IntegrationKind::Claude,
+            working_directory: "/work/lume".into(),
+            resume: true,
+            resume_id: Some(native_id.clone()),
+            target: "auto".into(),
+            initial_prompt: None,
+            permission_mode: Some(domain::AccessMode::WorkspaceWrite),
+            approval_policy: None,
+            model: None,
+            reasoning_effort: None,
+        };
+        let state = AppState::new(std::path::Path::new(":memory:")).expect("estado");
+        state
+            .ingest(lume_claude_session_event(&request, &native_id, None))
+            .expect("sessão");
+        // The hooks of each `claude --print` prompt report the CLI as source.
+        let mut hook = lume_claude_session_event(&request, &native_id, None);
+        hook.event = HookEventKind::Running;
+        hook.source = Some(SessionSource::Cli);
+        state.ingest(hook).expect("hook");
+
+        let sessions = state.sessions().expect("sessões");
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.id, format!("claude:{native_id}"));
+        assert_eq!(session.source, SessionSource::Desktop);
+        assert_eq!(session.control_origin, domain::SessionControlOrigin::Lume);
+        assert_eq!(
+            session.permission_profile.mode,
+            domain::AccessMode::WorkspaceWrite
+        );
+        assert!(session.permission_profile.can_respond_from_lume);
     }
 
     #[test]

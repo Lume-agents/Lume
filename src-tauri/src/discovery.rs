@@ -192,7 +192,9 @@ fn scan(
             if is_codex_infrastructure_arguments(&name, &arguments) {
                 return None;
             }
-            if is_claude_headless_resume(&command) {
+            if is_claude_headless_resume(&command)
+                || crate::claude_control::is_probe_process(pid.as_u32())
+            {
                 return None;
             }
             if ignored_codex_pids
@@ -217,6 +219,12 @@ fn scan(
                     (agent, label.to_string())
                 })
                 .or_else(|| detect_external_agent_arguments(&name, &arguments, external_plugins))?;
+            // The CLI's agent view starts background sessions nobody has used yet.
+            if agent == AgentKind::ClaudeCode
+                && crate::integrations::claude_background_pid_unused(pid.as_u32())
+            {
+                return None;
+            }
             let working_directory = command_working_directory(process.cmd());
             Some((
                 *pid,
@@ -979,10 +987,45 @@ fn is_claude_infrastructure(tokens: &[&str]) -> bool {
         .any(|pair| pair[0] == "claude" && SUBCOMMANDS.contains(&pair[1]))
 }
 
+/// Tokens of a command line for infrastructure checks. Claude retitles its
+/// daemon processes, so `argv[0]` arrives as the single string
+/// `"claude bg-pty-host"`; every element is split to see `claude` and its
+/// subcommand side by side whatever the shape.
+fn claude_command_tokens(arguments: &[String]) -> Vec<&str> {
+    arguments
+        .iter()
+        .flat_map(|argument| argument.split_whitespace())
+        .map(|token| {
+            token
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(token)
+                .trim_matches(['"', '\''])
+        })
+        .collect()
+}
+
+/// A `claude bg-spare` process is the daemon's pre-warmed pool. It only becomes
+/// a conversation once claimed, and then its hooks report it, so the process
+/// itself is never listed as a session.
+fn is_claude_spare(tokens: &[&str]) -> bool {
+    tokens
+        .windows(2)
+        .any(|pair| pair[0] == "claude" && pair[1] == "bg-spare")
+}
+
+/// Whether these arguments belong to the Claude daemon's own processes. Hooks
+/// stop climbing there: above them is the CLI that merely launched the daemon.
+pub(crate) fn is_claude_daemon_arguments(arguments: &[String]) -> bool {
+    is_claude_infrastructure(&claude_command_tokens(arguments))
+}
+
 fn is_claude_headless_resume(command: &str) -> bool {
     let tokens = command.split_whitespace().collect::<Vec<_>>();
     tokens.iter().any(|token| *token == "--print")
-        && tokens.iter().any(|token| *token == "--resume")
+        && tokens
+            .iter()
+            .any(|token| matches!(*token, "--resume" | "--session-id"))
         && tokens.iter().any(|token| {
             token
                 .trim_matches(['"', '\''])
@@ -1097,16 +1140,7 @@ fn launch_tokens<'a>(name: &str, arguments: &'a [String]) -> Vec<&'a str> {
 
 pub(crate) fn detect_agent_arguments(name: &str, arguments: &[String]) -> Option<AgentKind> {
     let raw_tokens = launch_tokens(name, arguments);
-    let command_tokens = arguments
-        .iter()
-        .map(|token| {
-            token
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(token)
-                .trim_matches(['"', '\''])
-        })
-        .collect::<Vec<_>>();
+    let command_tokens = claude_command_tokens(arguments);
     let tokens = raw_tokens
         .iter()
         .map(|token| {
@@ -1144,7 +1178,7 @@ pub(crate) fn detect_agent_arguments(name: &str, arguments: &[String]) -> Option
     };
     if executable_matches("codex") {
         Some(AgentKind::Codex)
-    } else if is_claude_infrastructure(&command_tokens) {
+    } else if is_claude_infrastructure(&command_tokens) || is_claude_spare(&command_tokens) {
         None
     } else if executable_matches("claude")
         || raw_tokens
@@ -1480,9 +1514,10 @@ fn resumed_prompt_command_matches(
         .to_lowercase();
     detect_agent(&executable, &joined).as_ref() == Some(expected_agent)
         && command.iter().any(|part| part.as_ref() == "--print")
-        && command
-            .windows(2)
-            .any(|parts| parts[0].as_ref() == "--resume" && parts[1].as_ref() == native_session_id)
+        && command.windows(2).any(|parts| {
+            matches!(parts[0].as_ref(), "--resume" | "--session-id")
+                && parts[1].as_ref() == native_session_id
+        })
 }
 
 fn process_depth(system: &System, mut pid: Pid) -> usize {
@@ -1965,10 +2000,88 @@ mod tests {
         );
     }
 
+    // `argv` exactly as the OS reports it for the processes of `claude`'s
+    // daemon: the pty host and the spare retitle `argv[0]` to one string.
+    fn argv(elements: &[&str]) -> Vec<String> {
+        elements.iter().map(|element| element.to_string()).collect()
+    }
+
+    #[test]
+    fn claude_daemon_processes_are_not_sessions() {
+        let pty_host = argv(&[
+            "claude bg-pty-host",
+            "--bg-pty-host",
+            "/tmp/cc-daemon-1000/d1c0b541/pty/929e9dc1.sock",
+            "120",
+            "30",
+            "--",
+            "/home/user/.local/share/claude/versions/2.1.292",
+            "--session-id",
+            "929e9dc1",
+            "--agent",
+            "claude",
+        ]);
+        let spare = argv(&[
+            "claude bg-spare",
+            "--bg-spare",
+            "/tmp/cc-daemon-1000/d1c0b541/spare/da2eba3f.claim.sock",
+        ]);
+        let daemon = argv(&[
+            "/home/user/.local/bin/claude",
+            "daemon",
+            "run",
+            "--origin",
+            "transient",
+        ]);
+        for (name, arguments) in [
+            ("2.1.292", &pty_host),
+            ("2.1.292", &spare),
+            ("claude", &daemon),
+        ] {
+            assert_eq!(
+                detect_agent_arguments(name, arguments),
+                None,
+                "{arguments:?}"
+            );
+        }
+        // Both ways a spawned `claude` can retitle itself.
+        assert!(is_claude_daemon_arguments(&pty_host));
+        assert!(is_claude_daemon_arguments(&daemon));
+        assert!(is_claude_daemon_arguments(&argv(&[
+            "claude",
+            "bg-pty-host",
+            "--bg-pty-host"
+        ])));
+        // A spare is a session host once claimed, so hooks must not stop on it.
+        assert!(!is_claude_daemon_arguments(&spare));
+
+        let panel = argv(&["claude"]);
+        let background = argv(&[
+            "/home/user/.local/share/claude/versions/2.1.292",
+            "--session-id",
+            "929e9dc1",
+            "--agent",
+            "claude",
+            "--inherit-permission-mode",
+            "auto",
+        ]);
+        assert_eq!(
+            detect_agent_arguments("claude", &panel),
+            Some(AgentKind::ClaudeCode)
+        );
+        assert_eq!(
+            detect_agent_arguments("2.1.292", &background),
+            Some(AgentKind::ClaudeCode)
+        );
+    }
+
     #[test]
     fn claude_headless_resume_is_not_a_second_process_session() {
         assert!(is_claude_headless_resume(
             "/home/user/.local/bin/claude --print --resume session-id prompt"
+        ));
+        assert!(is_claude_headless_resume(
+            "/home/user/.local/bin/claude --print --session-id session-id prompt"
         ));
         assert!(!is_claude_headless_resume(
             "/home/user/.local/bin/claude --resume session-id"

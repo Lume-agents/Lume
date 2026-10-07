@@ -1,17 +1,29 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
 
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 use crate::state::now_millis;
-use crate::{domain::AccessMode, integrations::IntegrationKind};
+use crate::{
+    domain::{
+        AccessMode, AgentKind, HookEvent, HookEventKind, SessionActivity, SessionControlOrigin,
+    },
+    event_server,
+    integrations::IntegrationKind,
+    state::AppState,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,7 +67,10 @@ pub fn launch(
     if request.agent == IntegrationKind::OpenCode {
         return Err("OpenCode is launched through its ACP bridge, not a terminal".into());
     }
-    let payload = payload_for(&request, codex_remote);
+    let mut payload = payload_for(&request, codex_remote);
+    if request.agent == IntegrationKind::Claude {
+        add_scoped_claude_hooks(&mut payload, executable)?;
+    }
     if request.target == "vscode" {
         if crate::integrations::vscode_status().configured {
             return launch_vscode(&payload, &request.agent);
@@ -68,7 +83,7 @@ pub fn launch(
             .as_deref()
             .is_some_and(|prompt| !prompt.trim().is_empty())
     {
-        return launch_background(payload);
+        return Err("Um prompt do Claude precisa da execução observável do Lume".into());
     }
     launch_terminal(payload, executable, app_data_dir)
 }
@@ -228,31 +243,401 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
     }
 }
 
-fn launch_background(payload: TerminalPayload) -> Result<(), String> {
+/// Messages sent while a Claude prompt runs. Each one is its own `claude --print`,
+/// so the queue lives here and the next one starts when the running one ends.
+struct QueuedClaudePrompt {
+    activity_id: String,
+    prompt: String,
+}
+
+#[derive(Default)]
+struct ClaudeQueue {
+    prompts: std::collections::VecDeque<QueuedClaudePrompt>,
+    /// After a cancel the queue waits for you instead of running on by itself.
+    paused: bool,
+}
+
+/// Why a running prompt was stopped from Lume.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ClaudeInterrupt {
+    Cancel,
+    /// Stopped so the next queued message can take its place.
+    Steer,
+}
+
+fn claude_queues() -> &'static Mutex<HashMap<String, ClaudeQueue>> {
+    static QUEUES: OnceLock<Mutex<HashMap<String, ClaudeQueue>>> = OnceLock::new();
+    QUEUES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn claude_interrupts() -> &'static Mutex<HashMap<String, ClaudeInterrupt>> {
+    static INTERRUPTS: OnceLock<Mutex<HashMap<String, ClaudeInterrupt>>> = OnceLock::new();
+    INTERRUPTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn queue_claude_prompt(session_id: &str, activity_id: String, prompt: String) {
+    if let Ok(mut queues) = claude_queues().lock() {
+        queues
+            .entry(session_id.to_string())
+            .or_default()
+            .prompts
+            .push_back(QueuedClaudePrompt {
+                activity_id,
+                prompt,
+            });
+    }
+}
+
+pub fn claude_queue_len(session_id: &str) -> usize {
+    claude_queues()
+        .lock()
+        .ok()
+        .and_then(|queues| queues.get(session_id).map(|queue| queue.prompts.len()))
+        .unwrap_or(0)
+}
+
+/// Records that the next exit of this session's prompt is Lume stopping it.
+pub fn note_claude_interrupt(session_id: &str, kind: ClaudeInterrupt) {
+    if let Ok(mut interrupts) = claude_interrupts().lock() {
+        interrupts.insert(session_id.to_string(), kind);
+    }
+}
+
+pub fn forget_claude_interrupt(session_id: &str) {
+    if let Ok(mut interrupts) = claude_interrupts().lock() {
+        interrupts.remove(session_id);
+    }
+}
+
+fn take_claude_interrupt(session_id: &str) -> Option<ClaudeInterrupt> {
+    claude_interrupts()
+        .lock()
+        .ok()
+        .and_then(|mut interrupts| interrupts.remove(session_id))
+}
+
+fn set_claude_queue_paused(session_id: &str, paused: bool) {
+    if let Ok(mut queues) = claude_queues().lock() {
+        if let Some(queue) = queues.get_mut(session_id) {
+            queue.paused = paused;
+        }
+    }
+}
+
+/// Starts the next queued message. `force` is for when you ask for it: it runs even
+/// when a cancel paused the queue.
+pub fn run_next_queued_claude_prompt(
+    app: &AppHandle,
+    state: &AppState,
+    session_id: &str,
+    force: bool,
+) -> Result<bool, String> {
+    let next = {
+        let mut queues = claude_queues()
+            .lock()
+            .map_err(|_| "Could not read the Claude queue".to_string())?;
+        let Some(queue) = queues.get_mut(session_id) else {
+            return Ok(false);
+        };
+        if queue.paused && !force {
+            return Ok(false);
+        }
+        queue.paused = false;
+        queue.prompts.pop_front()
+    };
+    let Some(next) = next else {
+        return Ok(false);
+    };
+    let started = (|| {
+        let session = state.connected_session(session_id)?;
+        let (request, permission_mode) =
+            crate::control::claude_launch_request(state, &session, &next.prompt)?;
+        state.promote_queued_prompt_activity(session_id, &next.activity_id)?;
+        state.mark_prompt_started(session_id)?;
+        launch_claude_prompt(
+            request,
+            app.clone(),
+            state.clone(),
+            session_id.to_string(),
+            permission_mode,
+        )
+    })();
+    if let Err(error) = started {
+        let _ = state.mark_queued_prompt_needs_attention(session_id, &next.activity_id);
+        // The session may already read as running; report the failure so it does not stay so.
+        if let Some(native_id) = state
+            .connected_session(session_id)
+            .ok()
+            .and_then(|session| session.native_session_id)
+        {
+            let mut event = claude_prompt_event(session_id, &native_id);
+            event.event = HookEventKind::Failed;
+            event.status_label = Some(error.chars().take(240).collect());
+            event.activity = Some(claude_error_activity(&native_id, &error));
+            let _ = event_server::publish_event(state, app, event);
+        }
+        crate::protocol::emit_sessions_changed(app);
+        return Err(error);
+    }
+    crate::protocol::emit_sessions_changed(app);
+    Ok(true)
+}
+
+pub fn launch_claude_prompt(
+    request: LaunchRequest,
+    app: AppHandle,
+    state: AppState,
+    session_id: String,
+    permission_mode: Option<String>,
+) -> Result<(), String> {
+    let native_id = request
+        .resume_id
+        .clone()
+        .ok_or("A sessão Claude não informou o ID para retomada")?;
+    if crate::integrations::claude_session_open_interactively(&native_id) {
+        return Err("Esta conversa do Claude está aberta no terminal. Envie a mensagem por lá ou feche o terminal para continuar pelo Lume.".into());
+    }
+    // A stop that raced the previous run's exit must not be taken for this run's.
+    forget_claude_interrupt(&session_id);
+    let mut payload = payload_for(&request, None);
+    if let Some(mode) = permission_mode.as_deref() {
+        apply_claude_permission_mode(&mut payload.arguments, mode);
+    }
+    if !crate::integrations::claude_transcript_can_resume(&native_id) {
+        start_claude_session_with_id(&mut payload.arguments, &native_id);
+    }
+    add_scoped_claude_hooks(&mut payload, &crate::integrations::lume_executable()?)?;
     let mut command = crate::executables::command(&payload.command)?;
     command
         .args(&payload.arguments)
         .env("LUME_MANAGED_SESSION", "1")
+        .env("LUME_CLAUDE_PROMPT_CAPTURE", "1")
         .current_dir(&payload.working_directory)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
+        command.creation_flags(0x0800_0000);
     }
-    let mut child = command
+    let child = command
         .spawn()
-        .map_err(|error| format!("Could not start {}: {error}", payload.command))?;
+        .map_err(|error| format!("Não foi possível iniciar o Claude: {error}"))?;
     thread::Builder::new()
-        .name("lume-agent-prompt".into())
+        .name("lume-claude-prompt".into())
         .spawn(move || {
-            let _ = child.wait();
+            let output = child.wait_with_output();
+            // Lume stopped this prompt: it is already marked as interrupted, so the
+            // process dying is not a failure. A cancel pauses the queue; a steer moves on.
+            if let Some(interrupt) = take_claude_interrupt(&session_id) {
+                match interrupt {
+                    ClaudeInterrupt::Cancel => set_claude_queue_paused(&session_id, true),
+                    ClaudeInterrupt::Steer => {
+                        let _ = run_next_queued_claude_prompt(&app, &state, &session_id, true);
+                    }
+                }
+                return;
+            }
+            let mut event = claude_prompt_event(&session_id, &native_id);
+            match output {
+                Ok(output) if output.status.success() => {
+                    let response = String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .chars()
+                        .take(32 * 1024)
+                        .collect::<String>();
+                    if response.is_empty() {
+                        let recorded_response = state
+                            .connected_session(&session_id)
+                            .ok()
+                            .and_then(|session| current_claude_reply(&session.activities, None));
+                        if let Some(recorded_response) = recorded_response {
+                            event.event = HookEventKind::Completed;
+                            event.last_response = Some(recorded_response);
+                        } else {
+                            event.event = HookEventKind::Failed;
+                            let detail = "Claude terminou sem enviar uma resposta";
+                            event.status_label = Some(detail.into());
+                            event.activity = Some(claude_error_activity(&native_id, detail));
+                        }
+                    } else {
+                        event.event = HookEventKind::Completed;
+                        event.last_response = Some(response.clone());
+                        let already_recorded = state
+                            .connected_session(&session_id)
+                            .ok()
+                            .and_then(|session| {
+                                current_claude_reply(&session.activities, Some(&response))
+                            })
+                            .is_some();
+                        if !already_recorded {
+                            event.activity = Some(SessionActivity {
+                                id: format!(
+                                    "claude:{native_id}:managed-response:{}",
+                                    crate::state::now_millis()
+                                ),
+                                kind: "message".into(),
+                                title: "Resposta do agente".into(),
+                                detail: Some(response),
+                                status: "completed".into(),
+                                created_at: crate::state::now_millis(),
+                                files: Vec::new(),
+                                attachments: Vec::new(),
+                                append_detail: false,
+                            });
+                        }
+                    }
+                }
+                Ok(output) => {
+                    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    event.event = HookEventKind::Failed;
+                    let detail = if detail.is_empty() {
+                        format!("Claude encerrou com código {}", output.status)
+                    } else {
+                        detail
+                    };
+                    event.status_label = Some(detail.chars().take(240).collect());
+                    event.activity = Some(claude_error_activity(&native_id, &detail));
+                }
+                Err(error) => {
+                    event.event = HookEventKind::Failed;
+                    let detail = format!("Falha ao aguardar o Claude: {error}");
+                    event.status_label = Some(detail.clone());
+                    event.activity = Some(claude_error_activity(&native_id, &detail));
+                }
+            }
+            let failed = matches!(event.event, HookEventKind::Failed);
+            let _ = event_server::publish_event(&state, &app, event);
+            // The next queued message follows a prompt that finished; after a failure
+            // the queue waits, so one error does not send everything behind it.
+            if failed {
+                set_claude_queue_paused(&session_id, true);
+            } else {
+                let _ = run_next_queued_claude_prompt(&app, &state, &session_id, false);
+            }
         })
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+// O Claude só grava o transcript após a primeira mensagem, então uma sessão aberta
+// sem prompt ainda não pode ser retomada; criamos a conversa com o mesmo ID.
+fn start_claude_session_with_id(arguments: &mut Vec<String>, native_id: &str) {
+    if let Some(index) = arguments
+        .windows(2)
+        .position(|pair| pair[0] == "--resume" && pair[1] == native_id)
+    {
+        arguments[index] = "--session-id".into();
+    } else if !arguments.iter().any(|argument| argument == "--session-id") {
+        let insert_at = if arguments
+            .first()
+            .is_some_and(|argument| argument == "--print")
+        {
+            1
+        } else {
+            0
+        };
+        arguments.splice(
+            insert_at..insert_at,
+            ["--session-id".into(), native_id.into()],
+        );
+    }
+}
+
+/// Runs the prompt in the chosen mode, replacing whatever the profile put there.
+fn apply_claude_permission_mode(arguments: &mut Vec<String>, mode: &str) {
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--permission-mode" => {
+                arguments.drain(index..(index + 2).min(arguments.len()));
+            }
+            "--allow-dangerously-skip-permissions" => {
+                arguments.remove(index);
+            }
+            _ => index += 1,
+        }
+    }
+    let mut flags = Vec::new();
+    if mode == "bypassPermissions" {
+        flags.push("--allow-dangerously-skip-permissions".to_string());
+    }
+    flags.extend(["--permission-mode".into(), mode.to_string()]);
+    arguments.splice(0..0, flags);
+}
+
+fn current_claude_reply(activities: &[SessionActivity], response: Option<&str>) -> Option<String> {
+    let last_prompt = activities
+        .iter()
+        .rposition(|activity| activity.kind == "prompt")
+        .map_or(activities.len(), |index| index + 1);
+    activities[last_prompt..]
+        .iter()
+        .rev()
+        .find(|activity| {
+            activity.kind == "message"
+                && activity.title != "Thinking"
+                && response.is_none_or(|expected| {
+                    activity.detail.as_deref().map(str::trim) == Some(expected.trim())
+                })
+        })
+        .and_then(|activity| activity.detail.clone())
+}
+
+fn claude_error_activity(native_id: &str, detail: &str) -> SessionActivity {
+    SessionActivity {
+        id: format!(
+            "claude:{native_id}:managed-error:{}",
+            crate::state::now_millis()
+        ),
+        kind: "error".into(),
+        title: "Erro do Claude".into(),
+        detail: Some(detail.chars().take(16 * 1024).collect()),
+        status: "failed".into(),
+        created_at: crate::state::now_millis(),
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    }
+}
+
+fn add_scoped_claude_hooks(payload: &mut TerminalPayload, executable: &Path) -> Result<(), String> {
+    if let Some(settings) = crate::integrations::managed_claude_hook_settings(
+        &executable.to_string_lossy(),
+        &payload.working_directory,
+    )? {
+        payload
+            .arguments
+            .splice(0..0, ["--settings".into(), settings]);
+    }
+    Ok(())
+}
+
+fn claude_prompt_event(session_id: &str, native_id: &str) -> HookEvent {
+    HookEvent {
+        event: HookEventKind::Running,
+        session_id: session_id.into(),
+        agent: AgentKind::ClaudeCode,
+        agent_label: Some("Claude Code".into()),
+        session_name: None,
+        project: None,
+        source: None,
+        source_app: None,
+        control_origin: SessionControlOrigin::Lume,
+        status_label: None,
+        started_at: None,
+        process_id: None,
+        native_session_id: Some(native_id.into()),
+        working_directory: None,
+        permission_profile: None,
+        permission: None,
+        question: None,
+        last_response: None,
+        activity: None,
+        activities: Vec::new(),
+        wait_for_decision: false,
+    }
 }
 
 fn apply_permission_profile(request: &LaunchRequest, arguments: &mut Vec<String>) {
@@ -517,6 +902,39 @@ fn command_available(command: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn claude_reply_must_belong_to_current_prompt() {
+        let activity = |kind: &str, detail: &str| SessionActivity {
+            id: format!("{kind}:{detail}"),
+            kind: kind.into(),
+            title: kind.into(),
+            detail: Some(detail.into()),
+            status: "completed".into(),
+            created_at: 1,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        };
+        let mut activities = vec![
+            activity("message", "resposta antiga"),
+            activity("prompt", "novo"),
+        ];
+        assert_eq!(current_claude_reply(&activities, None), None);
+        activities.push(activity("message", "resposta nova"));
+        assert_eq!(
+            current_claude_reply(&activities, None).as_deref(),
+            Some("resposta nova")
+        );
+        assert_eq!(
+            current_claude_reply(&activities, Some("resposta nova")).as_deref(),
+            Some("resposta nova")
+        );
+        assert_eq!(
+            current_claude_reply(&activities, Some("resposta antiga")),
+            None
+        );
+    }
+
     fn request(agent: IntegrationKind, resume: bool, resume_id: Option<&str>) -> LaunchRequest {
         LaunchRequest {
             agent,
@@ -649,6 +1067,108 @@ mod tests {
         assert_eq!(
             payload.arguments,
             vec!["--print", "--resume", "session-id", "Continue a tarefa"]
+        );
+    }
+
+    #[test]
+    fn claude_messages_queue_in_order_and_a_cancel_pauses_them() {
+        let session = "queue-test-session";
+        assert_eq!(claude_queue_len(session), 0);
+        queue_claude_prompt(session, "a1".into(), "primeira".into());
+        queue_claude_prompt(session, "a2".into(), "segunda".into());
+        assert_eq!(claude_queue_len(session), 2);
+
+        let take_next = |force: bool| {
+            let mut queues = claude_queues().lock().unwrap();
+            let queue = queues.get_mut(session).unwrap();
+            if queue.paused && !force {
+                return None;
+            }
+            queue.paused = false;
+            queue.prompts.pop_front().map(|prompt| prompt.activity_id)
+        };
+        assert_eq!(
+            take_next(false).as_deref(),
+            Some("a1"),
+            "runs in the order sent"
+        );
+        // A cancel (or a failure) holds the rest until you ask for it.
+        set_claude_queue_paused(session, true);
+        assert_eq!(take_next(false), None);
+        assert_eq!(claude_queue_len(session), 1, "nothing is lost while paused");
+        assert_eq!(
+            take_next(true).as_deref(),
+            Some("a2"),
+            "send now overrides the pause"
+        );
+        assert_eq!(claude_queue_len(session), 0);
+        claude_queues().lock().unwrap().remove(session);
+    }
+
+    #[test]
+    fn a_stop_from_lume_is_remembered_once() {
+        let session = "interrupt-test-session";
+        assert!(take_claude_interrupt(session).is_none());
+        note_claude_interrupt(session, ClaudeInterrupt::Steer);
+        assert!(take_claude_interrupt(session) == Some(ClaudeInterrupt::Steer));
+        assert!(
+            take_claude_interrupt(session).is_none(),
+            "the next exit is an ordinary one"
+        );
+        note_claude_interrupt(session, ClaudeInterrupt::Cancel);
+        forget_claude_interrupt(session);
+        assert!(
+            take_claude_interrupt(session).is_none(),
+            "a stop that failed is forgotten"
+        );
+    }
+
+    #[test]
+    fn claude_prompt_runs_in_the_chosen_permission_mode() {
+        let mut request = request(IntegrationKind::Claude, true, Some("session-id"));
+        request.initial_prompt = Some("Continue".into());
+        request.permission_mode = Some(AccessMode::FullAccess);
+        let arguments = |mode: &str| {
+            let mut payload = payload_for(&request, None);
+            apply_claude_permission_mode(&mut payload.arguments, mode);
+            payload.arguments
+        };
+        // The profile's own flags give way to the mode picked in Lume.
+        assert_eq!(
+            arguments("default"),
+            [
+                "--permission-mode",
+                "default",
+                "--print",
+                "--resume",
+                "session-id",
+                "Continue"
+            ]
+        );
+        assert_eq!(
+            arguments("bypassPermissions"),
+            [
+                "--allow-dangerously-skip-permissions",
+                "--permission-mode",
+                "bypassPermissions",
+                "--print",
+                "--resume",
+                "session-id",
+                "Continue"
+            ]
+        );
+        assert_eq!(arguments("auto")[..2], ["--permission-mode", "auto"]);
+    }
+
+    #[test]
+    fn claude_session_without_transcript_is_created_with_its_id() {
+        let mut request = request(IntegrationKind::Claude, true, Some("session-id"));
+        request.initial_prompt = Some("--resume".into());
+        let mut payload = payload_for(&request, None);
+        start_claude_session_with_id(&mut payload.arguments, "session-id");
+        assert_eq!(
+            payload.arguments,
+            vec!["--print", "--session-id", "session-id", "--resume"]
         );
     }
 

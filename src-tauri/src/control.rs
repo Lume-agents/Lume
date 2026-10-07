@@ -5,12 +5,13 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     browser_server::BrowserControl,
+    claude_control::{self, ClaudeModelCatalog, ClaudeModelSettings, ClaudeModelSources},
     codex_bridge::{CodexBridge, CodexThreadModelSettings},
-    discovery,
+    codex_permissions, discovery,
     domain::{
-        AgentKind, AgentSession, PendingQuestion, PermissionAction, PromptAttachment,
-        PromptAttachmentInput, PromptDelivery, QuestionAnswer, SessionControlOrigin,
-        SessionModelOverride, SessionSource, SessionStatus,
+        AgentKind, AgentSession, PendingQuestion, PermissionAction, PermissionSettings,
+        PromptAttachment, PromptAttachmentInput, PromptDelivery, QuestionAnswer,
+        SessionControlOrigin, SessionModelOverride, SessionSource, SessionStatus,
     },
     integrations::{self, IntegrationKind},
     launcher::{self, LaunchRequest},
@@ -197,6 +198,29 @@ pub fn submit_prompt(
         .collect::<Vec<_>>();
     let queued_for_later = is_running && delivery == PromptDelivery::Queue;
     let result = if is_running {
+        if session.agent == AgentKind::ClaudeCode
+            && session.control_origin == SessionControlOrigin::Lume
+        {
+            // Each message is its own `claude --print`, so it waits for the running one.
+            let all_paths = attachments
+                .iter()
+                .map(|attachment| attachment.path.clone())
+                .collect::<Vec<_>>();
+            let activity_id = format!("local:{}:queued:{}", session.id, crate::state::now_millis());
+            state.record_queued_prompt_activity(
+                &session.id,
+                &activity_id,
+                prompt,
+                display_attachments,
+            )?;
+            launcher::queue_claude_prompt(
+                &session.id,
+                activity_id,
+                prompt_with_attachment_paths(prompt, &all_paths),
+            );
+            protocol::emit_sessions_changed(app);
+            return Ok(());
+        }
         if session.agent != AgentKind::Codex {
             return Err(
                 "This running agent cannot receive queued or side prompts through Lume yet".into(),
@@ -370,33 +394,40 @@ pub fn submit_prompt(
             .map(|attachment| attachment.path.clone())
             .collect::<Vec<_>>();
         let prompt = prompt_with_attachment_paths(prompt, &attachment_paths);
-        let model_settings = if agent == IntegrationKind::Claude {
-            state.session_model_override(&session.id)?
+        if agent == IntegrationKind::Claude {
+            let (request, permission_mode) = claude_launch_request(state, &session, &prompt)?;
+            // Messages a cancel left queued stay paused until you send them.
+            if session.source != SessionSource::Web {
+                state.record_prompt_activity(&session.id, &prompt, display_attachments.clone())?;
+            }
+            launcher::launch_claude_prompt(
+                request,
+                app.clone(),
+                state.clone(),
+                session.id.clone(),
+                permission_mode,
+            )
         } else {
-            Default::default()
-        };
-        let is_claude = agent == IntegrationKind::Claude;
-        launcher::launch(
-            LaunchRequest {
+            let request = LaunchRequest {
                 agent,
                 working_directory,
                 resume: true,
                 resume_id: Some(resume_id),
                 target,
-                initial_prompt: Some(prompt),
-                permission_mode: is_claude.then(|| session.permission_profile.mode.clone()),
-                approval_policy: is_claude
-                    .then(|| session.permission_profile.approval_policy.clone()),
-                model: model_settings.model,
-                reasoning_effort: model_settings.reasoning_effort,
-            },
-            &executable,
-            &app_data_dir,
-            None,
-        )
+                initial_prompt: Some(prompt.clone()),
+                permission_mode: None,
+                approval_policy: None,
+                model: None,
+                reasoning_effort: None,
+            };
+            launcher::launch(request, &executable, &app_data_dir, None)
+        }
     };
     result?;
-    if !queued_for_later && session.source != SessionSource::Web {
+    if !queued_for_later
+        && session.source != SessionSource::Web
+        && session.agent != AgentKind::ClaudeCode
+    {
         state.record_prompt_activity(&session.id, prompt, display_attachments)?;
     }
     protocol::emit_sessions_changed(app);
@@ -465,7 +496,13 @@ pub fn interrupt_prompt(
             .native_session_id
             .as_deref()
             .ok_or_else(|| "The Claude session did not provide its session id".to_string())?;
-        discovery::interrupt_resumed_prompt_process(native_session_id, &session.agent)?;
+        launcher::note_claude_interrupt(session_id, launcher::ClaudeInterrupt::Cancel);
+        if let Err(error) =
+            discovery::interrupt_resumed_prompt_process(native_session_id, &session.agent)
+        {
+            launcher::forget_claude_interrupt(session_id);
+            return Err(error);
+        }
     }
     state.mark_prompt_interrupted(session_id)?;
     protocol::emit_sessions_changed(app);
@@ -475,7 +512,9 @@ pub fn interrupt_prompt(
 fn supports_safe_prompt_interrupt(agent: &AgentKind, source: &SessionSource) -> bool {
     match agent {
         AgentKind::Codex => source != &SessionSource::Web,
-        AgentKind::ClaudeCode => source == &SessionSource::Cli,
+        // A Lume-owned conversation (Desktop) runs each prompt as the same
+        // `claude --print` process a CLI session does.
+        AgentKind::ClaudeCode => matches!(source, SessionSource::Cli | SessionSource::Desktop),
         AgentKind::OpenCode => source == &SessionSource::Desktop,
         AgentKind::Antigravity => source == &SessionSource::Desktop,
         _ => false,
@@ -529,6 +568,30 @@ pub fn set_session_collaboration_mode(
     let mode = bridge.set_collaboration_mode(thread_id, mode, state, app)?;
     protocol::emit_sessions_changed(app);
     Ok(mode)
+}
+
+pub fn session_slash_commands(
+    app: &AppHandle,
+    state: &AppState,
+    bridge: &CodexBridge,
+    session_id: &str,
+) -> Result<Vec<crate::agent_commands::AgentSlashCommand>, String> {
+    let session = state.connected_session(session_id)?;
+    let Some(cwd) = session.working_directory.as_deref() else {
+        return Ok(Vec::new());
+    };
+    match session.agent {
+        AgentKind::ClaudeCode => crate::agent_commands::claude_commands(cwd),
+        AgentKind::Codex => crate::agent_commands::codex_commands(cwd, || bridge.list_skills(cwd)),
+        AgentKind::OpenCode => match session.native_session_id.as_deref() {
+            Some(native_id) => app
+                .state::<crate::opencode_acp::OpenCodeBridge>()
+                .slash_commands(native_id, cwd),
+            None => Ok(Vec::new()),
+        },
+        AgentKind::Antigravity => crate::agent_commands::antigravity_commands(cwd),
+        _ => Ok(Vec::new()),
+    }
 }
 
 pub fn session_model_settings(
@@ -743,7 +806,7 @@ pub fn set_session_fast_mode(
 pub fn claude_session_model_settings(
     state: &AppState,
     session_id: &str,
-) -> Result<SessionModelOverride, String> {
+) -> Result<ClaudeModelSettings, String> {
     let session = state.connected_session(session_id)?;
     if session.agent != AgentKind::ClaudeCode {
         return Err("These model settings are only available for Claude Code sessions".into());
@@ -751,7 +814,198 @@ pub fn claude_session_model_settings(
     if session.control_origin != SessionControlOrigin::Lume {
         return Err("Take control of this external CLI before changing its model".into());
     }
-    state.session_model_override(session_id)
+    effective_claude_model_settings(state, &session)
+}
+
+fn claude_model_catalog(session: &AgentSession) -> Result<ClaudeModelCatalog, String> {
+    let working_directory = session
+        .working_directory
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
+    Ok(claude_control::model_catalog(&claude_control::initialize(
+        &working_directory,
+    )?))
+}
+
+fn effective_claude_model_settings(
+    state: &AppState,
+    session: &AgentSession,
+) -> Result<ClaudeModelSettings, String> {
+    let catalog = claude_model_catalog(session)?;
+    let session_override = state.session_model_override(&session.id)?;
+    let native_id = session.native_session_id.as_deref();
+    let current_model = native_id.and_then(integrations::claude_session_model);
+    let last_session_model = current_model
+        .is_none()
+        .then(|| integrations::claude_latest_session_model(native_id))
+        .flatten();
+    let settings = integrations::claude_settings(session.working_directory.as_deref());
+    Ok(claude_control::effective_settings(
+        &catalog,
+        ClaudeModelSources {
+            session_override: Some(&session_override),
+            current_model,
+            last_session_model,
+            settings: Some(&settings),
+        },
+    ))
+}
+
+/// The mode a Lume prompt runs in: the one picked in Lume for this conversation,
+/// otherwise the one the CLI recorded. With neither, the CLI keeps its own default.
+fn effective_claude_permission_mode(
+    state: &AppState,
+    session: &AgentSession,
+) -> Result<Option<String>, String> {
+    if let Some(mode) = state.permission_mode_override(&session.id)? {
+        return Ok(Some(mode));
+    }
+    Ok(session
+        .native_session_id
+        .as_deref()
+        .and_then(integrations::claude_session_permission_mode))
+}
+
+/// The permission modes on offer for a session and the one in effect.
+pub fn session_permission_settings(
+    state: &AppState,
+    session_id: &str,
+) -> Result<PermissionSettings, String> {
+    let session = state.connected_session(session_id)?;
+    match session.agent {
+        AgentKind::ClaudeCode => claude_permission_settings(state, &session),
+        AgentKind::Codex => Ok(codex_permissions::settings(
+            &state
+                .permission_mode_override(session_id)?
+                .unwrap_or_else(|| codex_permissions::mode_of(&session.permission_profile).into()),
+        )),
+        _ => Err("Permissions can only be changed for Claude Code and Codex sessions".into()),
+    }
+}
+
+fn claude_permission_settings(
+    state: &AppState,
+    session: &AgentSession,
+) -> Result<PermissionSettings, String> {
+    let mode = effective_claude_permission_mode(state, session)?
+        .or_else(|| {
+            integrations::claude_settings(session.working_directory.as_deref())
+                .pointer("/permissions/defaultMode")
+                .and_then(|mode| mode.as_str().map(str::to_string))
+        })
+        .unwrap_or_else(|| "default".into());
+    // Auto mode depends on the model; failing to read it only hides that option.
+    let supports_auto_mode = effective_claude_model_settings(state, session)
+        .ok()
+        .and_then(|settings| {
+            settings
+                .models
+                .iter()
+                .find(|option| option.model == settings.model)
+                .map(|option| option.supports_auto_mode)
+        })
+        .unwrap_or(false);
+    Ok(claude_control::permission_settings(
+        &mode,
+        supports_auto_mode,
+    ))
+}
+
+/// Picks how the agent asks before acting. It applies from the next prompt Lume sends.
+pub fn set_session_permission_mode(
+    app: &AppHandle,
+    state: &AppState,
+    session_id: &str,
+    mode: &str,
+) -> Result<PermissionSettings, String> {
+    let session = state.connected_session(session_id)?;
+    let (offered, scope) = match session.agent {
+        AgentKind::ClaudeCode => (claude_control::is_permission_mode(mode), None),
+        AgentKind::Codex => (
+            codex_permissions::is_mode(mode),
+            codex_permissions::scope(mode),
+        ),
+        _ => {
+            return Err("Permissions can only be changed for Claude Code and Codex sessions".into())
+        }
+    };
+    if session.control_origin != SessionControlOrigin::Lume {
+        return Err("Take control of this external CLI before changing its permissions".into());
+    }
+    if !offered {
+        return Err(format!(
+            "{} does not offer the permission mode {mode}",
+            session.agent_label
+        ));
+    }
+    state.set_permission_mode_override(session_id, mode)?;
+    if let Some(scope) = scope {
+        state.set_permission_scope(session_id, scope)?;
+    }
+    protocol::emit_sessions_changed(app);
+    session_permission_settings(state, session_id)
+}
+
+/// Everything a Lume-sent Claude prompt runs with. It is built when the prompt starts,
+/// not when it is queued: by then the conversation may have a transcript to resume.
+pub(crate) fn claude_launch_request(
+    state: &AppState,
+    session: &AgentSession,
+    prompt: &str,
+) -> Result<(LaunchRequest, Option<String>), String> {
+    let resume_id = session
+        .native_session_id
+        .clone()
+        .ok_or_else(|| "A sessão não informou um identificador para retomada".to_string())?;
+    let working_directory = session
+        .working_directory
+        .clone()
+        .ok_or_else(|| "A sessão não informou a pasta do projeto".to_string())?;
+    let target = if session.source == SessionSource::Vscode {
+        "vscode".to_string()
+    } else {
+        state.preferences()?.launch_target
+    };
+    let model_settings = claude_prompt_model_settings(state, session);
+    integrations::ensure_claude_connected()?;
+    let can_resume = integrations::claude_transcript_can_resume(&resume_id);
+    let has_prior_response = session
+        .last_response
+        .as_deref()
+        .is_some_and(|response| !response.trim().is_empty())
+        || session
+            .activities
+            .iter()
+            .any(|activity| activity.kind == "message" && activity.status == "completed");
+    if !can_resume && has_prior_response {
+        return Err("O histórico do Claude não está disponível no disco. O Lume preservou a conversa para evitar continuar sem o contexto anterior.".into());
+    }
+    let request = LaunchRequest {
+        agent: IntegrationKind::Claude,
+        working_directory,
+        resume: can_resume,
+        resume_id: Some(resume_id),
+        target,
+        initial_prompt: Some(prompt.to_string()),
+        permission_mode: Some(session.permission_profile.mode.clone()),
+        approval_policy: Some(session.permission_profile.approval_policy.clone()),
+        model: model_settings.model,
+        reasoning_effort: model_settings.reasoning_effort,
+    };
+    Ok((request, effective_claude_permission_mode(state, session)?))
+}
+
+/// What a Lume prompt runs with, so the picker always shows the model in use.
+fn claude_prompt_model_settings(state: &AppState, session: &AgentSession) -> SessionModelOverride {
+    effective_claude_model_settings(state, session)
+        .ok()
+        .filter(|settings| !settings.model.is_empty())
+        .map(|settings| SessionModelOverride {
+            model: Some(settings.model),
+            reasoning_effort: settings.reasoning_effort,
+        })
+        .or_else(|| state.session_model_override(&session.id).ok())
+        .unwrap_or_default()
 }
 
 pub fn set_claude_session_model_settings(
@@ -760,7 +1014,7 @@ pub fn set_claude_session_model_settings(
     session_id: &str,
     model: Option<&str>,
     effort: Option<&str>,
-) -> Result<SessionModelOverride, String> {
+) -> Result<ClaudeModelSettings, String> {
     let session = state.connected_session(session_id)?;
     if session.agent != AgentKind::ClaudeCode {
         return Err("These model settings are only available for Claude Code sessions".into());
@@ -785,21 +1039,36 @@ pub fn set_claude_session_model_settings(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase);
-    if effort
-        .as_deref()
-        .is_some_and(|value| !matches!(value, "low" | "medium" | "high" | "xhigh" | "max"))
-    {
-        return Err("Unsupported Claude reasoning effort".into());
+    let catalog = claude_model_catalog(&session)?;
+    let option = match model.as_deref() {
+        Some(model) => Some(
+            catalog
+                .option(model)
+                .ok_or_else(|| format!("Claude Code does not offer the model {model}"))?,
+        ),
+        None => None,
+    };
+    if let (Some(option), Some(effort)) = (option, effort.as_deref()) {
+        if !option
+            .supported_reasoning_efforts
+            .iter()
+            .any(|supported| supported.value == effort)
+        {
+            return Err(format!(
+                "{} does not support the {effort} reasoning effort",
+                option.display_name
+            ));
+        }
     }
-    let settings = state.set_session_model_override(
+    state.set_session_model_override(
         session_id,
         SessionModelOverride {
-            model,
+            model: option.map(|option| option.model.clone()).or(model),
             reasoning_effort: effort,
         },
     )?;
     protocol::emit_sessions_changed(app);
-    Ok(settings)
+    effective_claude_model_settings(state, &session)
 }
 
 pub fn steer_queued_prompt(
@@ -814,6 +1083,11 @@ pub fn steer_queued_prompt(
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or_else(|| "Session not found".to_string())?;
+    if session.agent == AgentKind::ClaudeCode
+        && session.control_origin == SessionControlOrigin::Lume
+    {
+        return send_queued_claude_prompt_now(app, state, &session);
+    }
     if session.status != SessionStatus::Running || session.agent != AgentKind::Codex {
         return Err("This session cannot steer a queued prompt right now".into());
     }
@@ -822,6 +1096,37 @@ pub fn steer_queued_prompt(
         .as_deref()
         .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
     bridge.steer_queued_prompt(session_id, activity_id, thread_id, state, app)?;
+    protocol::emit_sessions_changed(app);
+    Ok(())
+}
+
+/// Runs the next queued message now: right away when nothing is running, otherwise by
+/// stopping the running prompt first so the queued one takes its place.
+fn send_queued_claude_prompt_now(
+    app: &AppHandle,
+    state: &AppState,
+    session: &AgentSession,
+) -> Result<(), String> {
+    if launcher::claude_queue_len(&session.id) == 0 {
+        return Err("There is no queued message to send".into());
+    }
+    if matches!(
+        session.status,
+        SessionStatus::Running | SessionStatus::PermissionRequired
+    ) {
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or_else(|| "The Claude session did not provide its session id".to_string())?;
+        launcher::note_claude_interrupt(&session.id, launcher::ClaudeInterrupt::Steer);
+        if let Err(error) = discovery::interrupt_resumed_prompt_process(native_id, &session.agent) {
+            launcher::forget_claude_interrupt(&session.id);
+            return Err(error);
+        }
+        state.mark_prompt_interrupted(&session.id)?;
+    } else {
+        launcher::run_next_queued_claude_prompt(app, state, &session.id, true)?;
+    }
     protocol::emit_sessions_changed(app);
     Ok(())
 }
@@ -1734,6 +2039,10 @@ mod tests {
         assert!(supports_safe_prompt_interrupt(
             &AgentKind::ClaudeCode,
             &SessionSource::Cli
+        ));
+        assert!(supports_safe_prompt_interrupt(
+            &AgentKind::ClaudeCode,
+            &SessionSource::Desktop
         ));
         assert!(!supports_safe_prompt_interrupt(
             &AgentKind::ClaudeCode,

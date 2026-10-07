@@ -578,6 +578,22 @@ impl OpenCodeBridge {
             .ok_or_else(|| "Esta versão do OpenCode não informou as opções da sessão".into())
     }
 
+    pub fn slash_commands(
+        &self,
+        session_id: &str,
+        cwd: &str,
+    ) -> Result<Vec<crate::agent_commands::AgentSlashCommand>, String> {
+        // Loading the session makes OpenCode announce its commands over ACP.
+        let _ = self.config_options(session_id, cwd);
+        for _ in 0..40 {
+            if let Some(commands) = crate::agent_commands::opencode_commands(session_id) {
+                return Ok(commands);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        Ok(Vec::new())
+    }
+
     pub fn model_settings(
         &self,
         session_id: &str,
@@ -601,11 +617,29 @@ impl OpenCodeBridge {
             json!({"sessionId":session_id,"configId":config_id,"value":value}),
             REQUEST_TIMEOUT,
         )?;
-        if !response["configOptions"].is_array() {
-            return Err("OpenCode não confirmou as novas opções da sessão".into());
+        let returned = &response["configOptions"];
+        if config_value(returned, config_id) == Some(value) {
+            self.cache_config(session_id, &response)?;
+            return Ok(returned.clone());
         }
-        self.cache_config(session_id, &response)?;
-        Ok(response["configOptions"].clone())
+        // Some OpenCode versions report the new selection in a separate
+        // config_option_update notification. Do not replace that newer cache
+        // with a stale set_config_option response.
+        for _ in 0..20 {
+            let cached = self
+                .session_configs
+                .lock()
+                .map_err(|_| "OpenCode config lock failed")?
+                .get(session_id)
+                .cloned();
+            if let Some(config) = cached {
+                if config_value(&config, config_id) == Some(value) {
+                    return Ok(config);
+                }
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        Err("OpenCode não confirmou a troca de modelo. A seleção anterior foi mantida.".into())
     }
 
     pub fn set_model_settings(
@@ -912,6 +946,10 @@ fn handle_update(
     };
     let update = &params["update"];
     let kind = update["sessionUpdate"].as_str().unwrap_or("");
+    if kind == "available_commands_update" {
+        crate::agent_commands::record_opencode_commands(id, &update["availableCommands"]);
+        return;
+    }
     if kind == "config_option_update" {
         if update["configOptions"].is_array() {
             if let Ok(mut configs) = session_configs.lock() {
@@ -1146,6 +1184,14 @@ fn config_option<'a>(config: &'a Value, category: &str) -> Option<&'a Value> {
                         || (category == "thought_level" && option["id"] == "effort"))
             })
         })
+}
+
+fn config_value<'a>(config: &'a Value, id: &str) -> Option<&'a str> {
+    config
+        .as_array()?
+        .iter()
+        .find(|option| option["id"] == id)?["currentValue"]
+        .as_str()
 }
 
 fn validate_config_value(option: &Value, value: &str) -> Result<(), String> {

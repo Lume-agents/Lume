@@ -1372,6 +1372,7 @@ mod tests {
             activities: Vec::new(),
             rate_limits: Vec::new(),
             prompt_token_usage: Vec::new(),
+            forked_from: None,
         };
         store.save_session(&session).expect("salva a sessão");
         let loaded = store.load_sessions().expect("carrega as sessões");

@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { fade, fly } from "svelte/transition";
+  import { fade, fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { animatedDisclosure } from "$lib/animatedDisclosure";
+  import { sessionLauncherTransition } from "$lib/sessionLauncherTransition";
   import { emit, listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -227,6 +228,8 @@
   let launcherRoot = $state<HTMLDivElement | null>(null);
   let launcherPopoverNode: HTMLDivElement | null = null;
   let launching = $state<IntegrationStatus["kind"] | null>(null);
+  let launchingSessionId = $state<string | null>(null);
+  let launchingPhase = $state<"choosing" | "opening" | null>(null);
   let resumeAgent = $state<IntegrationStatus["kind"] | null>(null);
   let resumableSessions = $state<ResumableSession[]>([]);
   let loadingResumeAgent = $state<IntegrationStatus["kind"] | null>(null);
@@ -397,6 +400,7 @@
       const availableAbove = anchor.top - 12;
       const above = availableBelow < 220 && availableAbove > availableBelow;
       const maxHeight = Math.max(100, Math.min(420, above ? availableAbove : availableBelow));
+      node.dataset.placement = above ? "above" : "below";
       node.style.width = `${width}px`;
       node.style.left = `${Math.max(8, Math.min(window.innerWidth - width - 8, anchor.right - width))}px`;
       node.style.maxHeight = `${maxHeight}px`;
@@ -841,11 +845,15 @@
   }
 
   async function startSession(agent: IntegrationStatus["kind"]) {
-    const selected = await withNativeDialog(() => openDialog({ directory: true, multiple: false, title: tr("Project for the new session", "Projeto da nova sessão") }));
-    if (!selected || Array.isArray(selected)) return;
     launching = agent;
+    launchingSessionId = null;
+    launchingPhase = "choosing";
     launchError = "";
     try {
+      const selected = await withNativeDialog(() => openDialog({ directory: true, multiple: false, title: tr("Project for the new session", "Projeto da nova sessão") }));
+      if (!selected || Array.isArray(selected)) return;
+
+      launchingPhase = "opening";
       const profile = preferences.projectProfiles[projectKey(selected)];
       pendingOpenedSession = { agent: agent === "claude" ? "claude_code" : agent, knownIds: new Set(sessions.map((session) => session.id)), startedAt: Date.now() };
       await launchAgentSession(agent, selected, false, undefined, profile?.launchTarget ?? preferences.launchTarget, profile?.permissionMode, profile?.approvalPolicy);
@@ -857,6 +865,8 @@
       else launchError = String(reason).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
+      launchingSessionId = null;
+      launchingPhase = null;
     }
   }
 
@@ -887,6 +897,8 @@
       return;
     }
     launching = stored.agent;
+    launchingSessionId = stored.id;
+    launchingPhase = "opening";
     launchError = "";
     try {
       const profile = preferences.projectProfiles[projectKey(stored.workingDirectory)];
@@ -902,6 +914,8 @@
       else launchError = String(reason).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
+      launchingSessionId = null;
+      launchingPhase = null;
     }
   }
 
@@ -2311,27 +2325,50 @@
         <span>{orderedSessions.length}</span>
       {/if}
       <div class="session-launcher" bind:this={launcherRoot}>
-        <button class:active={launcherOpen} type="button" aria-label={tr("New or resume chat", "Novo chat ou retomar")} title={tr("New or resume chat", "Novo chat ou retomar")} aria-expanded={launcherOpen} onclick={() => void toggleLauncher()}><LumeIcon name="plus" size={16} /></button>
+        <button class:active={launcherOpen} type="button" aria-label={launcherOpen ? tr("Close session launcher", "Fechar iniciador de sessões") : tr("New or resume chat", "Novo chat ou retomar")} title={launcherOpen ? tr("Close session launcher", "Fechar iniciador de sessões") : tr("New or resume chat", "Novo chat ou retomar")} aria-controls="workspace-session-launcher" aria-expanded={launcherOpen} onclick={() => void toggleLauncher()}><LumeIcon name="plus" size={16} /></button>
         {#if launcherOpen}
-          <div class="session-launcher-popover" use:floatLauncher role="group" aria-label={tr("Open session", "Abrir sessão")}>
+          <div id="workspace-session-launcher" class="session-launcher-popover" use:floatLauncher transition:sessionLauncherTransition={{ duration: 190, radius: 12 }} role="group" aria-label={tr("Open session", "Abrir sessão")}>
             <strong>{tr("Open session", "Abrir sessão")}</strong>
             {#each integrations.filter((item) => item.installed && item.canLaunch) as integration (integration.kind)}
               <div class="launcher-agent">
                 <div class="launcher-agent-row">
                   <BrandIcon name={integration.kind} size={17} />
                   <span>{integration.label}</span>
-                  <button type="button" disabled={launching !== null} onclick={() => void startSession(integration.kind)}>{tr("New", "Novo")}</button>
+                  <button class:loading={launching === integration.kind && launchingSessionId === null} type="button" disabled={launching !== null} onclick={() => void startSession(integration.kind)} aria-busy={launching === integration.kind && launchingSessionId === null}>
+                    <span class="launcher-button-content">
+                      {#if launching === integration.kind && launchingSessionId === null}<span class="launcher-spinner" aria-hidden="true"></span>{/if}
+                      <span>{#if launching === integration.kind && launchingSessionId === null}{launchingPhase === "choosing" ? tr("Choose…", "Escolher…") : tr("Opening…", "Abrindo…")}{:else}{tr("New", "Novo")}{/if}</span>
+                    </span>
+                  </button>
                   {#if integration.kind !== "gemini"}
-                    <button type="button" class:active={resumeAgent === integration.kind} disabled={launching !== null || loadingResumeAgent !== null} onclick={() => void toggleResumeSessions(integration.kind)}>{loadingResumeAgent === integration.kind ? "…" : tr("Resume", "Retomar")}</button>
+                    <button type="button" class:active={resumeAgent === integration.kind} class:loading={loadingResumeAgent === integration.kind} disabled={launching !== null || loadingResumeAgent !== null} onclick={() => void toggleResumeSessions(integration.kind)} aria-busy={loadingResumeAgent === integration.kind}>
+                      <span class="launcher-button-content">
+                        {#if loadingResumeAgent === integration.kind}<span class="launcher-spinner" aria-hidden="true"></span>{/if}
+                        <span>{loadingResumeAgent === integration.kind ? tr("Loading…", "Buscando…") : tr("Resume", "Retomar")}</span>
+                      </span>
+                    </button>
                   {/if}
                 </div>
                 {#if resumeAgent === integration.kind}
-                  <div class="launcher-resume-list">
-                    {#each resumableSessions as stored (stored.id)}
-                      <button type="button" disabled={launching !== null} title={stored.workingDirectory} onclick={() => void resumeStoredSession(stored)}><strong>{stored.name}</strong><small>{stored.project}</small></button>
+                  <div class="launcher-resume-list" transition:slide={{ duration: 145, easing: cubicOut }}>
+                    {#if loadingResumeAgent === integration.kind}
+                      <div class="launcher-loading-note" role="status" aria-live="polite" transition:fade={{ duration: 120 }}>
+                        <span class="launcher-spinner" aria-hidden="true"></span>
+                        <span>{tr("Finding recent sessions…", "Buscando sessões recentes…")}</span>
+                      </div>
+                    {:else if resumableSessions.length > 0}
+                      {#each resumableSessions as stored (stored.id)}
+                        <button class:loading={launchingSessionId === stored.id} type="button" disabled={launching !== null} title={stored.workingDirectory} onclick={() => void resumeStoredSession(stored)} aria-busy={launchingSessionId === stored.id}>
+                          <span class="launcher-session-copy">
+                            <strong>{stored.name}</strong>
+                            <small>{launchingSessionId === stored.id ? tr("Opening session…", "Abrindo sessão…") : stored.project}</small>
+                          </span>
+                          {#if launchingSessionId === stored.id}<span class="launcher-spinner" aria-hidden="true"></span>{/if}
+                        </button>
+                      {/each}
                     {:else}
-                      {#if loadingResumeAgent !== integration.kind}<p>{tr("No saved chats found.", "Nenhum chat salvo encontrado.")}</p>{/if}
-                    {/each}
+                      <p>{tr("No saved chats found.", "Nenhum chat salvo encontrado.")}</p>
+                    {/if}
                   </div>
                 {/if}
               </div>
@@ -3242,21 +3279,34 @@
   .search-toggle { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
   .search-toggle:hover, .search-toggle.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .session-launcher { position: relative; margin-left: auto; }
-  .session-launcher > button { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .session-launcher > button { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 120ms ease, background-color 120ms ease, transform 120ms cubic-bezier(.16, 1, .3, 1); }
   .session-launcher > button:hover, .session-launcher > button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .session-launcher > button:active { transform: scale(.94); }
+  .session-launcher > button :global(svg) { transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .session-launcher > button.active :global(svg) { transform: rotate(45deg); }
   .session-launcher-popover { position: fixed; z-index: 1000; box-sizing: border-box; padding: 10px; overflow-y: auto; border: 1px solid var(--workspace-line); border-radius: 12px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 42px rgba(8, 18, 13, .19); }
   .session-launcher-popover > strong { display: block; margin: 1px 3px 9px; color: var(--workspace-strong); font-size: 10px; }
   .launcher-agent { border-top: 1px solid var(--workspace-line); }
   .launcher-agent-row { min-height: 44px; display: flex; align-items: center; gap: 5px; }
   .launcher-agent-row > span { min-width: 0; flex: 1; overflow: hidden; color: var(--workspace-strong); font-size: 9px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }
-  .launcher-agent-row button { min-height: 26px; padding: 0 6px; border: 0; border-radius: 6px; color: var(--workspace-accent); background: var(--workspace-subtle); font-size: 8px; font-weight: 720; cursor: pointer; }
+  .launcher-agent-row button { box-sizing: border-box; min-width: 64px; min-height: 27px; padding: 0 7px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; color: var(--workspace-accent); background: var(--workspace-subtle); font-size: 8px; font-weight: 720; cursor: pointer; transition: color 120ms ease, background-color 120ms ease, transform 120ms cubic-bezier(.16, 1, .3, 1); }
+  .launcher-agent-row button:not(:disabled):active { transform: scale(.96); }
+  .launcher-agent-row button:focus-visible, .launcher-resume-list button:focus-visible { outline: 2px solid color-mix(in srgb, var(--workspace-accent) 48%, transparent); outline-offset: 2px; }
   .launcher-agent-row button:disabled { opacity: .45; cursor: default; }
   .launcher-agent-row button.active { background: var(--workspace-accent-soft); }
+  .launcher-agent-row button.loading { color: var(--workspace-accent); background: var(--workspace-accent-soft); opacity: .92; }
+  .launcher-button-content { display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; }
+  .launcher-spinner { width: 9px; height: 9px; flex: 0 0 auto; border: 1.4px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: session-launcher-spin 720ms linear infinite; }
+  @keyframes session-launcher-spin { to { transform: rotate(360deg); } }
   .launcher-resume-list { max-height: 180px; padding: 0 0 7px 21px; overflow-y: auto; }
-  .launcher-resume-list button { width: 100%; min-height: 39px; padding: 5px 7px; display: grid; gap: 2px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; text-align: left; cursor: pointer; }
+  .launcher-resume-list button { width: 100%; min-height: 39px; padding: 5px 7px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; text-align: left; cursor: pointer; transition: background-color 120ms ease, transform 120ms cubic-bezier(.16, 1, .3, 1); }
   .launcher-resume-list button:hover { background: var(--workspace-subtle); }
+  .launcher-resume-list button:disabled { opacity: .45; cursor: default; }
+  .launcher-resume-list button.loading { background: var(--workspace-accent-soft); opacity: .9; }
+  .launcher-session-copy { min-width: 0; display: grid; gap: 2px; }
   .launcher-resume-list strong { overflow: hidden; color: var(--workspace-strong); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
   .launcher-resume-list small { overflow: hidden; color: var(--workspace-muted); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+  .launcher-loading-note { min-height: 30px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); font-size: 8px; }
   .session-launcher-popover p { margin: 8px 3px; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }
   .session-filters { margin: 0 11px 10px; padding: 3px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--workspace-line); border-radius: 9px; background: color-mix(in srgb, var(--workspace-sidebar) 76%, var(--workspace-bg)); }
   .session-filters button { min-width: 0; height: 25px; padding: 0 5px; overflow: hidden; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
@@ -3424,5 +3474,5 @@
     .workspace-stage.review-open { grid-template-columns: minmax(300px, 1fr) 0px minmax(420px, 48vw); }
   }
   @media (max-height: 640px) { .brand-top { height: 46px; }.session-heading { padding-top: 8px; }.session-tree-item { margin-bottom: 0; } }
-  @media (prefers-reduced-motion: reduce) { .workspace, .brand-copy, .session-copy, .session-icon :global(.thread-avatar), .session-status-dot, .session-row, .session-tree-item, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .sidebar-toggle, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .layout-actions button, .workspace-stage { transition: none; }.session-copy em.status-running i, .session-context-menu, .layout-name-editor, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span, .subagent-row, .session-drag-preview { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .workspace, .brand-copy, .session-copy, .session-icon :global(.thread-avatar), .session-status-dot, .session-row, .session-tree-item, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .sidebar-toggle, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .layout-actions button, .workspace-stage, .session-launcher > button, .session-launcher > button :global(svg), .launcher-agent-row button, .launcher-resume-list button { transition: none; }.launcher-spinner { animation: none !important; }.session-copy em.status-running i, .session-context-menu, .layout-name-editor, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span, .subagent-row, .session-drag-preview { animation: none; } }
 </style>

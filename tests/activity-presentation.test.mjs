@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   activityCategory,
+  activityDisplayTitle,
   activityGroupSummary,
   activityRunFiles,
   activityRunTitle,
@@ -114,3 +115,26 @@ assert.equal(needsUserAuthorization("A autorização expirou, mas nenhuma nova t
 assert.equal(needsUserAuthorization("O guia explica como autorizar novamente o Docker para desenvolvimento."), false);
 
 console.log("activity presentation test suite passed");
+
+// ── git events ──
+const git = (title, detail = "") => activity("command", title, detail);
+assert.equal(activityCategory(git("git status")), "git");
+assert.equal(activityCategory(git("git grep -n workflow")), "git", "git grep is git work, not a search");
+assert.equal(activityCategory(git("gh pr create --title x")), "git");
+assert.equal(activityCategory(git("cd /work && git add -A && git commit -m x")), "git");
+assert.equal(activityCategory(git("rg -n git src")), "search");
+assert.equal(activityCategory(git("cat .gitignore")), "read", "a .gitignore path is not a git command");
+assert.equal(activityCategory(activity("tool", "functions · exec_command", JSON.stringify({ cmd: "git log -3" }))), "git");
+assert.equal(activityThinkingState(git("git push origin main")), "working");
+assert.equal(activityDisplayTitle(git("git push -u origin feat/x"), "pt-BR"), "Push → origin/feat/x");
+assert.equal(activityDisplayTitle(git("git switch -c fix/y"), "en"), "New branch · fix/y");
+const gitRuns = groupConsecutiveTraceActivities([
+  { ...git("git add -A"), id: "g1" },
+  { ...git("git commit -m done"), id: "g2" },
+  { ...git("npm run dev"), id: "c1" },
+  { ...git("npm run build"), id: "c2" },
+]);
+assert.deepEqual(gitRuns.map((run) => [run.category, run.activities.length]), [["git", 1], ["git", 1], ["command", 2]]);
+assert.equal(activityGroupSummary([git("git status"), git("git diff")], "en"), "2 git operations");
+assert.equal(activityGroupSummary([git("git status"), git("npm run dev")], "pt-BR"), "1 operação git, 1 comando");
+await import("./git-events.test.mjs");

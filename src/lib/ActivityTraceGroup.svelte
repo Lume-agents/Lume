@@ -4,6 +4,9 @@
   import { slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import ActivityTypeIcon from "$lib/ActivityTypeIcon.svelte";
+  import GitEventChips from "$lib/GitEventChips.svelte";
+  import GitEventDetails from "$lib/GitEventDetails.svelte";
+  import { gitActivityInfo } from "$lib/gitEvents";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import { displayFileChangePath } from "$lib/fileChanges";
   import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunFiles, activityRunTitle, groupConsecutiveTraceActivities, type ActivityCategory, type ActivityRun } from "$lib/activityPresentation";
@@ -116,6 +119,7 @@
       {#each visibleRuns as run, index (run.id)}
         {@const activity = run.activities[0]}
         {@const preview = activityPreview(activity)}
+        {@const gitInfo = run.category === "git" ? gitActivityInfo(activity) : null}
         {@const runFiles = plain ? activityRunFiles(run) : []}
         {#if plain && runFiles.length > 0}
           {@const status = runStatus(run)}
@@ -215,6 +219,34 @@
             </div>
             {#if activity.detail}<p class="reasoning-text">{activity.detail}</p>{/if}
           </div>
+        {:else if gitInfo}
+          <details
+            class:failed={activity.status === "failed" || gitInfo.result === "failed" || gitInfo.result === "conflict"}
+            class:interrupted={activity.status === "interrupted"}
+            class:running={activity.status === "running"}
+            class:waiting={activity.status === "waiting"}
+            class="activity-row git-row"
+            style={`--step-delay: ${Math.min(index, 4) * 22}ms`}
+          >
+            <summary>
+              <span class="activity-status" aria-label={activity.status}>
+                {#if activity.status === "completed"}
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
+                {:else if activity.status === "failed"}
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6m0-6-6 6" /></svg>
+                {:else}
+                  <i></i>
+                {/if}
+              </span>
+              <span class="activity-type git-type"><ActivityTypeIcon category="git" /></span>
+              <span class="activity-copy">
+                <strong>{activityDisplayTitle(activity, language)}</strong>
+                <GitEventChips info={gitInfo} {language} />
+              </span>
+              <svg class="row-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
+            </summary>
+            <GitEventDetails info={gitInfo} {language} />
+          </details>
         {:else}
           <details
             class:failed={activity.status === "failed"}
@@ -278,6 +310,9 @@
   .event-trigger { border: 0; background: transparent; text-align: left; }
   .activity-type { width: 15px; height: 15px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent, #428066); }
   .activity-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
+  .git-row .activity-copy { gap: 4px; }
+  .git-type { color: #cf673d; }
+  :global(.terminal-window.dark) .git-type, :global(.workspace.dark) .git-type { color: #e48a62; }
   .activity-copy strong { overflow: hidden; color: var(--workspace-strong, #52665c); font: 700 var(--activity-title-size, var(--chat-small-font-size, 9px))/1.25 Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
   .activity-copy code { overflow: hidden; color: var(--workspace-faint, #89958f); font: var(--activity-detail-size, var(--chat-tiny-font-size, 7px))/1.3 "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
   .activity-status { position: absolute; z-index: 1; top: calc((var(--activity-row-height, 34px) - 16px) / 2); left: -8px; width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--workspace-accent, #428066) 28%, transparent); border-radius: 50%; color: #4a956b; background: var(--workspace-pane, #f8fbf9); }

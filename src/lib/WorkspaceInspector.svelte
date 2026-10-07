@@ -25,6 +25,7 @@
     section = $bindable("session"),
     sessionOptions = [],
     onSelectSession,
+    loading = false,
   } = $props<{
     session: (AgentSession & { activityTotal?: number }) | null;
     language?: Language;
@@ -35,9 +36,12 @@
     section?: "session" | "repository";
     sessionOptions?: LumeSelectOption[];
     onSelectSession?: (sessionId: string) => void;
+    loading?: boolean;
   }>();
 
   let usageRefreshing = $state(false);
+  let usageSettledKey = $state("");
+  let usagePendingKey = $state("");
   let requestedUsageKey = "";
   let indexedPrompts = $state<WorkspacePromptIndexEntry[]>([]);
   let promptIndexLoading = $state(false);
@@ -70,6 +74,8 @@
   const totalRemoved = $derived(changes.reduce((total, file) => total + file.removed, 0));
   const tokenSamples = $derived((session?.promptTokenUsage ?? []).slice(-14));
   const tokenGraph = $derived(tokenGraphGeometry(tokenSamples));
+  // The first read of a session's limits is the only wait worth showing; later refreshes keep the last values.
+  const usageLoading = $derived(Boolean(session && hasUsage(session.agent) && usagePendingKey !== usageSettledKey && !session.rateLimits?.length));
   const automaticAccess = $derived(session?.permissionProfile.mode !== "full_access" && ["auto_review", "approve_for_me"].includes(session?.permissionProfile.approvalsReviewer?.replaceAll("-", "_") ?? ""));
   const fullAccess = $derived(session?.permissionProfile.mode === "full_access");
 
@@ -80,7 +86,8 @@
       : "";
     if (!key || key === requestedUsageKey) return;
     requestedUsageKey = key;
-    void refreshUsage();
+    usagePendingKey = key;
+    void refreshUsage(key);
   });
 
   $effect(() => {
@@ -155,14 +162,18 @@
     return agent === "codex" || agent === "claude_code";
   }
 
-  async function refreshUsage() {
-    if (!session || !hasUsage(session.agent) || usageRefreshing) return;
+  async function refreshUsage(key: string) {
+    if (!session || !hasUsage(session.agent) || usageRefreshing) {
+      if (!session || !hasUsage(session.agent)) usageSettledKey = key;
+      return;
+    }
     usageRefreshing = true;
     try {
       await refreshAgentRateLimits(session.agent);
     } catch { /* Keep the last known usage without adding noisy inspector copy. */ }
     finally {
       usageRefreshing = false;
+      usageSettledKey = usagePendingKey;
     }
   }
 </script>
@@ -219,7 +230,7 @@
     <div class="inspector-scroll" use:transientScrollbar>
       {#if hasUsage(session.agent)}
         <section class="usage-section" aria-label={tr(`${session.agentLabel} usage`, `Uso do ${session.agentLabel}`)}>
-          <div class="usage-gauges" class:loading={usageRefreshing && !session.rateLimits?.length}>
+          <div class="usage-gauges" class:loading={usageLoading} aria-busy={usageLoading}>
             {#each session.rateLimits ?? [] as limit (limit.id)}
               {@const remaining = remainingRate(Number(limit.usedPercent))}
               <div class="usage-gauge" style:--usage-remaining={remaining}>
@@ -233,9 +244,9 @@
             {/each}
             {#if !session.rateLimits?.length}<i></i><i></i>{/if}
           </div>
-          <div class="token-chart">
+          <div class="token-chart" aria-busy={usageLoading && !tokenSamples.length}>
             <span>{tr("Tokens / prompt", "Tokens / prompt")}</span>
-            <svg class:empty={!tokenGraph.points} class="token-graph" viewBox="0 0 226 54" preserveAspectRatio="none" role="img" aria-label={tr("Tokens used per prompt over time", "Tokens usados por prompt ao longo do tempo")}>
+            <svg class:empty={!tokenGraph.points} class:loading={usageLoading && !tokenSamples.length} class="token-graph" viewBox="0 0 226 54" preserveAspectRatio="none" role="img" aria-label={tr("Tokens used per prompt over time", "Tokens usados por prompt ao longo do tempo")}>
               <path class="graph-grid" d="M4 14H222M4 28H222M4 42H222" />
               <polygon points={tokenGraph.area} />
               <polyline points={tokenGraph.points || "4,42 222,42"} />
@@ -243,7 +254,7 @@
                 <circle cx={dot.x} cy={dot.y} r="2"><title>{dot.tokens.toLocaleString(language)} tokens</title></circle>
               {/each}
             </svg>
-            <small>{tr("Time →", "Tempo →")}</small>
+            <small>{usageLoading && !tokenSamples.length ? tr("Loading…", "Carregando…") : tr("Time →", "Tempo →")}</small>
           </div>
         </section>
       {/if}
@@ -315,7 +326,17 @@
     </div>
     {/if}
   {:else}
+    {#if loading}
+      <div class="inspector-scroll inspector-loading" role="status" aria-label={tr("Loading inspector", "Carregando o inspector")}>
+        <section class="usage-section">
+          <div class="usage-gauges loading"><i></i><i></i></div>
+          <div class="token-chart"><span>{tr("Tokens / prompt", "Tokens / prompt")}</span><svg class="token-graph empty loading" viewBox="0 0 226 54" preserveAspectRatio="none" aria-hidden="true"><path class="graph-grid" d="M4 14H222M4 28H222M4 42H222" /><polyline points="4,42 222,42" /></svg><small>{tr("Loading…", "Carregando…")}</small></div>
+        </section>
+        <div class="loading-rows" aria-hidden="true"><i></i><i></i><i></i></div>
+      </div>
+    {:else}
     <div class="inspector-empty"><BrandIcon name="lume" size={30} /><span>{tr("Select an agent to inspect its work.", "Selecione um agente para inspecionar o trabalho.")}</span></div>
+    {/if}
   {/if}
 </aside>
 
@@ -363,6 +384,12 @@
   .empty-section { margin: 0; padding: 0 0 5px; color: var(--workspace-faint); font-size: 9px; line-height: 1.45; }
   .inspector-empty { margin: auto; padding: 24px; display: grid; justify-items: center; gap: 10px; color: var(--workspace-faint); font-size: 10px; text-align: center; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .token-graph.loading { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
+  .inspector-loading { padding-top: 1px; }
+  .loading-rows { margin-top: 18px; display: grid; gap: 10px; }
+  .loading-rows > i { height: 12px; border-radius: 6px; background: var(--workspace-line); opacity: .5; animation: usage-pulse 1.2s ease-in-out infinite alternate; }
+  .loading-rows > i:nth-child(2) { width: 78%; }
+  .loading-rows > i:nth-child(3) { width: 54%; }
   @keyframes usage-pulse { to { opacity: .9; } }
-  @media (prefers-reduced-motion: reduce) { .inspector-section > summary::after, .gauge-progress { transition: none; }.usage-gauges.loading > i { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .inspector-section > summary::after, .gauge-progress { transition: none; }.usage-gauges.loading > i, .token-graph.loading, .loading-rows > i { animation: none; } }
 </style>

@@ -3178,6 +3178,12 @@
           {/key}
         {/if}
       {/if}
+    {:else if loading}
+      <div class="workspace-empty workspace-loading" role="status">
+        <span class="empty-mark"><BrandIcon name="lume" size={34} /></span>
+        <strong>{tr("Loading your workspace…", "Carregando seu workspace…")}</strong>
+        <i class="workspace-loading-bar" aria-hidden="true"></i>
+      </div>
     {:else}
       <div class="workspace-empty">
         <span class="empty-mark"><BrandIcon name="lume" size={34} /></span>
@@ -3221,7 +3227,7 @@
     <div class:open={inspectorOpen && !boardOpen} class="inspector-shell" aria-hidden={!inspectorOpen || boardOpen} inert={!inspectorOpen || boardOpen}>
       {#if inspectorOpen}
         <div class="inspector-content" in:fade={{ duration: motionDuration(140) }} out:fade={{ duration: motionDuration(100) }}>
-          <WorkspaceInspector session={focusedSession} {language} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} />
+          <WorkspaceInspector session={focusedSession} {language} {loading} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} />
         </div>
       {/if}
     </div>
@@ -3586,6 +3592,11 @@
   .empty-mark { width: 58px; height: 58px; display: grid; place-items: center; color: var(--workspace-accent); }
   .workspace-empty strong { color: var(--workspace-strong); font-size: 17px; letter-spacing: -.03em; }
   .workspace-empty p { max-width: 360px; margin: 0; font-size: 11px; line-height: 1.6; }
+  .workspace-loading .empty-mark { animation: loading-breathe 1.4s ease-in-out infinite alternate; }
+  .workspace-loading-bar { width: 96px; height: 3px; overflow: hidden; border-radius: 2px; background: var(--workspace-line); }
+  .workspace-loading-bar::after { display: block; width: 40%; height: 100%; border-radius: inherit; background: var(--workspace-accent); content: ""; animation: loading-slide 1.1s ease-in-out infinite; }
+  @keyframes loading-breathe { from { opacity: .45; transform: scale(.96); } to { opacity: 1; transform: scale(1); } }
+  @keyframes loading-slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
   .workspace-error { position: fixed; right: 18px; bottom: 18px; max-width: 420px; margin: 0; padding: 10px 12px; border: 1px solid rgba(198, 102, 98, .28); border-radius: 10px; color: #b45c58; background: var(--workspace-pane); font-size: 9px; }
   @keyframes live-pulse { 0%, 45% { box-shadow: 0 0 0 0 rgba(77, 153, 204, .28); } 80%, 100% { box-shadow: 0 0 0 4px rgba(77, 153, 204, 0); } }
   @keyframes session-menu-in { from { opacity: 0; transform: translateY(-4px); } }
@@ -3639,5 +3650,5 @@
     .workspace-stage.review-open { grid-template-columns: minmax(300px, 1fr) 0px minmax(420px, 48vw); }
   }
   @media (max-height: 640px) { .brand-top { height: 46px; }.session-heading { padding-top: 8px; }.session-tree-item { margin-bottom: 0; } }
-  @media (prefers-reduced-motion: reduce) { .workspace, .brand-copy, .session-copy, .session-icon :global(.thread-avatar), .session-status-dot, .session-row, .session-tree-item, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .sidebar-toggle, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .layout-actions button, .workspace-stage, .session-launcher > button, .session-launcher > button :global(svg), .launcher-agent-row button, .launcher-resume-list button { transition: none; }.launcher-spinner { animation: none !important; }.session-copy em.status-running i, .session-context-menu, .layout-name-editor, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span, .subagent-row, .session-drag-preview { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .workspace-loading .empty-mark, .workspace-loading-bar::after { animation: none; } .workspace, .brand-copy, .session-copy, .session-icon :global(.thread-avatar), .session-status-dot, .session-row, .session-tree-item, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .sidebar-toggle, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .layout-actions button, .workspace-stage, .session-launcher > button, .session-launcher > button :global(svg), .launcher-agent-row button, .launcher-resume-list button { transition: none; }.launcher-spinner { animation: none !important; }.session-copy em.status-running i, .session-context-menu, .layout-name-editor, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span, .subagent-row, .session-drag-preview { animation: none; } }
 </style>

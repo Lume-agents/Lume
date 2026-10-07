@@ -3811,7 +3811,7 @@
               {/if}
               {@render permissionSection()}
             {:else if modelSettings}
-              {#if promptIsRunning && (session.agent === "codex" || session.agent === "antigravity")}
+              {#if promptIsRunning && session.agent === "codex"}
                 <p class="model-pending-note">{tr("Changes will be applied when this prompt finishes.", "As mudanças serão aplicadas quando este prompt terminar.")}</p>
               {/if}
               <section class="model-settings-section">

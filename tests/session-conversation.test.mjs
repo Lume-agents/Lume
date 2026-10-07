@@ -183,3 +183,28 @@ test("changed files stay attached to the final response of their own prompt", ()
     ["activity:final-1", ["edit-1"]], ["activity:final-2", ["edit-2"]],
   ]);
 });
+
+test("a cancelled request is one notice in the chat, not a tool event and not twice", () => {
+  const notice = (id, createdAt, detail) =>
+    activity(id, "interrupt", createdAt, detail, { title: "Prompt interrupted", status: "interrupted" });
+  const activities = [
+    activity("prompt", "prompt", 10),
+    activity("read", "command", 20),
+    // Lume's own cancel, then the CLI's record of the same cancel a moment later.
+    notice("lume-cancel", 30, undefined),
+    notice("cli-record", 33, "user"),
+    activity("again", "prompt", 60),
+    notice("later", 90, "tool_use"),
+  ];
+  const feed = buildConversationFeed(entriesFor(activities));
+  assert.deepEqual(
+    feed.map((item) => (item.kind === "trace" ? "trace" : item.entry.activity.kind)),
+    ["prompt", "trace", "interrupt", "prompt", "interrupt"],
+    "the notice sits outside the tool events, and the two records of one cancel collapse",
+  );
+  assert.equal(
+    feed.filter((item) => item.kind === "entry" && item.entry.activity.kind === "interrupt").length,
+    2,
+    "a later cancel is a new notice",
+  );
+});

@@ -6,7 +6,7 @@
   import ActivityTypeIcon from "$lib/ActivityTypeIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import { displayFileChangePath } from "$lib/fileChanges";
-  import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunFiles, activityRunTitle, groupConsecutiveTraceActivities, type ActivityRun } from "$lib/activityPresentation";
+  import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunFiles, activityRunTitle, groupConsecutiveTraceActivities, type ActivityCategory, type ActivityRun } from "$lib/activityPresentation";
 
   let { activities, language = "en", active = false, plain = false } = $props<{
     activities: SessionActivity[];
@@ -16,6 +16,13 @@
   }>();
 
   const summary = $derived(activityGroupSummary(activities, language));
+  const summaryCategories: (ActivityCategory | "analysis")[] = $derived.by(() => {
+    const categories = new Set<ActivityCategory | "analysis">();
+    for (const activity of activities) {
+      categories.add(activity.kind === "analysis" ? "analysis" : activityCategory(activity));
+    }
+    return [...categories].slice(0, 3);
+  });
   const isWorking = $derived(active || activities.some(
     (activity: SessionActivity) => activity.status === "running",
   ));
@@ -87,7 +94,13 @@
     onclick={() => (expanded = !expanded)}
   >
     <span class="cluster-mark" aria-hidden="true">
-      <svg viewBox="0 0 20 20"><path d="M5 5.5h7M5 10h10M5 14.5h6" /><path d="m13.5 4 1 1 2-2" /></svg>
+      <span class="cluster-type-stack">
+        {#each summaryCategories as category, index (category)}
+          <span class="cluster-type-icon" data-category={category} style={`--icon-index:${index}`}>
+            <ActivityTypeIcon {category} size={11} />
+          </span>
+        {/each}
+      </span>
     </span>
     <strong>{summary}</strong>
     <small>{activities.length}</small>
@@ -247,8 +260,10 @@
   .activity-cluster.plain .activity-row pre { border: 0; border-radius: 0; background: transparent; }
   .cluster-summary { width: 100%; min-height: var(--activity-summary-height, 39px); padding: 6px 8px; display: flex; align-items: center; gap: 8px; border: 0; color: var(--workspace-muted, #65776e); background: transparent; cursor: pointer; text-align: left; }
   .activity-row > summary::-webkit-details-marker { display: none; }
-  .cluster-mark { width: 24px; height: 24px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 7px; color: var(--workspace-accent, #428066); background: color-mix(in srgb, var(--workspace-accent, #428066) 8%, transparent); }
-  .cluster-mark svg { width: 15px; height: 15px; }
+  .cluster-mark { width: max-content; min-width: 24px; height: 24px; display: flex; align-items: center; flex: 0 0 auto; border-radius: 7px; color: var(--workspace-accent, #428066); background: transparent; }
+  .cluster-type-stack { display: flex; align-items: center; padding-left: 1px; }
+  .cluster-type-icon { position: relative; z-index: calc(1 + var(--icon-index)); box-sizing: border-box; width: 18px; height: 18px; margin-left: -5px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--workspace-accent, #428066) 18%, var(--workspace-line, rgba(65, 94, 80, .18))); border-radius: 6px; color: var(--workspace-accent, #428066); background: var(--workspace-raised, #fff); animation: cluster-icon-arrive 220ms cubic-bezier(.16, 1, .3, 1) both; animation-delay: calc(var(--icon-index) * 24ms); }
+  .cluster-type-icon:first-child { margin-left: 0; }
   .cluster-summary > strong { min-width: 0; flex: 1; overflow: hidden; font: 730 var(--chat-small-font-size, 9px)/1.35 Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
   .cluster-summary > small { min-width: 17px; height: 17px; padding: 0 4px; display: grid; place-items: center; border-radius: 9px; color: #778980; background: rgba(76, 105, 91, .07); font: 700 var(--chat-tiny-font-size, 7px) Inter, sans-serif; }
   .cluster-chevron, .row-chevron { flex: 0 0 auto; color: #89968f; transition: transform 140ms ease; }
@@ -312,10 +327,12 @@
   :global(.terminal-window.dark) .load-earlier-activities:hover { color: #8bc5a8; }
   @keyframes activity-pulse { 50% { opacity: .38; transform: scale(.62); } }
   @keyframes step-arrive { from { opacity: 0; transform: translateY(5px); } }
+  @keyframes cluster-icon-arrive { from { opacity: 0; transform: translateX(-4px) scale(.92); } }
   @keyframes file-node-arrive { from { opacity: 0; transform: translateY(3px); } }
   .activity-row { animation: step-arrive 240ms cubic-bezier(.16, 1, .3, 1) both; animation-delay: var(--step-delay); }
   @media (prefers-reduced-motion: reduce) {
     .activity-cluster, .cluster-chevron, .row-chevron { transition: none; }
+    .cluster-type-icon { animation: none; }
     .activity-row { animation: none; }
     .file-node { animation: none; }
     .activity-row.running .activity-copy strong { color: #4e7fa6; }

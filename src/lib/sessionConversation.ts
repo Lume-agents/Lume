@@ -2,7 +2,7 @@ import type { AgentSession, SessionActivity } from "$lib/domain";
 import type { FileChangeSummary } from "$lib/fileChanges";
 import { mergeFileChanges, summarizeFileChanges } from "$lib/fileChanges";
 import { cleanPromptTransport, promptTextKey } from "$lib/chatAttachments";
-import { isHiddenAgentActivity, isPresentableTraceActivity } from "$lib/activityPresentation";
+import { activityCategory, isHiddenAgentActivity, isPresentableTraceActivity } from "$lib/activityPresentation";
 import { latestResponseText, sameResponseText } from "$lib/responseDedup.js";
 
 export type ConversationEntry = {
@@ -128,6 +128,15 @@ export function buildConversationEntries(
         continue;
       }
     }
+
+    if (
+      activity.kind === "interrupt"
+      && entries.some((entry) =>
+        entry.activity.kind === "interrupt"
+        && promptSegment(entry.activity.createdAt) === promptSegment(activity.createdAt)
+        && Math.abs(entry.activity.createdAt - activity.createdAt) < 15_000
+      )
+    ) continue;
 
     const files = activityChanges(activity);
     const matchingMessage = activity.kind === "message"
@@ -299,8 +308,23 @@ export function buildConversationFeed(
 ): ConversationFeedItem[] {
   const feed: ConversationFeedItem[] = [];
   let trace: Extract<ConversationFeedItem, { kind: "trace" }> | null = null;
+  let finalResponse: ConversationEntry | null = null;
   for (const entry of entries) {
     if (isHiddenAgentActivity(entry.activity)) continue;
+    if (finalResponse && activityCategory(entry.activity) === "edit") {
+      const fileChanges = entry.files.length
+        ? entry.files
+        : entry.activity.files.map((path) => ({ path, added: 0, removed: 0 }));
+      if (fileChanges.length || finalResponse.files.length) {
+        mergeFileChanges(finalResponse.files, fileChanges);
+        finalResponse.activity.files = [...new Set([
+          ...finalResponse.activity.files,
+          ...entry.activity.files,
+        ])];
+        continue;
+      }
+    }
+    finalResponse = null;
     if (
       isPresentableTraceActivity(entry.activity)
       || (options.includeAnalysisInTrace && entry.activity.kind === "analysis")
@@ -315,7 +339,11 @@ export function buildConversationFeed(
       continue;
     }
     trace = null;
-    feed.push({ kind: "entry", id: entry.id, entry });
+    const feedEntry = entry.isFinalResponse
+      ? { ...entry, activity: { ...entry.activity, files: [...entry.activity.files] }, files: [...entry.files] }
+      : entry;
+    feed.push({ kind: "entry", id: feedEntry.id, entry: feedEntry });
+    finalResponse = feedEntry.isFinalResponse ? feedEntry : null;
   }
   return feed;
 }

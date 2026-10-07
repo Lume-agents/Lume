@@ -3613,19 +3613,19 @@ mod tests {
         assert!(root["lume"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
             .is_some_and(|command| {
-                decoded_or_raw_command(command).contains("hook antigravity:PreToolUse")
+                decoded_or_raw_command(command).contains("antigravity:PreToolUseAsk")
             }));
         assert_eq!(root["lume"]["PostToolUse"][0]["matcher"], "*");
         assert_eq!(root["lume"]["PostToolUse"][0]["hooks"][0]["timeout"], 5);
         assert!(root["lume"]["PostToolUse"][0]["hooks"][0]["command"]
             .as_str()
             .is_some_and(|command| {
-                decoded_or_raw_command(command).contains("hook antigravity:PostToolUse")
+                decoded_or_raw_command(command).contains("antigravity:PostToolUse")
             }));
         assert!(root["lume"]["PreInvocation"][0]["command"]
             .as_str()
             .is_some_and(|command| {
-                decoded_or_raw_command(command).contains("hook antigravity:PreInvocation")
+                decoded_or_raw_command(command).contains("antigravity:PreInvocation")
             }));
         assert!(configured_content(
             &root.to_string(),

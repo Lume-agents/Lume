@@ -345,6 +345,7 @@
   let updateProgress = $state<number | null>(null);
   let dismissedAgentAlertIds = $state<string[]>([]);
   let rateLimitRefreshRequested = false;
+  let antigravityRateLimitRefreshRequested = false;
   let pendingUpdate: Update | null = null;
   let suppressCompactToggle = false;
   let dragState: {
@@ -794,6 +795,12 @@
       if (!rateLimitRefreshRequested && sessions.some((session) => session.agent === "codex")) {
         rateLimitRefreshRequested = true;
         void refreshAgentRateLimits("codex")
+          .then(() => refreshSessions(false))
+          .catch(() => undefined);
+      }
+      if (!antigravityRateLimitRefreshRequested && sessions.some((session) => session.agent === "antigravity")) {
+        antigravityRateLimitRefreshRequested = true;
+        void refreshAgentRateLimits("antigravity")
           .then(() => refreshSessions(false))
           .catch(() => undefined);
       }

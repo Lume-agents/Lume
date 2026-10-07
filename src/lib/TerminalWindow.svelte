@@ -1550,6 +1550,12 @@
                 .catch(() => undefined);
             }
           }
+          if (session.agent === "antigravity" && !rateLimitRefreshRequested) {
+            rateLimitRefreshRequested = true;
+            void refreshAgentRateLimits(session.agent)
+              .then(() => refresh())
+              .catch(() => undefined);
+          }
           return;
         }
       } catch (error) {

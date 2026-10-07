@@ -152,7 +152,7 @@
   }
 
   function hasUsage(agent: AgentSession["agent"]) {
-    return agent === "codex" || agent === "claude_code";
+    return agent === "codex" || agent === "claude_code" || agent === "antigravity";
   }
 
   async function refreshUsage() {

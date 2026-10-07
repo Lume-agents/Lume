@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             args: --bundles deb,appimage,rpm
           - os: windows-2022
             args: --bundles nsis
@@ -41,10 +41,18 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libdbus-1-dev libfuse2 pkg-config rpm
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev libdbus-1-dev libfuse2 pkg-config rpm squashfs-tools
       - name: Runtime do AppImage
         if: runner.os == 'Linux'
         run: curl --fail --location --silent --show-error --output "$RUNNER_TEMP/runtime-x86_64" https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+      - name: AppRun com permissões compatíveis com sandbox
+        if: runner.os == 'Linux'
+        run: |
+          tauri_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
+          mkdir -p "$tauri_cache_dir"
+          curl --fail --location --silent --show-error --output "$tauri_cache_dir/AppRun-x86_64" https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64
+          chmod 0755 "$tauri_cache_dir/AppRun-x86_64"
+          test "$(stat -c '%a' "$tauri_cache_dir/AppRun-x86_64")" = 755
       - name: Configuração de assinatura macOS
         if: runner.os == 'macOS'
         shell: bash
@@ -97,13 +105,31 @@ jobs:
           tagName: ${{ env.LUME_RELEASE_TAG }}
           releaseName: Lume v__VERSION__
           generateReleaseNotes: true
-          releaseDraft: ${{ github.ref_type != 'tag' }}
+          releaseDraft: true
           prerelease: ${{ github.ref_type != 'tag' || contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: lume-[platform]-[arch]-[bundle]
+      - name: Verificar permissão do launcher dentro do AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          appimage="$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          if [[ -z "$appimage" ]]; then
+            echo "::error::O build não gerou um AppImage."
+            exit 1
+          fi
+          offset="$("$appimage" --appimage-offset)"
+          listing="$RUNNER_TEMP/lume-appimage-files.txt"
+          unsquashfs -lln -o "$offset" "$appimage" > "$listing"
+          mode="$(awk '$NF == "squashfs-root/AppRun.wrapped" { print $1 }' "$listing")"
+          if [[ "$mode" != "-rwxr-xr-x" ]]; then
+            echo "::error::AppRun.wrapped precisa ser executável por todos; modo encontrado: ${mode:-ausente}."
+            exit 1
+          fi
+          echo "AppRun.wrapped validado com modo $mode."
 
   mobile-android:
     name: Android mobile
@@ -172,3 +198,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$LUME_RELEASE_TAG" "${{ steps.assets.outputs.apk }}" "${{ steps.assets.outputs.manifest }}" --clobber
+
+  publish-release:
+    name: Publicar release validada
+    needs: mobile-android
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publicar artefatos validados
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$LUME_RELEASE_TAG" --draft=false

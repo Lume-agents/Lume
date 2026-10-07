@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
+  import { STREAM_STEP_MS, stepsForBacklog, wordsForStep } from "$lib/streamPacing";
 
-  let { text, animate = false, live = false, startFromBeginning = false, render }: {
+  let { text, animate = false, live = false, startFromBeginning = false, onstreaming, render }: {
     text: string;
     animate?: boolean;
     live?: boolean;
     startFromBeginning?: boolean;
+    /** Tells the chat whether the message is still being written, so it can wait for it. */
+    onstreaming?: (active: boolean) => void;
     render: (value: string) => string;
   } = $props();
 
@@ -19,6 +22,9 @@
   let finishTimer = 0;
   let lastWrappedText = "";
   let revealedWords = 0;
+  // The reveal is planned to finish in a number of steps that grows with the text.
+  let plannedLength = 0;
+  let stepsLeft = 0;
   const maxAnimatedLength = 6_000;
 
   function fadeNewestWords(root: HTMLElement, count: number) {
@@ -43,13 +49,20 @@
 
   function advance(now: number) {
     if (!streaming) return;
-    if (lastFrame && now - lastFrame < 90) {
+    if (lastFrame && now - lastFrame < STREAM_STEP_MS) {
       frame = requestAnimationFrame(advance);
       return;
     }
     lastFrame = now;
     const backlog = text.length - visible.length;
-    const batch = backlog > 3_000 ? 5 : backlog > 1_500 ? 3 : backlog > 500 ? 2 : 1;
+    // Plan again whenever the text has grown past what the plan covered.
+    if (text.length !== plannedLength) {
+      plannedLength = text.length;
+      stepsLeft = stepsForBacklog(backlog);
+    }
+    const wordsLeft = text.slice(visible.length).match(/\S+/gu)?.length ?? 1;
+    const batch = wordsForStep(wordsLeft, stepsLeft);
+    stepsLeft = Math.max(1, stepsLeft - 1);
     let next = visible.length;
     revealedWords = 0;
     for (let index = 0; index < batch && next < text.length; index += 1) {
@@ -64,6 +77,7 @@
       streaming = false;
       fading = true;
       lastFrame = 0;
+      plannedLength = 0;
       finishTimer = window.setTimeout(() => (fading = false), 240);
     }
   }
@@ -96,6 +110,12 @@
       frame = requestAnimationFrame(advance);
     }
   });
+
+  // The chat waits for a message to finish writing before showing what follows it.
+  $effect(() => {
+    onstreaming?.(streaming);
+  });
+  onDestroy(() => onstreaming?.(false));
 
   $effect(() => {
     const current = visible;

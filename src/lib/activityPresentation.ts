@@ -69,7 +69,7 @@ export function activityThinkingLabel(state: ActivityThinkingState, language: La
 }
 
 export function isPresentableTraceActivity(activity: SessionActivity): boolean {
-  if (["prompt", "message", "analysis", "queued_prompt", "codex_queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
+  if (["prompt", "message", "analysis", "interrupt", "queued_prompt", "codex_queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return !/^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
 }

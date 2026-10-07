@@ -686,10 +686,19 @@ mod linux {
         let backend = std::env::var("LUME_LINUX_BACKEND").ok();
         if backend.as_deref() == Some("xwayland-fallback") {
             if let Ok(gtk_window) = window.gtk_window() {
-                gtk_window.set_type_hint(gtk::gdk::WindowTypeHint::Dock);
+                let is_main_orb = namespace == "lume";
+                gtk_window.set_type_hint(if is_main_orb {
+                    gtk::gdk::WindowTypeHint::Utility
+                } else {
+                    gtk::gdk::WindowTypeHint::Dock
+                });
                 gtk_window.set_decorated(false);
                 gtk_window.set_keep_above(true);
                 gtk_window.set_skip_taskbar_hint(true);
+                if is_main_orb {
+                    gtk_window.set_accept_focus(true);
+                    gtk_window.set_focus_on_map(true);
+                }
             }
             return false;
         }

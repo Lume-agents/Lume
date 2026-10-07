@@ -2777,6 +2777,10 @@ pub(crate) fn code_command() -> Command {
 mod tests {
     use super::*;
 
+    fn decoded_or_raw_command(command: &str) -> String {
+        decode_powershell_command(command).unwrap_or_else(|| command.to_string())
+    }
+
     #[test]
     fn codex_resume_metadata_excludes_subagents_and_keeps_project_context() {
         let session = codex_resume_metadata(
@@ -3608,15 +3612,21 @@ mod tests {
         assert_eq!(root["lume"]["PreToolUse"][0]["hooks"][0]["timeout"], 5);
         assert!(root["lume"]["PreToolUse"][0]["hooks"][0]["command"]
             .as_str()
-            .is_some_and(|command| command.contains("hook antigravity:PreToolUse")));
+            .is_some_and(|command| {
+                decoded_or_raw_command(command).contains("hook antigravity:PreToolUse")
+            }));
         assert_eq!(root["lume"]["PostToolUse"][0]["matcher"], "*");
         assert_eq!(root["lume"]["PostToolUse"][0]["hooks"][0]["timeout"], 5);
         assert!(root["lume"]["PostToolUse"][0]["hooks"][0]["command"]
             .as_str()
-            .is_some_and(|command| command.contains("hook antigravity:PostToolUse")));
+            .is_some_and(|command| {
+                decoded_or_raw_command(command).contains("hook antigravity:PostToolUse")
+            }));
         assert!(root["lume"]["PreInvocation"][0]["command"]
             .as_str()
-            .is_some_and(|command| command.contains("hook antigravity:PreInvocation")));
+            .is_some_and(|command| {
+                decoded_or_raw_command(command).contains("hook antigravity:PreInvocation")
+            }));
         assert!(configured_content(
             &root.to_string(),
             &IntegrationKind::Antigravity,
@@ -3958,7 +3968,9 @@ mod tests {
         assert!(
             migrated_cli["hooks"][ANTIGRAVITY_HOOK_NAME]["PreToolUse"][0]["hooks"][0]["command"]
                 .as_str()
-                .is_some_and(|command| command.contains(r#"{"decision":"ask"}"#))
+                .is_some_and(|command| {
+                    decoded_or_raw_command(command).contains(r#"{"decision":"ask"}"#)
+                })
         );
         assert_eq!(
             migrated_cli["hooks"][ANTIGRAVITY_HOOK_NAME]["custom-event"][0]["hooks"][0]["command"],

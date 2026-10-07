@@ -42,7 +42,7 @@ test("components without a banner host keep their local fallback", () => {
   assert.doesNotThrow(() => createSystemBannerSource(undefined)([{ id: "local", message: "Failed" }]));
 });
 
-function disclosureFixture({ reduced = false, supported = true } = {}) {
+function disclosureFixture({ reduced = false, supported = true, onOpenChange, contentHeight = () => 120 } = {}) {
   const summaryListeners = new Map();
   const detailsListeners = new Map();
   const attributes = new Map();
@@ -66,7 +66,7 @@ function disclosureFixture({ reduced = false, supported = true } = {}) {
     animations.push(animation);
     return animation;
   };
-  const content = { getBoundingClientRect: () => ({ height: 120 }), animate };
+  const content = { getBoundingClientRect: () => ({ height: contentHeight() }), animate };
   const details = {
     open: false, style: { overflow: "visible" }, offsetHeight: 42, clientHeight: 40,
     animate: supported ? animate : undefined,
@@ -79,7 +79,7 @@ function disclosureFixture({ reduced = false, supported = true } = {}) {
   const previousComputedStyle = globalThis.getComputedStyle;
   globalThis.window = { matchMedia: () => ({ matches: reduced }) };
   globalThis.getComputedStyle = () => ({ opacity: "1", transform: "none" });
-  const action = animatedDisclosure(details);
+  const action = animatedDisclosure(details, onOpenChange);
   return {
     details, attributes, animations, action, summaryListeners, detailsListeners,
     click: () => summaryListeners.get("click")({ defaultPrevented: false, button: 0, preventDefault() {} }),
@@ -94,7 +94,7 @@ function disclosureFixture({ reduced = false, supported = true } = {}) {
 test("disclosure slides and fades, then restores natural sizing", async () => {
   const fixture = disclosureFixture();
   try {
-    fixture.click();
+    await fixture.click();
     assert.equal(fixture.details.open, true);
     assert.equal(fixture.attributes.get("aria-expanded"), "true");
     assert.equal(fixture.animations.length, 2);
@@ -103,7 +103,7 @@ test("disclosure slides and fades, then restores natural sizing", async () => {
     fixture.animations[0].finish();
     await Promise.resolve();
     assert.equal(fixture.details.style.overflow, "visible");
-    fixture.click();
+    await fixture.click();
     assert.equal(fixture.details.open, true, "content remains present during the closing slide");
     fixture.animations[2].finish();
     await Promise.resolve();
@@ -111,12 +111,34 @@ test("disclosure slides and fades, then restores natural sizing", async () => {
   } finally { fixture.cleanup(); }
 });
 
+test("lazy disclosure content mounts before opening height is measured", async () => {
+  let mounted = false;
+  const changes = [];
+  const fixture = disclosureFixture({
+    contentHeight: () => mounted ? 120 : 0,
+    onOpenChange: (open) => { mounted = open; changes.push(open); },
+  });
+  try {
+    await fixture.click();
+    assert.equal(fixture.animations[0].frames[1].height, "162px");
+    assert.deepEqual(changes, [true]);
+
+    const closing = fixture.click();
+    assert.deepEqual(changes, [true], "lazy content remains mounted while the section closes");
+    fixture.animations[2].finish();
+    await closing;
+    await Promise.resolve();
+    assert.deepEqual(changes, [true, false]);
+  } finally { fixture.cleanup(); }
+});
+
 test("rapid reversal cannot settle an obsolete disclosure animation", async () => {
   const fixture = disclosureFixture();
   try {
-    fixture.click();
-    fixture.click();
-    fixture.click();
+    await fixture.click();
+    const closing = fixture.click();
+    const reopening = fixture.click();
+    await Promise.all([closing, reopening]);
     fixture.animations[0].finish();
     fixture.animations[2].finish();
     await Promise.resolve();
@@ -141,12 +163,12 @@ test("reduced motion and unsupported animations toggle immediately", () => {
   }
 });
 
-test("programmatic disclosure changes remain synchronized and cleanup removes listeners", () => {
+test("programmatic disclosure changes remain synchronized and cleanup removes listeners", async () => {
   const fixture = disclosureFixture({ reduced: true });
   try {
     fixture.details.open = true;
     fixture.detailsListeners.get("toggle")();
-    fixture.click();
+    await fixture.click();
     assert.equal(fixture.details.open, false);
   } finally { fixture.cleanup(); }
   assert.equal(fixture.summaryListeners.size, 0);

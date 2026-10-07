@@ -4,12 +4,14 @@
   import { cubicOut } from "svelte/easing";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { openPath } from "@tauri-apps/plugin-opener";
-  import type { SessionActivity, SessionResult } from "$lib/domain";
+  import type { InteractiveQuestion, PendingQuestion, PermissionAction, QuestionAnswer, SessionActivity, SessionResult } from "$lib/domain";
   import type { PromptAttachmentInput } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
   import StreamedMessage from "$lib/StreamedMessage.svelte";
+  import { MAX_HOLD_MS } from "$lib/streamPacing";
+  import { interruptNoticeText } from "$lib/interruptNotice";
   import ThinkingOrb from "$lib/ThinkingOrb.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SubagentPortals from "$lib/SubagentPortals.svelte";
@@ -21,6 +23,13 @@
   import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
+  import { caretOnEdgeLine, emptyPromptHistory, historyEntries, stepPromptHistory } from "$lib/promptHistory";
+  import { applyMention, mentionAtCaret, type MentionQuery } from "$lib/promptMentions";
+  import { claudeEffortForModel, claudeEffortValues, claudeModelOptions } from "$lib/claudeModels";
+  import { permissionDescription, permissionLabel, permissionTone } from "$lib/sessionPermissions";
+  import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
+  import { agentConnectionMessage, type ConnectableAgent } from "$lib/agentConnection";
   import SessionRepositoryBadge from "$lib/SessionRepositoryBadge.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
@@ -51,10 +60,17 @@
     getClaudeSessionModelSettings,
     getSessionCollaborationMode,
     getSessionModelSettings,
+    listSessionSlashCommands,
     forkSessionFromMessage,
     interruptPrompt,
     loadWorkspaceConversationPage,
+    answerQuestion,
+    decidePermission,
+    getSessionPermissionMode,
+    setSessionPermissionMode,
     loadWorkspacePromptIndexPage,
+    openSessionSource,
+    searchSessionPaths,
     readLocalImageDataUrl,
     setNativeFileDialogActive,
     setClaudeSessionModelSettings,
@@ -65,8 +81,11 @@
     steerQueuedPrompt,
     submitPrompt,
     takeControlSession,
+    type PermissionSettings,
+    type CodexModelOption,
     type CodexThreadModelSettings,
     type CollaborationMode,
+    type PathMention,
     type WorkspacePromptIndexEntry,
   } from "$lib/lume";
 
@@ -132,7 +151,37 @@
   const markdownCache = new BoundedRenderCache(64, 5 * 1024 * 1024);
   const paneOpenedAt = Date.now();
   let prompt = $state("");
+  let promptInput = $state<HTMLTextAreaElement | null>(null);
+  let slashCommandIndex = $state(0);
+  let slashMenuDismissed = $state(false);
+  let slashCommandMenu = $state<HTMLDivElement | null>(null);
+  let permissionBusy = $state(false);
+  let sessionPermission = $state<PermissionSettings | null>(null);
+  let permissionMenuOpen = $state(false);
+  let permissionMenuLoading = $state(false);
+  let permissionMenuSaving = $state(false);
+  let permissionMenuRoot = $state<HTMLDivElement | null>(null);
+  let loadedPermissionSessionId = "";
+  const pendingPermission = $derived(session.pendingPermission ?? null);
+  let questionSelections = $state<Record<string, string>>({});
+  let questionSending = $state(false);
+  const pendingQuestion = $derived<PendingQuestion | null>(session.pendingQuestion ?? null);
+  // A new question starts without the previous one's choices.
+  $effect(() => {
+    void pendingQuestion?.id;
+    questionSelections = {};
+  });
+  let promptHistory = $state(emptyPromptHistory());
+  let promptHistoryLoaded = false;
+  let promptHistoryHasMore = $state(false);
+  let activeMention = $state<MentionQuery | null>(null);
+  let mentionResults = $state<PathMention[]>([]);
+  let mentionIndex = $state(0);
+  let mentionMenu = $state<HTMLDivElement | null>(null);
+  let mentionRequest = 0;
   let sending = $state(false);
+  let connectionRequired = $state<string | null>(null);
+  let dismissedConnectionError = $state("");
   let outgoingPrompts = $state<OutgoingPrompt[]>([]);
   let outgoingSequence = 0;
   const outgoingFlights = new Map<number, { animation: Animation; element: HTMLElement }>();
@@ -174,6 +223,7 @@
   let selectedEffort = $state("");
   let claudeModel = $state("");
   let claudeEffort = $state("");
+  let claudeModels = $state<CodexModelOption[]>([]);
   let interrupting = $state(false);
   let steeringQueued = $state(false);
   let followingTail = $state(true);
@@ -261,6 +311,39 @@
   ));
   const hiddenCount = $derived(Math.max(0, feed.length - visibleFeedLimit));
   const visibleFeed = $derived(hiddenCount ? feed.slice(-visibleFeedLimit) : feed);
+  // Only the newest agent message is written out; older ones in a burst just appear.
+  const newestMessageEntryId = $derived(
+    visibleFeed.findLast((item) => item.kind === "entry" && item.entry.activity.kind === "message")
+      ?.id ?? null,
+  );
+  // What follows a message that is still being written waits for it to finish, but never
+  // for long: after MAX_HOLD_MS the message is shown whole and the chat moves on.
+  let writingFeedItemId = $state<string | null>(null);
+  let holdTimer: number | null = null;
+  const finishedWritingIds = new Set<string>();
+  function messageWriting(feedItemId: string, active: boolean) {
+    if (!active) {
+      // Another message mounting must not cancel this one's hold.
+      if (writingFeedItemId !== feedItemId) return;
+      writingFeedItemId = null;
+      if (holdTimer !== null) window.clearTimeout(holdTimer);
+      holdTimer = null;
+      return;
+    }
+    if (finishedWritingIds.has(feedItemId)) return;
+    writingFeedItemId = feedItemId;
+    if (holdTimer !== null) window.clearTimeout(holdTimer);
+    holdTimer = window.setTimeout(() => {
+      finishedWritingIds.add(feedItemId);
+      if (writingFeedItemId === feedItemId) writingFeedItemId = null;
+      holdTimer = null;
+    }, MAX_HOLD_MS);
+  }
+  const displayedFeed = $derived.by(() => {
+    if (!writingFeedItemId) return visibleFeed;
+    const index = visibleFeed.findIndex((item) => item.id === writingFeedItemId);
+    return index < 0 ? visibleFeed : visibleFeed.slice(0, index + 1);
+  });
   const promptIndexItems = $derived.by(() => {
     const byId = new Map(indexedPrompts.map((item) => [item.id, item]));
     for (const entry of entries) {
@@ -333,6 +416,16 @@
     && nextQueuedPrompt.kind === "queued_prompt"
     && session.capabilities.promptDeliveries.includes("steer")
   ));
+  // After a cancel Claude's queue waits for you: nothing runs, but you can send it now.
+  const canRunQueued = $derived(Boolean(
+    !promptIsRunning
+    && session.agent === "claude_code"
+    && nextQueuedPrompt
+    && nextQueuedPrompt.kind === "queued_prompt"
+    && session.capabilities.promptDeliveries.includes("steer")
+  ));
+  // Claude Code and Codex can change how they ask before acting, from Lume.
+  const supportsPermissionPicker = $derived(["claude_code", "codex"].includes(session.agent));
   const supportsAgentControls = $derived(["codex", "claude_code", "opencode"].includes(session.agent));
   let sourceEntryId = $state<string | null>(null);
   let actionNotice = $state("");
@@ -433,6 +526,9 @@
     const closeControls = (event: PointerEvent) => {
       if (controlsOpen && controlsRoot && !controlsRoot.contains(event.target as Node)) {
         controlsOpen = false;
+      }
+      if (permissionMenuOpen && permissionMenuRoot && !permissionMenuRoot.contains(event.target as Node)) {
+        permissionMenuOpen = false;
       }
       if (zoomOpen && zoomRoot && !zoomRoot.contains(event.target as Node)) {
         zoomOpen = false;
@@ -535,7 +631,7 @@
     if (historyError) items.push({ id: "history-error", message: historyError, tone: "error", onDismiss: () => { historyError = ""; } });
     if (actionNotice) items.push({ id: "message-action", message: actionNotice, tone: "success", onDismiss: () => { actionNotice = ""; } });
     for (const alert of agentAlerts) {
-      if (dismissedAgentAlertIds.includes(alert.id)) continue;
+      if (alert.usage || dismissedAgentAlertIds.includes(alert.id)) continue;
       items.push({
         id: alert.id,
         message: alert.message,
@@ -545,6 +641,19 @@
       });
     }
     return items;
+  });
+
+  // Usage notices sit above the composer with no close button: a low-usage one
+  // leaves on its own after a while; under 10% it stays until the window resets.
+  const usageNotices = $derived(
+    agentAlerts.filter((alert) => alert.usage && (alert.pinned || !dismissedAgentAlertIds.includes(alert.id))),
+  );
+
+  $effect(() => {
+    const timers = usageNotices
+      .filter((notice) => !notice.pinned)
+      .map((notice) => setTimeout(() => archiveAgentAlert(notice.id), notice.duration || 12_000));
+    return () => timers.forEach(clearTimeout);
   });
 
   function archiveAgentAlert(id: string) {
@@ -790,7 +899,10 @@
   async function sendPrompt() {
     const value = prompt.trim();
     const attachments = promptAttachments;
+    if (attachments.length === 0 && /^[/$]/.test(value) && await runSlashCommand(value)) return;
     if ((!value && attachments.length === 0) || !canSend || sending || takingControl) return;
+    resetPromptHistory();
+    closeMention();
     if (!session.capabilities.canPrompt && session.capabilities.canTakeControl) {
       takeoverConfirm = true;
       await tick();
@@ -857,7 +969,9 @@
         if (!prompt.trim()) prompt = value;
         if (!promptAttachments.length) promptAttachments = attachments;
       }
-      sendError = String(error).replace(/^Error:\s*/, "");
+      const connection = agentConnectionMessage(error);
+      connectionRequired = connection;
+      sendError = connection ? "" : String(error).replace(/^Error:\s*/, "");
     } finally {
       sending = false;
     }
@@ -877,7 +991,7 @@
   }
 
   async function steerNextPrompt() {
-    if (!nextQueuedPrompt || !canSteer || steeringQueued) return;
+    if (!nextQueuedPrompt || !(canSteer || canRunQueued) || steeringQueued) return;
     steeringQueued = true;
     sendError = "";
     try {
@@ -894,7 +1008,7 @@
   }
 
   function effortValues() {
-    if (session.agent === "claude_code") return ["", "low", "medium", "high", "xhigh", "max"];
+    if (session.agent === "claude_code") return claudeEffortValues(claudeModels, claudeModel);
     return currentModelOption()?.supportedReasoningEfforts.map((effort) => effort.value) ?? [];
   }
 
@@ -947,6 +1061,13 @@
     void saveAgentControls();
   }
 
+  function chooseClaudeModel(model: string) {
+    if (modelControlsDisabled) return;
+    claudeModel = model;
+    claudeEffort = claudeEffortForModel(claudeModels, model, claudeEffort);
+    void saveAgentControls();
+  }
+
   async function loadAgentControls() {
     controlsLoading = true;
     controlsError = "";
@@ -967,7 +1088,8 @@
           ?? "";
       } else if (session.agent === "claude_code") {
         const settings = await getClaudeSessionModelSettings(session.id);
-        claudeModel = settings.model ?? "";
+        claudeModels = settings.models;
+        claudeModel = settings.model;
         claudeEffort = settings.reasoningEffort ?? "";
       }
     } catch (error) {
@@ -1031,11 +1153,14 @@
           ?? "";
         if (!promptIsRunning) fastMode = modelSettings.serviceTier === "fast";
       } else if (session.agent === "claude_code") {
-        await setClaudeSessionModelSettings(
+        const settings = await setClaudeSessionModelSettings(
           session.id,
           claudeModel.trim() || undefined,
           claudeEffort || undefined,
         );
+        claudeModels = settings.models;
+        claudeModel = settings.model;
+        claudeEffort = settings.reasoningEffort ?? "";
       }
     } catch (error) {
       controlsError = String(error).replace(/^Error:\s*/, "");
@@ -1110,10 +1235,371 @@
     void tick().then(() => writerConflictPrimaryButton?.focus());
   });
 
+  let agentCommands = $state<AgentSlashCommand[]>([]);
+  let agentCommandsLoading = $state(false);
+  let agentCommandsSessionId = "";
+  let agentCommandsFailedAt = 0;
+
+  $effect(() => {
+    const sessionId = session.id;
+    if (slashCommandQuery(prompt) === null) return;
+    const retrying = agentCommandsFailedAt > 0 && Date.now() - agentCommandsFailedAt >= 3000;
+    if (sessionId === agentCommandsSessionId && !retrying) return;
+    agentCommandsSessionId = sessionId;
+    agentCommandsFailedAt = 0;
+    agentCommandsLoading = true;
+    agentCommands = [];
+    loadAgentSlashCommands(sessionId, listSessionSlashCommands)
+      .then((commands) => {
+        if (session.id === sessionId) agentCommands = commands;
+      })
+      .catch(() => {
+        agentCommandsFailedAt = Date.now();
+      })
+      .finally(() => {
+        if (session.id === sessionId) agentCommandsLoading = false;
+      });
+  });
+
+  function availableSlashCommands(): SlashCommand[] {
+    const commands = agentSlashCommands(agentCommands, session.agent);
+    const lumeCommands: SlashCommand[] = [];
+    if (session.agent === "codex" && !promptIsRunning) {
+      lumeCommands.push(
+        { name: "lume-plan", description: "Switch Codex to Plan mode", source: "lume", prefix: "/", action: "plan" },
+        { name: "lume-default", description: "Switch Codex to Default mode", source: "lume", prefix: "/", action: "default" },
+      );
+    }
+    if (promptIsRunning && session.capabilities.canInterrupt) {
+      lumeCommands.push({ name: "lume-interrupt", description: "Interrupt the current prompt", source: "lume", prefix: "/", action: "interrupt" });
+    }
+    if (canSteer) {
+      lumeCommands.push({ name: "lume-steer", description: "Steer the next queued prompt now", source: "lume", prefix: "/", action: "steer" });
+    }
+    lumeCommands.push(
+      { name: "lume-zoom-in", description: "Increase chat text size", source: "lume", prefix: "/", action: "zoom-in" },
+      { name: "lume-zoom-out", description: "Decrease chat text size", source: "lume", prefix: "/", action: "zoom-out" },
+    );
+    if (onClose) {
+      lumeCommands.push({ name: "lume-close", description: "Close this pane", source: "lume", prefix: "/", action: "close" });
+    }
+    return [...commands, ...lumeCommands];
+  }
+
+  const filteredSlashCommands = $derived(
+    slashMenuDismissed ? [] : filterSlashCommands(availableSlashCommands(), slashCommandQuery(prompt)),
+  );
+  const slashMenuVisible = $derived(
+    !slashMenuDismissed
+    && slashCommandQuery(prompt) !== null
+    && (agentCommandsLoading || filteredSlashCommands.length > 0),
+  );
+
+  async function selectSlashCommand(command: SlashCommand) {
+    prompt = slashCommandText(command);
+    slashCommandIndex = 0;
+    slashMenuDismissed = true;
+    await tick();
+    promptInput?.focus();
+    promptInput?.setSelectionRange(prompt.length, prompt.length);
+  }
+
+  async function revealSelectedSlashCommand() {
+    await tick();
+    slashCommandMenu
+      ?.querySelector<HTMLElement>(`[data-slash-index="${slashCommandIndex}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }
+
+  async function setCollaborationMode(mode: CollaborationMode) {
+    if (collaborationMode !== mode) await toggleCollaborationMode();
+  }
+
+  async function runSlashCommand(value: string) {
+    const action = findSlashCommand(availableSlashCommands(), value)?.action;
+    if (!action) return false;
+    switch (action) {
+      case "model":
+        if (!supportsAgentControls) return false;
+        if (!controlsOpen) await toggleAgentControls();
+        break;
+      case "plan":
+        await setCollaborationMode("plan");
+        break;
+      case "default":
+        await setCollaborationMode("default");
+        break;
+      case "interrupt":
+        await interruptAgentPrompt();
+        break;
+      case "steer":
+        await steerNextPrompt();
+        break;
+      case "zoom-in":
+        setTextZoom(textZoom + 0.1);
+        break;
+      case "zoom-out":
+        setTextZoom(textZoom - 0.1);
+        break;
+      case "close":
+        onClose?.();
+        break;
+      default:
+        return false;
+    }
+    prompt = "";
+    slashMenuDismissed = false;
+    return true;
+  }
+
+  async function loadSessionPermission() {
+    permissionMenuLoading = true;
+    try {
+      sessionPermission = await getSessionPermissionMode(session.id);
+    } catch {
+      // The selector stays hidden until the CLI answers; a prompt still runs.
+    } finally {
+      permissionMenuLoading = false;
+    }
+  }
+
+  async function toggleSessionPermissionMenu() {
+    permissionMenuOpen = !permissionMenuOpen;
+    if (permissionMenuOpen) await loadSessionPermission();
+  }
+
+  async function chooseSessionPermission(mode: string) {
+    if (permissionMenuSaving || mode === sessionPermission?.mode) {
+      permissionMenuOpen = false;
+      return;
+    }
+    permissionMenuSaving = true;
+    sendError = "";
+    try {
+      sessionPermission = await setSessionPermissionMode(session.id, mode);
+      permissionMenuOpen = false;
+    } catch (error) {
+      sendError = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      permissionMenuSaving = false;
+    }
+  }
+
+  // Each conversation reads its mode once; opening the menu refreshes it.
+  $effect(() => {
+    if (!supportsPermissionPicker || session.id === loadedPermissionSessionId) return;
+    loadedPermissionSessionId = session.id;
+    sessionPermission = null;
+    permissionMenuOpen = false;
+    void loadSessionPermission();
+  });
+
+  function permissionActionLabel(action: PermissionAction) {
+    return {
+      allow_once: tr("Allow", "Permitir"),
+      allow_session: tr("For this session", "Nesta sessão"),
+      deny: tr("Deny", "Recusar"),
+      open_source: tr("Open source", "Abrir origem"),
+    }[action];
+  }
+
+  async function resolvePermission(action: PermissionAction) {
+    const request = pendingPermission;
+    if (!request || permissionBusy) return;
+    permissionBusy = true;
+    sendError = "";
+    try {
+      if (action === "open_source") await openSessionSource(session.id);
+      else await decidePermission(session.id, request.id, action);
+    } catch (error) {
+      sendError = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      permissionBusy = false;
+    }
+  }
+
+  async function submitQuestionAnswers(answers: QuestionAnswer[]) {
+    if (!pendingQuestion || questionSending) return;
+    questionSending = true;
+    sendError = "";
+    try {
+      await answerQuestion(session.id, pendingQuestion.id, answers);
+      questionSelections = {};
+    } catch (error) {
+      sendError = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      questionSending = false;
+    }
+  }
+
+  async function chooseQuestionOption(questionId: string, label: string) {
+    if (!pendingQuestion) return;
+    questionSelections = { ...questionSelections, [questionId]: label };
+    if (pendingQuestion.questions.length === 1) {
+      await submitQuestionAnswers([{ questionId, answers: [label] }]);
+    }
+  }
+
+  async function submitSelectedQuestionAnswers() {
+    if (!pendingQuestion) return;
+    const answers = pendingQuestion.questions
+      .filter((question: InteractiveQuestion) => questionSelections[question.id])
+      .map((question: InteractiveQuestion) => ({ questionId: question.id, answers: [questionSelections[question.id]] }));
+    if (answers.length !== pendingQuestion.questions.length) {
+      sendError = tr("Choose one option for each question.", "Escolha uma opção para cada pergunta.");
+      return;
+    }
+    await submitQuestionAnswers(answers);
+  }
+
+  async function loadPromptHistory() {
+    if (promptHistoryLoaded || !session.nativeSessionId) return;
+    promptHistoryLoaded = true;
+    const requestedSessionId = session.id;
+    const prompts: WorkspacePromptIndexEntry[] = [];
+    let cursor: WorkspacePromptIndexEntry | undefined;
+    let hasMore = true;
+    try {
+      // Ten pages (300 prompts) reach back further than anyone scrolls with the arrows.
+      for (let page = 0; page < 10 && hasMore; page += 1) {
+        const result = await loadWorkspacePromptIndexPage(requestedSessionId, cursor?.createdAt, cursor?.id);
+        prompts.push(...result.prompts);
+        cursor = result.prompts.at(-1);
+        hasMore = result.hasMore && Boolean(cursor);
+      }
+    } catch {
+      promptHistoryLoaded = false;
+      return;
+    }
+    if (session.id !== requestedSessionId) return;
+    promptHistory = { ...promptHistory, entries: historyEntries(prompts.map((entry) => entry.detail)) };
+    promptHistoryHasMore = hasMore;
+  }
+
+  function resetPromptHistory() {
+    promptHistory = emptyPromptHistory();
+    promptHistoryLoaded = false;
+    promptHistoryHasMore = false;
+  }
+
+  async function browsePromptHistory(direction: 1 | -1) {
+    if (direction === 1) await loadPromptHistory();
+    const step = stepPromptHistory(promptHistory, direction, prompt);
+    if (!step) return;
+    promptHistory = step.history;
+    prompt = step.text;
+    closeMention();
+    slashMenuDismissed = true;
+    await tick();
+    promptInput?.setSelectionRange(prompt.length, prompt.length);
+  }
+
+  function closeMention() {
+    mentionRequest += 1;
+    activeMention = null;
+    mentionResults = [];
+    mentionIndex = 0;
+  }
+
+  async function refreshMention() {
+    const mention = promptInput ? mentionAtCaret(prompt, promptInput.selectionStart ?? prompt.length) : null;
+    if (!mention) {
+      if (activeMention) closeMention();
+      return;
+    }
+    if (activeMention?.start === mention.start && activeMention.query === mention.query) return;
+    activeMention = mention;
+    const request = ++mentionRequest;
+    try {
+      const results = await searchSessionPaths(session.id, mention.query);
+      if (request !== mentionRequest) return;
+      mentionResults = results;
+      mentionIndex = 0;
+    } catch {
+      if (request === mentionRequest) mentionResults = [];
+    }
+  }
+
+  async function selectMention(result: PathMention) {
+    if (!activeMention || !promptInput) return;
+    const applied = applyMention(prompt, promptInput.selectionStart ?? prompt.length, activeMention, result.path, result.isDirectory);
+    prompt = applied.text;
+    closeMention();
+    await tick();
+    promptInput?.focus();
+    promptInput?.setSelectionRange(applied.caret, applied.caret);
+    // A folder keeps the menu open on its contents, like the CLI.
+    if (result.isDirectory) void refreshMention();
+  }
+
+  async function revealSelectedMention() {
+    await tick();
+    mentionMenu?.querySelector<HTMLElement>(`[data-mention-index="${mentionIndex}"]`)?.scrollIntoView({ block: "nearest" });
+  }
+
   function handleComposerKeydown(event: KeyboardEvent) {
+    if (activeMention && mentionResults.length) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        mentionIndex = (mentionIndex + direction + mentionResults.length) % mentionResults.length;
+        void revealSelectedMention();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeMention();
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        void selectMention(mentionResults[Math.min(mentionIndex, mentionResults.length - 1)]);
+        return;
+      }
+    }
+    const slashCommands = filteredSlashCommands;
+    if (slashCommands.length) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        slashCommandIndex = (slashCommandIndex + direction + slashCommands.length) % slashCommands.length;
+        void revealSelectedSlashCommand();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        slashMenuDismissed = true;
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        void selectSlashCommand(slashCommands[Math.min(slashCommandIndex, slashCommands.length - 1)]);
+        return;
+      }
+    }
+    if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey && !event.isComposing) {
+      const direction = event.key === "ArrowUp" ? 1 : -1;
+      const target = event.currentTarget as HTMLTextAreaElement;
+      const collapsed = target.selectionStart === target.selectionEnd;
+      const browsing = promptHistory.index >= 0;
+      if (collapsed && (direction === 1 || browsing) && caretOnEdgeLine(prompt, target.selectionStart, direction)) {
+        event.preventDefault();
+        void browsePromptHistory(direction);
+        return;
+      }
+    }
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
     event.preventDefault();
     void sendPrompt();
+  }
+
+  function handlePromptInput() {
+    slashCommandIndex = 0;
+    slashMenuDismissed = false;
+    if (promptHistory.index >= 0) promptHistory = { ...promptHistory, index: -1, draft: "" };
+    void refreshMention();
   }
 
   async function previewLocalImage(path: string) {
@@ -1484,7 +1970,7 @@
     <span class="agent-mark"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName()} size={38} /></span>
     <span class="pane-identity">
       <strong>{sessionName()}</strong>
-      <small title={session.workingDirectory}><BrandIcon name={session.agent} size={10} />{session.agentLabel} · {session.project}</small>
+      <small title={session.workingDirectory}><BrandIcon name={session.agent} size={10} />{session.agentLabel} · {session.project}{#if session.forkedFrom}<span class="fork-mark" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)}><LumeIcon name="fork" size={10} />{tr("Fork", "Fork")}</span>{/if}</small>
       {#if visible && onOpenRepository}<SessionRepositoryBadge {session} {language} onOpen={onOpenRepository} />{/if}
     </span>
     {#if session.controlOrigin === "external"}
@@ -1588,9 +2074,13 @@
         {historyLoading ? tr("Loading earlier messages…", "Carregando mensagens anteriores…") : tr("Load earlier messages", "Carregar mensagens anteriores")}
       </button>
     {/if}
-    {#each visibleFeed as feedItem (feedItem.id)}
+    {#each displayedFeed as feedItem (feedItem.id)}
       {#if feedItem.kind === "trace"}
-        <div class="workspace-event-trace">
+        <div
+          class="workspace-event-trace"
+          in:slide={{ duration: motionDuration(175), easing: cubicOut }}
+          out:slide={{ duration: motionDuration(120), easing: cubicOut }}
+        >
           <ActivityTraceGroup
             activities={feedItem.entries.map((entry) => entry.activity)}
             active={feedItem.id === activeTraceId}
@@ -1627,7 +2117,7 @@
             <span class="time-gutter"><time>{time(item.createdAt)}</time></span>
             <div class="conversation-entry">
               <section class="message agent-message">
-                <div class="markdown-content"><StreamedMessage text={item.detail} animate={streamMessages && (item.createdAt > paneOpenedAt || item.status === "running")} live={item.status === "running"} startFromBeginning={item.createdAt > paneOpenedAt} render={(value) => renderMarkdown(entry.id, value)} /></div>
+                <div class="markdown-content"><StreamedMessage text={item.detail} animate={streamMessages && feedItem.id === newestMessageEntryId && (item.createdAt > paneOpenedAt || item.status === "running")} live={item.status === "running"} startFromBeginning={item.createdAt > paneOpenedAt} onstreaming={(active) => messageWriting(feedItem.id, active)} render={(value) => renderMarkdown(entry.id, value)} /></div>
                 <ResponseAttachments
                   text={item.detail}
                   attachments={item.attachments ?? []}
@@ -1657,7 +2147,7 @@
                   <button class="changed-files-toggle" type="button" aria-expanded={expandedFileSummaries.includes(entry.id)} onclick={() => toggleFileSummary(entry.id)}>
                     <LumeIcon name="file" size={14} />
                     <span>{tr(`${changedFiles.length} file${changedFiles.length === 1 ? "" : "s"} changed`, `${changedFiles.length} arquivo${changedFiles.length === 1 ? "" : "s"} alterado${changedFiles.length === 1 ? "" : "s"}`)}</span>
-                    {#if !expandedFileSummaries.includes(entry.id)}
+                    {#if !expandedFileSummaries.includes(entry.id) && (totalAdded > 0 || totalRemoved > 0)}
                       <b class="added">+{totalAdded}</b><b class="removed">-{totalRemoved}</b>
                     {/if}
                     <LumeIcon name="chevron-down" size={13} />
@@ -1668,7 +2158,7 @@
                         <button class="changed-file" type="button" title={tr(`Review ${file.path}`, `Revisar ${file.path}`)} onclick={() => onOpenReview?.(file.path)}>
                           <FileTypeIcon path={file.path} />
                           <span>{displayFileChangePath(file.path)}</span>
-                          <b class="added">+{file.added}</b><b class="removed">-{file.removed}</b>
+                          {#if file.added > 0 || file.removed > 0}<b class="added">+{file.added}</b><b class="removed">-{file.removed}</b>{/if}
                           <LumeIcon name="chevron-down" size={12} />
                         </button>
                       {/each}
@@ -1676,6 +2166,13 @@
                   {/if}
                 </div>
               {/if}
+            </div>
+          </div>
+        {:else if item.kind === "interrupt"}
+          <div class="conversation-row agent-row">
+            <span class="time-gutter"><time>{time(item.createdAt)}</time></span>
+            <div class="conversation-entry">
+              <p class="interrupt-notice" role="status"><LumeIcon name="stop" size={11} />{interruptNoticeText(item.detail, tr)}</p>
             </div>
           </div>
         {:else if item.kind === "analysis" && item.detail}
@@ -1873,10 +2370,13 @@
     {#if queuedPrompts.length}
       <div class="queue-tray">
         <span><i>{queuedPrompts.length}</i><b>{nextQueuedPrompt?.kind === "codex_queued_prompt" ? tr("Codex CLI · read only", "CLI do Codex · somente leitura") : tr("Queued", "Na fila")}</b><small>{nextQueuedPrompt?.detail || nextQueuedPrompt?.title}</small></span>
-        {#if canSteer}
-          <button type="button" disabled={steeringQueued} onclick={() => void steerNextPrompt()} title={tr("Steer into the current task", "Enviar para a tarefa atual")}>
+        {#if canSteer || canRunQueued}
+          <button type="button" disabled={steeringQueued} onclick={() => void steerNextPrompt()}
+            title={session.agent === "claude_code"
+              ? (canRunQueued ? tr("Send the next queued message now", "Enviar agora a próxima mensagem da fila") : tr("Stop the running message and send this one", "Interromper a mensagem em andamento e enviar esta"))
+              : tr("Steer into the current task", "Enviar para a tarefa atual")}>
             <LumeIcon name="steer" size={14} />
-            {tr("Steer now", "Enviar agora")}
+            {session.agent === "claude_code" && canSteer ? tr("Interrupt and send", "Interromper e enviar") : tr("Send now", "Enviar agora")}
           </button>
         {/if}
       </div>
@@ -1896,6 +2396,58 @@
         {/each}
       </div>
     {/if}
+    {#if pendingPermission}
+      <section class="agent-permission risk-{pendingPermission.risk}" role="group" aria-label={tr("Permission request", "Pedido de permissão")}>
+        <header>
+          <LumeIcon name="warning" size={14} />
+          <strong>{displayText(language, pendingPermission.summary)}</strong>
+        </header>
+        {#if pendingPermission.resource}<code title={pendingPermission.resource}>{pendingPermission.resource}</code>{/if}
+        <div class="permission-actions">
+          {#each session.permissionProfile.availableActions as action (action)}
+            <button class:allow={action === "allow_once"} class:danger={action === "deny"} type="button" disabled={permissionBusy} onclick={() => void resolvePermission(action)}>
+              {permissionActionLabel(action)}
+            </button>
+          {/each}
+        </div>
+      </section>
+    {/if}
+    {#if pendingQuestion}
+      <section class="agent-question" aria-label={tr("Agent question", "Pergunta do agente")}>
+        {#each pendingQuestion.questions as question (question.id)}
+          <div class="agent-question-item">
+            <small>{displayText(language, question.header)}</small>
+            <strong>{displayText(language, question.question)}</strong>
+            {#if question.options.length}
+              <div class="question-options">
+                {#each question.options as option, index (option.label)}
+                  <button
+                    class:selected={questionSelections[question.id] === option.label}
+                    disabled={questionSending}
+                    type="button"
+                    onclick={() => void chooseQuestionOption(question.id, option.label)}
+                  >
+                    <b>{index + 1}</b>
+                    <span>{displayText(language, option.label)}{#if option.description}<small>{displayText(language, option.description)}</small>{/if}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/each}
+        <p class="question-hint">{tr("Click an option, or type its number or your own answer below.", "Clique em uma opção ou digite o número ou sua própria resposta abaixo.")}</p>
+        {#if pendingQuestion.questions.length > 1}
+          <button class="question-submit" type="button" disabled={questionSending} onclick={() => void submitSelectedQuestionAnswers()}>{tr("Answer", "Responder")}</button>
+        {/if}
+      </section>
+    {/if}
+    {#if usageNotices.length}
+      <div class="usage-notices" role="status" aria-live="polite">
+        {#each usageNotices as notice (notice.id)}
+          <p class="usage-notice tone-{notice.tone}" transition:slide={{ duration: 160, easing: cubicOut }}><LumeIcon name="warning" size={13} /><span>{notice.message}</span></p>
+        {/each}
+      </div>
+    {/if}
     <div class:beam={freshChat && canCompose} class="composer-field">
       {#if canAttach}
         <button
@@ -1909,8 +2461,58 @@
           <LumeIcon name="attachment" size={16} />
         </button>
       {/if}
+      {#if slashMenuVisible}
+        <div bind:this={slashCommandMenu} class="slash-command-menu" aria-label={tr("Slash commands", "Comandos com barra")} transition:slide={{ duration: 140, easing: cubicOut }}>
+          <div class="slash-command-heading">
+            <strong>{tr("Commands", "Comandos")}</strong>
+            <small><kbd>↑↓</kbd> {tr("navigate", "navegar")} · <kbd>Enter</kbd> {tr("select", "selecionar")}</small>
+          </div>
+          {#if agentCommandsLoading}
+            <p class="slash-command-loading">{tr(`Loading ${session.agentLabel} commands…`, `Carregando comandos do ${session.agentLabel}…`)}</p>
+          {/if}
+          {#each filteredSlashCommands as command, index (`${command.source}:${command.prefix}${command.name}`)}
+            <button
+              class:active={slashCommandIndex === index}
+              data-slash-index={index}
+              type="button"
+              onmouseenter={() => (slashCommandIndex = index)}
+              onclick={() => void selectSlashCommand(command)}
+            >
+              <code>{command.prefix}{command.name}</code>
+              <span>{command.description}<small>{command.source === "agent" ? session.agentLabel : "Lume"}{command.argumentHint ? ` · ${command.argumentHint}` : ""}</small></span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {#if activeMention && mentionResults.length}
+        <div bind:this={mentionMenu} class="slash-command-menu mention-menu" aria-label={tr("Files and folders", "Arquivos e pastas")} transition:slide={{ duration: 140, easing: cubicOut }}>
+          <div class="slash-command-heading">
+            <strong>{tr("Files and folders", "Arquivos e pastas")}</strong>
+            <small><kbd>↑↓</kbd> {tr("navigate", "navegar")} · <kbd>Enter</kbd> {tr("select", "selecionar")}</small>
+          </div>
+          {#each mentionResults as result, index (result.path)}
+            <button
+              class:active={mentionIndex === index}
+              data-mention-index={index}
+              type="button"
+              onmouseenter={() => (mentionIndex = index)}
+              onclick={() => void selectMention(result)}
+            >
+              {#if result.isDirectory}<LumeIcon name="folder" size={14} />{:else}<FileTypeIcon path={result.path} size={14} />{/if}
+              <span>{result.path}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {#if promptHistory.index >= 0}
+        <span class="history-indicator" aria-live="polite">{tr("History", "Histórico")} {promptHistory.index + 1}/{promptHistory.entries.length}{promptHistoryHasMore ? "+" : ""}</span>
+      {/if}
       <textarea
+        bind:this={promptInput}
         bind:value={prompt}
+        oninput={handlePromptInput}
+        onclick={() => void refreshMention()}
+        onkeyup={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) void refreshMention(); }}
         rows="1"
         placeholder={composerPlaceholder()}
         disabled={!canCompose || sending || takingControl}
@@ -1944,7 +2546,7 @@
             onclick={() => void toggleAgentControls()}>
             <span>{session.agent === "codex" || session.agent === "opencode"
               ? (modelSettings?.models.find((option) => option.model === selectedModel)?.displayName || selectedModel || "Model")
-              : (claudeModel || tr("Model", "Modelo"))}</span>
+              : (claudeModels.find((option) => option.model === claudeModel)?.displayName || claudeModel || tr("Model", "Modelo"))}</span>
             <LumeIcon name="chevron-down" size={12} />
           </button>
           {#if controlsOpen}
@@ -1963,7 +2565,10 @@
                     </label>
                   {/if}
                 {:else}
-                  <label class="controls-field"><span>{tr("Model", "Modelo")}</span><input bind:value={claudeModel} disabled={modelControlsDisabled} maxlength="128" placeholder={tr("Session default", "Padrão da sessão")} onchange={() => void saveAgentControls()} /></label>
+                  <label class="controls-field"><span>{tr("Model", "Modelo")}</span>
+                    <LumeSelect value={claudeModel} options={claudeModelOptions(claudeModels, tr)}
+                      ariaLabel={tr("Model", "Modelo")} disabled={modelControlsDisabled} minWidth={190} onValueChange={chooseClaudeModel} />
+                  </label>
                 {/if}
                 {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
                   <label class="controls-field"><span>{tr("Agent mode", "Modo do agente")}</span>
@@ -1993,6 +2598,31 @@
             </section>
           {/if}
         </div>
+        {#if supportsPermissionPicker && sessionPermission}
+          <div class="permission-picker" bind:this={permissionMenuRoot}>
+            <button class:active={permissionMenuOpen} class="model-trigger permission-trigger tone-{permissionTone(sessionPermission.mode)}" type="button"
+              disabled={session.controlOrigin !== "lume" || permissionMenuSaving}
+              aria-label={tr("Choose permissions", "Escolher permissões")}
+              aria-haspopup="listbox" aria-expanded={permissionMenuOpen}
+              title={session.controlOrigin !== "lume" ? tr("Take control of this session to change permissions", "Assuma o controle desta sessão para mudar as permissões") : permissionDescription(sessionPermission.mode, tr)}
+              onclick={() => void toggleSessionPermissionMenu()}>
+              <LumeIcon name="shield" size={14} />
+              <span>{permissionLabel(sessionPermission.mode, tr)}</span>
+              <LumeIcon name="chevron-down" size={12} />
+            </button>
+            {#if permissionMenuOpen}
+              <div class="permission-menu" role="listbox" aria-label={tr("Permissions", "Permissões")} transition:slide={{ duration: 140, easing: cubicOut }}>
+                {#each sessionPermission.modes as mode (mode)}
+                  <button class:selected={mode === sessionPermission.mode} class="tone-{permissionTone(mode)}" role="option" aria-selected={mode === sessionPermission.mode} type="button" disabled={permissionMenuSaving || permissionMenuLoading} onclick={() => void chooseSessionPermission(mode)}>
+                    <span><strong>{permissionLabel(mode, tr)}</strong><small>{permissionDescription(mode, tr)}</small></span>
+                    {#if mode === sessionPermission.mode}<LumeIcon name="check" size={14} />{/if}
+                  </button>
+                {/each}
+                <p class="permission-note">{promptIsRunning ? tr("Applies to the next message.", "Vale para a próxima mensagem.") : tr("Applies to the messages you send from Lume.", "Vale para as mensagens enviadas pelo Lume.")}</p>
+              </div>
+            {/if}
+          </div>
+        {/if}
         {#if session.agent === "codex"}
           <button class="tool-icon fast-toggle" class:enabled={fastMode} type="button"
             disabled={runtimeControlsDisabled || fastSaving || !modelSettings} aria-pressed={fastMode}
@@ -2014,6 +2644,14 @@
   </form>
 </article>
 
+{#if (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel))) && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini"].includes(session.agent)}
+  <AgentConnectionDialog
+    agent={(session.agent === "claude_code" ? "claude" : session.agent) as ConnectableAgent}
+    message={connectionRequired ?? agentConnectionMessage(session.statusLabel) ?? ""}
+    {language}
+    onClose={() => { dismissedConnectionError = session.statusLabel; connectionRequired = null; }} />
+{/if}
+
 <style>
   .session-pane { --pane-status-color: #84948c; --workspace-chat-font-size: calc(12px + var(--workspace-chat-font-adjust)); --workspace-chat-small-size: calc(10px + var(--workspace-chat-small-adjust)); --workspace-chat-tiny-size: calc(8px + var(--workspace-chat-tiny-adjust)); --chat-small-font-size: var(--workspace-chat-small-size); --chat-tiny-font-size: var(--workspace-chat-tiny-size); --activity-summary-height: calc(44px + var(--workspace-chat-font-adjust)); --activity-row-height: calc(42px + var(--workspace-chat-font-adjust)); --activity-title-size: calc(11px + var(--workspace-chat-small-adjust)); --activity-detail-size: calc(9px + var(--workspace-chat-tiny-adjust)); position: relative; min-width: 0; min-height: 0; height: 100%; container-type: inline-size; display: flex; flex-direction: column; overflow: hidden; background: transparent; animation: pane-arrive 280ms cubic-bezier(.16, 1, .3, 1) both; }
   .session-pane.status-running { --pane-status-color: #4e98ca; }
@@ -2031,6 +2669,7 @@
   .pane-identity strong, .pane-identity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pane-identity strong { color: var(--workspace-strong); font-size: 12px; font-weight: 740; letter-spacing: -.015em; }
   .pane-identity small { display: flex; align-items: center; gap: 4px; color: var(--workspace-muted); font-size: 9px; }
+  .fork-mark { flex: 0 0 auto; margin-left: 3px; padding: 1px 5px 1px 4px; display: inline-flex; align-items: center; gap: 3px; border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-weight: 720; }
   .source-badge, .status-badge { min-height: 23px; padding: 0 7px; display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 740; }
   .status-badge { border-color: transparent; background: var(--workspace-subtle); }
   .status-badge i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--pane-status-color); }
@@ -2065,8 +2704,6 @@
   .agent-controls-popover .controls-field:first-child { margin-top: 0; }
   .controls-field > span { display: flex; align-items: center; justify-content: space-between; color: var(--workspace-muted); font-size: 8px; font-weight: 760; }
   .controls-field > span b { color: var(--effort-tone, var(--workspace-accent)); font-size: 9px; text-transform: capitalize; transition: color 180ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1); }
-  .controls-field > input:not([type="range"]) { min-width: 0; height: 32px; padding: 0 10px; border: 1px solid var(--workspace-line); border-radius: 9px; outline: 0; color: var(--workspace-strong); background: var(--workspace-pane); font-size: 9px; }
-  .controls-field > input:not([type="range"]):focus { border-color: color-mix(in srgb, var(--workspace-accent) 52%, transparent); }
   .controls-field :global(.lume-select) { width: 100%; }
   .effort-field { gap: 5px; }
   .effort-track { position: relative; height: 34px; margin: 0 12px 1px; display: flex; align-items: center; isolation: isolate; }
@@ -2075,12 +2712,12 @@
   .effort-progress { z-index: 0; background: linear-gradient(90deg, #4e98ca, var(--effort-tone)); box-shadow: 0 2px 7px color-mix(in srgb, var(--effort-tone) 18%, transparent); transform: scaleX(var(--effort-ratio)); transform-origin: left; transition: transform 240ms cubic-bezier(.16, 1, .3, 1), background 180ms ease, box-shadow 180ms ease; }
   .effort-thumb { position: absolute; z-index: 1; left: var(--effort-progress); box-sizing: border-box; width: 24px; height: 24px; border: 4px solid var(--workspace-raised); border-radius: 48% 52% 46% 54%; background: var(--effort-tone); box-shadow: 0 0 0 1px color-mix(in srgb, var(--effort-tone) 76%, transparent), 0 4px 10px rgba(0, 0, 0, .2); pointer-events: none; transform: translateX(-50%); transition: left 240ms cubic-bezier(.16, 1, .3, 1), border-radius 180ms ease, background 180ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1), box-shadow 180ms ease; }
   .effort-thumb::before { position: absolute; z-index: -1; top: 3px; right: calc(100% - 5px); width: 12px; height: 10px; border-radius: 999px 4px 4px 999px; background: var(--effort-tone); content: ""; opacity: var(--effort-ratio); transform: scaleX(.86); transform-origin: right; transition: opacity 180ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
-  .effort-track input { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; margin: 0; appearance: none; opacity: 0; cursor: pointer; }
+  .effort-track input { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; margin: 0; appearance: none; opacity: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
   .effort-track:hover .effort-thumb { border-radius: 56% 44% 52% 48%; transform: translateX(-50%) scale(1.06); }
   .effort-track:hover .effort-thumb::before { transform: scaleX(1.08); }
   .effort-track:has(input:active) .effort-thumb { border-radius: 42% 58% 45% 55%; transform: translateX(-50%) scale(1.16, .88); }
   .effort-track:has(input:active) .effort-thumb::before { transform: scaleX(1.32); }
-  .effort-track:focus-within { border-radius: 999px; outline: 2px solid color-mix(in srgb, var(--workspace-accent) 68%, transparent); outline-offset: 2px; }
+  .effort-track:has(input:focus-visible) { border-radius: 999px; outline: 2px solid color-mix(in srgb, var(--workspace-accent) 68%, transparent); outline-offset: 2px; }
   .effort-track:has(input:disabled) { opacity: .46; }
   .effort-track:has(input:disabled) input { cursor: default; }
   .effort-field.max .effort-thumb { animation: max-thumb-pulse 1.8s ease-in-out infinite alternate; }
@@ -2115,11 +2752,12 @@
   .user-row.outgoing-replacement { display: none; }
   .user-row.targeted .user-message { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
   .agent-message { align-self: flex-start; padding: 3px 0 7px; }
+  :global(.workspace.agent-message-surface) .agent-message { padding: 11px 15px 9px; border: 1px solid var(--workspace-line); border-radius: 14px 14px 14px 4px; background: color-mix(in srgb, var(--workspace-raised) 90%, transparent); box-shadow: 0 6px 22px rgba(8, 18, 13, .08); backdrop-filter: blur(14px) saturate(1.1); }
   .analysis-message header { margin-bottom: 7px; display: flex; align-items: center; gap: 8px; }
   .analysis-message header strong { min-width: 0; flex: 1; color: var(--workspace-strong); font-size: var(--workspace-chat-small-size); font-weight: 750; }
   time { color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); font-variant-numeric: tabular-nums; }
   .response-footer { min-height: 25px; margin-top: 8px; display: flex; align-items: center; gap: 8px; }
-  .final-actions { min-height: 24px; margin-left: auto; display: flex; justify-content: flex-end; gap: 2px; opacity: .35; transition: opacity 140ms ease; }
+  .final-actions { min-height: 24px; display: flex; justify-content: flex-start; gap: 2px; opacity: .35; transition: opacity 140ms ease; }
   .agent-row:hover .final-actions, .final-actions:focus-within { opacity: 1; }
   .final-actions button { width: 24px; height: 24px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-faint); background: transparent; cursor: pointer; transition: color 120ms ease, background 120ms ease, transform 120ms ease; }
   .final-actions button:hover, .final-actions button:focus-visible, .final-actions button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
@@ -2127,6 +2765,9 @@
   .final-actions button:disabled { cursor: wait; opacity: .55; }
   .final-actions button.loading :global(.lume-icon) { animation: history-loading 800ms linear infinite; }
   .markdown-content { min-width: 0; overflow-wrap: anywhere; font-size: var(--workspace-chat-font-size); line-height: 1.68; word-break: break-word; }
+  .agent-message .markdown-content { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: calc(13.5px + var(--workspace-chat-font-adjust)); font-weight: 430; line-height: 1.72; letter-spacing: -.012em; font-kerning: normal; }
+  .agent-message .markdown-content :global(strong) { font-weight: 720; letter-spacing: -.018em; }
+  .agent-message .markdown-content :global(pre) { font-size: calc(11px + var(--workspace-chat-small-adjust)); line-height: 1.62; }
   .markdown-content :global(p) { margin: 0 0 .75em; }.markdown-content :global(p:last-child) { margin-bottom: 0; }
   .markdown-content :global(strong) { color: var(--workspace-strong); font-weight: 790; }
   .markdown-content :global(em) { font-style: italic; }
@@ -2156,13 +2797,20 @@
   .markdown-content :global(pre) { max-width: 100%; padding: 11px 12px; overflow: auto; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-code); font: var(--workspace-chat-small-size)/1.6 "SFMono-Regular", Consolas, monospace; }
   .markdown-content :global(pre code) { padding: 0; color: inherit; background: transparent; white-space: pre-wrap; word-break: break-word; }
   .markdown-content :global(code) { overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; }
-  .markdown-content :global(.markdown-table-wrap) { max-width: 100%; margin: .7em 0; overflow-x: auto; border: 1px solid var(--workspace-line); border-radius: 9px; }
-  .markdown-content :global(table) { width: 100%; display: block; overflow-x: auto; border-collapse: collapse; }
-  .markdown-content :global(th), .markdown-content :global(td) { padding: 7px 9px; border-bottom: 1px solid var(--workspace-line); text-align: left; }
+  /* The wrapper scrolls; the table stays a real table so head and body share one set of column widths. */
+  .markdown-content :global(.markdown-table-wrap) { box-sizing: border-box; width: 100%; max-width: 100%; margin: .7em 0; overflow-x: auto; border: 1px solid var(--workspace-line); border-radius: 9px; }
+  .markdown-content :global(table) { width: 100%; border-collapse: collapse; }
+  .markdown-content :global(th), .markdown-content :global(td) { min-width: 88px; padding: 7px 9px; overflow-wrap: anywhere; border-right: 1px solid var(--workspace-line); border-bottom: 1px solid var(--workspace-line); text-align: left; vertical-align: top; word-break: normal; }
+  .markdown-content :global(th:last-child), .markdown-content :global(td:last-child) { border-right: 0; }
+  .markdown-content :global(tbody tr:last-child td) { border-bottom: 0; }
   .markdown-content :global(th) { color: var(--workspace-strong); background: var(--workspace-subtle); font-size: var(--workspace-chat-small-size); }
+  .markdown-content :global(.align-center) { text-align: center; }
+  .markdown-content :global(.align-right) { text-align: right; }
   .markdown-content :global(img) { max-width: 100%; height: auto; border-radius: 9px; }
   .markdown-content :global(hr) { margin: 1em 0; border: 0; border-top: 1px solid var(--workspace-line); }
   .response-duration { width: max-content; display: block; color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); font-variant-numeric: tabular-nums; }
+  .interrupt-notice { margin: 2px 0 4px; padding: 3px 9px 3px 7px; width: fit-content; max-width: 100%; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 999px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: var(--workspace-chat-tiny-size); font-weight: 680; }
+  .interrupt-notice :global(.lume-icon) { color: #d85c64; }
   .analysis-message { min-width: 0; padding: 5px 0 7px; color: var(--workspace-muted); }
   .analysis-message .markdown-content { font-size: calc(11px + var(--workspace-chat-small-adjust)); line-height: 1.62; }
   .changed-files { width: fit-content; max-width: 100%; min-width: 0; margin-top: 2px; }
@@ -2340,6 +2988,19 @@
   .composer-tools { max-width: 760px; min-height: 31px; margin: 6px auto 0; display: flex; align-items: center; gap: 3px; }
   .composer-tools .model-trigger, .composer-tools .tool-icon { width: auto; min-width: 30px; height: 28px; padding: 0 7px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 680; }
   .composer-tools .model-trigger { max-width: min(180px, 42cqw); padding-left: 4px; }
+  .permission-picker { position: relative; display: inline-flex; }
+  .composer-tools .permission-trigger { padding-left: 7px; }
+  .composer-tools .permission-trigger.tone-auto { color: var(--workspace-accent); }
+  .composer-tools .permission-trigger.tone-danger { color: #d85c64; }
+  .permission-menu { position: absolute; z-index: 13; bottom: calc(100% + 8px); left: 0; width: min(330px, calc(100cqw - 24px)); padding: 5px; display: grid; gap: 2px; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 44px rgba(8, 18, 13, .18); }
+  .composer .permission-menu > button { width: 100%; height: auto; min-height: 40px; padding: 7px 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-radius: 9px; color: var(--workspace-text); background: transparent; text-align: left; font-size: var(--workspace-chat-small-size); }
+  .composer .permission-menu > button:hover:not(:disabled), .composer .permission-menu > button.selected { transform: none; background: var(--workspace-accent-soft); }
+  .permission-menu button > span { min-width: 0; display: grid; gap: 2px; }
+  .permission-menu button strong { color: var(--workspace-strong); font-weight: 720; }
+  .permission-menu button.tone-danger strong { color: #d85c64; }
+  .permission-menu button small { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 560; line-height: 1.35; }
+  .permission-menu button > :global(.lume-icon) { flex: 0 0 auto; color: var(--workspace-accent); }
+  .permission-note { margin: 2px 9px 4px; color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); }
   .model-trigger span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer-tools .model-trigger:hover:not(:disabled), .composer-tools .tool-icon:hover:not(:disabled), .composer-tools .model-trigger.active, .composer-tools .tool-icon.enabled { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .composer-tools .tool-icon { width: 30px; padding: 0; }
@@ -2347,6 +3008,48 @@
   .composer-tools .tool-icon :global(.workspace-chat-icon) { animation: control-icon-arrive 210ms cubic-bezier(.16, 1, .3, 1) both; }
   .composer button:hover:not(:disabled) { transform: translateY(-1px) scale(1.03); }.composer button:disabled { opacity: .28; cursor: default; }
   .composer button.launching:disabled { opacity: 1; }
+  .usage-notices { max-width: 760px; margin: 0 auto 8px; display: grid; gap: 5px; }
+  .usage-notice { --notice-tone: #c78d35; margin: 0; padding: 7px 11px; display: flex; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--notice-tone) 34%, var(--workspace-line)); border-radius: 10px; color: var(--workspace-strong); background: color-mix(in srgb, var(--notice-tone) 10%, var(--workspace-raised)); font-size: var(--workspace-chat-small-size); font-weight: 620; line-height: 1.35; }
+  .usage-notice.tone-error { --notice-tone: #c45f5b; }
+  .usage-notice :global(.lume-icon) { flex: 0 0 auto; color: var(--notice-tone); }
+  .composer .agent-permission { max-width: 760px; margin: 0 auto 8px; padding: 11px 12px; display: grid; gap: 9px; border: 1px solid color-mix(in srgb, #d0a142 55%, var(--workspace-line)); border-radius: 13px; color: var(--workspace-text); background: color-mix(in srgb, #d0a142 11%, var(--workspace-raised)); }
+  .agent-permission.risk-high { border-color: color-mix(in srgb, #d85c64 60%, var(--workspace-line)); background: color-mix(in srgb, #d85c64 9%, var(--workspace-raised)); }
+  .agent-permission header { min-width: 0; display: flex; align-items: center; gap: 8px; color: #b9852a; }
+  .agent-permission.risk-high header { color: #d85c64; }
+  .agent-permission header strong { min-width: 0; color: var(--workspace-strong); font-size: var(--workspace-chat-font-size); font-weight: 720; line-height: 1.35; overflow-wrap: anywhere; }
+  .agent-permission code { padding: 6px 8px; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: color-mix(in srgb, var(--workspace-raised) 70%, transparent); font: 600 var(--workspace-chat-small-size) "SFMono-Regular", Consolas, "Liberation Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .permission-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .composer .permission-actions > button { width: auto; height: 30px; padding: 0 13px; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-text); background: var(--workspace-raised); font-size: var(--workspace-chat-small-size); font-weight: 750; }
+  .composer .permission-actions > button.allow { border-color: transparent; color: #f5fbf7; background: var(--workspace-accent); }
+  .composer .permission-actions > button.danger { color: #d85c64; }
+  .composer .permission-actions > button:hover:not(:disabled) { transform: none; border-color: var(--workspace-accent); }
+  .composer .agent-question { max-width: 760px; margin: 0 auto 8px; padding: 11px 12px; display: grid; gap: 10px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 34%, var(--workspace-line)); border-radius: 13px; color: var(--workspace-text); background: color-mix(in srgb, var(--workspace-accent-soft) 70%, var(--workspace-raised)); }
+  .agent-question-item { min-width: 0; display: grid; gap: 6px; }
+  .agent-question-item > small { color: var(--workspace-accent); font-size: var(--workspace-chat-tiny-size); font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+  .agent-question-item > strong { color: var(--workspace-strong); font-size: var(--workspace-chat-font-size); font-weight: 700; line-height: 1.4; overflow-wrap: anywhere; }
+  .question-options { display: grid; gap: 5px; }
+  .composer .question-options > button { width: 100%; height: auto; min-height: 34px; padding: 6px 9px; display: flex; align-items: flex-start; gap: 9px; place-items: initial; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-text); background: var(--workspace-raised); text-align: left; }
+  .composer .question-options > button:hover:not(:disabled), .composer .question-options > button.selected { border-color: var(--workspace-accent); background: var(--workspace-accent-soft); transform: none; }
+  .question-options button b { color: var(--workspace-accent); font-size: var(--workspace-chat-small-size); font-variant-numeric: tabular-nums; }
+  .question-options button > span { min-width: 0; display: grid; gap: 2px; font-size: var(--workspace-chat-small-size); font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+  .question-options button > span small { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 500; }
+  .question-hint { margin: 0; color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); }
+  .composer .question-submit { width: auto; height: 30px; padding: 0 14px; justify-self: end; border-radius: 9px; font-size: var(--workspace-chat-small-size); font-weight: 750; }
+  .composer .slash-command-menu { position: absolute; z-index: 12; right: 0; bottom: calc(100% + 7px); left: 0; max-height: min(260px, 46vh); padding: 5px; display: grid; gap: 2px; overflow-x: hidden; overflow-y: auto; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 44px rgba(8, 18, 13, .18); }
+  .slash-command-heading { min-height: 24px; padding: 2px 8px 5px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--workspace-line); }
+  .slash-command-heading strong { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+  .slash-command-heading small { color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); font-weight: 650; white-space: nowrap; }
+  .slash-command-heading kbd { padding: 1px 3px; border: 1px solid var(--workspace-line); border-radius: 4px; color: var(--workspace-muted); background: transparent; font: inherit; }
+  .composer .slash-command-menu > button { width: 100%; min-height: 36px; height: auto; padding: 5px 8px; display: grid; grid-template-columns: minmax(64px, auto) minmax(0, 1fr); align-items: center; gap: 9px; place-items: initial; border-radius: 8px; color: var(--workspace-text); background: transparent; text-align: left; transition: background 120ms ease; }
+  .composer .slash-command-menu > button:hover:not(:disabled) { transform: none; }
+  .composer .slash-command-menu > button.active { color: var(--workspace-strong); background: var(--workspace-accent-soft); }
+  .slash-command-loading { margin: 0; padding: 7px 8px; color: var(--workspace-muted); font-size: var(--workspace-chat-small-size); font-weight: 650; }
+  .slash-command-menu code { color: var(--workspace-accent); font: 750 var(--workspace-chat-small-size) "SFMono-Regular", Consolas, "Liberation Mono", monospace; white-space: nowrap; }
+  .slash-command-menu button > span { min-width: 0; display: grid; gap: 2px; overflow: hidden; font-size: var(--workspace-chat-small-size); font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+  .composer .mention-menu > button { grid-template-columns: 16px minmax(0, 1fr); }
+  .mention-menu button > span { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+  .history-indicator { position: absolute; right: 10px; bottom: calc(100% + 5px); padding: 2px 7px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: var(--workspace-raised); font-size: var(--workspace-chat-tiny-size); font-weight: 720; font-variant-numeric: tabular-nums; pointer-events: none; }
+  .slash-command-menu button > span small { overflow: hidden; color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 650; text-overflow: ellipsis; text-transform: uppercase; }
   .plane-launch { width: 16px; height: 16px; display: grid; place-items: center; pointer-events: none; animation: plane-takeoff 450ms cubic-bezier(.22, .72, .26, 1) both; }
   .composer button:hover:not(:disabled) :global(.lume-icon) { transform: translate(1px, -1px); }.composer button :global(.lume-icon) { transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .composer button:hover:not(:disabled) :global(.send-plane-icon) { transform: translate(1px, -1px); }.composer button :global(.send-plane-icon) { transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }

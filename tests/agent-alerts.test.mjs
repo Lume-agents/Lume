@@ -24,9 +24,17 @@ const usage = collectAgentAlerts([{ ...session, rateLimits: [{ id: "primary", la
 assert.equal(usage[0].tone, "warning");
 assert.match(usage[0].message, /Restam apenas 9%/);
 
+assert.equal(usage[0].usage, true);
+assert.equal(usage[0].pinned, true);
+const lowUsage = collectAgentAlerts([{ ...session, rateLimits: [{ id: "primary", label: "5h", usedPercent: 85 }] }], "pt-BR", now);
+assert.equal(lowUsage[0].pinned, false);
+assert.match(lowUsage[0].message, /Restam apenas 15%/);
+assert.deepEqual(collectAgentAlerts([{ ...session, rateLimits: [{ id: "primary", label: "5h", usedPercent: 70 }] }], "pt-BR", now), []);
+
 const exhausted = collectAgentAlerts([{ ...session, rateLimits: [{ id: "primary", label: "5h", usedPercent: 100 }] }], "pt-BR", now);
 assert.equal(exhausted[0].tone, "error");
 assert.equal(exhausted[0].duration, 0);
+assert.equal(exhausted[0].pinned, true);
 
 const mcp = collectAgentAlerts([{
   ...session,

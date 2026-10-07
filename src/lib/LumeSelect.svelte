@@ -52,10 +52,16 @@
 
   function floatMenu(node: HTMLDivElement) {
     menuNode = node;
+    // This menu lives outside its component. Stop pointer events before they
+    // reach document-level outside-click listeners, which run before Svelte's
+    // delegated handler and can destroy the selector before an option is clicked.
+    const keepParentOpen = (event: PointerEvent) => event.stopPropagation();
+    node.addEventListener("pointerdown", keepParentOpen);
     document.body.appendChild(node);
     syncFloatingTheme();
     return {
       destroy() {
+        node.removeEventListener("pointerdown", keepParentOpen);
         if (menuNode === node) menuNode = null;
         node.remove();
       },
@@ -166,7 +172,6 @@
       in:fly={{ y: reducedMotion ? 0 : menuAbove ? 6 : -6, duration: reducedMotion ? 80 : 160, easing: cubicOut }}
       out:fly={{ y: reducedMotion ? 0 : menuAbove ? 6 : -6, duration: reducedMotion ? 70 : 110, easing: cubicOut }}
       onkeydown={handleKeydown}
-      onpointerdown={(event) => event.stopPropagation()}
     >
       {#each options as option, index (option.value)}
         <button

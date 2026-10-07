@@ -100,6 +100,8 @@ export interface AgentSession {
   activities: SessionActivity[];
   rateLimits?: AgentRateLimit[];
   promptTokenUsage?: PromptTokenUsage[];
+  /** Native id of the conversation this one was forked from. */
+  forkedFrom?: string;
 }
 
 export interface PromptTokenUsage {
@@ -143,7 +145,7 @@ export interface AgentRateLimit {
 
 export interface SessionActivity {
   id: string;
-  kind: "prompt" | "queued_prompt" | "codex_queued_prompt" | "message" | "activity" | "analysis" | "plan" | "plan_document" | "command" | "file" | "test" | "tool" | "subagent" | "permission" | "question" | "warning";
+  kind: "prompt" | "queued_prompt" | "codex_queued_prompt" | "message" | "activity" | "analysis" | "plan" | "plan_document" | "command" | "file" | "test" | "tool" | "subagent" | "permission" | "question" | "warning" | "interrupt";
   title: string;
   detail?: string;
   status: "running" | "completed" | "failed" | "waiting" | "interrupted";

@@ -11,6 +11,15 @@ command -v gsettings >/dev/null 2>&1 && {
   echo "scaling-factor: $(gsettings get org.gnome.desktop.interface scaling-factor 2>/dev/null)"
 }
 
+echo "== Xwayland e bibliotecas"
+echo "Xwayland rodando: $(pgrep -a Xwayland 2>/dev/null | head -1 || true)"
+echo "binário Xwayland: $(command -v Xwayland 2>/dev/null || echo ausente)"
+if command -v ldconfig >/dev/null 2>&1; then
+  ldconfig -p 2>/dev/null | grep -E "libgtk-layer-shell|libwebkit2gtk-4.1|libgtk-3\.so|libX11\.so" | sed 's/^ *//'
+fi
+echo "Modo escolhido pelo Lume: com DISPLAY definido o Lume usa o XWayland (ele imprime"
+echo "'usando XWayland...' ao iniciar); sem DISPLAY usa o Wayland nativo, limitado."
+
 if ! command -v xwininfo >/dev/null 2>&1 || ! command -v xprop >/dev/null 2>&1; then
   echo "== xwininfo/xprop ausentes: instale o pacote x11-utils e rode de novo"
   exit 0

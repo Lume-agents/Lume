@@ -57,3 +57,6 @@ assert.equal(
 );
 
 console.log("workflow order test suite passed");
+
+await import("./workflow-board.test.mjs");
+await import("./workflow-board-persistence.test.mjs");

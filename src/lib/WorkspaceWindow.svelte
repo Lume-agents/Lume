@@ -28,11 +28,12 @@
   import WorkspaceInspector from "$lib/WorkspaceInspector.svelte";
   import WorkspaceReviewCenter from "$lib/WorkspaceReviewCenter.svelte";
   import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
+  import WorkflowBoard from "$lib/WorkflowBoard.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
-  import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, Preferences, ResumableSession } from "$lib/domain";
+  import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, Preferences, ResumableSession, WorkflowGroupDefinition } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
@@ -239,6 +240,8 @@
   let focusedPaneId = $state<string | null>(null);
   let maximizedPaneId = $state<string | null>(null);
   let inspectorOpen = $state(true);
+  let boardOpen = $state(false);
+  let boardMounted = $state(false);
   let inspectorSection = $state<"session" | "repository">("session");
   let reviewOpen = $state(false);
   let reviewInitialPath = $state<string | undefined>();
@@ -1053,7 +1056,7 @@
     draggingSessionId = sessionId;
     workspaceDropIntent = null;
     workspaceDropGeometry = null;
-    maximizedPaneId = null;
+    if (!boardOpen) maximizedPaneId = null;
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/x-lume-session", sessionId);
@@ -1695,6 +1698,28 @@
     return savePreferencePatch({ [key]: value } as Pick<Preferences, K>);
   }
 
+  function showWorkflowBoard(open: boolean) {
+    finishSidebarSessionDrag();
+    boardOpen = open;
+    if (open) boardMounted = true;
+    try { localStorage.setItem("lume:workflow-board:open", String(open)); }
+    catch { /* Opening the board is still available when storage is disabled. */ }
+  }
+
+  async function saveWorkflowBoardGroup(group: WorkflowGroupDefinition) {
+    const deadline = Date.now() + 15_000;
+    while (settingsSaving && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+    if (settingsSaving) throw new Error(tr("Preferences are still being saved. Try again.", "Os ajustes ainda estão sendo salvos. Tente novamente."));
+    const next = preferences.workflowGroups.some((item) => item.id === group.id)
+      ? preferences.workflowGroups.map((item) => item.id === group.id ? group : item)
+      : [...preferences.workflowGroups, group];
+    if (!await updatePreference("workflowGroups", next)) {
+      throw new Error(settingsError || tr("Could not save the workflow.", "Não foi possível salvar o workflow."));
+    }
+  }
+
   function selectAppearance(mode: "system" | "light" | "dark") {
     void updatePreference("darkMode", mode === "system" ? undefined : mode === "dark");
   }
@@ -2068,6 +2093,8 @@
   }
 
   onMount(() => {
+    try { if (localStorage.getItem("lume:workflow-board:open") === "true") showWorkflowBoard(true); }
+    catch { /* Start with chats when storage is unavailable. */ }
     const narrowSidebar = window.matchMedia("(max-width: 800px)");
     const syncSidebarWidth = (event: MediaQueryListEvent | MediaQueryList) => {
       sidebarCollapsed = event.matches;
@@ -2091,6 +2118,11 @@
       systemDark = event.matches;
     };
     const handleWorkspaceKeydown = (event: KeyboardEvent) => {
+      if (boardOpen && !settingsOpen && !launcherOpen && !sessionContextMenu && !headerControl && !searchOpen) return;
+      if (event.key === "Escape" && (settingsOpen || launcherOpen || sessionContextMenu || headerControl || searchOpen)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
       if (event.key === "Escape" && sessionContextMenu) {
         sessionContextMenu = null;
         return;
@@ -2108,7 +2140,7 @@
         launcherOpen = false;
         return;
       }
-      if (event.key === "Escape" && reviewOpen) {
+      if (event.key === "Escape" && reviewOpen && !boardOpen) {
         closeReview();
         return;
       }
@@ -2116,6 +2148,7 @@
         closeSettings();
         return;
       }
+      if (boardOpen) return;
       if (event.key === "Escape" && maximizedPaneId) {
         maximizedPaneId = null;
         persistWorkspaceLayout();
@@ -2352,7 +2385,8 @@
       {/if}
       {#if headerControl === null}
       <div class="header-utilities">
-        <button class:active={inspectorOpen} class="inspector-button" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen} onclick={toggleInspector}><WorkspaceHeaderIcon name="inspector" /></button>
+        <button class:active={boardOpen} class="inspector-button" type="button" title={tr("Workflow board", "Board de workflow")} aria-label={tr("Workflow board", "Board de workflow")} aria-pressed={boardOpen} onclick={() => showWorkflowBoard(!boardOpen)}><WorkspaceHeaderIcon name="workflow" /></button>
+        <button class:active={inspectorOpen && !boardOpen} class="inspector-button" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen && !boardOpen} onclick={() => { if (boardOpen) { showWorkflowBoard(false); if (!inspectorOpen) toggleInspector(); } else toggleInspector(); }}><WorkspaceHeaderIcon name="inspector" /></button>
         <button class:active={settingsOpen} class="settings-button" type="button" title={tr("Workspace settings", "Ajustes do Workspace")} aria-label={tr("Workspace settings", "Ajustes do Workspace")} aria-expanded={settingsOpen} onclick={() => settingsOpen ? closeSettings() : void openSettings()}><WorkspaceHeaderIcon name="settings" /></button>
         <button class="compact-mode" type="button" title={tr("Return to Orb", "Voltar ao Orb")} aria-label={tr("Return to Orb", "Voltar ao Orb")} onclick={() => void returnToOrb()}><WorkspaceHeaderIcon name="orb" /></button>
       </div>
@@ -2974,7 +3008,7 @@
     </div>
   {/if}
 
-  <section class:inspector-open={inspectorOpen} class:review-open={reviewOpen} class:maximized={Boolean(maximizedSession)} class="workspace-stage">
+  <section class:inspector-open={inspectorOpen && !boardOpen} class:review-open={reviewOpen && !boardOpen} class:maximized={Boolean(maximizedSession) && !boardOpen} class="workspace-stage">
     <section
       bind:this={workbenchElement}
       class:split={Boolean(secondary) && !maximizedSession}
@@ -2989,6 +3023,7 @@
       ondragleave={leaveWorkspaceDrop}
       ondrop={dropSessionInWorkspace}
     >
+    <div class="board-chat-layer" inert={boardOpen} aria-hidden={boardOpen}>
     {#if workspaceBackgroundImage}
       <div
         class="workspace-wallpaper"
@@ -3116,7 +3151,7 @@
       </div>
     {/if}
       {#if error && !orderedSessions.length}<p class="workspace-error">{error}</p>{/if}
-      {#if draggingSessionId && workspaceDropIntent}
+      {#if !boardOpen && draggingSessionId && workspaceDropIntent}
         <div
           class="layout-drop-preview {workspaceDropIntent.kind}"
           style:left={`${workspaceDropIntent.left}%`}
@@ -3133,15 +3168,29 @@
           </span>
         </div>
       {/if}
+    </div>
+    {#if boardMounted}
+      <WorkflowBoard
+        {sessions}
+        {preferences}
+        {language}
+        active={boardOpen}
+        keyboardEnabled={!settingsOpen && !launcherOpen && !sessionContextMenu && !headerControl && !searchOpen}
+        onSaveGroup={saveWorkflowBoardGroup}
+        onOpenChat={(session) => { showWorkflowBoard(false); selectSession(session); }}
+        onClose={() => showWorkflowBoard(false)}
+        onFinishSidebarDrag={finishSidebarSessionDrag}
+      />
+    {/if}
     </section>
-    <div class:open={inspectorOpen} class="inspector-shell" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
+    <div class:open={inspectorOpen && !boardOpen} class="inspector-shell" aria-hidden={!inspectorOpen || boardOpen} inert={!inspectorOpen || boardOpen}>
       {#if inspectorOpen}
         <div class="inspector-content" in:fade={{ duration: motionDuration(140) }} out:fade={{ duration: motionDuration(100) }}>
           <WorkspaceInspector session={focusedSession} {language} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} />
         </div>
       {/if}
     </div>
-    <div class:open={reviewOpen} class="review-shell" aria-hidden={!reviewOpen} inert={!reviewOpen}>
+    <div class:open={reviewOpen && !boardOpen} class="review-shell" aria-hidden={!reviewOpen || boardOpen} inert={!reviewOpen || boardOpen}>
       {#if reviewOpen && focusedSession}
         <div class="review-content" in:fly={{ x: 22, duration: motionDuration(220), easing: cubicOut }} out:fly={{ x: 16, duration: motionDuration(145), easing: cubicOut }}>
           <WorkspaceReviewCenter session={focusedSession} {language} initialPath={reviewInitialPath} onClose={closeReview} />
@@ -3472,6 +3521,7 @@
   .review-shell.open { border-left-width: 1px; border-left-color: var(--workspace-line); pointer-events: auto; }
   .review-content { min-width: 0; width: 100%; height: 100%; }
   .workbench { position: relative; width: 100%; max-width: 100%; min-width: 0; min-height: 0; isolation: isolate; contain: inline-size; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; background: var(--workspace-chat-background); }
+  .board-chat-layer { display: contents; }
   .workspace-wallpaper { position: absolute; z-index: -1; inset: 0; width: 100%; height: 100%; background-position: center; background-size: cover; background-repeat: no-repeat; pointer-events: none; }
   .workbench.split { grid-template-columns: minmax(0, 1fr) 7px minmax(0, 1fr); }
   .workbench.resizing { user-select: none; }

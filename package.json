@@ -15,6 +15,7 @@
     "test:web-companion": "node tests/web-companion.test.mjs",
     "test:handoff": "node --experimental-strip-types tests/handoff.test.mjs",
     "test:workflow-order": "node --experimental-strip-types tests/workflow-order.test.mjs",
+    "test:workflow-board-ui": "node tests/workflow-board-ui.test.mjs",
     "test:chat-attachments": "node --experimental-strip-types tests/chat-attachments.test.mjs",
     "test:session-conversation": "node --experimental-strip-types tests/session-conversation.test.mjs",
     "test:activity-presentation": "node --experimental-strip-types tests/activity-presentation.test.mjs",

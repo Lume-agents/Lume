@@ -1,6 +1,6 @@
 <script lang="ts">
   let { name, size = 20 }: {
-    name: "project" | "layout" | "inspector" | "settings" | "orb";
+    name: "project" | "layout" | "workflow" | "inspector" | "settings" | "orb";
     size?: number;
   } = $props();
 </script>
@@ -18,6 +18,7 @@
   class="header-icon"
   class:project={name === "project"}
   class:layout={name === "layout"}
+  class:workflow={name === "workflow"}
   class:inspector={name === "inspector"}
   class:settings={name === "settings"}
   class:orb={name === "orb"}
@@ -32,6 +33,11 @@
     <rect x="3.5" y="4.5" width="17" height="15" rx="2.2" />
     <path class="layout-vertical" d="M9.5 6.5v11" />
     <path class="layout-horizontal" d="M11.5 11.5h7" />
+  {:else if name === "workflow"}
+    <path class="board-link" d="M9 7h3a3 3 0 0 1 3 3v4M9 17h5" />
+    <rect class="board-node-one" x="3" y="4" width="6" height="6" rx="1.5" />
+    <rect class="board-node-two" x="3" y="14" width="6" height="6" rx="1.5" />
+    <rect class="board-node-three" x="15" y="14" width="6" height="6" rx="1.5" />
   {:else if name === "inspector"}
     <g class="detective-face">
       <path d="M6.5 11.5v2.5a5.5 5.5 0 0 0 11 0v-2.5" />
@@ -54,6 +60,11 @@
 <style>
   .header-icon { display: block; flex: 0 0 auto; overflow: visible; }
   .header-icon.layout { overflow: hidden; }
+  .board-link { stroke-dasharray: 26; stroke-dashoffset: 0; transition: stroke-dashoffset 240ms cubic-bezier(.16, 1, .3, 1); }
+  .board-node-one, .board-node-two, .board-node-three { transform-box: fill-box; transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  :global(button:is(:hover, :focus-visible)) .header-icon.workflow .board-node-one { transform: translateY(-1px); }
+  :global(button:is(:hover, :focus-visible)) .header-icon.workflow .board-node-three { transform: translateX(1px); }
+  :global(button:is(:hover, :focus-visible)) .header-icon.workflow .board-link { stroke-dashoffset: 2; }
   .folder-front, .folder-paper, .layout-vertical, .layout-horizontal, .detective-face, .detective-hat, .bead, .lume-head { transform-box: fill-box; transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .folder-paper { opacity: 0; transition: opacity 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .folder-front { transform-origin: 4px 9.5px; }
@@ -72,6 +83,6 @@
   :global(button:is(:hover, :focus-visible, .active)) .header-icon.settings .bead { fill: var(--workspace-subtle, #26392e); }
   :global(button:is(:hover, :focus-visible)) .header-icon.orb .lume-head { transform: rotate(-7deg) translateY(-1px); }
   @media (prefers-reduced-motion: reduce) {
-    .folder-front, .folder-paper, .layout-vertical, .layout-horizontal, .detective-face, .detective-hat, .bead, .lume-head { transition: none !important; transform: none !important; }
+    .folder-front, .folder-paper, .layout-vertical, .layout-horizontal, .detective-face, .detective-hat, .bead, .lume-head, .board-link, .board-node-one, .board-node-two, .board-node-three { transition: none !important; transform: none !important; }
   }
 </style>

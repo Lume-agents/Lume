@@ -742,6 +742,20 @@ mod linux {
         ))
     }
 
+    /// The window type the main Orb asks the window manager for in the XWayland fallback.
+    /// `LUME_ORB_WINDOW_TYPE` (dock, utility or normal) lets it be compared on a real
+    /// desktop: Mutter does not treat these the same way for focus and for placement.
+    pub(super) fn orb_window_type(requested: Option<&str>) -> gtk::gdk::WindowTypeHint {
+        match requested
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("dock") => gtk::gdk::WindowTypeHint::Dock,
+            Some("normal") => gtk::gdk::WindowTypeHint::Normal,
+            _ => gtk::gdk::WindowTypeHint::Utility,
+        }
+    }
+
     fn configure_layer(
         window: &WebviewWindow,
         show_over_fullscreen: bool,
@@ -754,11 +768,15 @@ mod linux {
         if backend.as_deref() == Some("xwayland-fallback") {
             if let Ok(gtk_window) = window.gtk_window() {
                 let is_main_orb = namespace == "lume";
-                gtk_window.set_type_hint(if is_main_orb {
-                    gtk::gdk::WindowTypeHint::Utility
+                let hint = if is_main_orb {
+                    orb_window_type(std::env::var("LUME_ORB_WINDOW_TYPE").ok().as_deref())
                 } else {
                     gtk::gdk::WindowTypeHint::Dock
-                });
+                };
+                if is_main_orb && std::env::var_os("LUME_ORB_DEBUG").is_some() {
+                    eprintln!("Lume orb: tipo de janela {hint:?}");
+                }
+                gtk_window.set_type_hint(hint);
                 gtk_window.set_decorated(false);
                 gtk_window.set_keep_above(true);
                 gtk_window.set_skip_taskbar_hint(true);
@@ -1571,4 +1589,27 @@ fn foreground_is_fullscreen() -> Option<bool> {
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn foreground_is_fullscreen() -> Option<bool> {
     None
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::linux::orb_window_type;
+    use gtk::gdk::WindowTypeHint;
+
+    #[test]
+    fn the_orb_window_type_can_be_chosen_to_compare_desktops() {
+        assert_eq!(
+            orb_window_type(None),
+            WindowTypeHint::Utility,
+            "the default"
+        );
+        assert_eq!(orb_window_type(Some("dock")), WindowTypeHint::Dock);
+        assert_eq!(orb_window_type(Some(" Normal ")), WindowTypeHint::Normal);
+        assert_eq!(orb_window_type(Some("utility")), WindowTypeHint::Utility);
+        assert_eq!(
+            orb_window_type(Some("nonsense")),
+            WindowTypeHint::Utility,
+            "unknown falls back"
+        );
+    }
 }

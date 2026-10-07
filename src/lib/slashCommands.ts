@@ -33,7 +33,7 @@ export type SlashCommand = {
 };
 
 /** Lume owns model selection for these agents, so `/model` opens Lume's picker. */
-const lumeModelAgents: AgentKind[] = ["codex", "claude_code", "opencode"];
+const lumeModelAgents: AgentKind[] = ["codex", "claude_code", "opencode", "antigravity"];
 
 export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKind | undefined): SlashCommand[] {
   const lumeModel = agent !== undefined && lumeModelAgents.includes(agent);
@@ -51,7 +51,13 @@ export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKi
     }));
   const owned: SlashCommand[] = [];
   if (lumeModel) {
-    owned.push({ name: "model", description: "Choose the model and reasoning effort", source: "lume", prefix: "/", action: "model" });
+    owned.push({
+      name: "model",
+      description: agent === "antigravity" ? "Choose the model and permissions" : "Choose the model and reasoning effort",
+      source: "lume",
+      prefix: "/",
+      action: "model",
+    });
   }
   if (lumePlan) {
     owned.push({ name: "plan", description: "Switch Plan mode on or off", source: "lume", prefix: "/", action: "plan" });

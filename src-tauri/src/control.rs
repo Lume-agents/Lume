@@ -618,8 +618,28 @@ pub fn session_model_settings(
                     .ok_or("Sessão OpenCode sem pasta de projeto")?,
             );
     }
+    if session.agent == AgentKind::Antigravity {
+        if session.control_origin != SessionControlOrigin::Lume
+            || session.source != SessionSource::Desktop
+        {
+            return Err(
+                "Retome esta sessão do Antigravity pelo Lume antes de alterar o modelo".into(),
+            );
+        }
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or("Sessão Antigravity sem ID nativo")?;
+        let mut settings = app
+            .state::<crate::antigravity_stream::AntigravityStream>()
+            .model_settings(native_id)?;
+        if let Some(model) = state.session_model_override(session_id)?.model {
+            settings.model = model;
+        }
+        return Ok(settings);
+    }
     if session.agent != AgentKind::Codex {
-        return Err("Model settings are currently available only for Codex sessions".into());
+        return Err("Model settings are unavailable for this session".into());
     }
     if session.control_origin != SessionControlOrigin::Lume {
         return Err("Take control of this external CLI before changing its model".into());
@@ -661,8 +681,40 @@ pub fn set_session_model_settings(
                 effort,
             );
     }
+    if session.agent == AgentKind::Antigravity {
+        if session.control_origin != SessionControlOrigin::Lume
+            || session.source != SessionSource::Desktop
+        {
+            return Err(
+                "Retome esta sessão do Antigravity pelo Lume antes de alterar o modelo".into(),
+            );
+        }
+        if !effort.trim().is_empty() {
+            return Err("O Antigravity não oferece ajuste separado de esforço".into());
+        }
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or("Sessão Antigravity sem ID nativo")?;
+        let mut settings = app
+            .state::<crate::antigravity_stream::AntigravityStream>()
+            .model_settings(native_id)?;
+        if !model.trim().is_empty() && !settings.models.iter().any(|option| option.model == model) {
+            return Err("Esse modelo não está disponível na CLI do Antigravity".into());
+        }
+        settings.model = model.to_string();
+        state.set_session_model_override(
+            session_id,
+            SessionModelOverride {
+                model: Some(model.to_string()),
+                reasoning_effort: None,
+            },
+        )?;
+        protocol::emit_sessions_changed(app);
+        return Ok(settings);
+    }
     if session.agent != AgentKind::Codex {
-        return Err("Model settings are currently available only for Codex sessions".into());
+        return Err("Model settings are unavailable for this session".into());
     }
     if session.control_origin != SessionControlOrigin::Lume {
         return Err("Take control of this external CLI before changing its model".into());
@@ -869,7 +921,33 @@ pub fn session_permission_settings(
                 .permission_mode_override(session_id)?
                 .unwrap_or_else(|| codex_permissions::mode_of(&session.permission_profile).into()),
         )),
-        _ => Err("Permissions can only be changed for Claude Code and Codex sessions".into()),
+        AgentKind::Antigravity
+            if session.control_origin == SessionControlOrigin::Lume
+                && session.source == SessionSource::Desktop =>
+        {
+            let mode = state
+                .permission_mode_override(session_id)?
+                .unwrap_or_else(
+                    || match session.permission_profile.approval_policy.as_str() {
+                        crate::antigravity_stream::PERMISSION_ACCEPT_EDITS
+                        | crate::antigravity_stream::PERMISSION_PLAN
+                        | crate::antigravity_stream::PERMISSION_ALLOW_ALL => {
+                            session.permission_profile.approval_policy.clone()
+                        }
+                        _ => crate::antigravity_stream::PERMISSION_DEFAULT.into(),
+                    },
+                );
+            Ok(PermissionSettings {
+                mode,
+                modes: vec![
+                    crate::antigravity_stream::PERMISSION_DEFAULT.into(),
+                    crate::antigravity_stream::PERMISSION_ACCEPT_EDITS.into(),
+                    crate::antigravity_stream::PERMISSION_PLAN.into(),
+                    crate::antigravity_stream::PERMISSION_ALLOW_ALL.into(),
+                ],
+            })
+        }
+        _ => Err("Permissions are unavailable for this session".into()),
     }
 }
 
@@ -915,9 +993,12 @@ pub fn set_session_permission_mode(
             codex_permissions::is_mode(mode),
             codex_permissions::scope(mode),
         ),
-        _ => {
-            return Err("Permissions can only be changed for Claude Code and Codex sessions".into())
-        }
+        AgentKind::Antigravity => (
+            session.source == SessionSource::Desktop
+                && crate::antigravity_stream::is_permission_mode(mode),
+            None,
+        ),
+        _ => return Err("Permissions are unavailable for this session".into()),
     };
     if session.control_origin != SessionControlOrigin::Lume {
         return Err("Take control of this external CLI before changing its permissions".into());
@@ -931,6 +1012,12 @@ pub fn set_session_permission_mode(
     state.set_permission_mode_override(session_id, mode)?;
     if let Some(scope) = scope {
         state.set_permission_scope(session_id, scope)?;
+    }
+    if session.agent == AgentKind::Antigravity {
+        state.set_permission_scope(
+            session_id,
+            crate::antigravity_stream::permission_profile_for_mode(mode),
+        )?;
     }
     protocol::emit_sessions_changed(app);
     session_permission_settings(state, session_id)

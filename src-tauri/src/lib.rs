@@ -2328,6 +2328,8 @@ fn launch_session_impl(
                 .resume
                 .then_some(request.resume_id.as_deref())
                 .flatten(),
+            request.model.as_deref(),
+            antigravity_stream::PERMISSION_DEFAULT,
         )?;
         if let Some(prompt) = request
             .initial_prompt

@@ -445,7 +445,7 @@ export interface PermissionSettings {
   modes: string[];
 }
 
-/** Claude Code and Codex sessions; the modes differ per agent. */
+/** Claude Code, Codex, and managed Antigravity sessions; modes differ by agent. */
 export async function getSessionPermissionMode(sessionId: string): Promise<PermissionSettings> {
   return invoke<PermissionSettings>("get_session_permission_mode", { sessionId });
 }

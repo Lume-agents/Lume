@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tauri::AppHandle;
 
 use crate::{
-    codex_bridge::{CodexModelOption, CodexThreadModelSettings},
+    codex_bridge::{CodexModelOption, CodexReasoningEffortOption, CodexThreadModelSettings},
     domain::{
         AccessMode, AgentKind, HookEvent, HookEventKind, PermissionProfile, SessionActivity,
         SessionControlOrigin, SessionSource,
@@ -31,6 +31,7 @@ pub const PERMISSION_PLAN: &str = "agy_plan";
 pub const PERMISSION_ALLOW_ALL: &str = "agy_allow_all";
 
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+const EFFORT_LEVELS: [&str; 3] = ["low", "medium", "high"];
 
 struct ManagedSession {
     child: Child,
@@ -38,6 +39,7 @@ struct ManagedSession {
     active: Arc<AtomicBool>,
     turn: Arc<AtomicU64>,
     model: Option<String>,
+    effort: Option<String>,
     permission_mode: String,
 }
 
@@ -69,6 +71,7 @@ impl AntigravityStream {
         working_directory: &str,
         resume_id: Option<&str>,
         model: Option<&str>,
+        effort: Option<&str>,
         permission_mode: &str,
     ) -> Result<String, String> {
         let cwd = std::fs::canonicalize(working_directory)
@@ -93,6 +96,9 @@ impl AntigravityStream {
             .stderr(Stdio::null());
         if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
             command.args(["--model", model]);
+        }
+        if let Some(effort) = effort.filter(|effort| is_effort(effort)) {
+            command.args(["--effort", effort]);
         }
         match permission_mode {
             PERMISSION_ACCEPT_EDITS => {
@@ -178,6 +184,9 @@ impl AntigravityStream {
                 active,
                 turn,
                 model: model.map(str::to_string).filter(|model| !model.is_empty()),
+                effort: effort
+                    .filter(|effort| is_effort(effort))
+                    .map(str::to_string),
                 permission_mode: permission_mode.to_string(),
             },
         );
@@ -199,8 +208,9 @@ impl AntigravityStream {
     pub fn prompt(&self, id: &str, cwd: &str, prompt: &str) -> Result<(), String> {
         let model_override = self
             .state
-            .session_model_override_for_native_id(AgentKind::Antigravity, id)?
-            .model;
+            .session_model_override_for_native_id(AgentKind::Antigravity, id)?;
+        let effort_override = model_override.reasoning_effort;
+        let model_override = model_override.model;
         let permission_override = self
             .state
             .permission_mode_override_for_native_id(AgentKind::Antigravity, id)?;
@@ -220,10 +230,15 @@ impl AntigravityStream {
                         .as_deref()
                         .map(|model| (!model.trim().is_empty()).then(|| model.to_string()))
                         .unwrap_or_else(|| session.model.clone());
+                    let requested_effort = effort_override
+                        .as_deref()
+                        .map(|effort| is_effort(effort).then(|| effort.to_string()))
+                        .unwrap_or_else(|| session.effort.clone());
                     let requested_permission = permission_override
                         .clone()
                         .unwrap_or_else(|| session.permission_mode.clone());
                     let configuration_changed = requested_model != session.model
+                        || requested_effort != session.effort
                         || requested_permission != session.permission_mode;
                     if configuration_changed && session.active.load(Ordering::SeqCst) {
                         return Err(
@@ -232,7 +247,7 @@ impl AntigravityStream {
                     }
                     if stale || configuration_changed {
                         sessions.remove(id);
-                        Some((requested_model, requested_permission))
+                        Some((requested_model, requested_effort, requested_permission))
                     } else {
                         None
                     }
@@ -241,12 +256,19 @@ impl AntigravityStream {
                     model_override
                         .as_deref()
                         .and_then(|model| (!model.trim().is_empty()).then(|| model.to_string())),
+                    effort_override.filter(|effort| is_effort(effort)),
                     permission_override.unwrap_or_else(|| PERMISSION_DEFAULT.into()),
                 )),
             }
         };
-        if let Some((model, permission_mode)) = restart_settings {
-            self.launch(cwd, Some(id), model.as_deref(), &permission_mode)?;
+        if let Some((model, effort, permission_mode)) = restart_settings {
+            self.launch(
+                cwd,
+                Some(id),
+                model.as_deref(),
+                effort.as_deref(),
+                &permission_mode,
+            )?;
         }
         let (writer, active) = {
             let sessions = self
@@ -288,16 +310,16 @@ impl AntigravityStream {
 
     pub fn model_settings(&self, id: &str) -> Result<CodexThreadModelSettings, String> {
         let models = self.available_models()?;
-        let current_model = self
+        let (current_model, current_effort) = self
             .sessions
             .lock()
             .map_err(|_| "Antigravity session lock failed")?
             .get(id)
-            .and_then(|session| session.model.clone())
+            .map(|session| (session.model.clone(), session.effort.clone()))
             .unwrap_or_default();
         Ok(CodexThreadModelSettings {
-            model: current_model,
-            reasoning_effort: None,
+            model: current_model.unwrap_or_default(),
+            reasoning_effort: current_effort,
             service_tier: None,
             models,
             session_modes: None,
@@ -414,7 +436,7 @@ fn parse_model_catalog(output: &str, default_label: Option<&str>) -> Vec<CodexMo
         },
         is_default: true,
         default_reasoning_effort: String::new(),
-        supported_reasoning_efforts: Vec::new(),
+        supported_reasoning_efforts: effort_options(),
     }];
     for (model, display_name) in parse_model_lines(output) {
         let is_the_default =
@@ -428,7 +450,7 @@ fn parse_model_catalog(output: &str, default_label: Option<&str>) -> Vec<CodexMo
             description: "Disponível na CLI do Antigravity".into(),
             is_default: false,
             default_reasoning_effort: String::new(),
-            supported_reasoning_efforts: Vec::new(),
+            supported_reasoning_efforts: effort_options(),
         });
     }
     models
@@ -449,6 +471,27 @@ fn read_default_model_label(path: &std::path::Path) -> Option<String> {
     let settings = serde_json::from_str::<Value>(&std::fs::read_to_string(path).ok()?).ok()?;
     let label = settings.get("model")?.as_str()?.trim();
     (!label.is_empty()).then(|| label.chars().take(MAX_DEFAULT_LABEL_CHARS).collect())
+}
+
+/// The CLI default comes first (empty value) so the slider can return to it.
+fn effort_options() -> Vec<CodexReasoningEffortOption> {
+    std::iter::once(CodexReasoningEffortOption {
+        value: String::new(),
+        description: "Usa o esforço padrão configurado na CLI do Antigravity".into(),
+    })
+    .chain(
+        EFFORT_LEVELS
+            .iter()
+            .map(|effort| CodexReasoningEffortOption {
+                value: (*effort).into(),
+                description: format!("--effort {effort}"),
+            }),
+    )
+    .collect()
+}
+
+pub fn is_effort(effort: &str) -> bool {
+    EFFORT_LEVELS.contains(&effort)
 }
 
 pub fn is_permission_mode(mode: &str) -> bool {
@@ -780,6 +823,26 @@ mod tests {
         assert_eq!(event.native_session_id.as_deref(), Some("conversation-1"));
         assert_eq!(event.control_origin, SessionControlOrigin::Lume);
         assert_eq!(event.source, Some(SessionSource::Desktop));
+    }
+
+    #[test]
+    fn model_catalog_offers_cli_effort_levels() {
+        let models = parse_model_catalog("gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n", None);
+        assert_eq!(models.len(), 2);
+        for model in &models {
+            let efforts = model
+                .supported_reasoning_efforts
+                .iter()
+                .map(|effort| effort.value.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(efforts, ["", "low", "medium", "high"]);
+            assert_eq!(model.default_reasoning_effort, "");
+        }
+        assert!(is_effort("high"));
+        assert!(!is_effort("xhigh"));
+        assert!(!is_effort("max"));
+        assert!(!is_effort(""));
+        assert!(!is_effort("ultra"));
     }
 
     #[test]

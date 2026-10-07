@@ -3041,7 +3041,6 @@
     --composer-beam-halo: conic-gradient(from var(--composer-beam-angle), transparent 0% 58%, rgba(0, 0, 0, .08) 65%, rgba(0, 0, 0, .4) 69%, rgba(0, 0, 0, .6) 70% 70.5%, rgba(0, 0, 0, .4) 71.5%, rgba(0, 0, 0, .08) 75%, transparent 82% 100%);
     --composer-beam-window: conic-gradient(from var(--composer-beam-angle), transparent 0% 30%, rgba(255, 255, 255, .1) 36%, rgba(255, 255, 255, .35) 44%, white 52% 80%, rgba(255, 255, 255, .35) 86%, rgba(255, 255, 255, .1) 92%, transparent 95% 100%);
     --composer-beam-colors: radial-gradient(ellipse 70px 40px at 33% -7.4%, rgb(255, 50, 100), transparent), radial-gradient(ellipse 60px 35px at 12% -5%, rgb(40, 140, 255), transparent), radial-gradient(ellipse 40px 70px at 2.1% 68.3%, rgb(50, 200, 80), transparent), radial-gradient(ellipse 20px 35px at 2.1% 68.3%, rgb(30, 185, 170), transparent), radial-gradient(ellipse 180px 32px at 74.4% 100%, rgb(100, 70, 255), transparent), radial-gradient(ellipse 85px 26px at 55% 100%, rgb(40, 140, 255), transparent), radial-gradient(ellipse 74px 32px at 93.9% 0%, rgb(255, 120, 40), transparent), radial-gradient(ellipse 26px 42px at 100% 27.1%, rgb(240, 50, 180), transparent), radial-gradient(ellipse 52px 48px at 100% 27.1%, rgb(180, 40, 240), transparent);
-    overflow: hidden;
     isolation: isolate;
     animation: composer-beam-orbit 4.4s linear infinite;
   }
@@ -3052,7 +3051,7 @@
     --composer-beam-highlight: conic-gradient(from var(--composer-beam-angle), transparent 0% 54%, rgba(255, 255, 255, .1) 57%, rgba(255, 255, 255, .3) 60%, rgba(255, 255, 255, .6) 63%, rgba(255, 255, 255, .75) 66%, rgba(255, 255, 255, .6) 69%, rgba(255, 255, 255, .3) 72%, rgba(255, 255, 255, .1) 75%, transparent 78% 100%);
     --composer-beam-halo: conic-gradient(from var(--composer-beam-angle), transparent 0% 58%, rgba(255, 255, 255, .08) 65%, rgba(255, 255, 255, .45) 69%, rgba(255, 255, 255, .85) 70% 70.5%, rgba(255, 255, 255, .45) 71.5%, rgba(255, 255, 255, .08) 75%, transparent 82% 100%);
   }
-  .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom { position: absolute; inset: 0; border-radius: inherit; content: ""; pointer-events: none; animation: composer-beam-appear .6s ease-out both, composer-beam-hue 12s ease-in-out infinite; }
+  .composer-field.beam::before, .composer-field.beam::after, .composer-beam-bloom { position: absolute; inset: 0; border-radius: inherit; clip-path: inset(0 round var(--field-radius)); content: ""; pointer-events: none; animation: composer-beam-appear .6s ease-out both, composer-beam-hue 12s ease-in-out infinite; }
   .composer-field.beam::after {
     z-index: 2;
     padding: 1px;

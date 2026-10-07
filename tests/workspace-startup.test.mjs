@@ -122,7 +122,8 @@ test("window creation and hot database commands stay outside the UI thread", () 
 
 test("frontend acknowledgement is wired after sessions load and render", () => {
   const component = readFileSync(new URL("../src/lib/WorkspaceWindow.svelte", import.meta.url), "utf8");
-  assert.match(component, /if \(!\(await refresh\(\)\)\) throw new Error/);
+  assert.match(component, /const \[loadedPreferences, loadedSessions\] = await Promise\.all\(\[\s*loadPreferences\(\),\s*refresh\(\),\s*\]\)/);
+  assert.match(component, /if \(!loadedSessions\) throw new Error/);
   assert.match(component, /await tick\(\); await markWorkspaceFrontendReady\(\)/);
   assert.match(component, /startup\.dispose\(\)/);
 });

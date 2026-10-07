@@ -32,8 +32,15 @@ test("the menu lists what the agent reported, with /model owned by Lume", () => 
   ]);
   assert.equal(findSlashCommand(commands, "/model").action, "model");
   assert.equal(findSlashCommand(commands, "/code-review").argumentHint, "[low|high]");
-  assert.deepEqual(agentSlashCommands([], "antigravity"), []);
-  assert.equal(agentSlashCommands(claudeReported, "antigravity")[0].source, "agent");
+  const antigravity = agentSlashCommands([], "antigravity");
+  assert.deepEqual(antigravity.map((command) => [command.source, command.name]), [["lume", "model"]]);
+  assert.equal(antigravity[0].description, "Choose the model and permissions");
+  const reportedByAntigravity = agentSlashCommands(claudeReported, "antigravity");
+  assert.deepEqual(reportedByAntigravity.map((command) => [command.source, command.name]), [
+    ["lume", "model"],
+    ["agent", "compact"],
+    ["agent", "code-review"],
+  ]);
 });
 
 test("slash browses everything and dollar narrows to Codex skills", () => {

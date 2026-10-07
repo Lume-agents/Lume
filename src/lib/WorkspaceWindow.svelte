@@ -174,6 +174,7 @@
   const sidebarMotion = new WeakMap<HTMLElement, Animation>();
   let sidebarToggleBusy = false;
   const observedSubagentIds = new Map<string, Set<string>>();
+  let subagentRevision = $state(0);
   let error = $state("");
   let query = $state("");
   let searchOpen = $state(false);
@@ -460,6 +461,12 @@
     return Array.from(projects, ([value, label]) => ({ value, label })).sort((left, right) => left.label.localeCompare(right.label));
   });
   const projectSessions = $derived(projectFilter === "all" ? orderedSessions : orderedSessions.filter((session) => projectKey(session.workingDirectory ?? session.project) === projectFilter));
+  const subagentsBySession = $derived.by(() => {
+    // Expanding a parent records a recent interaction, which can keep completed
+    // children visible even when the session snapshot itself did not change.
+    void subagentRevision;
+    return new Map(sessions.map((session) => [session.id, subagentsForSession(session)]));
+  });
   const filteredSessions = $derived.by(() => {
     const needle = query.trim().toLocaleLowerCase();
     return projectSessions.filter((session) => {
@@ -473,7 +480,7 @@
         session.project,
         session.agentLabel,
         session.workingDirectory ?? "",
-        ...subagentsForSession(session).map((agent) => agent.label),
+        ...(subagentsBySession.get(session.id) ?? []).map((agent) => agent.label),
       ].some((value) => value.toLocaleLowerCase().includes(needle));
     });
   });
@@ -490,7 +497,7 @@
     const liveSessionIds = new Set(currentSessions.map((session) => session.id));
     const newlyActiveParents: string[] = [];
     for (const session of currentSessions) {
-      const children = subagentsForSession(session);
+      const children = subagentsBySession.get(session.id) ?? [];
       const observed = observedSubagentIds.get(session.id) ?? new Set<string>();
       if (children.some((child) => !observed.has(child.id) && (child.status === "running" || Date.now() - child.startedAt < 2_500))) {
         newlyActiveParents.push(session.id);
@@ -796,7 +803,8 @@
     if (next.has(session.id)) next.delete(session.id);
     else {
       next.add(session.id);
-      for (const child of subagentsForSession(session)) noteSubagentInteraction(child.id);
+      for (const child of subagentsBySession.get(session.id) ?? []) noteSubagentInteraction(child.id);
+      subagentRevision += 1;
     }
     expandedSubagentSessions = next;
   }
@@ -2062,6 +2070,8 @@
     const paneDragHost = workbenchElement;
     paneDragHost?.addEventListener("pointerdown", beginPaneHeaderGesture);
     let disposed = false;
+    let preferenceEventRevision = 0;
+    let conflictEventRevision = 0;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     let refreshPromise: Promise<boolean> | undefined;
     let refreshAgain = false;
@@ -2136,30 +2146,43 @@
     };
 
     void startup.run(async () => {
-      await startup.subscribe(() => watchShortcutRegistrationError((error) => {
-        if (startup.active) shortcutRegistrationError = error;
-      }));
-      await startup.subscribe(() => listen<ExternalWriterConflict[]>("lume://external-writer-conflicts-changed", ({ payload }) => {
-        externalWriterConflicts = Object.fromEntries(payload.map((conflict) => [conflict.sessionId, conflict]));
-      }));
+      await Promise.all([
+        startup.subscribe(() => watchShortcutRegistrationError((error) => {
+          if (startup.active) shortcutRegistrationError = error;
+        })),
+        startup.subscribe(() => listen<ExternalWriterConflict[]>("lume://external-writer-conflicts-changed", ({ payload }) => {
+          conflictEventRevision += 1;
+          externalWriterConflicts = Object.fromEntries(payload.map((conflict) => [conflict.sessionId, conflict]));
+        })),
+        startup.subscribe(() => listen("lume://sessions-changed", queueRefresh)),
+        startup.subscribe(() => listen<Preferences>("lume://preferences-changed", ({ payload }) => {
+          preferenceEventRevision += 1;
+          preferences = payload;
+          language = payload.language;
+        })),
+      ]);
       if (!startup.active) return;
-      try {
-        const conflicts = await listExternalWriterConflicts();
-        externalWriterConflicts = Object.fromEntries(conflicts.map((conflict) => [conflict.sessionId, conflict]));
-      } catch {
-        // Older app processes may not expose the conflict query yet; live events still work.
+      const conflictRevisionAtRequest = conflictEventRevision;
+      void listExternalWriterConflicts()
+        .then((conflicts) => {
+          if (startup.active && conflictEventRevision === conflictRevisionAtRequest) {
+            externalWriterConflicts = Object.fromEntries(conflicts.map((conflict) => [conflict.sessionId, conflict]));
+          }
+        })
+        .catch(() => {
+          // Older app processes may not expose the conflict query yet; live events still work.
+        });
+      const preferenceRevisionAtRequest = preferenceEventRevision;
+      const [loadedPreferences, loadedSessions] = await Promise.all([
+        loadPreferences(),
+        refresh(),
+      ]);
+      if (!startup.active) return;
+      if (preferenceEventRevision === preferenceRevisionAtRequest) {
+        preferences = loadedPreferences;
+        language = loadedPreferences.language;
       }
-      const loadedPreferences = await loadPreferences();
-      if (!startup.active) return;
-      preferences = loadedPreferences;
-      language = loadedPreferences.language;
-      await startup.subscribe(() => listen("lume://sessions-changed", queueRefresh));
-      await startup.subscribe(() => listen<Preferences>("lume://preferences-changed", ({ payload }) => {
-        preferences = payload;
-        language = payload.language;
-      }));
-      if (!startup.active) return;
-      if (!(await refresh())) throw new Error(error || tr("Could not load your sessions", "Não foi possível carregar suas sessões"));
+      if (!loadedSessions) throw new Error(error || tr("Could not load your sessions", "Não foi possível carregar suas sessões"));
     }, {
       onLoaded: () => { loading = false; },
       onError: (reason) => { error = reason; },
@@ -2333,7 +2356,7 @@
         {/each}
       {:else if filteredSessions.length}
         {#each filteredSessions as session, index (session.id)}
-          {@const childAgents = subagentsForSession(session)}
+          {@const childAgents = subagentsBySession.get(session.id) ?? []}
           {@const waitingForChildren = parentWaitingForSubagents(session, childAgents)}
           {@const selected = currentPaneIds().includes(session.id)}
           <div class:focused={session.id === focusedPaneId} class:secondary-selected={selected && session.id !== focusedPaneId} class:connected={selected} class:connected-above={selected && index > 0 && currentPaneIds().includes(filteredSessions[index - 1].id)} class:connected-below={selected && index < filteredSessions.length - 1 && currentPaneIds().includes(filteredSessions[index + 1].id)} class="session-tree-item">

@@ -110,13 +110,25 @@ pub fn is_probe_process(pid: u32) -> bool {
 /// The `initialize` response (`commands`, `models`, `agents`...), cached per folder.
 pub fn initialize(working_directory: &str) -> Result<Value, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Value)>>> = OnceLock::new();
+    static PROBES: Mutex<()> = Mutex::new(());
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some((_, value)) = cache
+    let cached = || {
+        cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(working_directory).cloned())
+            .filter(|(created, _)| created.elapsed() < INITIALIZE_CACHE_TTL)
+            .map(|(_, value)| value)
+    };
+    if let Some(value) = cached() {
+        return Ok(value);
+    }
+    // Several panes opening at once ask the same thing: one probe runs, the others wait
+    // for it and read its answer from the cache.
+    let _probe = PROBES
         .lock()
-        .ok()
-        .and_then(|cache| cache.get(working_directory).cloned())
-        .filter(|(created, _)| created.elapsed() < INITIALIZE_CACHE_TTL)
-    {
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(value) = cached() {
         return Ok(value);
     }
     let value = request(working_directory, &["initialize"])?

@@ -44,6 +44,7 @@ import type {
   WorkflowRun,
 } from "$lib/domain";
 import { demoHistory, demoSessions } from "$lib/demo";
+import type { AgentSlashCommand } from "$lib/slashCommands";
 
 const inDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -153,6 +154,16 @@ export interface WorkspacePromptIndexEntry {
   id: string;
   createdAt: number;
   detail: string;
+}
+
+export interface PathMention {
+  path: string;
+  isDirectory: boolean;
+}
+
+/** Files and folders under the session folder that match an `@` mention. */
+export async function searchSessionPaths(sessionId: string, query: string): Promise<PathMention[]> {
+  return invoke<PathMention[]>("search_session_paths", { sessionId, query });
 }
 
 export async function loadWorkspacePromptIndexPage(
@@ -352,6 +363,8 @@ export interface CodexReasoningEffortOption {
 }
 
 export interface CodexModelOption {
+  /** Claude Code only: whether the model can run in auto permission mode. */
+  supportsAutoMode?: boolean;
   model: string;
   displayName: string;
   description: string;
@@ -389,6 +402,10 @@ export async function setSessionCollaborationMode(
   return invoke<CollaborationMode>("set_session_collaboration_mode", { sessionId, mode });
 }
 
+export async function listSessionSlashCommands(sessionId: string): Promise<AgentSlashCommand[]> {
+  return invoke<AgentSlashCommand[]>("list_session_slash_commands", { sessionId });
+}
+
 export async function getSessionModelSettings(
   sessionId: string,
 ): Promise<CodexThreadModelSettings> {
@@ -415,18 +432,43 @@ export async function setSessionFastMode(sessionId: string, enabled: boolean): P
   return invoke<boolean>("set_session_fast_mode", { sessionId, enabled });
 }
 
+/** The models Claude Code offers and the model and effort this session runs with. */
+export interface ClaudeModelSettings {
+  model: string;
+  reasoningEffort?: string | null;
+  models: CodexModelOption[];
+}
+
+/** How an agent asks before acting: the modes on offer and the one in effect. */
+export interface PermissionSettings {
+  mode: string;
+  modes: string[];
+}
+
+/** Claude Code and Codex sessions; the modes differ per agent. */
+export async function getSessionPermissionMode(sessionId: string): Promise<PermissionSettings> {
+  return invoke<PermissionSettings>("get_session_permission_mode", { sessionId });
+}
+
+export async function setSessionPermissionMode(
+  sessionId: string,
+  mode: string,
+): Promise<PermissionSettings> {
+  return invoke<PermissionSettings>("set_session_permission_mode", { sessionId, mode });
+}
+
 export async function getClaudeSessionModelSettings(
   sessionId: string,
-): Promise<SessionModelOverride> {
-  return invoke<SessionModelOverride>("get_claude_session_model_settings", { sessionId });
+): Promise<ClaudeModelSettings> {
+  return invoke<ClaudeModelSettings>("get_claude_session_model_settings", { sessionId });
 }
 
 export async function setClaudeSessionModelSettings(
   sessionId: string,
   model?: string,
   effort?: string,
-): Promise<SessionModelOverride> {
-  return invoke<SessionModelOverride>("set_claude_session_model_settings", {
+): Promise<ClaudeModelSettings> {
+  return invoke<ClaudeModelSettings>("set_claude_session_model_settings", {
     sessionId,
     model: model || null,
     effort: effort || null,

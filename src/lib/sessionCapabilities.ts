@@ -22,6 +22,13 @@ export interface SessionCapabilities {
   promptDeliveries: PromptDelivery[];
 }
 
+/** A Claude conversation Lume owns: each message is its own run, so they can queue. */
+function claudeQueuesInLume(session: AgentSession) {
+  return session.agent === "claude_code"
+    && session.controlOrigin === "lume"
+    && ["cli", "desktop"].includes(session.source);
+}
+
 export function sessionCapabilities(session: AgentSession): SessionCapabilities {
   let promptUnavailableReason: PromptUnavailableReason | undefined;
   const promptIsRunning = ["running", "permission_required"].includes(session.status);
@@ -50,6 +57,7 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
       !promptUnavailableReason
       && promptIsRunning
       && !(session.agent === "codex" && session.controlOrigin === "lume")
+      && !claudeQueuesInLume(session)
     ) {
       promptUnavailableReason = "agent_busy";
     }
@@ -77,7 +85,7 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
       ["running", "permission_required"].includes(session.status)
       && session.controlOrigin === "lume"
       && ["codex", "claude_code"].includes(session.agent)
-      && (session.agent === "codex" ? session.source !== "web" : session.source === "cli")
+      && (session.agent === "codex" ? session.source !== "web" : ["cli", "desktop"].includes(session.source))
       && Boolean(session.nativeSessionId?.trim()),
     canTakeControl:
       session.controlOrigin === "external"
@@ -93,6 +101,9 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
       && session.source !== "web"
       && session.controlOrigin === "lume"
         ? ["new_turn", "steer", "queue"]
-        : ["new_turn"],
+        // For Claude, "steer" is send now: stop the running message and send the queued one.
+        : claudeQueuesInLume(session)
+          ? ["new_turn", "queue", "steer"]
+          : ["new_turn"],
   };
 }

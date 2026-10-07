@@ -10,10 +10,15 @@ export type AgentAlert = {
   duration: number;
   occurredAt: number;
   priority: number;
+  /** Usage notices live above the composer instead of the dismissible banners. */
+  usage?: boolean;
+  /** Stays on screen until the usage window resets. */
+  pinned?: boolean;
 };
 
 const RECENT_FAILURE_WINDOW = 10 * 60 * 1_000;
 const USAGE_WARNING_REMAINING = 20;
+const USAGE_PINNED_REMAINING = 10;
 
 function tr(language: Language, english: string, portuguese: string) {
   return language === "pt-BR" ? portuguese : english;
@@ -86,6 +91,8 @@ export function collectAgentAlerts(
         duration: exhausted ? 0 : 12_000,
         occurredAt: limit.resetsAt ?? now,
         priority: exhausted ? 100 : 70,
+        usage: true,
+        pinned: remaining < USAGE_PINNED_REMAINING,
       });
     }
 

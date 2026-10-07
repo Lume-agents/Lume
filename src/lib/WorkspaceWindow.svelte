@@ -2,6 +2,7 @@
   import { onMount, tick } from "svelte";
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
+  import { animatedDisclosure } from "$lib/animatedDisclosure";
   import { emit, listen } from "@tauri-apps/api/event";
   import { getVersion } from "@tauri-apps/api/app";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -13,6 +14,8 @@
   import AccentColorPicker from "$lib/AccentColorPicker.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
+  import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
+  import { agentConnectionMessage } from "$lib/agentConnection";
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import WorkspaceSidebarToggleIcon from "$lib/WorkspaceSidebarToggleIcon.svelte";
   import { copyResolvedColorTokens } from "$lib/floatingTheme";
@@ -118,9 +121,25 @@
   let settingsLoading = $state(false);
   let settingsSaving = $state(false);
   let settingsError = $state("");
+  let settingsSections = $state({
+    appearance: true,
+    preferences: false,
+    agents: false,
+    companions: false,
+    externalDetectors: false,
+    shortcuts: false,
+    projectProfiles: false,
+    remoteComputers: false,
+    mobileAccess: false,
+    reset: false,
+  });
+  let settingsDataLoadedAt = 0;
+  let settingsDataRequest: Promise<void> | null = null;
   let shortcutRegistrationError = $state<string | null>(null);
   let settingsMessage = $state("");
   let integrations = $state<IntegrationStatus[]>([]);
+  let connectionAgent = $state<IntegrationStatus["kind"] | null>(null);
+  let connectionMessage = $state("");
   let integrationDiagnostics = $state<Partial<Record<IntegrationStatus["kind"], IntegrationDiagnostic>>>({});
   let configuringIntegration = $state<IntegrationStatus["kind"] | null>(null);
   let diagnosingIntegration = $state<IntegrationStatus["kind"] | null>(null);
@@ -169,6 +188,7 @@
   let streamMessages = $state(true);
   let workspaceBackgroundImage = $state("");
   let workspaceBackgroundImageOpacity = $state(100);
+  let agentMessageSurface = $state(true);
   let workspaceBackgroundInput = $state<HTMLInputElement | null>(null);
   let filter = $state<"all" | "active" | "attention">("all");
   let projectFilter = $state("all");
@@ -290,6 +310,7 @@
   const workspaceStreamMessagesKey = "lume:workspace-stream-messages:v1";
   const workspaceBackgroundImageKey = "lume:workspace-background-image:v1";
   const workspaceBackgroundImageOpacityKey = "lume:workspace-background-image-opacity:v1";
+  const agentMessageSurfaceKey = "lume:workspace-agent-message-surface:v1";
 
   function setStreamMessages(enabled: boolean) {
     streamMessages = enabled;
@@ -327,6 +348,8 @@
         if (dataUrl.length > 3_600_000) throw new Error("size");
         localStorage.setItem(workspaceBackgroundImageKey, dataUrl);
         workspaceBackgroundImage = dataUrl;
+        // A new image starts with readable agent messages; the user can turn it off.
+        setAgentMessageSurface(true);
         settingsMessage = tr("Workspace background updated.", "Fundo do Workspace atualizado.");
       } catch {
         settingsError = tr("This image could not be saved as a background.", "Não foi possível salvar esta imagem como fundo.");
@@ -348,6 +371,12 @@
     try { localStorage.removeItem(workspaceBackgroundImageKey); }
     catch { /* The background still resets for this window. */ }
     settingsMessage = tr("Custom background removed.", "Fundo personalizado removido.");
+  }
+
+  function setAgentMessageSurface(enabled: boolean) {
+    agentMessageSurface = enabled;
+    try { localStorage.setItem(agentMessageSurfaceKey, String(enabled)); }
+    catch { /* Keep the choice for this window. */ }
   }
 
   function setBackgroundImageOpacity(value: number) {
@@ -815,7 +844,9 @@
       launcherOpen = false;
     } catch (reason) {
       pendingOpenedSession = null;
-      launchError = String(reason).replace(/^Error:\s*/, "");
+      const connection = agentConnectionMessage(reason);
+      if (connection) { connectionAgent = agent; connectionMessage = connection; }
+      else launchError = String(reason).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
     }
@@ -858,7 +889,9 @@
       resumableSessions = [];
     } catch (reason) {
       pendingOpenedSession = null;
-      launchError = String(reason).replace(/^Error:\s*/, "");
+      const connection = agentConnectionMessage(reason);
+      if (connection) { connectionAgent = stored.agent; connectionMessage = connection; }
+      else launchError = String(reason).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
     }
@@ -1104,6 +1137,11 @@
     const pane = header.closest<HTMLElement>("[data-workspace-pane]");
     const sessionId = pane?.dataset.workspacePane;
     if (!sessionId || !currentPaneIds().includes(sessionId)) return;
+    if (isHeaderDoublePress(event)) {
+      event.preventDefault();
+      toggleWorkspaceMaximized();
+      return;
+    }
     const gesture: PaneHeaderGesture = {
       pointerId: event.pointerId,
       captureTarget: header,
@@ -1552,11 +1590,32 @@
     return `minmax(0, ${splitRatio * shared}fr) 7px minmax(0, ${(1 - splitRatio) * shared}fr) 7px minmax(0, ${tertiaryRatio}fr)`;
   }
 
+  // startDragging hands the press to the window manager, which can swallow the
+  // browser's dblclick, so a double press is recognized from the two pointerdowns.
+  let lastHeaderPress = { at: 0, x: 0, y: 0 };
+
+  function isHeaderDoublePress(event: PointerEvent) {
+    const double = event.timeStamp - lastHeaderPress.at < 420
+      && Math.hypot(event.clientX - lastHeaderPress.x, event.clientY - lastHeaderPress.y) < 6;
+    lastHeaderPress = double
+      ? { at: 0, x: 0, y: 0 }
+      : { at: event.timeStamp, x: event.clientX, y: event.clientY };
+    return double;
+  }
+
+  function toggleWorkspaceMaximized() {
+    void getCurrentWindow().toggleMaximize();
+  }
+
   function beginWorkspaceDrag(event: PointerEvent) {
     if (event.button !== 0) return;
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest("button, input, textarea, select, a, summary, .header-selectors, [role='button']")) return;
     event.preventDefault();
+    if (isHeaderDoublePress(event)) {
+      toggleWorkspaceMaximized();
+      return;
+    }
     void getCurrentWindow().startDragging();
   }
 
@@ -1606,39 +1665,59 @@
   }
 
   async function loadSettingsData() {
-    const results = await Promise.allSettled([
-      loadIntegrationStatuses(),
-      loadVscodeStatus(),
-      loadExternalPlugins(),
-      loadMobileGatewayStatus(),
-      loadPairedDevices(),
-      availableMonitors(),
-      getVersion(),
-    ]);
-    if (results[0].status === "fulfilled") integrations = results[0].value;
-    if (results[1].status === "fulfilled") vscodeStatus = results[1].value;
-    if (results[2].status === "fulfilled") externalPlugins = results[2].value;
-    if (results[3].status === "fulfilled") mobileStatus = results[3].value;
-    if (results[4].status === "fulfilled") pairedDevices = results[4].value;
-    if (results[5].status === "fulfilled") monitors = results[5].value.map((monitor, index) => ({
-      id: monitor.name ?? `monitor-${index}`,
-      label: monitor.name || `${tr("Monitor", "Monitor")} ${index + 1}`,
-    }));
-    if (results[6].status === "fulfilled") appVersion = results[6].value;
-    if (!selectedProfileKey) selectedProfileKey = detectedProjects[0]?.key ?? null;
+    if (settingsDataRequest) return settingsDataRequest;
+    if (Date.now() - settingsDataLoadedAt < 30_000) return;
+    settingsLoading = true;
+    const request = (async () => {
+      try {
+        const results = await Promise.allSettled([
+          loadIntegrationStatuses(),
+          loadVscodeStatus(),
+          loadExternalPlugins(),
+          loadMobileGatewayStatus(),
+          loadPairedDevices(),
+          availableMonitors(),
+          getVersion(),
+        ]);
+        if (results[0].status === "fulfilled") integrations = results[0].value;
+        if (results[1].status === "fulfilled") vscodeStatus = results[1].value;
+        if (results[2].status === "fulfilled") externalPlugins = results[2].value;
+        if (results[3].status === "fulfilled") mobileStatus = results[3].value;
+        if (results[4].status === "fulfilled") pairedDevices = results[4].value;
+        if (results[5].status === "fulfilled") monitors = results[5].value.map((monitor, index) => ({
+          id: monitor.name ?? `monitor-${index}`,
+          label: monitor.name || `${tr("Monitor", "Monitor")} ${index + 1}`,
+        }));
+        if (results[6].status === "fulfilled") appVersion = results[6].value;
+        if (!selectedProfileKey) selectedProfileKey = detectedProjects[0]?.key ?? null;
+        if (results.some((result) => result.status === "fulfilled")) settingsDataLoadedAt = Date.now();
+      } finally {
+        settingsLoading = false;
+      }
+    })();
+    settingsDataRequest = request;
+    try {
+      await request;
+    } finally {
+      if (settingsDataRequest === request) settingsDataRequest = null;
+    }
+  }
+
+  function closeSettings() {
+    settingsOpen = false;
+    settingsSections.remoteComputers = false;
+  }
+
+  function setSettingsSectionOpen(section: keyof typeof settingsSections, open: boolean) {
+    settingsSections[section] = open;
   }
 
   async function openSettings() {
     settingsOpen = true;
-    if (settingsLoading) return;
+    if (settingsLoading || Date.now() - settingsDataLoadedAt < 30_000) return;
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    if (!settingsOpen || settingsLoading) return;
-    settingsLoading = true;
-    try {
-      await loadSettingsData();
-    } finally {
-      settingsLoading = false;
-    }
+    if (!settingsOpen) return;
+    void loadSettingsData();
   }
 
   async function toggleIntegration(integration: IntegrationStatus) {
@@ -1915,6 +1994,8 @@
     catch { /* Use the default when local storage is unavailable. */ }
     try { workspaceBackgroundImage = localStorage.getItem(workspaceBackgroundImageKey) ?? ""; }
     catch { /* Keep the theme background when local storage is unavailable. */ }
+    try { agentMessageSurface = localStorage.getItem(agentMessageSurfaceKey) !== "false"; }
+    catch { /* Agent messages keep their surface by default. */ }
     try {
       const savedOpacity = Number(localStorage.getItem(workspaceBackgroundImageOpacityKey) ?? "100");
       workspaceBackgroundImageOpacity = Number.isFinite(savedOpacity) ? Math.max(0, Math.min(100, savedOpacity)) : 100;
@@ -1946,7 +2027,7 @@
         return;
       }
       if (event.key === "Escape" && settingsOpen) {
-        settingsOpen = false;
+        closeSettings();
         return;
       }
       if (event.key === "Escape" && maximizedPaneId) {
@@ -2109,6 +2190,7 @@
   class:searching={searchOpen}
   class:selecting={headerControl !== null}
   class="workspace terminal-window"
+  class:agent-message-surface={Boolean(workspaceBackgroundImage) && agentMessageSurface}
   data-appearance={appearance.theme}
   style:--lume-accent={appearance.accentCss}
   style:--lume-accent-strong={appearance.accentCss}
@@ -2170,7 +2252,7 @@
       {#if headerControl === null}
       <div class="header-utilities">
         <button class:active={inspectorOpen} class="inspector-button" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen} onclick={toggleInspector}><WorkspaceHeaderIcon name="inspector" /></button>
-        <button class:active={settingsOpen} class="settings-button" type="button" title={tr("Workspace settings", "Ajustes do Workspace")} aria-label={tr("Workspace settings", "Ajustes do Workspace")} aria-expanded={settingsOpen} onclick={() => settingsOpen ? (settingsOpen = false) : void openSettings()}><WorkspaceHeaderIcon name="settings" /></button>
+        <button class:active={settingsOpen} class="settings-button" type="button" title={tr("Workspace settings", "Ajustes do Workspace")} aria-label={tr("Workspace settings", "Ajustes do Workspace")} aria-expanded={settingsOpen} onclick={() => settingsOpen ? closeSettings() : void openSettings()}><WorkspaceHeaderIcon name="settings" /></button>
         <button class="compact-mode" type="button" title={tr("Return to Orb", "Voltar ao Orb")} aria-label={tr("Return to Orb", "Voltar ao Orb")} onclick={() => void returnToOrb()}><WorkspaceHeaderIcon name="orb" /></button>
       </div>
       {/if}
@@ -2270,7 +2352,7 @@
               <span class="session-icon"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName(session)} size={34} /><i class="session-status-dot status-{waitingForChildren ? 'subagents' : session.status}" aria-hidden="true"></i></span>
               <span class="session-copy">
                 <strong>{sessionName(session)}</strong>
-                <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{session.agentLabel} · {sessionSubtitle(session)}</span></small>
+                <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{session.agentLabel} · {sessionSubtitle(session)}</span>{#if session.forkedFrom}<span class="session-fork" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)} aria-label={tr("Fork", "Fork")}><LumeIcon name="fork" size={10} /></span>{/if}</small>
                 <em class="status-{waitingForChildren ? 'subagents' : session.status}"><i></i>{waitingForChildren ? tr("Waiting for subagents", "Aguardando subagentes") : statusLabel(session)}</em>
               </span>
             {#if childAgents.length}
@@ -2375,26 +2457,28 @@
     <div
       class="settings-scrim"
       role="presentation"
-      in:fade={{ duration: motionDuration(150) }}
-      out:fade={{ duration: motionDuration(110) }}
+      in:fade={{ duration: motionDuration(180) }}
+      out:fade={{ duration: motionDuration(120) }}
       onclick={(event) => {
-        if (event.target === event.currentTarget) settingsOpen = false;
+        if (event.target === event.currentTarget) closeSettings();
       }}
     >
-      <aside class="workspace-settings" aria-label={tr("Lume settings", "Ajustes do Lume")} aria-busy={settingsLoading} in:fly={{ x: 24, duration: motionDuration(220), easing: cubicOut }} out:fly={{ x: 18, duration: motionDuration(150), easing: cubicOut }}>
+      <aside class="workspace-settings" aria-label={tr("Lume settings", "Ajustes do Lume")} aria-busy={settingsLoading} in:fly={{ x: 22, duration: motionDuration(210), easing: cubicOut }} out:fly={{ x: 14, duration: motionDuration(140), easing: cubicOut }}>
         <header>
           <span>
             <strong>{tr("Settings", "Ajustes")}</strong>
             <small>{tr("Workspace and Lume preferences", "Preferências do Workspace e do Lume")}</small>
           </span>
-          <button type="button" aria-label={tr("Close settings", "Fechar ajustes")} onclick={() => (settingsOpen = false)}>
+          <button type="button" aria-label={tr("Close settings", "Fechar ajustes")} onclick={closeSettings}>
             <LumeIcon name="close" size={16} />
           </button>
         </header>
 
         <div class="settings-content">
-          <details class="settings-group" open>
+          <details class="settings-group" open={settingsSections.appearance} use:animatedDisclosure={(open) => setSettingsSectionOpen("appearance", open)}>
             <summary>{tr("Appearance", "Aparência")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.appearance}
             <div class="appearance-options" aria-label={tr("Color mode", "Modo de cores")}>
               {#each [
                 { id: "system", label: tr("System", "Sistema") },
@@ -2462,11 +2546,19 @@
                   oninput={(event) => setBackgroundImageOpacity(Number(event.currentTarget.value))}
                 />
               </label>
+              <label class="workspace-setting-row">
+                <span><strong>{tr("Agent message background", "Fundo nas mensagens do agente")}</strong><small>{tr("Keeps replies readable over the image", "Mantém as respostas legíveis sobre a imagem")}</small></span>
+                <input class="workspace-switch" type="checkbox" checked={agentMessageSurface} onchange={(event) => setAgentMessageSurface(event.currentTarget.checked)} />
+              </label>
             {/if}
+            {/if}
+            </div>
           </details>
 
-          <details class="settings-group compact-settings">
+          <details class="settings-group compact-settings" open={settingsSections.preferences} use:animatedDisclosure={(open) => setSettingsSectionOpen("preferences", open)}>
             <summary>{tr("Preferences", "Preferências")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.preferences}
             <label class="workspace-setting-row">
               <span><strong>{tr("Language", "Idioma")}</strong><small>{tr("Used across Lume", "Usado em todo o Lume")}</small></span>
               <LumeSelect
@@ -2527,10 +2619,14 @@
               <span><strong>{tr("Open sessions in", "Abrir sessões em")}</strong><small>{tr("Default launch target", "Destino padrão")}</small></span>
               <LumeSelect ariaLabel={tr("Session destination", "Destino das sessões")} value={preferences.launchTarget} options={[{ value: "auto", label: "Auto" }, { value: "terminal", label: "Terminal" }, { value: "vscode", label: "VS Code" }]} minWidth={112} onValueChange={(value) => void updatePreference("launchTarget", value as Preferences["launchTarget"])} />
             </label>
+            {/if}
+            </div>
           </details>
 
-          <details class="settings-group">
+          <details class="settings-group" open={settingsSections.agents} use:animatedDisclosure={(open) => setSettingsSectionOpen("agents", open)}>
             <summary>{tr("Agents", "Agentes")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.agents}
             {#each [
               { label: "", items: integrations.filter((integration) => integration.canLaunch) },
               { label: tr("Monitoring only", "Somente monitoramento"), items: integrations.filter((integration) => !integration.canLaunch) },
@@ -2554,10 +2650,14 @@
                 {/if}
               {/each}
             {/each}
+            {/if}
+            </div>
           </details>
 
-          <details class="settings-group">
+          <details class="settings-group" open={settingsSections.companions} use:animatedDisclosure={(open) => setSettingsSectionOpen("companions", open)}>
             <summary>{tr("Companions", "Companions")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.companions}
             <div class="integration-row">
               <span class="integration-icon"><BrandIcon name="vscode" size={18} /></span>
               <span><strong>VS Code Companion</strong><small>{vscodeStatus.detail}</small><small>{tr("Does not control Antigravity IDE or Gemini Code Assist chats.", "Não controla chats da IDE Antigravity nem do Gemini Code Assist.")}</small></span>
@@ -2568,10 +2668,14 @@
               <span><strong>Chrome, Edge & Brave</strong><small>{tr("Browser companion extension", "Extensão companion do navegador")}</small></span>
               <button type="button" onclick={() => void revealBrowserCompanion()}>{tr("Open", "Abrir")}</button>
             </div>
+            {/if}
+            </div>
           </details>
 
-          <details class="settings-group" data-external-detectors>
+          <details class="settings-group" data-external-detectors open={settingsSections.externalDetectors} use:animatedDisclosure={(open) => setSettingsSectionOpen("externalDetectors", open)}>
             <summary>{tr("External detectors", "Detectores externos")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.externalDetectors}
             {#each externalPlugins as plugin (plugin.id)}
               <div class="integration-row">
                 <span class="integration-icon"><BrandIcon name="unknown" size={17} /></span>
@@ -2585,10 +2689,14 @@
               <button type="button" disabled={installingPlugin} onclick={() => void addExternalPlugin()}>{installingPlugin ? "…" : tr("Install manifest", "Instalar manifesto")}</button>
               <button type="button" onclick={() => void revealPluginDirectory()}>{tr("Open detector folder", "Abrir pasta dos detectores")}</button>
             </div>
+            {/if}
+            </div>
           </details>
 
-          <details class="settings-group compact-settings">
+          <details class="settings-group compact-settings" open={settingsSections.shortcuts} use:animatedDisclosure={(open) => setSettingsSectionOpen("shortcuts", open)}>
             <summary>{tr("Keyboard shortcuts", "Atalhos de teclado")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.shortcuts}
             {#each [
               ["openShortcut", tr("Open Lume", "Abrir o Lume")],
               ["globalShortcut", tr("Command palette", "Paleta de comandos")],
@@ -2601,10 +2709,14 @@
                 <button class="shortcut-button" type="button" onclick={() => void openShortcutEditor(shortcut[0] as Exclude<typeof shortcutEditorKey, null>)}>{preferences[shortcut[0] as Exclude<typeof shortcutEditorKey, null>]}</button>
               </div>
             {/each}
+            {/if}
+            </div>
           </details>
 
-          <details class="settings-group compact-settings">
+          <details class="settings-group compact-settings" open={settingsSections.projectProfiles} use:animatedDisclosure={(open) => setSettingsSectionOpen("projectProfiles", open)}>
             <summary>{tr("Project profiles", "Perfis por projeto")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.projectProfiles}
             {#if detectedProjects.length}
               <label class="workspace-setting-row">
                 <span><strong>{tr("Project", "Projeto")}</strong></span>
@@ -2642,15 +2754,21 @@
             {:else}
               <p class="settings-empty">{tr("Profiles appear after a project is detected.", "Os perfis aparecem quando um projeto é detectado.")}</p>
             {/if}
+            {/if}
+            </div>
           </details>
 
-          <details class="settings-group" data-remote-nodes-section>
+          <details class="settings-group" data-remote-nodes-section open={settingsSections.remoteComputers} use:animatedDisclosure={(open) => setSettingsSectionOpen("remoteComputers", open)}>
             <summary>{tr("Remote computers", "Computadores remotos")}</summary>
-            <RemoteComputers language={preferences.language} dark={darkMode} />
+            <div class="settings-section-content">
+              {#if settingsSections.remoteComputers}<RemoteComputers language={preferences.language} dark={darkMode} />{/if}
+            </div>
           </details>
 
-          <details class="settings-group compact-settings">
+          <details class="settings-group compact-settings" open={settingsSections.mobileAccess} use:animatedDisclosure={(open) => setSettingsSectionOpen("mobileAccess", open)}>
             <summary>{tr("Mobile access", "Acesso mobile")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.mobileAccess}
             <label class="workspace-setting-row">
               <span><strong>{tr("Local network access", "Acesso na rede local")}</strong><small>{mobileStatus?.address || tr("Paired devices only", "Apenas dispositivos pareados")}</small></span>
               <input class="workspace-switch" type="checkbox" checked={mobileStatus?.networkReachable ?? false} disabled={mobileBusy} onchange={() => void toggleMobileAccess()} />
@@ -2667,6 +2785,8 @@
                 {/each}
               </div>
             {/each}
+            {/if}
+            </div>
           </details>
 
           <section class="settings-group about-settings">
@@ -2675,11 +2795,15 @@
             {#if updateDetail}<p>{updateDetail}</p>{/if}
           </section>
 
-          <details class="settings-group reset-group">
+          <details class="settings-group reset-group" open={settingsSections.reset} use:animatedDisclosure={(open) => setSettingsSectionOpen("reset", open)}>
             <summary>{tr("Reset", "Redefinir")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.reset}
             <div class="reset-control">
               {#if resetConfirming}<span>{tr("Restore every Lume setting?", "Restaurar todos os ajustes do Lume?")}</span><button type="button" onclick={() => resetConfirming = false}>{tr("Cancel", "Cancelar")}</button>{/if}
               <button class:danger={resetConfirming} type="button" onclick={() => void resetSettings()}>{resetConfirming ? tr("Confirm reset", "Confirmar redefinição") : tr("Reset settings", "Redefinir ajustes")}</button>
+            </div>
+            {/if}
             </div>
           </details>
 
@@ -2874,7 +2998,7 @@
     </section>
     <div class:open={inspectorOpen} class="inspector-shell" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
       {#if inspectorOpen}
-        <div class="inspector-content" in:fly={{ x: 18, duration: motionDuration(210), easing: cubicOut }} out:fly={{ x: 14, duration: motionDuration(145), easing: cubicOut }}>
+        <div class="inspector-content" in:fade={{ duration: motionDuration(140) }} out:fade={{ duration: motionDuration(100) }}>
           <WorkspaceInspector session={focusedSession} {language} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} />
         </div>
       {/if}
@@ -2896,6 +3020,9 @@
         <LumeIcon name="layout" size={15} />
       </div>
     {/if}
+  {/if}
+  {#if connectionAgent}
+    <AgentConnectionDialog agent={connectionAgent} message={connectionMessage} {language} onClose={() => { connectionAgent = null; }} />
   {/if}
 </main>
 
@@ -2999,7 +3126,7 @@
   .settings-group > summary::-webkit-details-marker { display: none; }
   .settings-group > summary::after { width: 7px; height: 7px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .55; transform: rotate(45deg) translate(-2px, 2px); transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .settings-group[open] > summary::after { transform: rotate(225deg) translate(-1px, 0); }
-  .settings-group[open] { padding-bottom: 18px; }
+  .settings-section-content { padding-bottom: 18px; }
   .settings-hint { margin: 2px 0 10px; color: var(--workspace-muted); font-size: 8px; line-height: 1.5; }
   .appearance-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
   .appearance-option { min-width: 0; padding: 7px; display: grid; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: transparent; cursor: pointer; text-align: left; transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
@@ -3139,6 +3266,7 @@
   .session-copy small { color: var(--workspace-muted); font-size: 8px; line-height: 1.3; }
   .session-copy .session-meta { display: flex; align-items: center; gap: 4px; }
   .session-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-meta .session-fork { flex: 0 0 auto; min-width: auto; display: inline-flex; color: var(--workspace-accent); }
   .session-copy em { display: flex; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 8px; font-style: normal; font-weight: 650; }
   .session-copy em i { width: 5px; height: 5px; border-radius: 50%; background: #8a9891; }
   .session-copy em.status-running i { background: #4d99cc; }.session-copy em.status-completed i { background: #4daa77; }.session-copy em.status-permission_required i { background: #d6a441; }.session-copy em.status-failed i { background: #c86662; }
@@ -3181,7 +3309,7 @@
   .session-context-actions .primary { color: var(--workspace-raised); background: var(--workspace-accent); }
   .session-context-actions .primary:hover { color: var(--workspace-raised); background: color-mix(in srgb, var(--workspace-accent) 84%, var(--workspace-strong)); }
   .session-context-actions button:disabled { opacity: .55; cursor: wait; }
-  .workspace-stage { position: relative; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 0px 0px; grid-template-rows: minmax(0, 1fr); overflow: hidden; background: transparent; transition: grid-template-columns 220ms cubic-bezier(.16, 1, .3, 1); }
+  .workspace-stage { position: relative; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 0px 0px; grid-template-rows: minmax(0, 1fr); overflow: hidden; background: transparent; transition: grid-template-columns 180ms cubic-bezier(.16, 1, .3, 1); }
   .workspace-stage.inspector-open { grid-template-columns: minmax(0, 1fr) clamp(270px, 23vw, 350px) 0px; }
   .workspace-stage.review-open { grid-template-columns: minmax(340px, 1fr) 0px clamp(460px, 46vw, 760px); }
   .workspace-stage.maximized { grid-template-columns: minmax(0, 1fr) 0px 0px; }
@@ -3268,7 +3396,7 @@
   .workspace.sidebar-collapsed .session-tree-item.focused::before { top: 10px; bottom: 10px; }
   @media (max-width: 1100px) {
     .workspace-stage.inspector-open { grid-template-columns: minmax(0, 1fr) 0px 0px; }
-    .inspector-shell { position: absolute; z-index: 34; top: 0; right: 0; bottom: 0; width: min(350px, calc(100% - 44px)); opacity: 0; transform: translateX(20px); transition: opacity 150ms ease, transform 210ms cubic-bezier(.16, 1, .3, 1); }
+    .inspector-shell { position: absolute; z-index: 34; top: 0; right: 0; bottom: 0; width: min(350px, calc(100% - 44px)); opacity: 0; transform: translateX(20px); transition: opacity 130ms ease, transform 170ms cubic-bezier(.16, 1, .3, 1); }
     .inspector-shell.open { opacity: 1; transform: translateX(0); box-shadow: -16px 0 40px rgba(4, 15, 9, .16); }
     .workspace-stage.review-open { grid-template-columns: minmax(300px, 1fr) 0px minmax(420px, 48vw); }
   }

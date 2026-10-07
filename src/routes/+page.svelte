@@ -40,6 +40,8 @@
   import LumeSelect from "$lib/LumeSelect.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
+  import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
+  import { agentConnectionMessage } from "$lib/agentConnection";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
@@ -208,6 +210,8 @@
   let launcherOpen = $state(false);
   let launching = $state<IntegrationStatus["kind"] | null>(null);
   let launchError = $state<string | null>(null);
+  let connectionAgent = $state<IntegrationStatus["kind"] | null>(null);
+  let connectionMessage = $state("");
   let resumeAgent = $state<IntegrationStatus["kind"] | null>(null);
   let resumableSessions = $state<ResumableSession[]>([]);
   let loadingResumeAgent = $state<IntegrationStatus["kind"] | null>(null);
@@ -2480,7 +2484,9 @@
       );
       launcherOpen = false;
     } catch (error) {
-      launchError = String(error).replace(/^Error:\s*/, "");
+      const connection = agentConnectionMessage(error);
+      if (connection) { connectionAgent = agent; connectionMessage = connection; }
+      else launchError = String(error).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
     }
@@ -2530,7 +2536,9 @@
       resumeAgent = null;
       resumableSessions = [];
     } catch (error) {
-      launchError = String(error).replace(/^Error:\s*/, "");
+      const connection = agentConnectionMessage(error);
+      if (connection) { connectionAgent = stored.agent; connectionMessage = connection; }
+      else launchError = String(error).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
     }
@@ -4317,6 +4325,9 @@
         </button>
       </footer>
     </section>
+  {/if}
+  {#if connectionAgent}
+    <AgentConnectionDialog agent={connectionAgent} message={connectionMessage} language={preferences.language} onClose={() => { connectionAgent = null; }} />
   {/if}
 </main>
 

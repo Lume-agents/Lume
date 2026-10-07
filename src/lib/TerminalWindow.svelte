@@ -10,6 +10,10 @@
   import type { HubSession, WorkItemStatus } from "$lib/hubProtocol";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import { claudeEffortForModel, claudeEffortValues, claudeModelOptions } from "$lib/claudeModels";
+  import { permissionDescription, permissionLabel } from "$lib/sessionPermissions";
+  import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
+  import { agentConnectionMessage, type ConnectableAgent } from "$lib/agentConnection";
   import { colorWithOpacity, normalizeAccentColor, normalizeAppearanceTheme, type AppearanceTheme } from "$lib/appearance";
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
   import CollapsibleUserMessage from "$lib/CollapsibleUserMessage.svelte";
@@ -61,6 +65,8 @@
   } from "$lib/handoff";
   import { sessionCapabilities } from "$lib/sessionCapabilities";
   import { resolveTerminalSession } from "$lib/sessionIdentity";
+  import { interruptNoticeText } from "$lib/interruptNotice";
+  import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
   import {
     orderTerminalsByPosition,
     orderWorkflowSteps,
@@ -75,7 +81,10 @@
     finishLayeredTerminalResize,
     getSessionCollaborationMode,
     getClaudeSessionModelSettings,
+    getSessionPermissionMode,
+    setSessionPermissionMode,
     getSessionModelSettings,
+    listSessionSlashCommands,
     interruptPrompt,
     loadDisplayBackend,
     loadPreferences,
@@ -113,6 +122,8 @@
     toggleTerminalGroupFullscreen,
     undockTerminalWindow,
     type CollaborationMode,
+    type PermissionSettings,
+    type CodexModelOption,
     type CodexThreadModelSettings,
     type DisplayBackend,
   } from "$lib/lume";
@@ -121,12 +132,6 @@
   const label = currentWindow.label;
   const isWindows = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
   type ResizeDirection = "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
-  type SlashCommand = {
-    name: string;
-    description: string;
-    source: "agent" | "lume";
-    action?: "model" | "plan" | "default" | "interrupt" | "steer" | "rename" | "detach" | "fullscreen" | "zoom-in" | "zoom-out" | "close";
-  };
   let windowState = $state<TerminalWindowState | null>(null);
   let session = $state<HubSession | null>(null);
   let initializationError = $state<string | null>(null);
@@ -139,6 +144,8 @@
   let fullscreen = $state(false);
   let promptAttachments = $state<PromptAttachmentInput[]>([]);
   let message = $state<string | null>(null);
+  let connectionRequired = $state<string | null>(null);
+  let dismissedConnectionError = $state("");
   type HandoffTarget = {
     terminal: TerminalWindowState;
     session: HubSession;
@@ -171,6 +178,9 @@
   let selectedEffort = $state("");
   let claudeModel = $state("");
   let claudeEffort = $state("");
+  let claudeModels = $state<CodexModelOption[]>([]);
+  let sessionPermission = $state<PermissionSettings | null>(null);
+  let permissionSaving = $state(false);
   let modelLoading = $state(false);
   let modelSaving = $state(false);
   let modelError = $state<string | null>(null);
@@ -375,7 +385,7 @@
     if (handoffError) items.push({ id: "handoff-error", message: handoffError, tone: "error", onDismiss: () => { handoffError = null; } });
     if (modelError) items.push({ id: "model-error", message: modelError, tone: "error", onDismiss: () => { modelError = null; } });
     for (const alert of agentAlerts) {
-      if (dismissedAgentAlertIds.includes(alert.id)) continue;
+      if (alert.usage || dismissedAgentAlertIds.includes(alert.id)) continue;
       items.push({
         id: alert.id,
         message: alert.message,
@@ -386,6 +396,19 @@
     }
     if (message) items.push({ id: "terminal-message", message, onDismiss: () => { message = null; } });
     return items;
+  });
+
+  // Usage notices sit above the composer with no close button: a low-usage one
+  // leaves on its own after a while; under 10% it stays until the window resets.
+  const usageNotices = $derived(
+    agentAlerts.filter((alert) => alert.usage && (alert.pinned || !dismissedAgentAlertIds.includes(alert.id))),
+  );
+
+  $effect(() => {
+    const timers = usageNotices
+      .filter((notice) => !notice.pinned)
+      .map((notice) => setTimeout(() => dismissAgentAlert(notice.id), notice.duration || 12_000));
+    return () => timers.forEach(clearTimeout);
   });
 
   function dismissAgentAlert(id: string) {
@@ -817,6 +840,13 @@
   );
   const queuedPrompts = $derived(pendingQueuedPrompts(session));
   const nextQueuedPrompt = $derived(queuedPrompts[0] ?? null);
+  // Claude's queue also waits after a cancel; the tray then sends the next message at once.
+  const canSendQueuedNow = $derived(
+    Boolean(
+      (canSendWhileRunning || (session?.agent === "claude_code" && !promptIsRunning && nextQueuedPrompt))
+      && capabilities?.promptDeliveries.includes("steer"),
+    ),
+  );
   const readyForPrompt = $derived(
     Boolean(
       session
@@ -828,172 +858,73 @@
     ),
   );
 
-  function slashCommandQuery() {
-    const value = prompt.trimStart();
-    if (!value.startsWith("/") || /\s/.test(value)) return null;
-    return value.slice(1).toLowerCase();
-  }
+  let agentCommands = $state<AgentSlashCommand[]>([]);
+  let agentCommandsLoading = $state(false);
+  let agentCommandsSessionId = "";
+  let agentCommandsFailedAt = 0;
 
-  const codexSlashCommands: Array<[string, string]> = [
-    ["model", "Choose the model and reasoning effort"],
-    ["fast", "Toggle the faster service tier"],
-    ["personality", "Choose how Codex communicates"],
-    ["permissions", "Change approval and sandbox permissions"],
-    ["plan", "Switch to Plan mode"],
-    ["goal", "View or manage the current task goal"],
-    ["status", "Show session configuration and token usage"],
-    ["usage", "Show account usage and rate limits"],
-    ["diff", "Show working tree changes"],
-    ["review", "Review the current working tree"],
-    ["mention", "Attach a file or folder to the prompt"],
-    ["compact", "Summarize the chat to free context"],
-    ["new", "Start a new chat"],
-    ["rename", "Rename the current chat"],
-    ["resume", "Resume a saved chat"],
-    ["fork", "Fork the current chat"],
-    ["side", "Start an ephemeral side chat"],
-    ["agent", "Switch between agent threads"],
-    ["ps", "Show background terminals"],
-    ["stop", "Stop background terminals"],
-    ["approve", "Retry a recent auto-review denial"],
-    ["experimental", "Configure experimental features"],
-    ["memories", "Configure memory use and generation"],
-    ["skills", "Browse and use skills"],
-    ["import", "Import setup and chats from Claude Code"],
-    ["ide", "Include current IDE context"],
-    ["apps", "Browse connected apps"],
-    ["plugins", "Browse and manage plugins"],
-    ["hooks", "View and manage lifecycle hooks"],
-    ["mcp", "List configured MCP tools"],
-    ["init", "Generate an AGENTS.md file"],
-    ["copy", "Copy the latest completed response"],
-    ["raw", "Toggle raw scrollback"],
-    ["clear", "Clear the terminal and start a new chat"],
-    ["archive", "Archive this session and exit"],
-    ["delete", "Permanently delete this session"],
-    ["statusline", "Configure status-line items"],
-    ["title", "Configure terminal title items"],
-    ["theme", "Choose the syntax theme"],
-    ["pets", "Choose or hide the terminal pet"],
-    ["keymap", "Configure TUI keyboard shortcuts"],
-    ["vim", "Toggle Vim mode"],
-    ["app", "Continue this session in the desktop app"],
-    ["feedback", "Send feedback to Codex"],
-    ["logout", "Sign out of Codex"],
-    ["quit", "Exit Codex"],
-  ];
-
-  const claudeSlashCommands: Array<[string, string]> = [
-    ["model", "Choose the Claude model"],
-    ["permissions", "View or update tool permissions"],
-    ["plan", "Enter plan mode"],
-    ["btw", "Ask a side question without interrupting the task"],
-    ["compact", "Compact the conversation context"],
-    ["context", "Inspect context usage"],
-    ["cost", "Show token usage and cost"],
-    ["diff", "Review changed files"],
-    ["doctor", "Check the Claude Code installation"],
-    ["hooks", "Manage lifecycle hooks"],
-    ["ide", "Manage the IDE integration"],
-    ["mcp", "Manage MCP servers"],
-    ["memory", "Edit project memory"],
-    ["review", "Review current changes"],
-    ["resume", "Resume another conversation"],
-    ["rename", "Rename the current conversation"],
-    ["status", "Show session status"],
-    ["vim", "Toggle Vim editing mode"],
-    ["clear", "Clear conversation history"],
-    ["help", "Show Claude Code help"],
-    ["exit", "Exit Claude Code"],
-  ];
-
-  const geminiSlashCommands: Array<[string, string]> = [
-    ["model", "Choose the Gemini model"],
-    ["memory", "Manage saved context"],
-    ["chat", "Manage conversation history"],
-    ["compress", "Compress the conversation context"],
-    ["directory", "Manage workspace directories"],
-    ["extensions", "Manage Gemini CLI extensions"],
-    ["mcp", "Manage MCP servers"],
-    ["settings", "Open Gemini CLI settings"],
-    ["stats", "Show session usage statistics"],
-    ["tools", "List available tools"],
-    ["help", "Show Gemini CLI help"],
-    ["clear", "Clear the screen and conversation"],
-    ["quit", "Exit Gemini CLI"],
-  ];
-
-  const antigravitySlashCommands: Array<[string, string]> = [
-    ["model", "Choose the Antigravity model"],
-    ["effort", "Choose the reasoning effort"],
-    ["resume", "Resume or switch conversations"],
-    ["tasks", "Inspect background tasks"],
-    ["permissions", "Review agent permissions"],
-    ["usage", "Inspect current usage"],
-    ["diff", "Review changed files"],
-    ["btw", "Add context without interrupting the task"],
-    ["hooks", "Manage lifecycle hooks"],
-    ["settings", "Open Antigravity settings"],
-    ["help", "Show Antigravity help"],
-    ["quit", "Exit Antigravity CLI"],
-  ];
-
-  function agentSlashCommands(): SlashCommand[] {
-    const catalog =
-      session?.agent === "codex"
-        ? codexSlashCommands
-        : session?.agent === "claude_code"
-          ? claudeSlashCommands
-          : session?.agent === "antigravity"
-            ? antigravitySlashCommands
-          : session?.agent === "gemini"
-            ? geminiSlashCommands
-            : [];
-    return catalog.map(([name, description]) => ({
-      name,
-      description,
-      source: ["codex", "claude_code"].includes(session?.agent ?? "") && name === "model" ? "lume" : "agent",
-      action: ["codex", "claude_code"].includes(session?.agent ?? "") && name === "model" ? "model" : undefined,
-    }));
-  }
+  $effect(() => {
+    const sessionId = session?.id;
+    if (!sessionId || slashCommandQuery(prompt) === null) return;
+    const retrying = agentCommandsFailedAt > 0 && Date.now() - agentCommandsFailedAt >= 3000;
+    if (sessionId === agentCommandsSessionId && !retrying) return;
+    agentCommandsSessionId = sessionId;
+    agentCommandsFailedAt = 0;
+    agentCommandsLoading = true;
+    agentCommands = [];
+    loadAgentSlashCommands(sessionId, listSessionSlashCommands)
+      .then((commands) => {
+        if (session?.id === sessionId) agentCommands = commands;
+      })
+      .catch(() => {
+        agentCommandsFailedAt = Date.now();
+      })
+      .finally(() => {
+        if (session?.id === sessionId) agentCommandsLoading = false;
+      });
+  });
 
   function availableSlashCommands(): SlashCommand[] {
-    const commands = agentSlashCommands();
+    const commands = agentSlashCommands(agentCommands, session?.agent);
     const lumeCommands: SlashCommand[] = [];
     if (session?.agent === "codex" && !promptIsRunning) {
-      lumeCommands.push({ name: "lume-default", description: "Switch Codex to Default mode", source: "lume", action: "default" });
+      lumeCommands.push(
+        { name: "lume-plan", description: "Switch Codex to Plan mode", source: "lume", prefix: "/", action: "plan" },
+        { name: "lume-default", description: "Switch Codex to Default mode", source: "lume", prefix: "/", action: "default" },
+      );
     }
     if (canInterruptRunningPrompt) {
-      lumeCommands.push({ name: "lume-interrupt", description: "Interrupt the current prompt", source: "lume", action: "interrupt" });
+      lumeCommands.push({ name: "lume-interrupt", description: "Interrupt the current prompt", source: "lume", prefix: "/", action: "interrupt" });
     }
     if (nextQueuedPrompt && canSendWhileRunning) {
-      lumeCommands.push({ name: "lume-steer", description: "Steer the next queued prompt now", source: "lume", action: "steer" });
+      lumeCommands.push({ name: "lume-steer", description: "Steer the next queued prompt now", source: "lume", prefix: "/", action: "steer" });
     }
     lumeCommands.push(
-      { name: "lume-rename", description: "Rename this session", source: "lume", action: "rename" },
-      { name: "lume-zoom-in", description: "Increase chat text size", source: "lume", action: "zoom-in" },
-      { name: "lume-zoom-out", description: "Decrease chat text size", source: "lume", action: "zoom-out" },
+      { name: "lume-rename", description: "Rename this session", source: "lume", prefix: "/", action: "rename" },
+      { name: "lume-zoom-in", description: "Increase chat text size", source: "lume", prefix: "/", action: "zoom-in" },
+      { name: "lume-zoom-out", description: "Decrease chat text size", source: "lume", prefix: "/", action: "zoom-out" },
     );
     if (windowState?.docked) {
-      lumeCommands.push({ name: "lume-detach", description: "Undock this terminal", source: "lume", action: "detach" });
+      lumeCommands.push({ name: "lume-detach", description: "Undock this terminal", source: "lume", prefix: "/", action: "detach" });
     }
-    lumeCommands.push({ name: "lume-fullscreen", description: fullscreen ? "Exit full screen" : "Enter full screen", source: "lume", action: "fullscreen" });
-    lumeCommands.push({ name: "lume-close", description: "Close this terminal", source: "lume", action: "close" });
+    lumeCommands.push({ name: "lume-fullscreen", description: fullscreen ? "Exit full screen" : "Enter full screen", source: "lume", prefix: "/", action: "fullscreen" });
+    lumeCommands.push({ name: "lume-close", description: "Close this terminal", source: "lume", prefix: "/", action: "close" });
     return [...commands, ...lumeCommands];
   }
 
   function filteredSlashCommands() {
-    const query = slashCommandQuery();
-    if (query === null || slashMenuDismissed) return [];
-    return availableSlashCommands().filter((command) =>
-      !query
-      || command.name.includes(query)
-      || command.description.toLowerCase().includes(query)
-    );
+    if (slashMenuDismissed) return [];
+    return filterSlashCommands(availableSlashCommands(), slashCommandQuery(prompt));
+  }
+
+  function slashMenuVisible() {
+    return !slashMenuDismissed
+      && slashCommandQuery(prompt) !== null
+      && (agentCommandsLoading || filteredSlashCommands().length > 0);
   }
 
   async function selectSlashCommand(command: SlashCommand) {
-    prompt = `/${command.name}`;
+    prompt = slashCommandText(command);
     slashCommandIndex = 0;
     slashMenuDismissed = true;
     await tick();
@@ -2431,9 +2362,7 @@
   }
 
   function effortValues() {
-    if (session?.agent === "claude_code") {
-      return ["", "low", "medium", "high", "xhigh", "max"];
-    }
+    if (session?.agent === "claude_code") return claudeEffortValues(claudeModels, claudeModel);
     return currentModelOption()?.supportedReasoningEfforts.map((effort) => effort.value) ?? [];
   }
 
@@ -2493,6 +2422,7 @@
     try {
       if (session.agent === "codex" || session.agent === "opencode") {
         modelSettings = await getSessionModelSettings(session.id);
+        if (session.agent === "codex") sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
         selectedModel = modelSettings.model;
         const option = currentModelOption();
         selectedEffort = modelSettings.reasoningEffort
@@ -2501,8 +2431,10 @@
           ?? "";
       } else {
         const settings = await getClaudeSessionModelSettings(session.id);
-        claudeModel = settings.model ?? "";
+        claudeModels = settings.models;
+        claudeModel = settings.model;
         claudeEffort = settings.reasoningEffort ?? "";
+        sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
       }
     } catch (error) {
       modelError = String(error).replace(/^Error:\s*/, "");
@@ -2510,6 +2442,19 @@
       modelLoading = false;
     }
     return true;
+  }
+
+  async function chooseSessionPermission(mode: string) {
+    if (!session || permissionSaving || mode === sessionPermission?.mode) return;
+    permissionSaving = true;
+    modelError = null;
+    try {
+      sessionPermission = await setSessionPermissionMode(session.id, mode);
+    } catch (error) {
+      modelError = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      permissionSaving = false;
+    }
   }
 
   async function saveModelSettings() {
@@ -2531,7 +2476,8 @@
           claudeModel.trim() || undefined,
           claudeEffort || undefined,
         );
-        claudeModel = settings.model ?? "";
+        claudeModels = settings.models;
+        claudeModel = settings.model;
         claudeEffort = settings.reasoningEffort ?? "";
       } else {
         return;
@@ -2569,14 +2515,11 @@
   }
 
   async function runSlashCommand(value: string) {
-    const command = value.trim().toLowerCase();
-    const selected = availableSlashCommands().find((item) => `/${item.name}` === command);
+    const selected = findSlashCommand(availableSlashCommands(), value);
     if (!selected) {
       return false;
     }
-    const action = selected.action
-      ?? (session?.agent === "codex" && selected.name === "plan" ? "plan" : undefined)
-      ?? (selected.name === "rename" ? "rename" : undefined);
+    const action = selected.action ?? (selected.name === "rename" ? "rename" : undefined);
     if (!action) return false;
     let handled = true;
     switch (action) {
@@ -2654,7 +2597,9 @@
       };
       await refresh();
     } catch (error) {
-      message = String(error).replace(/^Error:\s*/, "");
+      const connection = agentConnectionMessage(error);
+      connectionRequired = connection;
+      message = connection ? null : String(error).replace(/^Error:\s*/, "");
     } finally {
       sending = false;
     }
@@ -2682,7 +2627,7 @@
   }
 
   async function steerNextQueuedPrompt() {
-    if (!session || !nextQueuedPrompt || nextQueuedPrompt.kind !== "queued_prompt" || !canSendWhileRunning || steeringQueued) return;
+    if (!session || !nextQueuedPrompt || nextQueuedPrompt.kind !== "queued_prompt" || !canSendQueuedNow || steeringQueued) return;
     steeringQueued = true;
     message = null;
     try {
@@ -3354,7 +3299,7 @@
         onwheel={handleOutputWheel}
       >
         {#if activeTab === "chat"}
-          <p><span>$</span> {session.agentLabel.toLowerCase()} <i>{session.project}</i></p>
+          <p><span>$</span> {session.agentLabel.toLowerCase()} <i>{session.project}</i>{#if session.forkedFrom}<span class="fork-mark" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)}><LumeIcon name="fork" size={10} />fork</span>{/if}</p>
           <p class="status status-{session.status}"><span>&gt;</span> {displayText(language, session.statusLabel)}</p>
         {/if}
         {#if session.pendingQuestion}
@@ -3510,6 +3455,8 @@
                       </footer>
                     {/if}
                   </div>
+                {:else if item.kind === "interrupt"}
+                  <p class="interrupt-notice" role="status"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" /></svg>{interruptNoticeText(item.detail, tr)}<time>{activityTime(item.createdAt)}</time></p>
                 {:else if item.kind === "analysis" && item.detail}
                   <section class:running={item.status === "running"} class="reasoning-update">
                     <header>
@@ -3793,16 +3740,32 @@
               </div>
             </header>
 
+            {#snippet permissionSection()}
+              {#if sessionPermission}
+                <section class="model-settings-section claude-model-settings">
+                  <label>
+                    <span class="model-settings-label">{tr("Permissions", "Permissões")}</span>
+                    <LumeSelect value={sessionPermission.mode} disabled={permissionSaving || session?.controlOrigin !== "lume"}
+                      options={sessionPermission.modes.map((mode) => ({ value: mode, label: permissionLabel(mode, tr), description: permissionDescription(mode, tr) }))}
+                      ariaLabel={tr("Permissions", "Permissões")} minWidth={250} onValueChange={(value) => void chooseSessionPermission(value)} />
+                  </label>
+                  <small>{tr("Applies to the messages you send from Lume.", "Vale para as mensagens enviadas pelo Lume.")}</small>
+                </section>
+              {/if}
+            {/snippet}
             {#if modelLoading}
               <div class="model-settings-loading"><span></span>{tr("Loading available models…", "Carregando modelos disponíveis…")}</div>
             {:else if session.agent === "claude_code"}
               <section class="model-settings-section claude-model-settings">
                 <label>
                   <span class="model-settings-label">{tr("Model", "Modelo")}</span>
-                  <input bind:value={claudeModel} maxlength="128" placeholder={tr("Session default or model alias", "Padrão da sessão ou alias do modelo")} />
+                  <LumeSelect value={claudeModel} options={claudeModelOptions(claudeModels, tr)}
+                    ariaLabel={tr("Model", "Modelo")} minWidth={250} onValueChange={(value) => { claudeModel = value; claudeEffort = claudeEffortForModel(claudeModels, value, claudeEffort); }} />
                 </label>
-                <small>{tr("Use an alias such as sonnet or opus, or the full model name. Leave blank to keep the session default.", "Use um alias como sonnet ou opus, ou o nome completo. Deixe vazio para manter o padrão da sessão.")}</small>
+                <small>{tr("Choose an available model for the next prompt.", "Escolha um modelo para o próximo prompt.")}</small>
               </section>
+              {@render permissionSection()}
+              {#if effortValues().length}
               <section class="model-settings-section">
                 <span class="model-settings-label">{tr("Reasoning effort", "Nível de raciocínio")}<b>{effortLabel()}</b></span>
                 <div class="effort-slider">
@@ -3814,6 +3777,7 @@
                   </div>
                 </div>
               </section>
+              {/if}
             {:else if modelSettings}
               {#if promptIsRunning && session.agent === "codex"}
                 <p class="model-pending-note">{tr("Changes will be applied when this prompt finishes.", "As mudanças serão aplicadas quando este prompt terminar.")}</p>
@@ -3828,6 +3792,7 @@
                   {/each}
                 </div>
               </section>
+              {#if session.agent === "codex"}{@render permissionSection()}{/if}
 
               {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
                 <section class="model-settings-section">
@@ -3861,6 +3826,13 @@
         </div>
       {/if}
 
+      {#if usageNotices.length}
+        <div class="usage-notices" role="status" aria-live="polite">
+          {#each usageNotices as notice (notice.id)}
+            <p class="usage-notice tone-{notice.tone}" transition:slide={{ duration: reducedMotion ? 0 : 160, easing: cubicOut }}><LumeIcon name="warning" size={12} /><span>{notice.message}</span></p>
+          {/each}
+        </div>
+      {/if}
       <form
         class="terminal-composer"
         inert={modalOpen}
@@ -3885,13 +3857,16 @@
           onpointerup={endComposerResize}
           onpointercancel={endComposerResize}
         ><span></span></button>
-        {#if filteredSlashCommands().length}
+        {#if slashMenuVisible()}
           <div bind:this={slashCommandMenu} class="slash-command-menu" aria-label={tr("Slash commands", "Comandos com barra")} in:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 70 : 160, easing: cubicOut }} out:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 60 : 110, easing: cubicOut }}>
             <div class="slash-command-heading">
               <strong>{tr("Commands", "Comandos")}</strong>
               <small><kbd>↑↓</kbd> {tr("navigate", "navegar")} · <kbd>Enter</kbd> {tr("select", "selecionar")}</small>
             </div>
-            {#each filteredSlashCommands() as command, index (command.name)}
+            {#if agentCommandsLoading}
+              <p class="slash-command-loading">{tr(`Loading ${session.agentLabel} commands…`, `Carregando comandos do ${session.agentLabel}…`)}</p>
+            {/if}
+            {#each filteredSlashCommands() as command, index (`${command.source}:${command.prefix}${command.name}`)}
               <button
                 class:active={slashCommandIndex === index}
                 data-slash-index={index}
@@ -3899,8 +3874,8 @@
                 onmouseenter={() => (slashCommandIndex = index)}
                 onclick={() => void selectSlashCommand(command)}
               >
-                <code>/{command.name}</code>
-                <span>{command.description}<small>{command.source === "agent" ? session.agentLabel : "Lume"}</small></span>
+                <code>{command.prefix}{command.name}</code>
+                <span>{command.description}<small>{command.source === "agent" ? session.agentLabel : "Lume"}{command.argumentHint ? ` · ${command.argumentHint}` : ""}</small></span>
               </button>
             {/each}
           </div>
@@ -3937,7 +3912,7 @@
         {:else if nextQueuedPrompt}
           <button
             class="queued-prompt-tray"
-            disabled={steeringQueued || !canSendWhileRunning}
+            disabled={steeringQueued || !canSendQueuedNow}
             type="button"
             onclick={() => void steerNextQueuedPrompt()}
             aria-label={tr("Steer the next queued prompt now", "Enviar agora o próximo prompt da fila")}
@@ -3947,7 +3922,7 @@
               <small>{queuedPrompts.length > 1 ? tr(`${queuedPrompts.length} queued prompts`, `${queuedPrompts.length} prompts na fila`) : tr("Queued next", "Próximo na fila")}</small>
               <strong>{nextQueuedPrompt.detail || tr("Prompt with attached files", "Prompt com arquivos anexados")}</strong>
             </span>
-            <span class="queue-shortcut"><kbd>Tab</kbd><small>{steeringQueued ? tr("Steering…", "Enviando…") : tr("Steer now", "Enviar agora")}</small></span>
+            <span class="queue-shortcut"><kbd>Tab</kbd><small>{steeringQueued ? tr("Steering…", "Enviando…") : session.agent === "claude_code" && promptIsRunning ? tr("Interrupt and send", "Interromper e enviar") : tr("Send now", "Enviar agora")}</small></span>
           </button>
         {/if}
         <div class="composer-controls">
@@ -4078,6 +4053,11 @@
       <LumeLogo size={34} />
       <span>{tr("Connecting to session…", "Conectando à sessão…")}</span>
     </section>
+  {/if}
+  {#if session && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini"].includes(session.agent) && (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)))}
+    <AgentConnectionDialog agent={(session.agent === "claude_code" ? "claude" : session.agent) as ConnectableAgent}
+      message={connectionRequired ?? agentConnectionMessage(session.statusLabel) ?? ""} {language}
+      onClose={() => { dismissedConnectionError = session?.statusLabel ?? ""; connectionRequired = null; }} />
   {/if}
 </main>
 
@@ -4378,6 +4358,10 @@
   .chat-message { box-sizing: border-box; width: fit-content; min-width: 0; max-width: 94%; padding: 7px 8px; overflow: clip; overflow-clip-margin: 1px; border: 1px solid rgba(77, 104, 91, 0.09); border-radius: 9px; background: rgba(69, 99, 84, 0.035); }
   .chat-message.user-message { --message-collapse-surface: rgba(50, 145, 99, 0.075); --user-message-content-margin-top: 5px; --user-message-font: var(--chat-font-size)/1.5 "SFMono-Regular", Consolas, "Liberation Mono", monospace; --user-message-text: #4b5c54; --user-message-muted: #71837a; --user-message-accent: #2f8560; --user-message-summary-font: Inter, sans-serif; --user-message-action-font: Inter, sans-serif; margin-left: auto; border-bottom-right-radius: 3px; background: rgba(50, 145, 99, 0.075); }
   .chat-message.agent-message { margin-right: auto; border-bottom-left-radius: 3px; }
+  .interrupt-notice { width: fit-content; max-width: 100%; margin: 3px 0; padding: 3px 9px 3px 7px; display: flex; align-items: center; gap: 6px; border: 1px solid rgba(74, 107, 91, 0.14); border-radius: 999px; color: #6c7d75; background: rgba(74, 107, 91, 0.05); font: 680 var(--chat-small-font-size) Inter, sans-serif; }
+  .interrupt-notice svg { width: 9px; height: 9px; fill: #d85c64; }
+  .interrupt-notice time { margin-left: 4px; color: #93a19a; font-weight: 600; }
+  .terminal-window.dark .interrupt-notice { border-color: rgba(205, 222, 213, 0.12); color: #9eb0a7; background: rgba(205, 222, 213, 0.05); }
   .chat-message.agent-message.intervention-required { width: min(94%, 460px); border-color: rgba(190, 132, 42, 0.18); background: rgba(196, 139, 47, 0.025); }
   .chat-message header { display: flex; align-items: center; gap: 6px; }
   .chat-message header strong { min-width: 0; flex: 1; color: #4f685c; font: 750 var(--chat-small-font-size) Inter, sans-serif; }
@@ -4589,8 +4573,6 @@
   .model-settings-section { min-height: 0; display: grid; gap: 6px; }
   .model-settings-section:first-of-type { overflow: hidden; }
   .claude-model-settings label { display: grid; gap: 6px; }
-  .claude-model-settings input { box-sizing: border-box; width: 100%; min-height: 35px; padding: 0 9px; border: 1px solid rgba(72, 103, 88, 0.14); border-radius: 8px; outline: none; color: #40564b; background: rgba(76, 113, 95, 0.035); font: 650 var(--chat-small-font-size) Inter, sans-serif; }
-  .claude-model-settings input:focus { border-color: rgba(48, 139, 95, 0.52); box-shadow: 0 0 0 2px rgba(57, 143, 99, 0.08); }
   .claude-model-settings > small { color: #7b8982; font: 550 var(--chat-tiny-font-size)/1.4 Inter, sans-serif; }
   .model-settings-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #718078; font: 800 var(--chat-tiny-font-size) Inter, sans-serif; letter-spacing: 0.06em; text-transform: uppercase; }
   .model-settings-label b { padding: 2px 6px; border-radius: 999px; color: #3d8063; background: rgba(57, 143, 99, 0.09); font: 780 var(--chat-tiny-font-size) Inter, sans-serif; letter-spacing: 0; text-transform: capitalize; }
@@ -4602,7 +4584,8 @@
   .model-options button strong { min-width: 0; overflow: hidden; color: #40564b; font-size: var(--chat-small-font-size); text-overflow: ellipsis; white-space: nowrap; }
   .model-options button small { padding: 2px 4px; border-radius: 4px; color: #4c8067; background: rgba(63, 137, 101, 0.09); font: 750 var(--chat-tiny-font-size) Inter, sans-serif; }
   .effort-slider { display: grid; gap: 5px; }
-  .effort-slider input { width: 100%; height: 16px; margin: 0; accent-color: #3d8b64; cursor: pointer; }
+  .effort-slider input { width: 100%; height: 16px; margin: 0; accent-color: #3d8b64; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .effort-slider input:focus:not(:focus-visible) { outline: none; box-shadow: none; }
   .effort-scale { display: flex; align-items: center; justify-content: space-between; gap: 3px; }
   .effort-scale span { min-width: 0; color: #93a098; font: 650 calc(var(--chat-tiny-font-size) - 1px) Inter, sans-serif; text-transform: capitalize; transition: color 140ms ease, transform 140ms ease; }
   .effort-scale span.active { color: #397d5d; font-weight: 820; transform: translateY(-1px); }
@@ -4610,6 +4593,12 @@
   .model-settings-loading span { width: 16px; height: 16px; margin: 0 auto 4px; border: 2px solid rgba(61, 128, 99, 0.18); border-top-color: #3d8063; border-radius: 50%; animation: model-spin 0.8s linear infinite; }
   .model-pending-note { margin: 0; padding: 7px 9px; border-radius: 8px; color: #7b673e; background: rgba(190, 143, 62, .1); font: 650 var(--chat-tiny-font-size)/1.4 Inter, sans-serif; }
   @keyframes model-spin { to { transform: rotate(360deg); } }
+  .usage-notices { flex: 0 0 auto; padding: 6px 10px 0; display: grid; gap: 4px; }
+  .usage-notice { --notice-tone: #c78d35; margin: 0; padding: 6px 9px; display: flex; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--notice-tone) 32%, transparent); border-radius: 9px; color: #42534b; background: color-mix(in srgb, var(--notice-tone) 10%, transparent); font: 640 var(--chat-small-font-size)/1.35 Inter, sans-serif; }
+  .usage-notice.tone-error { --notice-tone: #c45f5b; }
+  .usage-notice :global(.lume-icon) { flex: 0 0 auto; color: var(--notice-tone); }
+  .terminal-window.dark .usage-notice { color: #c9d8d0; }
+  .terminal-window[data-appearance] .usage-notice { color: var(--dropdown-text); }
   .terminal-composer { position: relative; box-sizing: border-box; min-height: 63px; padding: 7px 8px 8px 10px; display: flex; flex: 0 0 auto; flex-direction: column; align-items: stretch; gap: 6px; border-top: 1px solid rgba(97, 119, 109, 0.11); }
   .composer-controls { min-width: 0; min-height: 0; display: flex; flex: 1; align-items: flex-end; gap: 6px; }
   .composer-leading-actions { position: relative; display: flex; flex: 0 0 auto; flex-direction: column; justify-content: flex-end; gap: 4px; }
@@ -4650,6 +4639,10 @@
   .terminal-composer .slash-command-menu > button { width: 100%; min-height: 35px; height: auto; padding: 5px 7px; display: grid; grid-template-columns: minmax(64px, auto) minmax(0, 1fr); align-items: center; gap: 8px; place-items: initial; border-radius: 7px; color: #63746c; background: transparent; text-align: left; }
   .terminal-composer .slash-command-menu > button:hover,
   .terminal-composer .slash-command-menu > button.active { color: #2e7657; background: rgba(54, 143, 97, 0.08); }
+  .terminal-output .fork-mark { margin-left: 7px; display: inline-flex; align-items: center; gap: 3px; color: #397d5d; font: 700 var(--chat-tiny-font-size) Inter, sans-serif; vertical-align: middle; }
+  .terminal-window.dark .terminal-output .fork-mark { color: #8dceb0; }
+  .terminal-window[data-appearance] .terminal-output .fork-mark { color: var(--dropdown-accent); }
+  .slash-command-loading { margin: 0; padding: 7px 8px; color: #8b9892; font: 650 var(--chat-small-font-size) Inter, sans-serif; }
   .slash-command-menu code { color: #397d5d; font: 750 var(--chat-small-font-size) "SFMono-Regular", Consolas, "Liberation Mono", monospace; white-space: nowrap; }
   .slash-command-menu button > span { min-width: 0; display: grid; gap: 2px; overflow: hidden; font: 620 var(--chat-small-font-size) Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
   .slash-command-menu button > span small { overflow: hidden; color: #8b9892; font: 650 var(--chat-tiny-font-size) Inter, sans-serif; text-overflow: ellipsis; text-transform: uppercase; }
@@ -4905,7 +4898,6 @@
   .terminal-window.dark .model-settings-label b { color: #8fd0af; background: rgba(91, 177, 136, 0.1); }
   .terminal-window.dark .effort-scale span { color: #71847a; }
   .terminal-window.dark .effort-scale span.active { color: #8fd0af; }
-  .terminal-window.dark .claude-model-settings input { color: #d0e1d8; border-color: rgba(205, 222, 213, 0.1); background: rgba(213, 233, 223, 0.035); }
   .terminal-window.dark .claude-model-settings > small { color: #91a299; }
   .terminal-window.dark .model-pending-note { color: #d5ba83; background: rgba(195, 145, 61, .11); }
   .terminal-window.dark .terminate-dialog .model-options > button { border-color: rgba(205, 222, 213, 0.08); background: rgba(213, 233, 223, 0.025); }
@@ -4927,6 +4919,7 @@
   .terminal-window.dark .terminal-composer .slash-command-menu > button:hover,
   .terminal-window.dark .terminal-composer .slash-command-menu > button.active { color: #98d3b7; background: rgba(91, 174, 132, 0.1); }
   .terminal-window.dark .slash-command-menu code { color: #8dceb0; }
+  .terminal-window.dark .slash-command-loading { color: #81938a; }
   .terminal-window.dark .terminal-composer .queued-prompt-tray { color: #a7bdcd; border-color: rgba(125, 166, 199, 0.13); background: rgba(91, 143, 184, 0.065); }
   .terminal-window.dark .terminal-composer .queued-prompt-tray:hover:not(:disabled) { border-color: rgba(128, 177, 216, 0.23); background: rgba(91, 143, 184, 0.1); }
   .terminal-window.dark .terminal-composer .queued-prompt-tray.read-only:hover { border-color: rgba(125, 166, 199, 0.13); background: rgba(91, 143, 184, 0.065); }
@@ -5121,6 +5114,7 @@
   .terminal-window[data-appearance] .workflow-role-menu small,
   .terminal-window[data-appearance] .composer-tools-menu small,
   .terminal-window[data-appearance] .slash-command-menu button > span small { color: var(--dropdown-muted); }
+  .terminal-window[data-appearance] .slash-command-loading { color: var(--dropdown-muted); }
   .terminal-window[data-appearance] .workflow-role-menu > button:hover,
   .terminal-window[data-appearance] .workflow-role-menu > button.active,
   .terminal-window[data-appearance] .terminal-composer .slash-command-menu > button:hover,

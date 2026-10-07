@@ -1,5 +1,10 @@
+import { tick } from "svelte";
+
 /** Keep native details/summary semantics while revealing its content smoothly. */
-export function animatedDisclosure(details: HTMLDetailsElement) {
+export function animatedDisclosure(
+  details: HTMLDetailsElement,
+  onOpenChange?: (open: boolean) => void,
+) {
   const summary = details.querySelector<HTMLElement>(":scope > summary");
   const content = details.querySelector<HTMLElement>(":scope > .settings-section-content");
   if (!summary || !content) return;
@@ -9,9 +14,17 @@ export function animatedDisclosure(details: HTMLDetailsElement) {
   let contentAnimation: Animation | undefined;
   let generation = 0;
   const originalOverflow = details.style.overflow;
+  let notifiedOpen = details.open;
+
+  function notify(open: boolean) {
+    if (open === notifiedOpen) return;
+    notifiedOpen = open;
+    onOpenChange?.(open);
+  }
 
   function settle(open: boolean) {
     details.open = open;
+    notify(open);
     heightAnimation?.cancel();
     contentAnimation?.cancel();
     heightAnimation = undefined;
@@ -19,7 +32,7 @@ export function animatedDisclosure(details: HTMLDetailsElement) {
     details.style.overflow = originalOverflow;
   }
 
-  function toggle(event: MouseEvent) {
+  async function toggle(event: MouseEvent) {
     if (!summary || !content || event.defaultPrevented || event.button !== 0) return;
     event.preventDefault();
     const current = ++generation;
@@ -35,11 +48,19 @@ export function animatedDisclosure(details: HTMLDetailsElement) {
     contentAnimation?.cancel();
 
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || !details.animate) {
+      details.open = targetOpen;
+      notify(targetOpen);
       settle(targetOpen);
       return;
     }
 
-    details.open = true;
+    if (targetOpen) {
+      details.open = true;
+      details.style.overflow = "hidden";
+      notify(true);
+      await tick();
+      if (current !== generation) return;
+    }
     const border = details.offsetHeight - details.clientHeight;
     const endHeight = summary!.getBoundingClientRect().height + border
       + (targetOpen ? content!.getBoundingClientRect().height : 0);
@@ -68,6 +89,7 @@ export function animatedDisclosure(details: HTMLDetailsElement) {
     if (heightAnimation) return;
     targetOpen = details.open;
     summary!.setAttribute("aria-expanded", String(targetOpen));
+    notify(targetOpen);
   }
   details.addEventListener("toggle", syncNativeState);
   return {

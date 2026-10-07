@@ -12,6 +12,7 @@
     | "copy"
     | "diff"
     | "file"
+    | "folder"
     | "image"
     | "inspector"
     | "layout"
@@ -27,6 +28,7 @@
     | "sources"
     | "fork"
     | "settings"
+    | "shield"
     | "goal"
     | "task-list"
     | "split"
@@ -149,6 +151,10 @@
     <path d="M7 7v4a3 3 0 0 0 3 3h5M9 9h4a4 4 0 0 0 4-4" />
   {:else if name === "file"}
     <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 13h6M9 17h4" />
+  {:else if name === "shield"}
+    <path d="M12 3.5 5 6v5.5c0 4.2 2.8 7.2 7 9 4.2-1.8 7-4.8 7-9V6z" /><path d="m9 12 2 2 4-4" />
+  {:else if name === "folder"}
+    <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2.5h7.5A2.5 2.5 0 0 1 21 10v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z" />
   {:else if name === "image"}
     <rect x="3" y="4" width="18" height="16" rx="3" />
     <circle cx="9" cy="9" r="1.6" />

@@ -11,6 +11,10 @@ export function permissionLabel(mode: string, translate: Translate): string {
     case "default": return translate("Normal", "Normal");
     case "acceptEdits": return translate("Accept edits", "Aceitar edições");
     case "plan": return translate("Plan", "Planejar");
+    case "agy_default": return translate("Antigravity default", "Padrão do Antigravity");
+    case "agy_accept_edits": return translate("Accept edits", "Aceitar edições");
+    case "agy_plan": return translate("Plan", "Planejar");
+    case "agy_allow_all": return translate("Allow all tools", "Permitir todas as ferramentas");
     case "auto":
     case "auto_review": return translate("Approve for me", "Aprovar por mim");
     case "bypassPermissions":
@@ -26,6 +30,10 @@ export function permissionDescription(mode: string, translate: Translate): strin
     case "default": return translate("Asks before edits and commands", "Pergunta antes de editar e de executar comandos");
     case "acceptEdits": return translate("Edits files freely, still asks for commands", "Edita arquivos sem perguntar e ainda pergunta pelos comandos");
     case "plan": return translate("Plans only, changes nothing", "Só planeja, não altera nada");
+    case "agy_default": return translate("Uses Antigravity CLI rules; interactive approvals are denied in Lume's headless chat", "Usa as regras da CLI; pedidos de aprovação interativa são negados no chat headless do Lume");
+    case "agy_accept_edits": return translate("Accepts file edits; commands still follow Antigravity rules", "Aceita edições de arquivos; comandos continuam seguindo as regras do Antigravity");
+    case "agy_plan": return translate("Plans with read-only tools and makes no changes", "Planeja com ferramentas somente de leitura e não altera arquivos");
+    case "agy_allow_all": return translate("Automatically approves every tool, including commands and file edits", "Aprova automaticamente todas as ferramentas, inclusive comandos e edições");
     case "auto": return translate("A classifier approves safe actions for you", "Um classificador aprova as ações seguras por você");
     case "auto_review": return translate("A reviewer approves safe requests for you", "Um revisor aprova os pedidos seguros por você");
     case "bypassPermissions":
@@ -37,6 +45,6 @@ export function permissionDescription(mode: string, translate: Translate): strin
 }
 
 export function permissionTone(mode: string): PermissionTone {
-  if (mode === "bypassPermissions" || mode === "full_access") return "danger";
-  return mode === "auto" || mode === "auto_review" ? "auto" : "normal";
+  if (mode === "bypassPermissions" || mode === "full_access" || mode === "agy_allow_all") return "danger";
+  return mode === "auto" || mode === "auto_review" || mode === "agy_accept_edits" ? "auto" : "normal";
 }

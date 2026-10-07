@@ -2398,7 +2398,7 @@
   }
 
   async function openModelDialog() {
-    if (!session || !["codex", "claude_code", "opencode"].includes(session.agent)) return false;
+    if (!session || !["codex", "claude_code", "opencode", "antigravity"].includes(session.agent)) return false;
     if (modelLoading || modelSaving) return true;
     composerToolsOpen = false;
     if (session.controlOrigin !== "lume") {
@@ -2420,7 +2420,12 @@
     modelError = null;
     modelSettings = null;
     try {
-      if (session.agent === "codex" || session.agent === "opencode") {
+      if (session.agent === "antigravity") {
+        sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
+        modelSettings = await getSessionModelSettings(session.id);
+        selectedModel = modelSettings.model;
+        selectedEffort = "";
+      } else if (session.agent === "codex" || session.agent === "opencode") {
         modelSettings = await getSessionModelSettings(session.id);
         if (session.agent === "codex") sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
         selectedModel = modelSettings.model;
@@ -2462,13 +2467,13 @@
     if (session.agent === "codex" && (!modelSettings || !selectedModel || !selectedEffort)) return;
     modelSaving = true;
     modelError = null;
-    const deferredUntilPromptEnds = session.agent === "codex" && promptIsRunning;
+    const deferredUntilPromptEnds = (session.agent === "codex" || session.agent === "antigravity") && promptIsRunning;
     try {
-      if (session.agent === "codex" || session.agent === "opencode") {
+      if (session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity") {
         modelSettings = await setSessionModelSettings(
           session.id,
           selectedModel,
-          selectedEffort,
+          session.agent === "antigravity" ? "" : selectedEffort,
         );
       } else if (session.agent === "claude_code") {
         const settings = await setClaudeSessionModelSettings(
@@ -3735,7 +3740,7 @@
                 <svg viewBox="0 0 24 24"><path d="M7 7.5 12 4l5 3.5v9L12 20l-5-3.5zM12 4v16m-5-3.5 5-3.5 5 3.5M7 7.5l5 3.5 5-3.5" /></svg>
               </span>
               <div>
-                <strong id="model-settings-title">{tr("Model and reasoning", "Modelo e raciocínio")}</strong>
+                <strong id="model-settings-title">{session.agent === "antigravity" ? tr("Model and permissions", "Modelo e permissões") : tr("Model and reasoning", "Modelo e raciocínio")}</strong>
                 <p>{tr("Next prompt", "Próximo prompt")}</p>
               </div>
             </header>
@@ -3743,7 +3748,7 @@
             {#if modelError}
               <div class="model-settings-error" role="alert">
                 <span>{modelError}</span>
-                {#if session.agent === "codex" && !modelLoading && !modelSettings}
+                {#if (session.agent === "codex" || session.agent === "antigravity") && !modelLoading && !modelSettings}
                   <button type="button" onclick={() => void openModelDialog()}>{tr("Retry", "Tentar novamente")}</button>
                 {/if}
               </div>
@@ -3763,6 +3768,7 @@
               {/if}
             {/snippet}
             {#if modelLoading}
+              {#if session.agent === "antigravity"}{@render permissionSection()}{/if}
               <div class="model-settings-loading"><span></span>{tr("Loading available models…", "Carregando modelos disponíveis…")}</div>
             {:else if session.agent === "claude_code"}
               <section class="model-settings-section claude-model-settings">
@@ -3787,8 +3793,25 @@
                 </div>
               </section>
               {/if}
+            {:else if session.agent === "antigravity"}
+              {#if modelSettings}
+                <section class="model-settings-section">
+                  <span class="model-settings-label">{tr("Model", "Modelo")}</span>
+                  <div class="model-options">
+                    {#each modelSettings.models as option (option.model)}
+                      <button class:active={selectedModel === option.model} type="button" onclick={() => chooseModel(option.model)} title={option.description}>
+                        <span><strong>{option.displayName}</strong>{#if option.isDefault}<small>{tr("Default", "Padrão")}</small>{/if}</span>
+                      </button>
+                    {/each}
+                  </div>
+                </section>
+                {#if promptIsRunning}
+                  <p class="model-pending-note">{tr("Changes will be applied when this prompt finishes.", "As mudanças serão aplicadas ao final deste prompt.")}</p>
+                {/if}
+              {/if}
+              {@render permissionSection()}
             {:else if modelSettings}
-              {#if promptIsRunning && session.agent === "codex"}
+              {#if promptIsRunning && (session.agent === "codex" || session.agent === "antigravity")}
                 <p class="model-pending-note">{tr("Changes will be applied when this prompt finishes.", "As mudanças serão aplicadas quando este prompt terminar.")}</p>
               {/if}
               <section class="model-settings-section">
@@ -3827,7 +3850,7 @@
 
             <footer>
               <button disabled={modelSaving} type="button" onclick={() => (modelDialogOpen = false)}>{tr("Cancel", "Cancelar")}</button>
-              <button class="takeover" disabled={modelLoading || modelSaving || (session.agent === "codex" && (!modelSettings || !selectedModel || !selectedEffort))} type="button" onclick={() => void saveModelSettings()}>
+              <button class="takeover" disabled={modelLoading || modelSaving || (session.agent === "codex" && (!modelSettings || !selectedModel || !selectedEffort)) || (session.agent === "antigravity" && !modelSettings)} type="button" onclick={() => void saveModelSettings()}>
                 {modelSaving ? tr("Saving…", "Salvando…") : tr("Save", "Salvar")}
               </button>
             </footer>
@@ -3977,10 +4000,10 @@
                       <span><strong>{tr("Agent mode", "Modo do agente")}</strong><small>{collaborationMode === "plan" ? "Plan" : "Default"}</small></span>
                     </button>
                   {/if}
-                  {#if ["codex", "claude_code", "opencode"].includes(session.agent)}
+                  {#if ["codex", "claude_code", "opencode", "antigravity"].includes(session.agent)}
                     <button type="button" role="menuitem" onclick={() => void openModelDialog()}>
                       <span class="tool-icon"><svg viewBox="0 0 20 20"><path d="M5 5.5 10 3l5 2.5v9L10 17l-5-2.5zM5 5.5l5 2.5 5-2.5M10 8v9" /></svg></span>
-                      <span><strong>{tr("Model and effort", "Modelo e effort")}</strong><small>{tr("Configure", "Configurar")}</small></span>
+                      <span><strong>{session.agent === "antigravity" ? tr("Model and permissions", "Modelo e permissões") : tr("Model and effort", "Modelo e effort")}</strong><small>{tr("Configure", "Configurar")}</small></span>
                       <svg class="tool-chevron" viewBox="0 0 20 20"><path d="m8 5 5 5-5 5" /></svg>
                     </button>
                   {/if}

@@ -429,8 +429,8 @@
     && session.capabilities.promptDeliveries.includes("steer")
   ));
   // Claude Code and Codex can change how they ask before acting, from Lume.
-  const supportsPermissionPicker = $derived(["claude_code", "codex"].includes(session.agent));
-  const supportsAgentControls = $derived(["codex", "claude_code", "opencode"].includes(session.agent));
+  const supportsPermissionPicker = $derived(["claude_code", "codex", "antigravity"].includes(session.agent));
+  const supportsAgentControls = $derived(["codex", "claude_code", "opencode", "antigravity"].includes(session.agent));
   let sourceEntryId = $state<string | null>(null);
   let actionNotice = $state("");
   let forkingEntryId = $state<string | null>(null);
@@ -1085,7 +1085,7 @@
   }
 
   async function fetchAgentControls() {
-      if (session.agent === "codex" || session.agent === "opencode") {
+      if (session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity") {
         const [mode, settings] = await Promise.all([
           session.agent === "codex" ? getSessionCollaborationMode(session.id) : Promise.resolve("default" as CollaborationMode),
           getSessionModelSettings(session.id),
@@ -1208,9 +1208,13 @@
     controlsSaving = true;
     controlsError = "";
     try {
-      if (session.agent === "codex" || session.agent === "opencode") {
-        if (!selectedModel || (session.agent === "codex" && !selectedEffort)) return;
-        const savedSettings = await setSessionModelSettings(session.id, selectedModel, selectedEffort);
+      if (session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity") {
+        if ((session.agent !== "antigravity" && !selectedModel) || (session.agent === "codex" && !selectedEffort)) return;
+        const savedSettings = await setSessionModelSettings(
+          session.id,
+          selectedModel,
+          session.agent === "antigravity" ? "" : selectedEffort,
+        );
         modelSettings = savedSettings;
         selectedModel = savedSettings.model;
         selectedEffort = savedSettings.reasoningEffort
@@ -2615,17 +2619,17 @@
       <div class="composer-tools">
         <div class="agent-controls" bind:this={controlsRoot}>
           <button class:active={controlsOpen} class="model-trigger" type="button"
-            aria-label={tr("Choose model and effort", "Escolher modelo e esforço")}
+            aria-label={session.agent === "antigravity" ? tr("Choose model and permissions", "Escolher modelo e permissões") : tr("Choose model and effort", "Escolher modelo e esforço")}
             aria-haspopup="dialog" aria-expanded={controlsOpen}
             onclick={() => void toggleAgentControls()}>
-            <span>{session.agent === "codex" || session.agent === "opencode"
+            <span>{session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity"
               ? (modelSettings?.models.find((option) => option.model === selectedModel)?.displayName || selectedModel || "Model")
               : (claudeModels.find((option) => option.model === claudeModel)?.displayName || claudeModel || tr("Model", "Modelo"))}</span>
             {#if session.agent === "codex" && fastMode}<span class="fast-indicator" title={tr("Fast mode is on", "Modo Fast ligado")}><WorkspaceChatIcon name="fast" size={13} active /></span>{/if}
             <LumeIcon name="chevron-down" size={12} />
           </button>
           {#if controlsOpen}
-            <section class="agent-controls-popover" aria-label={tr("Model and effort", "Modelo e esforço")}>
+            <section class="agent-controls-popover" aria-label={session.agent === "antigravity" ? tr("Model and permissions", "Modelo e permissões") : tr("Model and effort", "Modelo e esforço")}>
               {#if session.controlOrigin !== "lume"}
                 <p class="controls-note">{tr("Take control of this session to change its model.", "Assuma o controle desta sessão para mudar o modelo.")}</p>
               {:else if controlsLoading}
@@ -2650,7 +2654,7 @@
                     </button>
                   {/if}
                 {/snippet}
-                {#if session.agent === "codex" || session.agent === "opencode"}
+                {#if session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity"}
                   {#if modelSettings}
                     <div class="controls-model-row">
                       {@render modelResetButton()}
@@ -2692,7 +2696,7 @@
                     </div>
                   </div>
                 {/if}
-                {#if promptIsRunning && session.agent !== "opencode"}<p class="controls-note">{session.agent === "codex"
+                {#if promptIsRunning && session.agent !== "opencode"}<p class="controls-note">{session.agent === "codex" || session.agent === "antigravity"
                   ? tr("Changes made now will apply when this prompt finishes.", "Mudanças feitas agora serão aplicadas ao final deste prompt.")
                   : tr("Finish or interrupt the current prompt to apply changes.", "Finalize ou interrompa o prompt atual para aplicar mudanças.")}</p>{/if}
                 {#if controlsSaving}<p class="controls-saving" role="status">{tr("Saving…", "Salvando…")}</p>{/if}

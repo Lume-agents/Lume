@@ -87,6 +87,41 @@
     updatedAt: number;
   };
 
+  type SettingsSectionKey =
+    | "appearance"
+    | "preferences"
+    | "agents"
+    | "companions"
+    | "externalDetectors"
+    | "shortcuts"
+    | "projectProfiles"
+    | "remoteComputers"
+    | "mobileAccess"
+    | "about"
+    | "reset";
+  type SettingsDataResource =
+    | "integrations"
+    | "vscode"
+    | "externalPlugins"
+    | "mobileStatus"
+    | "pairedDevices"
+    | "monitors"
+    | "version";
+
+  const settingsSectionResources: Record<SettingsSectionKey, SettingsDataResource[]> = {
+    appearance: [],
+    preferences: ["monitors"],
+    agents: ["integrations"],
+    companions: ["vscode"],
+    externalDetectors: ["externalPlugins"],
+    shortcuts: [],
+    projectProfiles: ["integrations", "monitors"],
+    remoteComputers: [],
+    mobileAccess: ["mobileStatus", "pairedDevices"],
+    about: ["version"],
+    reset: [],
+  };
+
   type WorkspaceDropIntent = {
     kind: "insert" | "replace" | "move";
     index: number;
@@ -120,10 +155,11 @@
   let systemDark = $state(false);
   let settingsOpen = $state(false);
   let settingsLoading = $state(false);
+  let settingsLoadingSections = $state<SettingsSectionKey[]>([]);
   let settingsSaving = $state(false);
   let settingsError = $state("");
   let settingsSections = $state({
-    appearance: true,
+    appearance: false,
     preferences: false,
     agents: false,
     companions: false,
@@ -132,10 +168,13 @@
     projectProfiles: false,
     remoteComputers: false,
     mobileAccess: false,
+    about: false,
     reset: false,
   });
-  let settingsDataLoadedAt = 0;
-  let settingsDataRequest: Promise<void> | null = null;
+  const settingsResourceLoadedAt = new Map<SettingsDataResource, number>();
+  const settingsResourceRequests = new Map<SettingsDataResource, Promise<void>>();
+  const settingsSectionRequests = new Map<SettingsSectionKey, Promise<void>>();
+  let settingsResourceLoadingCount = 0;
   let shortcutRegistrationError = $state<string | null>(null);
   let settingsMessage = $state("");
   let integrations = $state<IntegrationStatus[]>([]);
@@ -1686,60 +1725,85 @@
     }
   }
 
-  async function loadSettingsData() {
-    if (settingsDataRequest) return settingsDataRequest;
-    if (Date.now() - settingsDataLoadedAt < 30_000) return;
+  async function loadSettingsResource(resource: SettingsDataResource) {
+    const inFlight = settingsResourceRequests.get(resource);
+    if (inFlight) return inFlight;
+    if (Date.now() - (settingsResourceLoadedAt.get(resource) ?? 0) < 30_000) return;
+
+    settingsResourceLoadingCount += 1;
     settingsLoading = true;
     const request = (async () => {
       try {
-        const results = await Promise.allSettled([
-          loadIntegrationStatuses(),
-          loadVscodeStatus(),
-          loadExternalPlugins(),
-          loadMobileGatewayStatus(),
-          loadPairedDevices(),
-          availableMonitors(),
-          getVersion(),
-        ]);
-        if (results[0].status === "fulfilled") integrations = results[0].value;
-        if (results[1].status === "fulfilled") vscodeStatus = results[1].value;
-        if (results[2].status === "fulfilled") externalPlugins = results[2].value;
-        if (results[3].status === "fulfilled") mobileStatus = results[3].value;
-        if (results[4].status === "fulfilled") pairedDevices = results[4].value;
-        if (results[5].status === "fulfilled") monitors = results[5].value.map((monitor, index) => ({
-          id: monitor.name ?? `monitor-${index}`,
-          label: monitor.name || `${tr("Monitor", "Monitor")} ${index + 1}`,
-        }));
-        if (results[6].status === "fulfilled") appVersion = results[6].value;
+        switch (resource) {
+          case "integrations": integrations = await loadIntegrationStatuses(); break;
+          case "vscode": vscodeStatus = await loadVscodeStatus(); break;
+          case "externalPlugins": externalPlugins = await loadExternalPlugins(); break;
+          case "mobileStatus": mobileStatus = await loadMobileGatewayStatus(); break;
+          case "pairedDevices": pairedDevices = await loadPairedDevices(); break;
+          case "monitors": monitors = (await availableMonitors()).map((monitor, index) => ({
+            id: monitor.name ?? `monitor-${index}`,
+            label: monitor.name || `${tr("Monitor", "Monitor")} ${index + 1}`,
+          })); break;
+          case "version": appVersion = await getVersion(); break;
+        }
+        settingsResourceLoadedAt.set(resource, Date.now());
         if (!selectedProfileKey) selectedProfileKey = detectedProjects[0]?.key ?? null;
-        if (results.some((result) => result.status === "fulfilled")) settingsDataLoadedAt = Date.now();
+      } catch (reason) {
+        settingsError = String(reason).replace(/^Error:\s*/, "");
       } finally {
-        settingsLoading = false;
+        settingsResourceLoadingCount = Math.max(0, settingsResourceLoadingCount - 1);
+        settingsLoading = settingsResourceLoadingCount > 0;
       }
     })();
-    settingsDataRequest = request;
+    settingsResourceRequests.set(resource, request);
     try {
       await request;
     } finally {
-      if (settingsDataRequest === request) settingsDataRequest = null;
+      if (settingsResourceRequests.get(resource) === request) settingsResourceRequests.delete(resource);
+    }
+  }
+
+  async function loadSettingsSectionData(section: SettingsSectionKey) {
+    const inFlight = settingsSectionRequests.get(section);
+    if (inFlight) return inFlight;
+    const resources = settingsSectionResources[section];
+    if (!resources.length) return;
+
+    settingsLoadingSections = [...settingsLoadingSections, section];
+    const request = Promise.all(resources.map(loadSettingsResource)).then(() => undefined);
+    settingsSectionRequests.set(section, request);
+    try {
+      await request;
+    } finally {
+      settingsLoadingSections = settingsLoadingSections.filter((item) => item !== section);
+      if (settingsSectionRequests.get(section) === request) settingsSectionRequests.delete(section);
     }
   }
 
   function closeSettings() {
     settingsOpen = false;
-    settingsSections.remoteComputers = false;
+    settingsSections = {
+      appearance: false,
+      preferences: false,
+      agents: false,
+      companions: false,
+      externalDetectors: false,
+      shortcuts: false,
+      projectProfiles: false,
+      remoteComputers: false,
+      mobileAccess: false,
+      about: false,
+      reset: false,
+    };
   }
 
-  function setSettingsSectionOpen(section: keyof typeof settingsSections, open: boolean) {
+  function setSettingsSectionOpen(section: SettingsSectionKey, open: boolean) {
     settingsSections[section] = open;
+    if (open) void loadSettingsSectionData(section);
   }
 
-  async function openSettings() {
+  function openSettings() {
     settingsOpen = true;
-    if (settingsLoading || Date.now() - settingsDataLoadedAt < 30_000) return;
-    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-    if (!settingsOpen) return;
-    void loadSettingsData();
   }
 
   async function toggleIntegration(integration: IntegrationStatus) {
@@ -2583,8 +2647,8 @@
               <span><strong>{tr("Dark workspace", "Workspace escuro")}</strong><small>{preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor ?? tr("Using the dark preset", "Usando o preset escuro")} · {workspaceCanvasOpacity}%</small></span>
               <AccentColorPicker value={preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor} opacity={workspaceCanvasOpacity} fallback={selectedAppearanceTheme.darkSurface} readyColors={["#0f1915", "#14231c", "#182116", "#101f28", "#1b1726", "#261a13", "#121916"]} minimumOpacity={35} {language} label={tr("Dark workspace background", "Fundo escuro do Workspace")} onValueChange={(color, opacity) => void savePreferencePatch({ workspaceDarkBackgroundColor: color, workspaceDarkBackgroundOpacity: opacity })} onReset={() => void savePreferencePatch({ workspaceDarkBackgroundColor: undefined, workspaceDarkBackgroundOpacity: 96, workspaceBackgroundColor: undefined })} />
             </div>
-            <div class="workspace-setting-row wallpaper-setting">
-              <span><strong>{tr("Background image", "Imagem de fundo")}</strong><small>{workspaceBackgroundImage ? tr("Stored locally on this device", "Salva localmente neste dispositivo") : tr("Add your own workspace backdrop", "Adicione um plano de fundo ao Workspace")}</small></span>
+            <div class="workspace-setting-row wallpaper-setting" data-tooltip={workspaceBackgroundImage ? tr("Stored locally on this device", "Salva localmente neste dispositivo") : tr("Add your own workspace backdrop", "Adicione um plano de fundo ao Workspace")}>
+              <span><strong>{tr("Background image", "Imagem de fundo")}</strong></span>
               {#if workspaceBackgroundImage}<i class="wallpaper-preview" style:background-image={`url("${workspaceBackgroundImage}")`} aria-hidden="true"></i>{/if}
               <div class="wallpaper-actions">
                 <button type="button" title={workspaceBackgroundImage ? tr("Change background image", "Trocar imagem de fundo") : tr("Choose background image", "Escolher imagem de fundo")} aria-label={workspaceBackgroundImage ? tr("Change background image", "Trocar imagem de fundo") : tr("Choose background image", "Escolher imagem de fundo")} onclick={() => workspaceBackgroundInput?.click()}><LumeIcon name="image" size={14} /></button>
@@ -2606,8 +2670,8 @@
                   oninput={(event) => setBackgroundImageOpacity(Number(event.currentTarget.value))}
                 />
               </label>
-              <label class="workspace-setting-row">
-                <span><strong>{tr("Agent message background", "Fundo nas mensagens do agente")}</strong><small>{tr("Keeps replies readable over the image", "Mantém as respostas legíveis sobre a imagem")}</small></span>
+              <label class="workspace-setting-row" data-tooltip={tr("Keeps replies readable over the image", "Mantém as respostas legíveis sobre a imagem")}>
+                <span><strong>{tr("Agent message background", "Fundo nas mensagens do agente")}</strong></span>
                 <input class="workspace-switch" type="checkbox" checked={agentMessageSurface} onchange={(event) => setAgentMessageSurface(event.currentTarget.checked)} />
               </label>
             {/if}
@@ -2619,8 +2683,9 @@
             <summary>{tr("Preferences", "Preferências")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.preferences}
-            <label class="workspace-setting-row">
-              <span><strong>{tr("Language", "Idioma")}</strong><small>{tr("Used across Lume", "Usado em todo o Lume")}</small></span>
+            {#if settingsLoadingSections.includes("preferences")}<p class="settings-loading-hint" role="status">{tr("Loading display information…", "Carregando informações de tela…")}</p>{/if}
+            <label class="workspace-setting-row" data-tooltip={tr("Used across Lume", "Usado em todo o Lume")}>
+              <span><strong>{tr("Language", "Idioma")}</strong></span>
               <LumeSelect
                 ariaLabel={tr("Language", "Idioma")}
                 value={preferences.language}
@@ -2629,8 +2694,8 @@
                 onValueChange={(value) => void updatePreference("language", value as Preferences["language"])}
               />
             </label>
-            <label class="workspace-setting-row">
-              <span><strong>{tr("Open Lume as", "Abrir o Lume como")}</strong><small>{tr("Default view for the next launch", "Visualização padrão da próxima abertura")}</small></span>
+            <label class="workspace-setting-row" data-tooltip={tr("Default view for the next launch", "Visualização padrão da próxima abertura")}>
+              <span><strong>{tr("Open Lume as", "Abrir o Lume como")}</strong></span>
               <LumeSelect
                 ariaLabel={tr("Default startup view", "Visualização inicial padrão")}
                 value={preferences.startupMode}
@@ -2643,40 +2708,40 @@
                 onValueChange={(value) => void updatePreference("startupMode", value as Preferences["startupMode"])}
               />
             </label>
-            <label class="workspace-setting-row">
-              <span><strong>{tr("Desktop notifications", "Notificações no desktop")}</strong><small>{tr("Alerts outside Lume", "Alertas fora do Lume")}</small></span>
+            <label class="workspace-setting-row" data-tooltip={tr("Alerts outside Lume", "Alertas fora do Lume")}>
+              <span><strong>{tr("Desktop notifications", "Notificações no desktop")}</strong></span>
               <input class="workspace-switch" type="checkbox" checked={preferences.popupNotificationsEnabled} disabled={settingsSaving} onchange={(event) => void updatePreference("popupNotificationsEnabled", event.currentTarget.checked)} />
             </label>
-            <label class="workspace-setting-row">
-              <span><strong>{tr("Stream agent messages", "Mensagens em Stream")}</strong><small>{tr("Reveal new replies as they arrive", "Mostra novas respostas à medida que chegam")}</small></span>
+            <label class="workspace-setting-row" data-tooltip={tr("Reveal new replies as they arrive", "Mostra novas respostas à medida que chegam")}>
+              <span><strong>{tr("Stream agent messages", "Mensagens em Stream")}</strong></span>
               <input class="workspace-switch" type="checkbox" checked={streamMessages} onchange={(event) => setStreamMessages(event.currentTarget.checked)} />
             </label>
-            <label class="workspace-setting-row">
-              <span><strong>{tr("Start with the system", "Iniciar com o sistema")}</strong><small>{tr("Keep Lume available", "Mantenha o Lume disponível")}</small></span>
+            <label class="workspace-setting-row" data-tooltip={tr("Keep Lume available", "Mantenha o Lume disponível")}>
+              <span><strong>{tr("Start with the system", "Iniciar com o sistema")}</strong></span>
               <input class="workspace-switch" type="checkbox" checked={preferences.autostart} disabled={settingsSaving} onchange={(event) => void updatePreference("autostart", event.currentTarget.checked)} />
             </label>
-            <label class="workspace-setting-row">
-              <span><strong>{tr("Subtle sounds", "Sons sutis")}</strong><small>{tr("Task and permission feedback", "Retorno de tarefas e permissões")}</small></span>
+            <label class="workspace-setting-row" data-tooltip={tr("Task and permission feedback", "Retorno de tarefas e permissões")}>
+              <span><strong>{tr("Subtle sounds", "Sons sutis")}</strong></span>
               <input class="workspace-switch" type="checkbox" checked={preferences.soundEnabled} disabled={settingsSaving} onchange={(event) => void updatePreference("soundEnabled", event.currentTarget.checked)} />
             </label>
             <label class="workspace-setting-row">
               <span><strong>{tr("Sound volume", "Volume dos sons")}</strong><small>{preferences.soundVolume}%</small></span>
               <input class="settings-range" aria-label={tr("Sound volume", "Volume dos sons")} type="range" min="0" max="100" step="5" disabled={!preferences.soundEnabled} value={preferences.soundVolume} onchange={(event) => void updatePreference("soundVolume", Number(event.currentTarget.value))} />
             </label>
-            <label class="workspace-setting-row">
-              <span><strong>{tr("Show over fullscreen", "Sobre tela cheia")}</strong><small>{tr("Keep Lume above fullscreen apps", "Mantém o Lume sobre apps em tela cheia")}</small></span>
+            <label class="workspace-setting-row" data-tooltip={tr("Keep Lume above fullscreen apps", "Mantém o Lume sobre apps em tela cheia")}>
+              <span><strong>{tr("Show over fullscreen", "Sobre tela cheia")}</strong></span>
               <input class="workspace-switch" type="checkbox" checked={preferences.showOverFullscreen} disabled={settingsSaving} onchange={(event) => void updatePreference("showOverFullscreen", event.currentTarget.checked)} />
             </label>
-            <label class="workspace-setting-row">
-              <span><strong>{tr("Monitor", "Monitor")}</strong><small>{tr("Primary display by default", "Tela principal por padrão")}</small></span>
+            <label class="workspace-setting-row" data-tooltip={tr("Primary display by default", "Tela principal por padrão")}>
+              <span><strong>{tr("Monitor", "Monitor")}</strong></span>
               <LumeSelect ariaLabel={tr("Monitor", "Monitor")} value={preferences.monitorId ?? ""} options={[{ value: "", label: tr("Primary", "Principal") }, ...monitors.map((monitor) => ({ value: monitor.id, label: monitor.label }))]} minWidth={128} onValueChange={(value) => void updatePreference("monitorId", value || undefined)} />
             </label>
-            <label class="workspace-setting-row">
-              <span><strong>{tr("History", "Histórico")}</strong><small>{tr("Local retention", "Retenção local")}</small></span>
+            <label class="workspace-setting-row" data-tooltip={tr("Local retention", "Retenção local")}>
+              <span><strong>{tr("History", "Histórico")}</strong></span>
               <LumeSelect ariaLabel={tr("History retention", "Retenção do histórico")} value={String(preferences.historyRetentionDays)} options={[{ value: "7", label: tr("7 days", "7 dias") }, { value: "30", label: tr("30 days", "30 dias") }, { value: "90", label: tr("90 days", "90 dias") }]} minWidth={112} onValueChange={(value) => void updatePreference("historyRetentionDays", Number(value))} />
             </label>
-            <label class="workspace-setting-row">
-              <span><strong>{tr("Open sessions in", "Abrir sessões em")}</strong><small>{tr("Default launch target", "Destino padrão")}</small></span>
+            <label class="workspace-setting-row" data-tooltip={tr("Default launch target", "Destino padrão")}>
+              <span><strong>{tr("Open sessions in", "Abrir sessões em")}</strong></span>
               <LumeSelect ariaLabel={tr("Session destination", "Destino das sessões")} value={preferences.launchTarget} options={[{ value: "auto", label: "Auto" }, { value: "terminal", label: "Terminal" }, { value: "vscode", label: "VS Code" }]} minWidth={112} onValueChange={(value) => void updatePreference("launchTarget", value as Preferences["launchTarget"])} />
             </label>
             {/if}
@@ -2687,6 +2752,7 @@
             <summary>{tr("Agents", "Agentes")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.agents}
+            {#if settingsLoadingSections.includes("agents")}<p class="settings-loading-hint" role="status">{tr("Loading agent integrations…", "Carregando integrações de agentes…")}</p>{/if}
             {#each [
               { label: "", items: integrations.filter((integration) => integration.canLaunch) },
               { label: tr("Monitoring only", "Somente monitoramento"), items: integrations.filter((integration) => !integration.canLaunch) },
@@ -2718,6 +2784,7 @@
             <summary>{tr("Companions", "Companions")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.companions}
+            {#if settingsLoadingSections.includes("companions")}<p class="settings-loading-hint" role="status">{tr("Loading companions…", "Carregando companions…")}</p>{/if}
             <div class="integration-row">
               <span class="integration-icon"><BrandIcon name="vscode" size={18} /></span>
               <span><strong>VS Code Companion</strong><small>{vscodeStatus.detail}</small><small>{tr("Does not control Antigravity IDE or Gemini Code Assist chats.", "Não controla chats da IDE Antigravity nem do Gemini Code Assist.")}</small></span>
@@ -2736,6 +2803,7 @@
             <summary>{tr("External detectors", "Detectores externos")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.externalDetectors}
+            {#if settingsLoadingSections.includes("externalDetectors")}<p class="settings-loading-hint" role="status">{tr("Loading external detectors…", "Carregando detectores externos…")}</p>{/if}
             {#each externalPlugins as plugin (plugin.id)}
               <div class="integration-row">
                 <span class="integration-icon"><BrandIcon name="unknown" size={17} /></span>
@@ -2777,6 +2845,7 @@
             <summary>{tr("Project profiles", "Perfis por projeto")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.projectProfiles}
+            {#if settingsLoadingSections.includes("projectProfiles")}<p class="settings-loading-hint" role="status">{tr("Loading project options…", "Carregando opções do projeto…")}</p>{/if}
             {#if detectedProjects.length}
               <label class="workspace-setting-row">
                 <span><strong>{tr("Project", "Projeto")}</strong></span>
@@ -2829,6 +2898,7 @@
             <summary>{tr("Mobile access", "Acesso mobile")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.mobileAccess}
+            {#if settingsLoadingSections.includes("mobileAccess")}<p class="settings-loading-hint" role="status">{tr("Checking mobile access…", "Verificando acesso mobile…")}</p>{/if}
             <label class="workspace-setting-row">
               <span><strong>{tr("Local network access", "Acesso na rede local")}</strong><small>{mobileStatus?.address || tr("Paired devices only", "Apenas dispositivos pareados")}</small></span>
               <input class="workspace-switch" type="checkbox" checked={mobileStatus?.networkReachable ?? false} disabled={mobileBusy} onchange={() => void toggleMobileAccess()} />
@@ -2849,11 +2919,19 @@
             </div>
           </details>
 
-          <section class="settings-group about-settings">
-            <span><strong>Lume</strong><small>{tr("Version", "Versão")} {appVersion}</small></span>
-            {#if updateState === "available"}<button class="primary" type="button" onclick={() => void installUpdate()}>{tr("Update to", "Atualizar para")} {availableVersion}</button>{:else}<button type="button" disabled={["checking", "downloading", "ready"].includes(updateState)} onclick={() => void checkForUpdates()}>{updateState === "checking" ? "…" : tr("Check updates", "Verificar atualizações")}</button>{/if}
-            {#if updateDetail}<p>{updateDetail}</p>{/if}
-          </section>
+          <details class="settings-group" open={settingsSections.about} use:animatedDisclosure={(open) => setSettingsSectionOpen("about", open)}>
+            <summary>{tr("About Lume", "Sobre o Lume")}</summary>
+            <div class="settings-section-content">
+            {#if settingsSections.about}
+            {#if settingsLoadingSections.includes("about")}<p class="settings-loading-hint" role="status">{tr("Loading app information…", "Carregando informações do aplicativo…")}</p>{/if}
+            <section class="about-settings">
+              <span><strong>Lume</strong><small>{tr("Version", "Versão")} {appVersion}</small></span>
+              {#if updateState === "available"}<button class="primary" type="button" onclick={() => void installUpdate()}>{tr("Update to", "Atualizar para")} {availableVersion}</button>{:else}<button type="button" disabled={["checking", "downloading", "ready"].includes(updateState)} onclick={() => void checkForUpdates()}>{updateState === "checking" ? "…" : tr("Check updates", "Verificar atualizações")}</button>{/if}
+              {#if updateDetail}<p>{updateDetail}</p>{/if}
+            </section>
+            {/if}
+            </div>
+          </details>
 
           <details class="settings-group reset-group" open={settingsSections.reset} use:animatedDisclosure={(open) => setSettingsSectionOpen("reset", open)}>
             <summary>{tr("Reset", "Redefinir")}</summary>
@@ -3187,6 +3265,7 @@
   .settings-group > summary::after { width: 7px; height: 7px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .55; transform: rotate(45deg) translate(-2px, 2px); transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .settings-group[open] > summary::after { transform: rotate(225deg) translate(-1px, 0); }
   .settings-section-content { padding-bottom: 18px; }
+  .settings-loading-hint { margin: 3px 0 9px; color: var(--workspace-muted); font-size: 8px; line-height: 1.4; }
   .settings-hint { margin: 2px 0 10px; color: var(--workspace-muted); font-size: 8px; line-height: 1.5; }
   .appearance-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
   .appearance-option { min-width: 0; padding: 7px; display: grid; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: transparent; cursor: pointer; text-align: left; transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
@@ -3212,8 +3291,8 @@
   .compact-settings { display: grid; }
   .workspace-setting-row { width: 100%; max-width: 100%; min-width: 0; min-height: 53px; display: flex; align-items: center; gap: 14px; overflow: hidden; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 62%, transparent); }
   .workspace-setting-row:last-child { border-bottom: 0; }
-  .workspace-setting-row > span { min-width: 0; flex: 1; display: grid; gap: 3px; }
-  .workspace-setting-row > span strong { color: var(--workspace-strong); font-size: 9px; font-weight: 730; }.workspace-setting-row > span small { color: var(--workspace-muted); font-size: 8px; line-height: 1.35; }
+  .workspace-setting-row > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
+  .workspace-setting-row > span strong { color: var(--workspace-strong); font-size: 10px; font-weight: 730; }.workspace-setting-row > span small { color: var(--workspace-muted); font-size: 8px; line-height: 1.35; }
   .workspace-switch { position: relative; width: 34px; height: 20px; flex: 0 0 auto; appearance: none; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); cursor: pointer; transition: border-color 140ms ease, background 180ms ease; }
   .workspace-switch::after { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: var(--workspace-muted); content: ""; transition: background 140ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1); }
   .workspace-switch:checked { border-color: transparent; background: var(--workspace-accent); }.workspace-switch:checked::after { background: #f7fbf8; transform: translateX(14px); }.workspace-switch:disabled { cursor: wait; opacity: .58; }

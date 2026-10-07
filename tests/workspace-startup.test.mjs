@@ -134,3 +134,25 @@ test("startup failure is visible in the Orb regardless of its active tab", () =>
   assert.match(orb, /workspaceOpenError = String\(reason\)[\s\S]*?startupChooserOpen = false/);
   assert.match(orb, /lume:\/\/workspace-open-failed/);
 });
+
+test("Workspace settings defer section content and native reads until expanded", () => {
+  const workspace = readFileSync(new URL("../src/lib/WorkspaceWindow.svelte", import.meta.url), "utf8");
+  assert.ok(/let settingsSections = \$state\(\{\s*appearance: false,[\s\S]*?about: false,[\s\S]*?reset: false/.test(workspace), "all settings sections start collapsed");
+  assert.ok(/function openSettings\(\) \{\s*settingsOpen = true;\s*\}/.test(workspace), "opening the drawer does not load section data");
+  assert.ok(/function closeSettings\(\) \{\s*settingsOpen = false;\s*settingsSections = \{\s*appearance: false,[\s\S]*?about: false,[\s\S]*?reset: false/.test(workspace), "reopening the drawer stays lightweight after a previous visit");
+  assert.ok(/function setSettingsSectionOpen\(section: SettingsSectionKey, open: boolean\) \{\s*settingsSections\[section\] = open;\s*if \(open\) void loadSettingsSectionData\(section\);/.test(workspace), "section data loads only when expanded");
+  assert.ok(/preferences: \["monitors"\],[\s\S]*?agents: \["integrations"\],[\s\S]*?companions: \["vscode"\],[\s\S]*?externalDetectors: \["externalPlugins"\],[\s\S]*?mobileAccess: \["mobileStatus", "pairedDevices"\]/.test(workspace), "native reads are mapped to their owning sections");
+  assert.ok(workspace.includes("{#if settingsSections.agents}") && workspace.includes("{#if settingsSections.about}"), "section bodies are conditionally mounted");
+  assert.ok(!workspace.includes("loadSettingsData()"), "the old eager settings load is removed");
+});
+
+test("Workspace setting explanations use the shared tooltip instead of a second text line", () => {
+  const workspace = readFileSync(new URL("../src/lib/WorkspaceWindow.svelte", import.meta.url), "utf8");
+  assert.ok(workspace.includes('data-tooltip={tr("Used across Lume", "Usado em todo o Lume")}'));
+  assert.ok(workspace.includes('data-tooltip={tr("Default view for the next launch", "Visualização padrão da próxima abertura")}'));
+  assert.ok(workspace.includes('data-tooltip={tr("Task and permission feedback", "Retorno de tarefas e permissões")}'));
+  assert.ok(workspace.includes('data-tooltip={tr("Primary display by default", "Tela principal por padrão")}'));
+  assert.ok(!workspace.includes('<small>{tr("Used across Lume", "Usado em todo o Lume")}</small>'));
+  assert.ok(!workspace.includes('<small>{tr("Default view for the next launch", "Visualização padrão da próxima abertura")}</small>'));
+  assert.ok(workspace.includes("font-size: 10px; font-weight: 730"), "setting names are more legible without their descriptions");
+});

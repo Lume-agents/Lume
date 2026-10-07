@@ -1119,6 +1119,31 @@ pub fn monitor_work_area(
     }
 }
 
+/// The Orb is sized in native pixels, but WebKitGTK lays the page out at `window / (Xft DPI / 96)`
+/// (GNOME's text scaling), so the page ended up taller than the window and the panel was cut.
+/// Zooming the page out by the same factor makes one CSS pixel one window pixel again.
+pub fn neutralize_text_scaling(window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::GtkSettingsExt;
+        let Some(settings) = gtk::Settings::default() else {
+            return;
+        };
+        let dpi = settings.gtk_xft_dpi();
+        if dpi <= 0 {
+            return;
+        }
+        let factor = f64::from(dpi) / 1024.0 / 96.0;
+        if (factor - 1.0).abs() > 0.01 {
+            let _ = window.set_zoom(1.0 / factor);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+    }
+}
+
 /// Whether the window was asked to take keyboard focus the way a window manager accepts.
 /// Only the XWayland fallback needs it; elsewhere the ordinary focus request is enough.
 pub fn activate_window(window: &tauri::WebviewWindow) -> bool {

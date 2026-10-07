@@ -4796,7 +4796,7 @@
   .final-response-body .final-response-copy { position: relative; top: auto; right: auto; margin: 0 0 5px auto; }
   .empty-session-actions button { min-height: 30px; padding: 5px 10px; border: 1px solid rgba(70, 109, 87, .3); border-radius: 7px; color: inherit; background: rgba(72, 131, 97, .08); font: 650 11px Inter, sans-serif; cursor: pointer; }
   .empty-session-actions button:hover { background: rgba(72, 131, 97, .16); }
-  .empty-session-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+  .empty-session-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 14px; }
   .session-details .permission-block, .session-details .question-block { margin: 0 0 14px; padding: 11px; border: 1px solid rgba(166, 122, 49, .28); border-radius: 10px; font-size: 12px; line-height: 1.5; }
   .session-details .permission-block code { max-height: 120px; overflow: auto; text-overflow: clip; white-space: pre-wrap; overflow-wrap: anywhere; }
   .session-details .permission-actions button, .session-details .question-actions button { min-height: 32px; font-size: 11px; }

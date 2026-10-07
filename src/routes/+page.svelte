@@ -1167,6 +1167,13 @@
       launcherOpen = false;
     }
     morphing = null;
+    if (opening) {
+      // Content can finish mounting while the morph is in progress, when the
+      // resize observer is intentionally paused. Re-measure once it is visible.
+      await tick();
+      const panel = document.querySelector<HTMLElement>(".panel");
+      if (panel) applyExpandedHeight(panel.offsetHeight, true);
+    }
   }
 
   async function animateCapsule(
@@ -1490,9 +1497,19 @@
   }
 
   function beginSessionRename(session: AgentSession) {
+    void bringOverlayToFront();
     renamingSessionId = session.id;
     renameDraft = sessionDisplayName(session);
     renameError = null;
+    void focusOrbField(".session-name-editor input", true);
+  }
+
+  async function focusOrbField(selector: string, selectText = false) {
+    await tick();
+    const field = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+    if (!field?.isConnected) return;
+    field.focus({ preventScroll: true });
+    if (selectText && field instanceof HTMLInputElement) field.select();
   }
 
   function cancelSessionRename() {
@@ -1562,10 +1579,15 @@
   }
 
   function toggleSessionComposer(session: AgentSession) {
-    composerSessionId = composerSessionId === session.id ? null : session.id;
+    const opening = composerSessionId !== session.id;
+    composerSessionId = opening ? session.id : null;
     composerPrompt = "";
     composerAttachments = [];
     composerMessage = null;
+    if (opening) {
+      void bringOverlayToFront();
+      void focusOrbField(".inline-composer textarea");
+    }
   }
 
   async function sendSessionPrompt(session: AgentSession) {

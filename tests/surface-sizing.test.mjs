@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { createSurfaceSizeQueue } from "../src/lib/surfaceSizing.ts";
 
@@ -33,4 +34,19 @@ test("recovers from one rejected resize without dropping a later size", async ()
   await assert.rejects(first, /GTK surface unavailable/);
   await second;
   assert.equal(calls, 2);
+});
+
+test("remeasures the expanded Orb after its opening morph completes", () => {
+  const orb = readFileSync(new URL("../src/routes/+page.svelte", import.meta.url), "utf8");
+  const toggleStart = orb.indexOf("async function toggleExpanded()");
+  const animateStart = orb.indexOf("async function animateCapsule(", toggleStart);
+  const toggle = orb.slice(toggleStart, animateStart);
+  assert.match(toggle, /morphing = null;[\s\S]*?if \(opening\) \{\s*(?:\/\/[^\n]*\n\s*)*await tick\(\);\s*const panel = document\.querySelector<HTMLElement>\("\.panel"\);\s*if \(panel\) applyExpandedHeight\(panel\.offsetHeight, true\);/);
+});
+
+test("Orb rename and continue controls request window focus and focus their mounted field", () => {
+  const orb = readFileSync(new URL("../src/routes/+page.svelte", import.meta.url), "utf8");
+  assert.match(orb, /function beginSessionRename\(session: AgentSession\) \{\s*void bringOverlayToFront\(\);[\s\S]*?void focusOrbField\("\.session-name-editor input", true\);/);
+  assert.match(orb, /function toggleSessionComposer\(session: AgentSession\) \{[\s\S]*?void bringOverlayToFront\(\);\s*void focusOrbField\("\.inline-composer textarea"\);/);
+  assert.match(orb, /async function focusOrbField\(selector: string, selectText = false\) \{\s*await tick\(\);[\s\S]*?field\.focus\(\{ preventScroll: true \}\);/);
 });

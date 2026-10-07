@@ -522,6 +522,56 @@ fn base_event(id: &str, event: HookEventKind) -> HookEvent {
     }
 }
 
+/// Reads stay `tool` on purpose: the UI treats `file` activities as edits
+/// and lists their paths among the turn's changed files.
+fn tool_activity(id: &str, step: &Value) -> SessionActivity {
+    let tool_name = step["tool_name"].as_str().unwrap_or("Ferramenta");
+    let tool_info = &step["tool_info"];
+    let params = &tool_info["parameters"];
+    let first_param = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| params[*key].as_str().filter(|value| !value.is_empty()))
+    };
+    let path = first_param(&["TargetFile", "AbsolutePath"]);
+    let edited_path = match tool_name {
+        "write_to_file" | "replace_file_content" => path,
+        _ => None,
+    };
+    let (kind, title) = match tool_name {
+        "run_command" => ("command", first_param(&["CommandLine", "toolSummary"])),
+        "manage_task" => ("tool", first_param(&["Action", "toolSummary"])),
+        _ if edited_path.is_some() => ("file", edited_path),
+        // Reads, and edits without a path: a summary must not pose as a file.
+        "view_file" | "write_to_file" | "replace_file_content" => {
+            ("tool", path.or_else(|| first_param(&["toolSummary"])))
+        }
+        _ => ("tool", first_param(&["toolSummary", "toolAction"])),
+    };
+    let title = title.unwrap_or(tool_name);
+    let done = step["state"].as_str() == Some("DONE");
+    let detail = tool_info["output"]
+        .as_str()
+        .filter(|output| done && !output.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            params
+                .as_object()
+                .filter(|params| !params.is_empty())
+                .and_then(|params| serde_json::to_string_pretty(params).ok())
+        });
+    SessionActivity {
+        id: format!("agy-tool:{id}:{}", step["step_index"].as_u64().unwrap_or(0)),
+        kind: kind.into(),
+        title: title.chars().take(180).collect(),
+        detail: detail.map(|text| text.chars().take(32 * 1024).collect()),
+        status: if done { "completed" } else { "running" }.into(),
+        created_at: now_millis(),
+        files: edited_path.map(str::to_string).into_iter().collect(),
+        attachments: Vec::new(),
+        append_detail: false,
+    }
+}
+
 fn read_stream(
     output: impl std::io::Read,
     init: mpsc::Sender<Result<String, String>>,
@@ -573,27 +623,7 @@ fn read_stream(
                             append_detail: true,
                         }
                     }
-                    Some("tool") => SessionActivity {
-                        id: format!("agy-tool:{id}:{}", step["step_index"].as_u64().unwrap_or(0)),
-                        kind: "tool".into(),
-                        title: step["tool_name"]
-                            .as_str()
-                            .unwrap_or("Ferramenta")
-                            .chars()
-                            .take(120)
-                            .collect(),
-                        detail: None,
-                        status: if step["state"].as_str() == Some("DONE") {
-                            "completed"
-                        } else {
-                            "running"
-                        }
-                        .into(),
-                        created_at: now_millis(),
-                        files: Vec::new(),
-                        attachments: Vec::new(),
-                        append_detail: false,
-                    },
+                    Some("tool") => tool_activity(id, step),
                     _ => continue,
                 };
                 let mut event = base_event(id, HookEventKind::Activity);
@@ -750,5 +780,162 @@ mod tests {
         assert_eq!(event.native_session_id.as_deref(), Some("conversation-1"));
         assert_eq!(event.control_origin, SessionControlOrigin::Lume);
         assert_eq!(event.source, Some(SessionSource::Desktop));
+    }
+
+    #[test]
+    fn finished_command_shows_command_line_and_output() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "step_type": "tool",
+                "step_index": 4,
+                "state": "DONE",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "parameters": { "CommandLine": "cargo test", "toolSummary": "Run tests" },
+                    "output": "test result: ok. 12 passed",
+                },
+            }),
+        );
+        assert_eq!(activity.id, "agy-tool:conversation-1:4");
+        assert_eq!(activity.kind, "command");
+        assert_eq!(activity.title, "cargo test");
+        assert_eq!(
+            activity.detail.as_deref(),
+            Some("test result: ok. 12 passed")
+        );
+        assert_eq!(activity.status, "completed");
+    }
+
+    #[test]
+    fn running_task_shows_action_and_parameters() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "step_index": 2,
+                "state": "ACTIVE",
+                "tool_name": "manage_task",
+                "tool_info": { "parameters": { "Action": "create", "TaskName": "Fix CI" } },
+            }),
+        );
+        assert_eq!(activity.kind, "tool");
+        assert_eq!(activity.title, "create");
+        assert_eq!(activity.status, "running");
+        let detail = activity.detail.expect("parameters are shown while running");
+        assert!(detail.contains("\"TaskName\": \"Fix CI\""), "{detail}");
+    }
+
+    #[test]
+    fn running_tool_ignores_partial_output() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "ACTIVE",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "parameters": { "CommandLine": "npm run build" },
+                    "output": "vite v6 building...",
+                },
+            }),
+        );
+        let detail = activity.detail.expect("parameters are shown while running");
+        assert!(detail.contains("npm run build"), "{detail}");
+        assert!(!detail.contains("building"), "{detail}");
+    }
+
+    #[test]
+    fn finished_task_shows_its_output() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "DONE",
+                "tool_name": "manage_task",
+                "tool_info": {
+                    "parameters": { "Action": "complete" },
+                    "output": "Task Fix CI completed",
+                },
+            }),
+        );
+        assert_eq!(activity.title, "complete");
+        assert_eq!(activity.detail.as_deref(), Some("Task Fix CI completed"));
+        assert_eq!(activity.status, "completed");
+    }
+
+    #[test]
+    fn file_edits_report_their_target() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "DONE",
+                "tool_name": "replace_file_content",
+                "tool_info": { "parameters": { "TargetFile": "/repo/src/lib.rs" } },
+            }),
+        );
+        assert_eq!(activity.kind, "file");
+        assert_eq!(activity.title, "/repo/src/lib.rs");
+        assert_eq!(activity.files, ["/repo/src/lib.rs"]);
+
+        let pathless = tool_activity(
+            "conversation-1",
+            &json!({
+                "tool_name": "write_to_file",
+                "tool_info": { "parameters": { "toolSummary": "Write notes" } },
+            }),
+        );
+        assert_eq!(pathless.kind, "tool");
+        assert_eq!(pathless.title, "Write notes");
+        assert!(pathless.files.is_empty());
+    }
+
+    #[test]
+    fn file_reads_are_not_reported_as_edits() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "DONE",
+                "tool_name": "view_file",
+                "tool_info": { "parameters": { "AbsolutePath": "/repo/README.md" } },
+            }),
+        );
+        assert_eq!(activity.kind, "tool");
+        assert_eq!(activity.title, "/repo/README.md");
+        assert!(activity.files.is_empty());
+    }
+
+    #[test]
+    fn unknown_tools_fall_back_to_summary_then_name() {
+        let summarized = tool_activity(
+            "conversation-1",
+            &json!({
+                "tool_name": "grep_search",
+                "tool_info": { "parameters": { "toolSummary": "Search for TODO" } },
+            }),
+        );
+        assert_eq!(summarized.title, "Search for TODO");
+        let bare = tool_activity("conversation-1", &json!({ "tool_name": "list_dir" }));
+        assert_eq!(bare.title, "list_dir");
+        assert_eq!(bare.detail, None);
+        let unnamed = tool_activity("conversation-1", &json!({}));
+        assert_eq!(unnamed.title, "Ferramenta");
+    }
+
+    #[test]
+    fn tool_detail_and_title_are_bounded() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "DONE",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "parameters": { "CommandLine": "x".repeat(500) },
+                    "output": "y".repeat(64 * 1024),
+                },
+            }),
+        );
+        assert_eq!(activity.title.chars().count(), 180);
+        assert_eq!(
+            activity.detail.map(|text| text.chars().count()),
+            Some(32 * 1024)
+        );
     }
 }

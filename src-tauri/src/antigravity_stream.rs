@@ -349,10 +349,11 @@ impl AntigravityStream {
                 detail
             });
         }
-        let mut models = parse_model_catalog(&String::from_utf8_lossy(&output.stdout));
-        if models.len() == 1 {
+        let listing = String::from_utf8_lossy(&output.stdout);
+        if parse_model_lines(&listing).is_empty() {
             return Err("A CLI do Antigravity não retornou modelos disponíveis".into());
         }
+        let mut models = parse_model_catalog(&listing, default_model_label().as_deref());
         models.sort_by(|left, right| {
             right
                 .is_default
@@ -376,15 +377,9 @@ impl AntigravityStream {
     }
 }
 
-fn parse_model_catalog(output: &str) -> Vec<CodexModelOption> {
-    let mut models = vec![CodexModelOption {
-        model: String::new(),
-        display_name: "Padrão do Antigravity".into(),
-        description: "Usa o modelo padrão configurado na CLI do Antigravity".into(),
-        is_default: true,
-        default_reasoning_effort: String::new(),
-        supported_reasoning_efforts: Vec::new(),
-    }];
+/// The `<id>\t<label>` lines of `agy models`, without headings or anything else.
+fn parse_model_lines(output: &str) -> Vec<(String, String)> {
+    let mut lines: Vec<(String, String)> = Vec::new();
     for line in output.lines() {
         let mut parts = line.split_whitespace();
         let Some(model) = parts.next() else { continue };
@@ -394,12 +389,41 @@ fn parse_model_catalog(output: &str) -> Vec<CodexModelOption> {
             && model
                 .chars()
                 .all(|character| character.is_ascii_alphanumeric() || "-_.:/".contains(character));
-        if !valid_slug || display_name.is_empty() || models.iter().any(|entry| entry.model == model)
-        {
+        if !valid_slug || display_name.is_empty() || lines.iter().any(|(id, _)| id == model) {
+            continue;
+        }
+        lines.push((model.to_string(), display_name));
+    }
+    lines
+}
+
+/// The first entry has an empty model, so no `--model` is passed and the session keeps
+/// following the CLI. It is named after the model the CLI uses (`default_label`), and that
+/// model is not listed again below it.
+fn parse_model_catalog(output: &str, default_label: Option<&str>) -> Vec<CodexModelOption> {
+    let default_label = default_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+    let mut models = vec![CodexModelOption {
+        model: String::new(),
+        display_name: default_label.unwrap_or("Padrão do Antigravity").into(),
+        description: if default_label.is_some() {
+            "Padrão da CLI do Antigravity".into()
+        } else {
+            "Usa o modelo padrão configurado na CLI do Antigravity".into()
+        },
+        is_default: true,
+        default_reasoning_effort: String::new(),
+        supported_reasoning_efforts: Vec::new(),
+    }];
+    for (model, display_name) in parse_model_lines(output) {
+        let is_the_default =
+            default_label.is_some_and(|label| label.eq_ignore_ascii_case(display_name.trim()));
+        if is_the_default {
             continue;
         }
         models.push(CodexModelOption {
-            model: model.to_string(),
+            model,
             display_name,
             description: "Disponível na CLI do Antigravity".into(),
             is_default: false,
@@ -408,6 +432,23 @@ fn parse_model_catalog(output: &str) -> Vec<CodexModelOption> {
         });
     }
     models
+}
+
+const MAX_DEFAULT_LABEL_CHARS: usize = 120;
+
+/// The model the `agy` CLI uses when none is chosen. Its settings hold the label
+/// (for example "Gemini 3.1 Pro (High)"), not the id.
+fn default_model_label() -> Option<String> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    read_default_model_label(
+        &std::path::Path::new(&home).join(".gemini/antigravity-cli/settings.json"),
+    )
+}
+
+fn read_default_model_label(path: &std::path::Path) -> Option<String> {
+    let settings = serde_json::from_str::<Value>(&std::fs::read_to_string(path).ok()?).ok()?;
+    let label = settings.get("model")?.as_str()?.trim();
+    (!label.is_empty()).then(|| label.chars().take(MAX_DEFAULT_LABEL_CHARS).collect())
 }
 
 pub fn is_permission_mode(mode: &str) -> bool {
@@ -596,6 +637,113 @@ fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const AGY_MODELS: &str = "Available models:\n\
+        gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n\
+        gemini-3.1-pro-low\tGemini 3.1 Pro (Low)\n\
+        claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n";
+
+    fn shown(models: &[CodexModelOption]) -> Vec<(&str, &str)> {
+        models
+            .iter()
+            .map(|entry| (entry.model.as_str(), entry.display_name.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn the_default_entry_is_named_after_the_model_the_cli_uses() {
+        let models = parse_model_catalog(AGY_MODELS, Some("Gemini 3.1 Pro (High)"));
+        assert_eq!(
+            shown(&models),
+            [
+                ("", "Gemini 3.1 Pro (High)"),
+                ("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)"),
+                ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)"),
+            ],
+            "the default is not listed a second time"
+        );
+        assert_eq!(models[0].description, "Padrão da CLI do Antigravity");
+        assert!(
+            models[0].is_default && models[0].model.is_empty(),
+            "it keeps following the CLI"
+        );
+        // Lookup ignores case and the spaces at the ends.
+        let loose = parse_model_catalog(AGY_MODELS, Some("  gemini 3.1 PRO (high) "));
+        assert_eq!(loose.len(), 3);
+    }
+
+    #[test]
+    fn without_a_known_default_the_generic_entry_stays() {
+        for label in [None, Some(""), Some("   ")] {
+            let models = parse_model_catalog(AGY_MODELS, label);
+            assert_eq!(models.len(), 4, "every listed model stays");
+            assert_eq!(models[0].display_name, "Padrão do Antigravity");
+            assert_eq!(
+                models[0].description,
+                "Usa o modelo padrão configurado na CLI do Antigravity"
+            );
+        }
+    }
+
+    #[test]
+    fn a_default_the_list_does_not_have_is_still_named() {
+        let models = parse_model_catalog(AGY_MODELS, Some("Gemini 9 Ultra"));
+        assert_eq!(models[0].display_name, "Gemini 9 Ultra");
+        assert_eq!(models.len(), 4, "the list is left as it is");
+    }
+
+    #[test]
+    fn a_catalog_of_one_model_is_not_an_empty_catalog() {
+        let only = "gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n";
+        let models = parse_model_catalog(only, Some("Gemini 3.1 Pro (High)"));
+        assert_eq!(models.len(), 1, "only the named default remains");
+        assert_eq!(
+            parse_model_lines(only).len(),
+            1,
+            "so the CLI did list a model"
+        );
+        assert!(parse_model_lines("Available models:\n").is_empty());
+    }
+
+    #[test]
+    fn the_default_label_comes_from_the_cli_settings() {
+        let directory = std::env::temp_dir().join(format!("lume-agy-settings-{}", now_millis()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let read = |content: Option<&str>| {
+            let path = directory.join("settings.json");
+            match content {
+                Some(content) => std::fs::write(&path, content).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            read_default_model_label(&path)
+        };
+        assert_eq!(
+            read(Some(
+                r#"{"colorScheme":"dark","model":" Gemini 3.1 Pro (High) "}"#
+            ))
+            .as_deref(),
+            Some("Gemini 3.1 Pro (High)")
+        );
+        assert_eq!(read(None), None, "no file");
+        assert_eq!(read(Some("{not json")), None);
+        assert_eq!(
+            read(Some(r#"{"colorScheme":"dark"}"#)),
+            None,
+            "no model key"
+        );
+        assert_eq!(read(Some(r#"{"model":"   "}"#)), None, "only spaces");
+        assert_eq!(read(Some(r#"{"model":""}"#)), None);
+        assert_eq!(read(Some(r#"{"model":42}"#)), None, "not a string");
+        let long = format!(r#"{{"model":"{}"}}"#, "x".repeat(500));
+        assert_eq!(
+            read(Some(&long)).map(|label| label.chars().count()),
+            Some(120)
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     #[test]
     fn managed_event_keeps_provider_identity() {
         let event = base_event("conversation-1", HookEventKind::Running);

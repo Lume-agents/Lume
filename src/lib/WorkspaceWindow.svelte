@@ -964,7 +964,7 @@
     }
   }
 
-  function automationAware(error: unknown): unknown {
+  function flagAutomationError(error: unknown): unknown {
     const automation = macosAutomationMessage(error);
     if (!automation) return error;
     automationRequired = true;
@@ -992,7 +992,7 @@
       );
     } catch (error) {
       pendingOpenedSession = null;
-      throw automationAware(error);
+      throw flagAutomationError(error);
     }
   }
 
@@ -1036,7 +1036,7 @@
       );
     } catch (reason) {
       pendingOpenedSession = null;
-      throw automationAware(reason);
+      throw flagAutomationError(reason);
     }
   }
 

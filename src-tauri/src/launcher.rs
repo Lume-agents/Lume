@@ -790,11 +790,14 @@ fn launch_terminal(
 
 #[cfg(target_os = "macos")]
 pub fn open_automation_settings() -> Result<(), String> {
-    Command::new("/usr/bin/open")
+    let status = Command::new("/usr/bin/open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("Não foi possível abrir os Ajustes do Sistema: {error}"))
+        .status()
+        .map_err(|error| format!("Não foi possível abrir os Ajustes do Sistema: {error}"))?;
+    if !status.success() {
+        return Err("Não foi possível abrir os Ajustes do Sistema".into());
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1288,7 +1291,11 @@ mod tests {
         let first = persist_terminal_payload(&payload, &app_data_dir).unwrap();
         let second = persist_terminal_payload(&payload, &app_data_dir).unwrap();
 
-        assert_ne!(first, second);
+        let sequence_of = |path: &Path| -> u64 {
+            let stem = path.file_stem().unwrap().to_str().unwrap();
+            stem.split_once('-').unwrap().1.parse().unwrap()
+        };
+        assert!(sequence_of(&second) > sequence_of(&first));
         for path in [&first, &second] {
             assert_eq!(path.parent().unwrap(), app_data_dir.join("launches"));
             let name = path.file_name().unwrap().to_str().unwrap();

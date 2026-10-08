@@ -19,7 +19,10 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "clipboard-manager:allow-read-image",
-    "opener:allow-open-url",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://*" }, { "url": "http://*" }, { "url": "mailto:*" }]
+    },
     "opener:allow-open-path",
     "process:allow-restart",
     "updater:default"

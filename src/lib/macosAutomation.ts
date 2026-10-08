@@ -1,7 +1,6 @@
-const marker = "MACOS_AUTOMATION_REQUIRED:";
+// @ts-expect-error TypeScript's bundler mode disallows the explicit source extension used by Node.
+import { markedErrorMessage } from "./agentConnection.ts";
 
 export function macosAutomationMessage(error: unknown): string | null {
-  const message = String(error).replace(/^Error:\s*/, "");
-  if (!message.includes(marker)) return null;
-  return message.slice(message.indexOf(marker) + marker.length).trim();
+  return markedErrorMessage(error, "MACOS_AUTOMATION_REQUIRED:");
 }

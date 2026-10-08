@@ -6,52 +6,14 @@ import { compile } from "svelte/compiler";
 import { readFileSync, existsSync, readdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { join, dirname, extname } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { join, dirname, extname, sep } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const output = mkdtempSync(join(tmpdir(), "lume-workflow-board-ui-"));
-const cache = join(homedir(), ".cache/puppeteer/chrome-headless-shell");
-const puppeteerPlatform = process.platform === "win32" ? "win64" : process.platform === "darwin" ? (process.arch === "arm64" ? "mac-arm64" : "mac-x64") : "linux64";
-const puppeteerExecutable = process.platform === "win32" ? "chrome-headless-shell.exe" : "chrome-headless-shell";
-const cached = existsSync(cache)
-  ? readdirSync(cache).sort().reverse().map((version) => join(cache, version, `chrome-headless-shell-${puppeteerPlatform}`, puppeteerExecutable))
-  : [];
-const browserCandidates = [
-  process.env.LUME_TEST_BROWSER,
-  process.env.CHROME_BIN,
-  process.env.CHROME_PATH,
-  process.env.CHROMIUM_BIN,
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  ...cached,
-  ...(process.platform === "win32"
-    ? [
-        join(process.env.ProgramFiles || "C:\\Program Files", "Google/Chrome/Application/chrome.exe"),
-        join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Google/Chrome/Application/chrome.exe"),
-        join(process.env.LOCALAPPDATA || "", "Google/Chrome/Application/chrome.exe"),
-      ]
-    : process.platform === "darwin"
-      ? [
-          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-          "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-          join(homedir(), "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        ]
-      : [
-          "/usr/bin/google-chrome",
-          "/usr/bin/google-chrome-stable",
-          "/opt/google/chrome/chrome",
-          "/usr/bin/chromium",
-          "/usr/bin/chromium-browser",
-          "/snap/bin/chromium",
-        ]),
-];
-const executable = browserCandidates.find((candidate) => candidate && existsSync(candidate));
-assert.ok(
-  executable,
-  `Chromium not found. Set LUME_TEST_BROWSER to its executable. Searched: ${browserCandidates.filter(Boolean).join(", ")}`,
-);
+import { executable, browserArguments } from "./support/browser.mjs";
 console.log(`Workflow board UI test using Chromium: ${executable}`);
 await build({
   stdin: {
@@ -160,8 +122,8 @@ const server = createServer((request, response) => {
   } else {
     const bundled = join(output, path.slice(1));
     const publicAsset = join(root, "static", path.slice(1));
-    const file = bundled.startsWith(output + "/") && existsSync(bundled) ? bundled : publicAsset;
-    if ((!file.startsWith(output + "/") && !file.startsWith(join(root, "static") + "/")) || !existsSync(file)) { response.writeHead(404).end(); return; }
+    const file = bundled.startsWith(output + sep) && existsSync(bundled) ? bundled : publicAsset;
+    if ((!file.startsWith(output + sep) && !file.startsWith(join(root, "static") + sep)) || !existsSync(file)) { response.writeHead(404).end(); return; }
     const mime = { ".css": "text/css", ".js": "text/javascript", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".woff": "font/woff" };
     response.setHeader("content-type", mime[extname(file)] || "application/octet-stream");
     response.end(readFileSync(file));
@@ -169,7 +131,7 @@ const server = createServer((request, response) => {
 });
 server.listen(0, "127.0.0.1");
 await once(server, "listening");
-const browser = spawn(executable, ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--disable-background-networking", `--user-data-dir=${mkdtempSync(join(tmpdir(), "lume-ui-profile-"))}`, "--remote-debugging-port=0", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+const browser = spawn(executable, browserArguments(), { stdio: ["ignore", "ignore", "pipe"] });
 let socket;
 try {
   const endpoint = await new Promise((resolve, reject) => {

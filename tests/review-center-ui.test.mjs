@@ -6,17 +6,14 @@ import { compile } from "svelte/compiler";
 import { readFileSync, existsSync, readdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { join, dirname, extname } from "node:path";
+import { join, dirname, extname, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { executable, browserArguments } from "./support/browser.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const output = mkdtempSync(join(tmpdir(), "lume-review-center-ui-"));
-const cache = join(process.env.HOME, ".cache/puppeteer/chrome-headless-shell");
-const cached = existsSync(cache) ? readdirSync(cache).sort().reverse().map((version) => join(cache, version, "chrome-headless-shell-linux64/chrome-headless-shell")).find(existsSync) : undefined;
-const executable = process.env.LUME_TEST_BROWSER || cached;
-assert.ok(executable, "Set LUME_TEST_BROWSER to a Chromium executable");
 
 await build({
   stdin: {
@@ -76,13 +73,13 @@ const server = createServer((request, response) => {
   const path = new URL(request.url, "http://localhost").pathname;
   if (path === "/") { response.setHeader("content-type", "text/html"); response.end('<html><head><link rel="stylesheet" href="/app.css"></head><body style="margin:0"><div id="app" style="width:1000px;height:720px;--workspace-sidebar:var(--lume-sidebar-dark);--workspace-pane:var(--lume-pane-dark);--workspace-raised:var(--lume-raised-dark);--workspace-line:var(--lume-line-dark);--workspace-strong:var(--lume-ink-strong-dark);--workspace-text:var(--lume-ink-dark);--workspace-muted:var(--lume-ink-muted-dark);--workspace-faint:var(--lume-ink-faint-dark);--workspace-accent:var(--lume-accent);--workspace-accent-soft:var(--lume-accent-soft-dark);--workspace-subtle:var(--lume-subtle-dark);--workspace-code:var(--lume-code-dark);--workspace-scroll-thumb:var(--lume-scroll-dark);background:var(--lume-canvas-dark);color:var(--workspace-text);font-family:var(--lume-font-ui, sans-serif)"></div><script type="module" src="/app.js"></script></body></html>'); return; }
   const file = join(output, path.slice(1));
-  if (!file.startsWith(output + "/") || !existsSync(file)) { response.writeHead(404).end(); return; }
+  if (!file.startsWith(output + sep) || !existsSync(file)) { response.writeHead(404).end(); return; }
   response.setHeader("content-type", { ".css": "text/css", ".js": "text/javascript" }[extname(file)] || "application/octet-stream");
   response.end(readFileSync(file));
 });
 server.listen(0, "127.0.0.1");
 await once(server, "listening");
-const browser = spawn(executable, ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--disable-background-networking", `--user-data-dir=${mkdtempSync(join(tmpdir(), "lume-ui-profile-"))}`, "--remote-debugging-port=0", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+const browser = spawn(executable, browserArguments(), { stdio: ["ignore", "ignore", "pipe"] });
 let socket;
 try {
   const endpoint = await new Promise((resolve, reject) => {

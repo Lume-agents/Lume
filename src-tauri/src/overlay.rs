@@ -1508,7 +1508,7 @@ fn update_fullscreen_visibility(state: &crate::state::AppState, app: &tauri::App
 
 /// The Orb, mini terminals and workflow connectors float with the user; the
 /// Workspace window is an ordinary window.
-fn is_overlay_window_label(label: &str) -> bool {
+pub fn is_overlay_window_label(label: &str) -> bool {
     label == "main" || label.starts_with("terminal-") || label.starts_with("workflow-bridge-")
 }
 

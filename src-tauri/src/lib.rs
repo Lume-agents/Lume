@@ -794,10 +794,7 @@ fn set_native_file_dialog_windows(
     let mut updated = 0usize;
     let mut first_error = None;
     for (window_label, window) in app.webview_windows() {
-        if window_label != "main"
-            && !window_label.starts_with("terminal-")
-            && !window_label.starts_with("workflow-bridge-")
-        {
+        if !overlay::is_overlay_window_label(&window_label) {
             continue;
         }
         match overlay::set_file_dialog_active(&window, active, show_over_fullscreen) {

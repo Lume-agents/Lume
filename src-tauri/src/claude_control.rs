@@ -152,6 +152,110 @@ pub fn usage(working_directory: &str) -> Result<Vec<AgentRateLimit>, String> {
     Ok(rate_limits(&response))
 }
 
+/// The MCP servers of a Claude conversation started in this folder, with their tools. Servers
+/// connect in the background, so the status is asked again until none is still `pending`.
+pub fn mcp_status(working_directory: &str) -> Result<Vec<Value>, String> {
+    let mut command = crate::executables::command("claude")?;
+    command
+        .args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--settings",
+            r#"{"disableAllHooks":true}"#,
+        ])
+        .current_dir(working_directory)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start Claude: {error}"))?;
+    let pid = child.id();
+    if let Ok(mut pids) = probe_pids().lock() {
+        pids.insert(pid);
+    }
+    let result = mcp_status_exchange(&mut child);
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Ok(mut pids) = probe_pids().lock() {
+        pids.remove(&pid);
+    }
+    result
+}
+
+fn mcp_status_exchange(child: &mut std::process::Child) -> Result<Vec<Value>, String> {
+    let stdout = child.stdout.take().ok_or("Claude closed its output")?;
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut stdin = child.stdin.take().ok_or("Claude closed its input")?;
+    let send = |stdin: &mut std::process::ChildStdin, id: &str, subtype: &str| {
+        let request = json!({ "type": "control_request", "request_id": id, "request": { "subtype": subtype } });
+        writeln!(stdin, "{request}")
+            .and_then(|_| stdin.flush())
+            .map_err(|error| error.to_string())
+    };
+    send(&mut stdin, "init", "initialize")?;
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut latest: Vec<Value> = Vec::new();
+    let mut asked = 0u32;
+    send(&mut stdin, "mcp-0", "mcp_status")?;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = receiver.recv_timeout(remaining) else {
+            break;
+        };
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let response = &message["response"];
+        if message.get("type").and_then(Value::as_str) != Some("control_response")
+            || !response
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("mcp-"))
+        {
+            continue;
+        }
+        if response.get("subtype").and_then(Value::as_str) == Some("error") {
+            return Err(response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Claude rejected the request")
+                .to_string());
+        }
+        latest = response["response"]["mcpServers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let pending = latest
+            .iter()
+            .any(|server| server.get("status").and_then(Value::as_str) == Some("pending"));
+        if !pending || asked >= 12 {
+            break;
+        }
+        asked += 1;
+        thread::sleep(Duration::from_millis(1200));
+        send(&mut stdin, &format!("mcp-{asked}"), "mcp_status")?;
+    }
+    drop(stdin);
+    Ok(latest)
+}
+
 fn request(working_directory: &str, subtypes: &[&str]) -> Result<HashMap<String, Value>, String> {
     let mut command = crate::executables::command("claude")?;
     command
@@ -619,5 +723,18 @@ mod tests {
             ("7d", 4, Some(10080))
         );
         assert_eq!(limits[0].resets_at, Some(1_791_319_200_000));
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    #[test]
+    #[ignore = "starts the installed Claude Code CLI"]
+    fn live_mcp_status_settles_without_pending_servers() {
+        let servers = super::mcp_status("/tmp").expect("mcp status");
+        assert!(
+            servers.iter().all(|server| server["status"] != "pending"),
+            "{servers:?}"
+        );
     }
 }

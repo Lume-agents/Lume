@@ -62,6 +62,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     prepareClipboardImage,
   } from "$lib/imageAttachments";
   import {
+    listSessionMcpServers,
+    type McpServer,
     getClaudeSessionModelSettings,
     getSessionFastMode,
     getSessionCollaborationMode,
@@ -209,6 +211,43 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let conversationElement = $state<HTMLDivElement | null>(null);
   let conversationContentElement = $state<HTMLDivElement | null>(null);
   let composerElement = $state<HTMLFormElement | null>(null);
+
+  // /mcp: the agent's MCP servers and what they offer.
+  let mcpOpen = $state(false);
+  let mcpServers = $state<McpServer[]>([]);
+  let mcpLoading = $state(false);
+  let mcpExpanded = $state<string[]>([]);
+  let mcpRequest = 0;
+  const mcpStatusOrder = ["connected", "needs_auth", "failed", "unknown", "disabled"];
+  const sortedMcpServers = $derived([...mcpServers].sort((a, b) => mcpStatusOrder.indexOf(a.status) - mcpStatusOrder.indexOf(b.status)));
+  async function loadMcpPanel() {
+    const request = ++mcpRequest;
+    const id = session.id;
+    mcpLoading = true;
+    try {
+      const configured = await listSessionMcpServers(id, false);
+      if (request !== mcpRequest) return;
+      mcpServers = configured;
+      const live = await listSessionMcpServers(id, true);
+      if (request === mcpRequest) mcpServers = live;
+    } catch (error) {
+      if (request === mcpRequest) sendError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (request === mcpRequest) mcpLoading = false;
+    }
+  }
+  function openMcpPanel() {
+    mcpOpen = true;
+    mcpExpanded = [];
+    void loadMcpPanel();
+  }
+  function toggleMcpServer(key: string) {
+    mcpExpanded = mcpExpanded.includes(key) ? mcpExpanded.filter((item) => item !== key) : [...mcpExpanded, key];
+  }
+  function mcpStatusLabel(status: string) {
+    return ({ connected: tr("Connected", "Conectado"), needs_auth: tr("Needs sign-in", "Precisa de login"), failed: tr("Failed", "Falhou"), disabled: tr("Disabled", "Desativado") } as Record<string, string>)[status] ?? tr("Not checked", "Não verificado");
+  }
+  $effect(() => { session.id; untrack(() => { mcpOpen = false; mcpServers = []; mcpRequest++; }); });
 
   // Ctrl/Cmd+F: find text inside this conversation.
   let findOpen = $state(false);
@@ -1514,6 +1553,11 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       case "zoom-out":
         setTextZoom(textZoom - 0.1);
         break;
+      case "mcp":
+        prompt = "";
+        slashMenuDismissed = false;
+        openMcpPanel();
+        return true;
       case "clear":
         if (!onNewConversation) return false;
         prompt = "";
@@ -2661,7 +2705,41 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
           <LumeIcon name="attachment" size={16} />
         </button>
       {/if}
-      {#if slashMenuVisible}
+      {#if mcpOpen}
+        <section class="slash-command-menu mcp-panel" aria-label="MCP" transition:slide={{ duration: 140, easing: cubicOut }}>
+          <div class="slash-command-heading">
+            <strong>MCP</strong>
+            <small>{mcpLoading ? tr("Checking connections…", "Verificando conexões…") : tr(`${mcpServers.length} server${mcpServers.length === 1 ? "" : "s"}`, `${mcpServers.length} servidor${mcpServers.length === 1 ? "" : "es"}`)}</small>
+            <span class="mcp-actions">
+              <button type="button" disabled={mcpLoading} title={tr("Check again", "Verificar de novo")} aria-label={tr("Check again", "Verificar de novo")} onclick={() => void loadMcpPanel()}><LumeIcon name="refresh" size={13} /></button>
+              <button type="button" title={tr("Close", "Fechar")} aria-label={tr("Close", "Fechar")} onclick={() => (mcpOpen = false)}><LumeIcon name="close" size={13} /></button>
+            </span>
+          </div>
+          {#if !mcpServers.length && !mcpLoading}
+            <p class="slash-command-loading">{tr("No MCP servers are configured for this agent.", "Nenhum servidor MCP está configurado para este agente.")}</p>
+          {/if}
+          {#each sortedMcpServers as item (`${item.scope}:${item.name}`)}
+            {@const key = `${item.scope}:${item.name}`}
+            <div class:open={mcpExpanded.includes(key)} class="mcp-item">
+              <button class="mcp-row" type="button" aria-expanded={mcpExpanded.includes(key)} onclick={() => toggleMcpServer(key)}>
+                <i class="mcp-dot status-{item.status}" class:checking={mcpLoading && item.status === "unknown"} title={mcpStatusLabel(item.status)}></i>
+                <span class="mcp-main"><strong>{item.name}</strong><small title={item.target}>{item.target || item.transport}</small></span>
+                <span class="mcp-side"><b>{item.tools.length ? tr(`${item.tools.length} tools`, `${item.tools.length} ferramentas`) : mcpStatusLabel(item.status)}</b><em>{item.transport === "stdio" ? "stdio" : "HTTP"} · {item.scope}</em></span>
+                <LumeIcon name="chevron-down" size={12} />
+              </button>
+              {#if mcpExpanded.includes(key)}
+                <ul class="mcp-tools" transition:slide={{ duration: 120, easing: cubicOut }}>
+                  {#each item.tools as tool (tool.name)}
+                    <li><code>{tool.name}</code>{#if tool.description}<span>{tool.description}</span>{/if}</li>
+                  {:else}
+                    <li class="mcp-no-tools">{item.status === "connected" ? tr("This server did not list its tools.", "Este servidor não listou suas ferramentas.") : item.status === "needs_auth" ? tr("Sign in to this server in the agent's CLI to use it.", "Entre neste servidor pela CLI do agente para usá-lo.") : tr("Tools appear once the server is connected.", "As ferramentas aparecem quando o servidor estiver conectado.")}</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          {/each}
+        </section>
+      {:else if slashMenuVisible}
         <div bind:this={slashCommandMenu} class="slash-command-menu" aria-label={tr("Slash commands", "Comandos com barra")} transition:slide={{ duration: 140, easing: cubicOut }}>
           <div class="slash-command-heading">
             <strong>{tr("Commands", "Comandos")}</strong>
@@ -2870,6 +2948,30 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 <style>
   :global(::highlight(lume-find)) { color: inherit; background: color-mix(in srgb, #e9b94a 38%, transparent); }
   :global(::highlight(lume-find-current)) { color: #1b1403; background: #f0b73c; }
+  .mcp-actions { margin-left: auto; display: flex; gap: 2px; }
+  .mcp-actions button { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .mcp-actions button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .mcp-actions button:disabled { opacity: .4; }
+  .mcp-item + .mcp-item { border-top: 1px solid color-mix(in srgb, var(--workspace-line) 70%, transparent); }
+  .composer .mcp-row { width: 100%; height: auto; min-height: 40px; padding: 6px 8px; display: flex; align-items: center; gap: 9px; border-radius: 8px; color: var(--workspace-text); background: transparent; text-align: left; }
+  .composer .mcp-row:hover:not(:disabled) { transform: none; background: var(--workspace-accent-soft); }
+  .mcp-row > :global(.lume-icon) { flex: 0 0 auto; color: var(--workspace-muted); transition: transform 160ms ease; }
+  .mcp-item.open .mcp-row > :global(.lume-icon) { transform: rotate(180deg); }
+  .mcp-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--workspace-faint); }
+  .mcp-dot.status-connected { background: #3f9b69; box-shadow: 0 0 0 3px color-mix(in srgb, #3f9b69 22%, transparent); }
+  .mcp-dot.status-failed { background: #c0554f; }
+  .mcp-dot.status-needs_auth { background: #d0a142; }
+  .mcp-dot.checking { animation: controls-arrive 1s ease-in-out infinite alternate; }
+  .mcp-main { min-width: 0; flex: 1; display: grid; gap: 1px; }
+  .mcp-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-strong); font-size: var(--workspace-chat-small-size); font-weight: 700; }
+  .mcp-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); }
+  .mcp-side { flex: 0 0 auto; display: grid; justify-items: end; gap: 1px; }
+  .mcp-side b { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 700; }
+  .mcp-side em { color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); font-style: normal; }
+  .mcp-tools { margin: 0 6px 6px 25px; padding: 0; display: grid; gap: 5px; list-style: none; }
+  .mcp-tools li { min-width: 0; display: grid; gap: 1px; }
+  .mcp-tools code { overflow: hidden; text-overflow: ellipsis; color: var(--workspace-accent); font: 700 var(--workspace-chat-tiny-size) "SFMono-Regular", Consolas, monospace; }
+  .mcp-tools span, .mcp-no-tools { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); line-height: 1.4; }
   .find-bar { position: absolute; z-index: 14; top: 62px; right: 18px; width: min(340px, calc(100% - 36px)); padding: 5px 6px 5px 10px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: var(--workspace-raised); box-shadow: 0 10px 30px rgba(8, 18, 13, .2); }
   .find-bar input { min-width: 0; flex: 1; height: 26px; padding: 0 2px; border: 0; outline: 0; color: var(--workspace-strong); background: transparent; font: inherit; font-size: 12px; }
   .find-count { min-width: 38px; color: var(--workspace-muted); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }

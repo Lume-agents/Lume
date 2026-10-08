@@ -12,6 +12,7 @@ export type SlashCommandAction =
   | "zoom-in"
   | "zoom-out"
   | "clear"
+  | "mcp"
   | "close";
 
 /** A command as the agent itself reports it (see src-tauri/src/agent_commands.rs). */
@@ -41,6 +42,8 @@ const clearAliases = ["clear", "new", "reset"];
 
 /** Lume owns model selection for these agents, so `/model` opens Lume's picker. */
 const lumeModelAgents: AgentKind[] = ["codex", "claude_code", "opencode", "antigravity"];
+/** Agents whose MCP servers Lume can list, so `/mcp` opens Lume's panel instead of being sent. */
+const mcpAgents: AgentKind[] = ["codex", "claude_code", "opencode"];
 
 export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKind | undefined): SlashCommand[] {
   const lumeModel = agent !== undefined && lumeModelAgents.includes(agent);
@@ -50,6 +53,7 @@ export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKi
     .filter((command) => !(lumeModel && command.prefix === "/" && command.name === "model"))
     .filter((command) => !(lumePlan && command.prefix === "/" && command.name === "plan"))
     .filter((command) => !(command.prefix === "/" && clearAliases.includes(command.name)))
+    .filter((command) => !(agent !== undefined && mcpAgents.includes(agent) && command.prefix === "/" && command.name === "mcp"))
     .map((command): SlashCommand => ({
       name: command.name,
       description: command.description,
@@ -66,6 +70,9 @@ export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKi
       prefix: "/",
       action: "model",
     });
+  }
+  if (agent !== undefined && mcpAgents.includes(agent)) {
+    owned.push({ name: "mcp", description: "Show the MCP servers and their tools", source: "lume", prefix: "/", action: "mcp" });
   }
   owned.push({
     name: "clear",

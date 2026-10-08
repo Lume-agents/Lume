@@ -27,10 +27,12 @@ test("the menu lists what the agent reported, with /model owned by Lume", () => 
   const commands = agentSlashCommands(claudeReported, "claude_code");
   assert.deepEqual(commands.map((command) => [command.source, command.name]), [
     ["lume", "model"],
+    ["lume", "mcp"],
     ["lume", "clear"],
     ["agent", "compact"],
     ["agent", "code-review"],
   ]);
+  assert.equal(findSlashCommand(commands, "/mcp").action, "mcp");
   assert.equal(findSlashCommand(commands, "/model").action, "model");
   assert.equal(findSlashCommand(commands, "/code-review").argumentHint, "[low|high]");
   const antigravity = agentSlashCommands([], "antigravity");
@@ -67,7 +69,7 @@ test("slash browses everything and dollar narrows to Codex skills", () => {
     "codex",
   );
   assert.deepEqual(filterSlashCommands(commands, null), []);
-  assert.equal(filterSlashCommands(commands, slashCommandQuery("/")).length, 4, "model, clear and plan are Lume's, plus the skill");
+  assert.equal(filterSlashCommands(commands, slashCommandQuery("/")).length, 5, "model, mcp, clear and plan are Lume's, plus the skill");
   assert.deepEqual(
     filterSlashCommands(commands, slashCommandQuery("$")).map((command) => command.name),
     ["lint"],

@@ -1,5 +1,6 @@
 mod adapters;
 mod agent_commands;
+mod agent_mcp;
 mod agent_plugins;
 mod antigravity_stream;
 mod browser_server;
@@ -1055,6 +1056,21 @@ fn set_session_collaboration_mode(
     mode: String,
 ) -> Result<String, String> {
     control::set_session_collaboration_mode(&app, state.inner(), bridge.inner(), &session_id, &mode)
+}
+
+#[tauri::command]
+async fn list_session_mcp_servers(
+    state: State<'_, AppState>,
+    session_id: String,
+    probe: bool,
+) -> Result<Vec<agent_mcp::McpServer>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = state.connected_session(&session_id)?;
+        agent_mcp::servers_for(&session.agent, session.working_directory.as_deref(), probe)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -3024,6 +3040,7 @@ pub fn run() {
             get_session_collaboration_mode,
             set_session_collaboration_mode,
             list_session_slash_commands,
+            list_session_mcp_servers,
             get_session_model_settings,
             set_session_model_settings,
             set_session_agent_mode,

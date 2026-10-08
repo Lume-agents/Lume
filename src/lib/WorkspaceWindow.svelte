@@ -39,6 +39,7 @@
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
+  import { sidebarGroupsKey } from "$lib/sidebarGroups";
   import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, Preferences, ResumableSession, WorkflowGroupDefinition } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
@@ -571,7 +572,6 @@
   type SidebarRow =
     | { key: string; kind: "header"; group: SidebarGroup | null; count: number }
     | { key: string; kind: "session"; session: HubSession; index: number };
-  const sidebarGroupsKey = "lume:sidebar-groups:v1";
   let sidebarGroups = $state<SidebarGroup[]>([]);
   let groupAssignments = $state<Record<string, string>>({});
   let groupDropTarget = $state<string | null>(null);
@@ -727,7 +727,13 @@
     }
     return { rows, visible };
   });
-  onMount(loadSidebarGroups);
+  onMount(() => {
+    loadSidebarGroups();
+    // The Orb can collapse a group too.
+    const sync = (event: StorageEvent) => { if (event.key === sidebarGroupsKey) loadSidebarGroups(); };
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  });
 
   const filteredInternalServices = $derived(
     projectFilter === "all" && filter !== "attention"

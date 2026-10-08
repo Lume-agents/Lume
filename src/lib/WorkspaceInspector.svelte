@@ -11,7 +11,7 @@
   import type { AgentSession, SessionActivity } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
-  import { loadWorkspacePromptIndexPage, refreshAgentRateLimits, type WorkspacePromptIndexEntry } from "$lib/lume";
+  import { listSessionMcpServers, loadWorkspacePromptIndexPage, refreshAgentRateLimits, type McpServer, type WorkspacePromptIndexEntry } from "$lib/lume";
   import { buildLatestReviewTurn } from "$lib/reviewDiffs";
   import { subagentsForSession } from "$lib/workspaceAgents";
   import { expectedUsageLimitCount, stacksUsageGauges, usageGaugeGroups } from "$lib/usageGauges";
@@ -39,6 +39,45 @@
     onSelectSession?: (sessionId: string) => void;
     loading?: boolean;
   }>();
+
+  let mcpServers = $state<McpServer[]>([]);
+  let mcpProbing = $state(false);
+  let mcpKey = "";
+  const mcpAgents = ["codex", "claude_code", "opencode"];
+  const mcpOrder = ["connected", "needs_auth", "failed", "unknown", "disabled"];
+  $effect(() => {
+    const id = session?.id;
+    const agent = session?.agent;
+    if (!id || !agent || !mcpAgents.includes(agent)) { mcpKey = ""; mcpServers = []; return; }
+    if (mcpKey === id) return;
+    mcpKey = id;
+    mcpServers = [];
+    void loadMcp(id, agent);
+  });
+  async function loadMcp(id: string, agent: string) {
+    try {
+      const configured = await listSessionMcpServers(id, false);
+      if (mcpKey !== id) return;
+      mcpServers = configured;
+      if (agent !== "claude_code") return;
+      mcpProbing = true;
+      const live = await listSessionMcpServers(id, true);
+      if (mcpKey === id) mcpServers = live;
+    } catch { /* The list is informational; the section stays with what was read. */ }
+    finally { if (mcpKey === id) mcpProbing = false; }
+  }
+  const sortedMcp = $derived([...mcpServers].sort((a, b) => mcpOrder.indexOf(a.status) - mcpOrder.indexOf(b.status)));
+  function mcpStatusLabel(status: string) {
+    return ({
+      connected: tr("Connected", "Conectado"),
+      needs_auth: tr("Needs sign-in", "Precisa de login"),
+      failed: tr("Failed", "Falhou"),
+      disabled: tr("Disabled", "Desativado"),
+    } as Record<string, string>)[status] ?? tr("Not checked", "Não verificado");
+  }
+  function mcpScopeLabel(scope: string) {
+    return ({ user: tr("User", "Usuário"), project: tr("Project", "Projeto"), local: tr("Local", "Local"), account: tr("Account", "Conta") } as Record<string, string>)[scope] ?? scope;
+  }
 
   let usageRefreshing = $state(false);
   let usageSettledKey = $state("");
@@ -257,6 +296,22 @@
         </section>
       {/if}
 
+      {#if mcpAgents.includes(session.agent) && (mcpServers.length || mcpProbing)}
+        <details class="inspector-section mcp-section" open>
+          <summary><LumeIcon name="sources" size={14} /><span>MCP</span><em>{mcpServers.length}</em></summary>
+          <p class="section-description">{mcpProbing ? tr("Checking connections…", "Verificando conexões…") : tr("Tool servers this agent can use", "Servidores de ferramentas que este agente pode usar")}</p>
+          <ul class="mcp-list">
+            {#each sortedMcp as item (`${item.scope}:${item.name}`)}
+              <li class:disabled={item.status === "disabled"}>
+                <i class="mcp-dot status-{item.status}" class:checking={mcpProbing && item.status === "unknown"} title={mcpStatusLabel(item.status)}></i>
+                <span class="mcp-copy"><strong>{item.name}</strong><small title={item.target}>{item.target || item.transport}</small></span>
+                <span class="mcp-meta"><b>{item.transport === "stdio" ? "stdio" : "HTTP"}</b><em>{mcpScopeLabel(item.scope)}</em></span>
+              </li>
+            {/each}
+          </ul>
+        </details>
+      {/if}
+
       <details class="inspector-section events-section" open>
         <summary><LumeIcon name="send" size={14} /><span>{tr("Events", "Eventos")}</span><em>{recentPrompts.length}</em></summary>
         <p class="section-description">{tr("Latest prompts", "Últimos prompts")}</p>
@@ -390,6 +445,21 @@
   .subagent-list { display: grid; gap: 3px; }.subagent-list > div { min-width: 0; min-height: 36px; padding: 4px 5px; display: flex; align-items: center; gap: 8px; border-radius: 8px; }.subagent-list > div:hover { background: var(--workspace-subtle); }.subagent-list > div > span { min-width: 0; display: grid; gap: 2px; }.subagent-list strong { overflow: hidden; color: var(--workspace-text); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.subagent-list small { color: var(--workspace-faint); font-size: 8px; }.subagent-list small.status-running { color: #4e98ca; }.subagent-list small.status-failed { color: #c66762; }.subagent-list small.status-completed { color: #50aa79; }
   .files-toolbar { min-height: 40px; margin-bottom: 4px; padding-bottom: 8px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 65%, transparent); }.files-toolbar > span { min-width: 0; display: grid; gap: 2px; flex: 1; }.files-toolbar > span > strong { color: var(--workspace-text); font-size: 9px; }.files-toolbar > span small { display: flex; gap: 5px; font-size: 8px; }.files-toolbar b, .inspector-files b { color: #43a873; }.files-toolbar i, .inspector-files i { color: #c16660; font-style: normal; }.files-toolbar button { min-height: 28px; padding: 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 28%, var(--workspace-line)); border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 8px; font-weight: 740; cursor: pointer; }.files-toolbar button:hover { border-color: color-mix(in srgb, var(--workspace-accent) 52%, var(--workspace-line)); }
   .inspector-files { display: grid; gap: 1px; }.inspector-files > button, .inspector-files > .inspector-file-entry { width: 100%; min-width: 0; min-height: 31px; padding: 0 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font-size: 9px; text-align: left; }.inspector-files > button { cursor: pointer; }.inspector-files > button:hover { background: var(--workspace-subtle); }.inspector-files > button > span, .inspector-file-entry > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.inspector-files > button > small, .inspector-file-entry > small { display: flex; gap: 4px; flex: 0 0 auto; font-size: 7px; }.review-more { margin: 5px 0 0 4px; padding: 3px 0; border: 0; color: var(--workspace-accent); background: transparent; font-size: 8px; font-weight: 720; cursor: pointer; }
+  .mcp-list { margin: 0; padding: 0; display: grid; gap: 1px; list-style: none; }
+  .mcp-list li { min-width: 0; padding: 7px 0; display: flex; align-items: center; gap: 9px; }
+  .mcp-list li + li { border-top: 1px solid var(--workspace-line); }
+  .mcp-list li.disabled { opacity: .55; }
+  .mcp-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--workspace-faint); }
+  .mcp-dot.status-connected { background: #3f9b69; box-shadow: 0 0 0 3px color-mix(in srgb, #3f9b69 22%, transparent); }
+  .mcp-dot.status-failed { background: #c0554f; }
+  .mcp-dot.status-needs_auth { background: #d0a142; }
+  .mcp-dot.checking { animation: usage-pulse 1.1s ease-in-out infinite alternate; }
+  .mcp-copy { min-width: 0; flex: 1; display: grid; gap: 1px; }
+  .mcp-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-strong); font-size: 11px; font-weight: 650; }
+  .mcp-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-faint); font-size: 9px; }
+  .mcp-meta { flex: 0 0 auto; display: grid; justify-items: end; gap: 1px; }
+  .mcp-meta b { color: var(--workspace-muted); font-size: 9px; font-weight: 700; }
+  .mcp-meta em { color: var(--workspace-faint); font-size: 9px; font-style: normal; }
   .section-description { margin: -1px 0 3px; color: var(--workspace-muted); font-size: 10px; line-height: 1.45; }
   .empty-section { margin: 0; padding: 0 0 5px; color: var(--workspace-faint); font-size: 9px; line-height: 1.45; }
   .inspector-empty { margin: auto; padding: 24px; display: grid; justify-items: center; gap: 10px; color: var(--workspace-faint); font-size: 10px; text-align: center; }

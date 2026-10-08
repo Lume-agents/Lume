@@ -16,7 +16,9 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
+  import MacosAutomationDialog from "$lib/MacosAutomationDialog.svelte";
   import { agentConnectionMessage } from "$lib/agentConnection";
+  import { macosAutomationMessage } from "$lib/macosAutomation";
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import WorkspaceSidebarToggleIcon from "$lib/WorkspaceSidebarToggleIcon.svelte";
   import { copyResolvedColorTokens } from "$lib/floatingTheme";
@@ -180,6 +182,7 @@
   let integrations = $state<IntegrationStatus[]>([]);
   let connectionAgent = $state<IntegrationStatus["kind"] | null>(null);
   let connectionMessage = $state("");
+  let automationRequired = $state(false);
   let integrationDiagnostics = $state<Partial<Record<IntegrationStatus["kind"], IntegrationDiagnostic>>>({});
   let configuringIntegration = $state<IntegrationStatus["kind"] | null>(null);
   let diagnosingIntegration = $state<IntegrationStatus["kind"] | null>(null);
@@ -902,6 +905,7 @@
       pendingOpenedSession = null;
       const connection = agentConnectionMessage(reason);
       if (connection) { connectionAgent = agent; connectionMessage = connection; }
+      else if (macosAutomationMessage(reason)) automationRequired = true;
       else launchError = String(reason).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
@@ -951,12 +955,20 @@
       pendingOpenedSession = null;
       const connection = agentConnectionMessage(reason);
       if (connection) { connectionAgent = stored.agent; connectionMessage = connection; }
+      else if (macosAutomationMessage(reason)) automationRequired = true;
       else launchError = String(reason).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
       launchingSessionId = null;
       launchingPhase = null;
     }
+  }
+
+  function automationAware(error: unknown): unknown {
+    const automation = macosAutomationMessage(error);
+    if (!automation) return error;
+    automationRequired = true;
+    return new Error(automation);
   }
 
   async function openForkedCodexSession(threadId: string, source: HubSession) {
@@ -980,7 +992,7 @@
       );
     } catch (error) {
       pendingOpenedSession = null;
-      throw error;
+      throw automationAware(error);
     }
   }
 
@@ -1024,7 +1036,7 @@
       );
     } catch (reason) {
       pendingOpenedSession = null;
-      throw reason;
+      throw automationAware(reason);
     }
   }
 
@@ -3166,6 +3178,9 @@
   {/if}
   {#if connectionAgent}
     <AgentConnectionDialog agent={connectionAgent} message={connectionMessage} {language} onClose={() => { connectionAgent = null; }} />
+  {/if}
+  {#if automationRequired}
+    <MacosAutomationDialog {language} onClose={() => { automationRequired = false; }} />
   {/if}
 </main>
 

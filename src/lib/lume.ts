@@ -957,6 +957,10 @@ export async function launchAgentSession(
   });
 }
 
+export async function openAutomationSettings(): Promise<void> {
+  await invoke("open_automation_settings");
+}
+
 export async function loadVscodeStatus(): Promise<CompanionStatus> {
   if (!("__TAURI_INTERNALS__" in window)) {
     return { installed: true, configured: false, detail: "Necessário para abrir sessões no editor" };

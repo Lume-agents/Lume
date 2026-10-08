@@ -2310,6 +2310,11 @@ fn reveal_plugin_directory(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn open_automation_settings() -> Result<(), String> {
+    launcher::open_automation_settings()
+}
+
+#[tauri::command]
 async fn launch_session(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -3007,7 +3012,8 @@ pub fn run() {
             install_external_plugin,
             remove_external_plugin,
             reveal_plugin_directory,
-            launch_session
+            launch_session,
+            open_automation_settings
         ])
         .run(tauri::generate_context!())
         .expect("erro ao executar o Lume");

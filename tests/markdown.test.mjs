@@ -72,3 +72,10 @@ assert.match(
 );
 
 console.log("markdown test suite passed");
+
+{
+  const html = renderSafeMarkdown("See https://github.com/Lume-agents/Lume/pull/26, and [the issue](https://github.com/o/r/issues/3). Plain https://example.com/x stays.");
+  assert.match(html, /<a class="github-ref" href="https:\/\/github.com\/Lume-agents\/Lume\/pull\/26"[^>]*>Lume-agents\/Lume#26<\/a>/);
+  assert.match(html, /<a class="github-ref" href="https:\/\/github.com\/o\/r\/issues\/3"/);
+  assert.doesNotMatch(html, /example\.com[^<]*<\/a>/);
+}

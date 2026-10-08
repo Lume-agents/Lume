@@ -143,3 +143,28 @@ export function repositoryError(error: string, portuguese: boolean) {
   };
   return descriptions[error]?.[Number(portuguese)] ?? (portuguese ? "Não foi possível carregar os dados. Confira sua conexão e tente atualizar." : "Could not load the data. Check your connection and try refreshing.");
 }
+
+export type GitHubReference = {
+  state: string;
+  kind?: "pull_request" | "issue";
+  owner?: string; repo?: string; number?: number;
+  title?: string;
+  status?: "open" | "closed" | "merged";
+  draft?: boolean | null;
+  url?: string;
+  body?: string;
+  author?: string | null;
+  labels?: { name: string; color: string }[];
+  comments?: number;
+  createdAt?: string; updatedAt?: string;
+  head?: string | null; base?: string | null;
+  additions?: number | null; deletions?: number | null; changedFiles?: number | null;
+  review?: string | null;
+  checks?: string | null;
+};
+export type CommitOutcome = { hash: string; summary: string };
+
+export const getGitHubReference = (owner: string, repo: string, number: number, refresh = false) =>
+  invoke<GitHubReference>("get_github_reference", { owner, repo, number, refresh });
+export const commitRepository = (sessionId: string, paths: string[], message: string) =>
+  invoke<CommitOutcome>("commit_session_repository", { sessionId, paths, message });

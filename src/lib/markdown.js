@@ -33,6 +33,11 @@ function renderInline(source) {
   /** @type {string[]} */
   const tokens = [];
   /** @param {string} html */
+  // A pull request or issue of GitHub is marked so the chat can preview it in place.
+  const githubReference = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:pull|issues)\/\d+(?:[/?#].*)?$/;
+  /** @param {string} href */
+  const linkClass = (href) => (githubReference.test(href) ? ' class="github-ref"' : "");
+  /** @param {string} html */
   const stash = (html) => {
     const index = tokens.push(html) - 1;
     return `\uE000${index}\uE001`;
@@ -44,7 +49,7 @@ function renderInline(source) {
       const safeHref = safeLink(href);
       if (!safeHref) return escapeHtml(href);
       return stash(
-        `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${escapeHtml(href)}</a>`,
+        `<a${linkClass(safeHref)} href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${escapeHtml(href)}</a>`,
       );
     })
     .replace(
@@ -53,9 +58,15 @@ function renderInline(source) {
         const safeHref = safeLink(href);
         if (!safeHref) return label;
         return stash(
-          `<a href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${formatEmphasis(escapeHtml(label))}</a>`,
+          `<a${linkClass(safeHref)} href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${formatEmphasis(escapeHtml(label))}</a>`,
         );
       },
+    )
+    // Bare GitHub pull request and issue URLs become links too.
+    .replace(
+      /(^|[\s(])(https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:pull|issues)\/(\d+))(?=[\s).,;:!?]|$)/g,
+      (match, lead, href, owner, repo, number) =>
+        `${lead}${stash(`<a class="github-ref" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(`${owner}/${repo}#${number}`)}</a>`)}`,
     );
 
   value = formatEmphasis(escapeHtml(value));

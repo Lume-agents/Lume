@@ -27,6 +27,6 @@ The account calendar uses the official GitHub GraphQL `contributionsCollection`,
 
 Git inspection works locally without GitHub authentication. Local observation is shared and polled every 15 seconds while its consumers are mounted and the window is visible; GitHub responses are cached for 60 seconds. Commands have deadlines and output limits. This is a read-only CLI transport, not the official GitHub MCP Server integration.
 
-New PR and issue actions open GitHub's forms for explicit publication. Staging, committing, pushing, requesting review, merging and rerunning workflows are not automated. Native account connection, official MCP transport, scoped agent tools and approved writes through Lume's action broker remain under development.
+New PR and issue actions open GitHub's forms for explicit publication. The Changes tab can commit the files you tick (staging only those, running your git hooks; nothing is pushed), and a pull request or issue link in a chat opens a read-only preview in place. Pushing, requesting review, merging and rerunning workflows are not automated. Native account connection, official MCP transport, scoped agent tools and approved writes through Lume's action broker remain under development.
 
 A remote Node's repository must eventually be inspected through an RPC on its owning computer. The current commands inspect locally accessible directories and report unavailable ones; no remote repository RPC is implemented, and a repository is not guessed from a chat name.

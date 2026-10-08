@@ -61,6 +61,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     prepareClipboardFile,
     prepareClipboardImage,
   } from "$lib/imageAttachments";
+  import { getGitHubReference, openGitHub, type GitHubReference } from "$lib/repositories";
+  import { renderSafeMarkdown } from "$lib/markdown.js";
   import {
     listSessionMcpServers,
     type McpServer,
@@ -211,6 +213,41 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let conversationElement = $state<HTMLDivElement | null>(null);
   let conversationContentElement = $state<HTMLDivElement | null>(null);
   let composerElement = $state<HTMLFormElement | null>(null);
+
+  // A GitHub pull request or issue mentioned in the chat, shown without leaving Lume.
+  let ghRefOpen = $state(false);
+  let ghRef = $state<GitHubReference | null>(null);
+  let ghRefLoading = $state(false);
+  let ghRefLink = $state("");
+  let ghRefRequest = 0;
+  async function showGitHubReference(owner: string, repo: string, number: number, link: string, refresh = false) {
+    const request = ++ghRefRequest;
+    ghRefOpen = true;
+    ghRefLoading = true;
+    ghRefLink = link;
+    if (!refresh) ghRef = null;
+    try {
+      const reference = await getGitHubReference(owner, repo, number, refresh);
+      if (request === ghRefRequest) ghRef = reference;
+    } catch (error) {
+      if (request === ghRefRequest) ghRef = { state: String(error).replace(/^Error:\s*/, "") };
+    } finally {
+      if (request === ghRefRequest) ghRefLoading = false;
+    }
+  }
+  function closeGitHubReference() { ghRefOpen = false; ghRefRequest++; }
+  function ghReferenceError(state: string) {
+    return ({
+      not_found: tr("This item was not found, or your account cannot see it.", "Este item não foi encontrado, ou sua conta não pode vê-lo."),
+      auth_required: tr("Sign in with the GitHub CLI to preview private items.", "Entre com o GitHub CLI para ver itens privados."),
+      cli_missing: tr("Install the GitHub CLI to preview items here.", "Instale o GitHub CLI para ver itens aqui."),
+      access_limited: tr("GitHub did not allow this request. Try again later.", "O GitHub não permitiu esta consulta. Tente de novo mais tarde."),
+    } as Record<string, string>)[state] ?? tr("Could not read this item.", "Não foi possível ler este item.");
+  }
+  function ghStatusLabel(reference: GitHubReference) {
+    if (reference.draft && reference.status === "open") return tr("Draft", "Rascunho");
+    return ({ open: tr("Open", "Aberto"), closed: tr("Closed", "Fechado"), merged: tr("Merged", "Mesclado") } as Record<string, string>)[reference.status ?? ""] ?? "";
+  }
 
   // /mcp: the agent's MCP servers and what they offer.
   let mcpOpen = $state(false);
@@ -703,9 +740,20 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       const path = badge.dataset.localFile;
       if (path) void openPath(path).catch((error) => (sendError = String(error).replace(/^Error:\s*/, "")));
     };
+    const openGitHubLink = (event: MouseEvent) => {
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a.github-ref") : null;
+      if (!link || !paneRoot?.contains(link)) return;
+      const match = /github\.com\/([\w.-]+)\/([\w.-]+)\/(?:pull|issues)\/(\d+)/.exec(link.href);
+      if (!match) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void showGitHubReference(match[1], match[2], Number(match[3]), link.href);
+    };
     document.addEventListener("pointerdown", closeControls);
     window.addEventListener("keydown", closeSidebars);
     paneRoot?.addEventListener("click", openInlineFile);
+    paneRoot?.addEventListener("click", openGitHubLink, true);
     const chat = conversationElement;
     const content = conversationContentElement;
     let lastContentHeight = content?.getBoundingClientRect().height ?? 0;
@@ -2299,6 +2347,46 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   <WorkspaceWorkBookmarks {session} {language} hasSubagents={subagents.length > 0} />
 
+  {#if ghRefOpen}
+    <aside class="github-ref-panel" aria-label={tr("GitHub preview", "Prévia do GitHub")} transition:fly={{ y: -6, duration: 140 }}>
+      <header>
+        <LumeIcon name={ghRef?.kind === "issue" ? "issue" : "pull-request"} size={15} />
+        <strong>{ghRef?.owner ? `${ghRef.owner}/${ghRef.repo}#${ghRef.number}` : tr("GitHub", "GitHub")}</strong>
+        <button type="button" disabled={ghRefLoading} title={tr("Refresh", "Atualizar")} aria-label={tr("Refresh", "Atualizar")} onclick={() => { const match = /github\.com\/([\w.-]+)\/([\w.-]+)\/(?:pull|issues)\/(\d+)/.exec(ghRefLink); if (match) void showGitHubReference(match[1], match[2], Number(match[3]), ghRefLink, true); }}><LumeIcon name="refresh" size={13} /></button>
+        <button type="button" title={tr("Close", "Fechar")} aria-label={tr("Close", "Fechar")} onclick={closeGitHubReference}><LumeIcon name="close" size={13} /></button>
+      </header>
+      {#if ghRefLoading && !ghRef}
+        <p class="github-ref-note" role="status">{tr("Reading from GitHub…", "Lendo do GitHub…")}</p>
+      {:else if ghRef && ghRef.state === "connected"}
+        <div class="github-ref-body">
+          <h4>{ghRef.title}</h4>
+          <div class="github-ref-meta">
+            <span class="github-ref-status {ghRef.status}{ghRef.draft ? ' draft' : ''}">{ghStatusLabel(ghRef)}</span>
+            {#if ghRef.author}<span>{ghRef.author}</span>{/if}
+            {#if ghRef.kind === "pull_request" && ghRef.head}<span class="github-ref-branch">{ghRef.head} → {ghRef.base}</span>{/if}
+          </div>
+          {#if ghRef.kind === "pull_request"}
+            <div class="github-ref-stats">
+              <span><b class="added">+{ghRef.additions ?? 0}</b> <b class="removed">−{ghRef.deletions ?? 0}</b></span>
+              <span>{tr(`${ghRef.changedFiles ?? 0} files`, `${ghRef.changedFiles ?? 0} arquivos`)}</span>
+              {#if ghRef.checks}<span class="github-ref-check {String(ghRef.checks).toLowerCase()}">{({ SUCCESS: tr("Checks passing", "Checks passando"), FAILURE: tr("Checks failing", "Checks falhando"), ERROR: tr("Checks failing", "Checks falhando"), PENDING: tr("Checks running", "Checks rodando"), EXPECTED: tr("Checks waiting", "Checks aguardando") } as Record<string, string>)[ghRef.checks] ?? ghRef.checks}</span>{/if}
+              {#if ghRef.review}<span>{({ APPROVED: tr("Approved", "Aprovado"), CHANGES_REQUESTED: tr("Changes requested", "Mudanças pedidas"), REVIEW_REQUIRED: tr("Review required", "Revisão necessária") } as Record<string, string>)[ghRef.review] ?? ghRef.review}</span>{/if}
+            </div>
+          {/if}
+          {#if ghRef.labels?.length}<div class="github-ref-labels">{#each ghRef.labels as label (label.name)}<span style:--label={`#${label.color}`}>{label.name}</span>{/each}</div>{/if}
+          {#if ghRef.body?.trim()}<div class="github-ref-text markdown-content">{@html renderSafeMarkdown(ghRef.body)}</div>{:else}<p class="github-ref-note">{tr("No description.", "Sem descrição.")}</p>{/if}
+          <footer>
+            <small>{tr(`${ghRef.comments ?? 0} comments`, `${ghRef.comments ?? 0} comentários`)}</small>
+            <button type="button" onclick={() => ghRef?.url && void openGitHub(ghRef.url)}><LumeIcon name="external" size={12} />{tr("Open on GitHub", "Abrir no GitHub")}</button>
+          </footer>
+        </div>
+      {:else if ghRef}
+        <p class="github-ref-note" role="alert">{ghReferenceError(ghRef.state)}</p>
+        <footer><span></span><button type="button" onclick={() => void openGitHub(ghRefLink)}><LumeIcon name="external" size={12} />{tr("Open on GitHub", "Abrir no GitHub")}</button></footer>
+      {/if}
+    </aside>
+  {/if}
+
   {#if findOpen}
     <div class="find-bar" role="search" transition:fly={{ y: -6, duration: 140 }}>
       <LumeIcon name="search" size={14} />
@@ -2948,6 +3036,32 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 <style>
   :global(::highlight(lume-find)) { color: inherit; background: color-mix(in srgb, #e9b94a 38%, transparent); }
   :global(::highlight(lume-find-current)) { color: #1b1403; background: #f0b73c; }
+  :global(a.github-ref) { padding: 0 5px 0 4px; border-radius: 6px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 9%, transparent); text-decoration: none; font-weight: 650; white-space: nowrap; }
+  :global(a.github-ref:hover) { background: color-mix(in srgb, var(--workspace-accent) 17%, transparent); }
+  .github-ref-panel { position: absolute; z-index: 15; top: 62px; right: 18px; width: min(390px, calc(100% - 36px)); max-height: min(70%, 520px); display: flex; flex-direction: column; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 44px rgba(8, 18, 13, .24); overflow: hidden; }
+  .github-ref-panel > header { padding: 8px 8px 8px 12px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--workspace-line); color: var(--workspace-muted); }
+  .github-ref-panel > header strong { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-strong); font-size: 11px; }
+  .github-ref-panel > header button { width: 24px; height: 24px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .github-ref-panel > header button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .github-ref-body { min-height: 0; padding: 11px 12px 0; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+  .github-ref-body h4 { margin: 0; color: var(--workspace-strong); font-size: 13px; line-height: 1.35; }
+  .github-ref-meta, .github-ref-stats, .github-ref-labels { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--workspace-muted); font-size: 10px; }
+  .github-ref-status { padding: 2px 8px; border-radius: 999px; color: #fff; background: #3f9b69; font-weight: 700; }
+  .github-ref-status.closed { background: #c0554f; }
+  .github-ref-status.merged { background: #8957e5; }
+  .github-ref-status.draft { background: #6e7781; }
+  .github-ref-branch { font-family: "SFMono-Regular", Consolas, monospace; }
+  .github-ref-stats b.added { color: #3f9b69; }
+  .github-ref-stats b.removed { color: #c0554f; }
+  .github-ref-check.success { color: #3f9b69; }
+  .github-ref-check.failure, .github-ref-check.error { color: #c0554f; }
+  .github-ref-check.pending { color: #d0a142; }
+  .github-ref-labels span { padding: 1px 7px; border: 1px solid var(--label); border-radius: 999px; color: var(--workspace-text); background: color-mix(in srgb, var(--label) 16%, transparent); }
+  .github-ref-text { min-height: 0; max-height: 240px; overflow-y: auto; font-size: 11px; line-height: 1.55; }
+  .github-ref-note { margin: 0; padding: 12px; color: var(--workspace-muted); font-size: 11px; line-height: 1.5; }
+  .github-ref-panel footer { margin-top: auto; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--workspace-line); color: var(--workspace-muted); background: var(--workspace-raised); }
+  .github-ref-panel footer button { height: 26px; padding: 0 9px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .github-ref-panel footer button:hover { color: var(--workspace-accent); border-color: var(--workspace-accent); }
   .mcp-actions { margin-left: auto; display: flex; gap: 2px; }
   .mcp-actions button { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
   .mcp-actions button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }

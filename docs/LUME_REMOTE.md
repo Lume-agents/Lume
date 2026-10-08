@@ -1,6 +1,9 @@
 # Lume Remote — hosted Relay design
 
-Status: proposal. Nothing in this document is implemented. It extends [LUME_NODE.md](./LUME_NODE.md) and must satisfy
+Status: proposal with a working prototype of the transport. The Relay lives in
+[Lume-agents/lume-relay](https://github.com/Lume-agents/lume-relay) (AGPL-3.0); the Node side is `relay_link.rs` (connection,
+signed challenge, pairing, authorization) and `relay_e2e.rs` (end-to-end encryption) in `src-tauri`. They are not wired into
+the running Node or the UI yet, and accounts, billing and push do not exist. It extends [LUME_NODE.md](./LUME_NODE.md) and must satisfy
 [DISTRIBUTED_THREAT_MODEL.md](./DISTRIBUTED_THREAT_MODEL.md), including its security gates before any internet pairing.
 
 ## Product decisions

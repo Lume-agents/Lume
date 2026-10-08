@@ -33,6 +33,10 @@ pub mod node_inventory;
 pub mod node_network;
 pub mod node_pairing;
 pub mod node_service;
+#[allow(dead_code)]
+pub mod relay_e2e;
+#[allow(dead_code)]
+pub mod relay_link;
 mod opencode_acp;
 mod overlay;
 mod path_mentions;

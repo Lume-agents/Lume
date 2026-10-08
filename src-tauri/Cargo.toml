@@ -40,7 +40,7 @@ sha2 = "0.10"
 subtle = "2.6"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 sysinfo = "0.39.6"
-tungstenite = "0.30.0"
+tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 notify = "8.2.0"
 mdns-sd = "0.20.2"
 

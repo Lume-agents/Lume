@@ -681,6 +681,59 @@ impl WorkflowRuntime {
             .map(|session| session.id))
     }
 
+    /// A chat can get its real id when its first prompt starts the thread. Steps that
+    /// pointed at the old id follow it, in the saved workflows and in any run.
+    pub fn rename_session(&self, app: &AppHandle, state: &AppState, old: &str, new: &str) {
+        if old == new || old.trim().is_empty() || new.trim().is_empty() {
+            return;
+        }
+        if let Ok(mut preferences) = state.preferences() {
+            let mut changed = false;
+            for group in &mut preferences.workflow_groups {
+                if group.steps.iter().any(|step| step.session_native_id == new) {
+                    continue;
+                }
+                for step in group
+                    .steps
+                    .iter_mut()
+                    .filter(|step| step.session_native_id == old)
+                {
+                    step.session_native_id = new.to_string();
+                    changed = true;
+                }
+            }
+            if changed && state.save_preferences(&preferences).is_ok() {
+                let _ = app.emit("lume://preferences-changed", &preferences);
+            }
+        }
+        let Ok(mut runs) = self.runs.lock() else {
+            return;
+        };
+        for active in runs.values_mut() {
+            let mut changed = false;
+            for step in active
+                .group
+                .steps
+                .iter_mut()
+                .filter(|step| step.session_native_id == old)
+            {
+                step.session_native_id = new.to_string();
+                changed = true;
+            }
+            for history in active
+                .step_history
+                .values_mut()
+                .filter(|history| history.session_native_id == old)
+            {
+                history.session_native_id = new.to_string();
+                changed = true;
+            }
+            if changed {
+                let _ = persist_active(state, active);
+            }
+        }
+    }
+
     pub fn rebind_session(
         &self,
         app: &AppHandle,

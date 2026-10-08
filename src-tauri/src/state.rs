@@ -1312,11 +1312,13 @@ impl AppState {
         Ok(())
     }
 
+    /// Moves a Codex session to its real thread. Returns the id it had before, which
+    /// anything that stored it (such as a workflow step) must follow.
     pub fn rebind_codex_thread(
         &self,
         session_id: &str,
         native_session_id: String,
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         let old_native_session_id = {
             let mut sessions = self
                 .sessions
@@ -1334,7 +1336,7 @@ impl AppState {
             session.updated_at = now_millis();
             old_native_session_id
         };
-        if let Some(old_native_session_id) = old_native_session_id {
+        if let Some(old_native_session_id) = old_native_session_id.clone() {
             let mut settings = self
                 .session_model_overrides
                 .lock()
@@ -1343,7 +1345,7 @@ impl AppState {
                 settings.insert((AgentKind::Codex, native_session_id), value);
             }
         }
-        Ok(())
+        Ok(old_native_session_id)
     }
 
     pub fn mark_session_lume_controlled(

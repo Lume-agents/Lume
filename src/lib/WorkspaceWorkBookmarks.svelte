@@ -334,8 +334,8 @@
   .panel-content { min-height: 0; padding: 9px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
 
   .task-list { margin: 0; padding: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; list-style: none; }
-  .task-list li:not(.sr-only) { --task-accent: var(--workspace-accent); width: fit-content; max-width: 100%; min-height: 36px; padding: 6px 9px; display: grid; grid-template-columns: 19px minmax(0, 1fr); align-items: start; gap: 8px; border-radius: 11px; color: var(--workspace-strong); background: color-mix(in srgb, var(--workspace-raised) 76%, var(--workspace-subtle)); font-size: 10px; font-weight: 650; line-height: 19px; transition: color 300ms ease, filter 160ms ease, box-shadow 300ms ease; }
-  .task-list li:not(.sr-only):hover { filter: brightness(1.035); }.task-list li.doing { color: var(--workspace-strong); }
+  .task-list li:not(.sr-only) { --task-accent: var(--workspace-accent); width: fit-content; max-width: 100%; min-height: 36px; padding: 6px 9px; display: grid; grid-template-columns: 19px minmax(0, 1fr); align-items: start; gap: 8px; border-radius: 11px; color: var(--workspace-strong); background: color-mix(in srgb, var(--workspace-raised) 76%, var(--workspace-subtle)); font-size: 10px; font-weight: 650; line-height: 19px; transition: color 300ms ease, background-color 220ms ease, filter 160ms ease, box-shadow 220ms ease; }
+  .task-list li:not(.sr-only):hover { filter: brightness(1.035); }.task-list li.doing { color: var(--workspace-strong); background: color-mix(in srgb, var(--workspace-accent-soft) 74%, var(--workspace-raised)); box-shadow: inset 2px 0 var(--workspace-accent); }
   .task-check { width: 19px; height: 19px; overflow: visible; color: color-mix(in srgb, var(--workspace-muted) 58%, transparent); }
   .check-ring { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 1 4.316; transition: opacity 240ms cubic-bezier(.22, 1, .36, 1); }
   .check-fill { fill: var(--task-accent); transform: scale(0); transform-box: fill-box; transform-origin: center; transition: transform 240ms cubic-bezier(.22, 1, .36, 1); }
@@ -343,7 +343,7 @@
   .task-label { color: inherit; background-image: linear-gradient(currentColor, currentColor); background-repeat: no-repeat; background-position: 0 52%; background-size: 0 1.5px; box-decoration-break: clone; -webkit-box-decoration-break: clone; transition: background-size 380ms cubic-bezier(.65, 0, .35, 1), color 300ms ease; }
   .task-list li.done { color: var(--workspace-faint); }.done .check-ring { opacity: 0; }.done .check-fill { transform: scale(1); }.done .check-tick { stroke-dashoffset: 0; opacity: 1; }.done .task-label { background-size: 100% 1.5px; }
   .task-list li.settling { animation: task-nudge 300ms cubic-bezier(.22, 1, .36, 1) 680ms both; }.settling .task-check { animation: task-pop 340ms cubic-bezier(.22, 1, .36, 1) both; }
-  .doing .check-ring { color: var(--workspace-accent); animation: active-ring 1.7s linear infinite; }
+  .doing .check-ring { color: var(--workspace-accent); }
 
   .plan-list { margin: 0; padding: 2px 1px; display: grid; list-style: none; }
   .plan-list li { position: relative; min-width: 0; min-height: 48px; padding: 8px 7px; display: grid; grid-template-columns: 27px minmax(0, 1fr); align-items: start; gap: 10px; color: var(--workspace-text); font-size: 11.5px; font-weight: 590; line-height: 1.5; }
@@ -357,7 +357,6 @@
 
   @keyframes task-pop { 0%, 100% { transform: scale(1); } 40% { transform: scale(1.08); } }
   @keyframes task-nudge { 0% { transform: translateX(0); } 35% { transform: translateX(8px); } 70% { transform: translateX(-2px); } 100% { transform: translateX(0); } }
-  @keyframes active-ring { to { transform: rotate(360deg); transform-origin: center; } }
   @media (max-width: 420px) { .work-bookmarks { width: calc(100% - 10px); } }
-  @media (prefers-reduced-motion: reduce) { .bookmark-panel { transition: opacity 100ms ease; }.bookmark-trigger { transition-duration: 80ms; }.task-list li.settling, .settling .task-check, .doing .check-ring { animation: none; }.task-list li:not(.sr-only), .check-ring, .check-fill, .check-tick, .task-label, .goal-progress > span i { transition-duration: 80ms; } }
+  @media (prefers-reduced-motion: reduce) { .bookmark-panel { transition: opacity 100ms ease; }.bookmark-trigger { transition-duration: 80ms; }.task-list li.settling, .settling .task-check { animation: none; }.task-list li:not(.sr-only), .check-ring, .check-fill, .check-tick, .task-label, .goal-progress > span i { transition-duration: 80ms; } }
 </style>

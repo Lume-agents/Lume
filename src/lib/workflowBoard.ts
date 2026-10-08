@@ -64,7 +64,7 @@ export function newConnection(fromStepId: string, toStepId: string): WorkflowCon
     contextSelection: defaultContextSelection(),
     additionalInstruction: "",
     requiresApproval: true,
-    advanceMode: "manual",
+    advanceMode: "automatic",
   };
 }
 

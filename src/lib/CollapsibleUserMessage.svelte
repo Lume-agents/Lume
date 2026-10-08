@@ -3,12 +3,14 @@
   import { slide } from "svelte/transition";
   import type { Language } from "$lib/i18n";
   import LumeIcon from "$lib/LumeIcon.svelte";
-  import { userMessagePresentation } from "$lib/userMessagePresentation";
+  import { parseWorkflowPrompt, userMessagePresentation } from "$lib/userMessagePresentation";
 
   let { text, language = "en" } = $props<{ text: string; language?: Language }>();
   let expanded = $state(false);
   let previousText = $state("");
   const presentation = $derived(userMessagePresentation(text));
+  const workflow = $derived(parseWorkflowPrompt(text));
+  let showPrompt = $state(false);
   const collapsible = $derived(presentation.kind !== "full");
   const visibleText = $derived(expanded ? text : presentation.preview);
 
@@ -16,6 +18,7 @@
     if (text === previousText) return;
     previousText = text;
     expanded = false;
+    showPrompt = false;
   });
 
   function tr(english: string, portuguese: string) {
@@ -27,6 +30,24 @@
   }
 </script>
 
+{#if workflow}
+  <div class="workflow-message">
+    <div class="workflow-heading">
+      <span class="workflow-mark" aria-hidden="true"><LumeIcon name="branch" size={13} /></span>
+      <strong>
+        {#if workflow.kind === "handoff"}{tr("Workflow handoff", "Passagem de workflow")}{#if workflow.from && workflow.to} · {workflow.from} → {workflow.to}{/if}
+        {:else if workflow.kind === "skipped"}{tr("Workflow continues", "Workflow continua")}{#if workflow.role} · {tr(`${workflow.role} skipped`, `${workflow.role} ignorado`)}{/if}
+        {:else}{tr("Workflow step", "Etapa do workflow")}{#if workflow.role} · {workflow.role}{/if}{/if}
+      </strong>
+    </div>
+    {#if workflow.objective}<p class="workflow-objective">{workflow.objective}</p>{/if}
+    <button type="button" aria-expanded={showPrompt} onclick={() => (showPrompt = !showPrompt)}>
+      <span>{showPrompt ? tr("Hide prompt", "Ocultar prompt") : tr("Show prompt sent", "Ver prompt enviado")}</span>
+      <LumeIcon name="chevron-down" size={12} />
+    </button>
+    {#if showPrompt}<pre class="workflow-prompt">{text}</pre>{/if}
+  </div>
+{:else}
 <div class:expanded class="collapsible-user-message">
   {#key expanded}
     {#if !expanded && presentation.kind === "pasted"}
@@ -48,8 +69,14 @@
     </button>
   {/if}
 </div>
+{/if}
 
 <style>
+  .workflow-message { min-width: 0; max-width: 100%; display: grid; gap: 6px; justify-items: start; }
+  .workflow-heading { display: flex; align-items: center; gap: 7px; color: var(--user-message-text, inherit); font-size: .9em; }
+  .workflow-mark { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 7px; color: var(--user-message-accent, var(--workspace-accent)); background: color-mix(in srgb, var(--user-message-accent, var(--workspace-accent)) 14%, transparent); }
+  .workflow-objective { max-width: 100%; margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; color: var(--user-message-muted, var(--workspace-muted)); line-height: 1.5; overflow-wrap: anywhere; }
+  .workflow-prompt { max-height: 260px; padding: 8px 10px; overflow: auto; border-radius: 8px; background: color-mix(in srgb, currentColor 6%, transparent); font-size: .85em; }
   .collapsible-user-message { min-width: 0; max-width: 100%; margin-top: var(--user-message-content-margin-top, 0); display: grid; gap: 5px; justify-items: end; }
   .message-text-frame { position: relative; min-width: 0; max-width: 100%; }
   pre { min-width: 0; max-width: 100%; margin: 0; overflow-x: hidden; color: var(--user-message-text, inherit); font: var(--user-message-font, inherit); line-height: var(--user-message-line-height, 1.55); overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; animation: message-reveal 180ms cubic-bezier(.16, 1, .3, 1); }

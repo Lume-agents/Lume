@@ -79,11 +79,14 @@ assert.equal(addConnection(abc, "step-c", "step-a"), abc, "a refused arrow chang
 assert.match(connectionRefusalMessage("cycle", true), /laço/);
 assert.match(connectionRefusalMessage("has-outgoing", false), /outgoing arrow/);
 assert.match(problemMessage({ code: "multiple-starts", stepIds: [] }, true), /uma etapa/i);
-
+// ── defaults of a new arrow ──
 // ── the same defaults the orb gives a new arrow ──
+// A new arrow asks for approval and then goes on by itself: manual and approval were the same pause twice.
 const [connection] = ab.connections;
 assert.equal(connection.requiresApproval, true);
-assert.equal(connection.advanceMode, "manual");
+assert.equal(connection.advanceMode, "automatic");
+
+
 assert.equal(connection.contextPolicy, "standard");
 assert.deepEqual(connection.contextSelection, { response: true, files: true, checks: true, plan: false, activity: false, diffs: false });
 assert.equal(updateConnection(ab, connection.id, { advanceMode: "automatic" }).connections[0].advanceMode, "automatic");

@@ -424,6 +424,7 @@ export type McpServer = {
   target: string;
   scope: "user" | "project" | "local" | "account" | string;
   status: "connected" | "needs_auth" | "failed" | "disabled" | "unknown" | string;
+  tools: { name: string; description: string }[];
 };
 
 /** The agent's MCP servers; `probe` also asks Claude Code for their live health, which is slow. */

@@ -30,6 +30,15 @@ pub struct McpServer {
     pub scope: String,
     /// `connected`, `needs_auth`, `failed`, `disabled` or `unknown`.
     pub status: String,
+    /// What the server offers, when the agent reports it.
+    pub tools: Vec<McpTool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpTool {
+    pub name: String,
+    pub description: String,
 }
 
 fn home() -> Option<PathBuf> {
@@ -45,7 +54,64 @@ fn server(name: &str, transport: &str, target: String, scope: &str, status: &str
         target,
         scope: scope.into(),
         status: status.into(),
+        tools: Vec::new(),
     }
+}
+
+/// `mcp_status` entries of a Claude conversation, as servers.
+pub fn parse_claude_live(entries: &[Value]) -> Vec<McpServer> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("name").and_then(Value::as_str)?;
+            let config = entry.get("config").unwrap_or(&Value::Null);
+            let mut item = from_json_entry(
+                name,
+                config,
+                match entry.get("scope").and_then(Value::as_str) {
+                    Some("claudeai") => "account",
+                    Some(other) => other,
+                    None => "user",
+                },
+            );
+            if item.transport == "claudeai-proxy" {
+                item.transport = "http".into();
+            }
+            item.status = match entry.get("status").and_then(Value::as_str) {
+                Some("connected") => "connected",
+                Some("needs-auth") => "needs_auth",
+                Some("failed") => "failed",
+                Some("disabled") => "disabled",
+                _ => "unknown",
+            }
+            .into();
+            item.tools = entry
+                .get("tools")
+                .and_then(Value::as_array)
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .filter_map(|tool| {
+                            Some(McpTool {
+                                name: tool.get("name").and_then(Value::as_str)?.to_string(),
+                                description: tool
+                                    .get("description")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(160)
+                                    .collect(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(item)
+        })
+        .collect()
 }
 
 fn from_json_entry(name: &str, entry: &Value, scope: &str) -> McpServer {
@@ -207,9 +273,9 @@ pub fn parse_codex_config(text: &str, scope: &str) -> Vec<McpServer> {
     let mut command = String::new();
     let mut args = String::new();
     let flush = |servers: &mut Vec<McpServer>,
-                     index: Option<usize>,
-                     command: &mut String,
-                     args: &mut String| {
+                 index: Option<usize>,
+                 command: &mut String,
+                 args: &mut String| {
         if let Some(index) = index {
             if servers[index].target.is_empty() {
                 servers[index].target = format!("{command} {args}").trim().to_string();
@@ -375,6 +441,15 @@ pub fn servers_for(
     };
     if probe && *agent == AgentKind::ClaudeCode {
         if let Some(cwd) = cwd {
+            // The control protocol answers with status and tools; the slower `claude mcp list` is the fallback.
+            if let Ok(entries) = crate::claude_control::mcp_status(cwd) {
+                let live = parse_claude_live(&entries);
+                if !live.is_empty() {
+                    servers = live;
+                    servers.sort_by_key(|item| item.name.to_lowercase());
+                    return Ok(servers);
+                }
+            }
             for (name, target, status) in claude_health(cwd)? {
                 match servers.iter_mut().find(|item| item.name == name) {
                     Some(item) => item.status = status,
@@ -426,6 +501,28 @@ mod tests {
         let servers = json_servers(&value, "mcp", "user");
         assert_eq!(servers[0].target, "https://x.test/mcp");
         assert_eq!(servers[0].transport, "http");
+    }
+
+    #[test]
+    fn claude_live_status_carries_tools() {
+        let entries = vec![
+            json!({
+                "name": "docs", "status": "connected", "scope": "user",
+                "config": { "type": "http", "url": "https://x.test/mcp" },
+                "tools": [{ "name": "search", "description": "Search the docs.\nMore text" }]
+            }),
+            json!({ "name": "claude.ai Claude Docs", "status": "needs-auth", "scope": "claudeai", "config": { "type": "claudeai-proxy", "url": "https://x.test/p" } }),
+        ];
+        let servers = parse_claude_live(&entries);
+        assert_eq!(servers[0].tools[0].description, "Search the docs.");
+        assert_eq!(
+            (
+                servers[1].status.as_str(),
+                servers[1].scope.as_str(),
+                servers[1].transport.as_str()
+            ),
+            ("needs_auth", "account", "http")
+        );
     }
 
     #[test]

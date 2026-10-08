@@ -19,7 +19,8 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import AccentColorPicker from "$lib/AccentColorPicker.svelte";
-  import { appearanceAttributes, appearanceThemes } from "$lib/appearance";
+  import { ensureCustomFonts } from "$lib/fonts";
+  import { appearanceAttributes, appearanceThemes, darkBases, lightBases } from "$lib/appearance";
   import LumeLogo from "$lib/LumeLogo.svelte";
   import OrbResponse from "$lib/OrbResponse.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
@@ -45,6 +46,8 @@
   import { agentConnectionMessage } from "$lib/agentConnection";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
+  import { usageAlertDismissals } from "$lib/usageAlertDismissals";
+  import { playTone as playNotificationTone, type ToneKind } from "$lib/notificationTones";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import { SYSTEM_BANNER_CONTEXT, type SystemBannerNotice, type SystemBannerReporter } from "$lib/systemBannerContext";
   import { animatedDisclosure } from "$lib/animatedDisclosure";
@@ -466,8 +469,8 @@
       tone: "error",
       onDismiss: () => (terminalOpenError = null),
     });
-    for (const alert of collectAgentAlerts(sessions, preferences.language)) {
-      if (dismissedAgentAlertIds.includes(alert.id)) continue;
+    for (const alert of collectAgentAlerts(sessions, preferences.language, Date.now(), { usageScope: "active" })) {
+      if (dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id)) continue;
       visibleItems.push({
         id: alert.id,
         message: alert.message,
@@ -503,6 +506,7 @@
   }
 
   function dismissAgentAlert(id: string) {
+    usageAlertDismissals.dismiss(id);
     if (dismissedAgentAlertIds.includes(id)) return;
     dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-200);
   }
@@ -634,6 +638,7 @@
 
   const effectiveDark = $derived(preferences.darkMode ?? systemDark);
   const appearance = $derived(appearanceAttributes(preferences));
+  $effect(() => { void ensureCustomFonts(preferences); });
   const darkWorkspaceOpacity = $derived(
     preferences.workspaceDarkBackgroundColor
       ? preferences.workspaceDarkBackgroundOpacity
@@ -1009,8 +1014,17 @@
     }
   }
 
+  const announcedUsageAlerts = new Set<string>();
+  let usageAlertsSeeded = false;
+
   async function refreshSessions(withSound: boolean) {
     const next = await loadSessions();
+    // A usage alert that was not there before gets its own chime (the first load only records them).
+    const freshUsageAlert = collectAgentAlerts(next, preferences.language, Date.now(), { usageScope: "active" })
+      .filter((alert) => alert.usage && !announcedUsageAlerts.has(alert.id) && !$usageAlertDismissals.includes(alert.id));
+    if (!usageAlertsSeeded || withSound) freshUsageAlert.forEach((alert) => announcedUsageAlerts.add(alert.id));
+    if (usageAlertsSeeded && withSound && freshUsageAlert.length && preferences.soundEnabled) playTone("usage");
+    usageAlertsSeeded = true;
     if (withSound && preferences.soundEnabled) {
       const soundKey = (session: AgentSession) =>
         session.nativeSessionId
@@ -2768,7 +2782,7 @@
 
   async function selectAppearanceTheme(theme: Preferences["appearanceTheme"]) {
     const previous = preferences;
-    preferences = { ...preferences, appearanceTheme: theme, accentColor: undefined, accentOpacity: 100 };
+    preferences = { ...preferences, appearanceTheme: theme };
     savingSettings = true;
     try {
       await savePreferences(preferences);
@@ -2930,39 +2944,8 @@
       });
   }
 
-  function playTone(kind: "completed" | "failed" | "permission") {
-    try {
-      const AudioContextClass = window.AudioContext;
-      const context = new AudioContextClass();
-      const gain = context.createGain();
-      const peakVolume = 0.09 * Math.max(0, Math.min(100, preferences.soundVolume)) / 100;
-      gain.gain.setValueAtTime(0.0001, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(
-        Math.max(0.0001, peakVolume),
-        context.currentTime + 0.015,
-      );
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.42);
-      gain.connect(context.destination);
-
-      const notes = kind === "completed"
-        ? [620, 820]
-        : kind === "permission"
-          ? [440, 440]
-          : [330, 250];
-      notes.forEach((frequency, index) => {
-        const oscillator = context.createOscillator();
-        oscillator.type = kind === "permission" ? "triangle" : "sine";
-        oscillator.frequency.value = frequency;
-        oscillator.connect(gain);
-        const spacing = kind === "permission" ? 0.18 : 0.09;
-        const duration = kind === "permission" ? 0.12 : 0.25;
-        oscillator.start(context.currentTime + index * spacing);
-        oscillator.stop(context.currentTime + duration + index * spacing);
-      });
-      setTimeout(() => void context.close(), 600);
-    } catch {
-      // Audio is optional and may be blocked until the first interaction.
-    }
+  function playTone(kind: ToneKind) {
+    playNotificationTone(kind, preferences.soundVolume);
   }
 
   function actionLabel(action: PermissionAction) {
@@ -3016,7 +2999,7 @@
   class:dark={effectiveDark}
   class:morphing={morphing !== null}
   class="overlay-shell"
-  style={`--panel-radius: ${panelRadius}; --morph-width: ${morphWidth}px; --morph-height: ${morphHeight}px;${appearance.accentCss ? ` --lume-accent: ${appearance.accentCss}; --lume-accent-strong: ${appearance.accentCss};` : ""}`}
+  style={`--panel-radius: ${panelRadius}; --morph-width: ${morphWidth}px; --morph-height: ${morphHeight}px;${appearance.accentCss ? ` --lume-accent: ${appearance.accentCss}; --lume-accent-strong: ${appearance.accentCss};` : ""}${appearance.baseCss ? ` ${appearance.baseCss};` : ""}`}
   onpointermove={wakeMascot}
   aria-label={tr("Lume, agent monitor", "Lume, monitor de agentes")}
 >
@@ -3091,7 +3074,7 @@
           </div>
         </div>
         <div class="header-actions">
-          <button class="workspace-button" type="button" title={tr("Open Workspace", "Abrir Workspace")} disabled={openingWorkspace} aria-busy={openingWorkspace} onclick={() => void showWorkspaceWindow()} aria-label={tr("Open Workspace", "Abrir Workspace")}>
+          <button class:opening={openingWorkspace} class="workspace-button" type="button" title={tr("Open Workspace", "Abrir Workspace")} disabled={openingWorkspace} aria-busy={openingWorkspace} onclick={() => void showWorkspaceWindow()} aria-label={tr("Open Workspace", "Abrir Workspace")}>
             <WorkspaceHeaderIcon name="orb" size={19} />
           </button>
           <button class="palette-button" type="button" title={preferences.globalShortcut} onclick={showCommandPalette} aria-label={tr("Open command palette", "Abrir paleta de comandos")}>
@@ -3713,32 +3696,28 @@
               {/if}
             </div>
 
-            <div class:enabled={preferences.workflowEnabled} class="workflow-group-row workflow-global-mode">
-              <span class="workflow-group-symbol" aria-hidden="true">
-                <svg viewBox="0 0 24 20">
-                  <path class="normal-link" d="M3 10h18" />
-                  <path class="workflow-link" d="M12 2.5 3 17h18L12 2.5Z" />
-                  <circle class="node-start" cx="3" cy="17" r="2.25" />
-                  <circle class="node-center" cx="12" cy="2.5" r="2.25" />
-                  <circle class="node-end" cx="21" cy="17" r="2.25" />
-                </svg>
-              </span>
-              <span class="workflow-group-copy">
-                <strong>{tr("Terminal mode", "Modo dos terminais")}</strong>
-              </span>
+            <div class:enabled={preferences.workflowEnabled} class="workflow-global-mode">
               <span class:workflow-active={preferences.workflowEnabled} class="workflow-mode-switch" role="group" aria-label={tr("Terminal mode", "Modo dos terminais")}>
                 <button
                   class:active={!preferences.workflowEnabled}
                   disabled={workflowModeChanging}
                   type="button"
+                  aria-pressed={!preferences.workflowEnabled}
                   onclick={() => void togglePanelWorkflowMode(false)}
-                >{tr("Normal", "Normal")}</button>
+                >
+                  <svg class="mode-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12" /><circle cx="4" cy="10" r="1.7" /><circle cx="10" cy="10" r="1.7" /><circle cx="16" cy="10" r="1.7" /></svg>
+                  {tr("Normal", "Normal")}
+                </button>
                 <button
                   class:active={preferences.workflowEnabled}
                   disabled={workflowModeChanging}
                   type="button"
+                  aria-pressed={preferences.workflowEnabled}
                   onclick={() => void togglePanelWorkflowMode(true)}
-                >Workflow</button>
+                >
+                  <svg class="mode-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4 4 15h12L10 4Z" /><circle cx="10" cy="4" r="1.7" /><circle cx="4" cy="15" r="1.7" /><circle cx="16" cy="15" r="1.7" /></svg>
+                  Workflow
+                </button>
               </span>
               <button
                 class:active={workflowSettingsOpen}
@@ -3749,7 +3728,7 @@
                 aria-expanded={workflowSettingsOpen}
                 onclick={() => void toggleWorkflowSettings()}
               >
-                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M4 10h12M4 14h12" /></svg>
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 6h5.5M13 6h3.5M3.5 14h2.5M10 14h6.5" /><circle cx="11" cy="6" r="1.9" /><circle cx="8" cy="14" r="1.9" /></svg>
               </button>
             </div>
 
@@ -3939,18 +3918,36 @@
               </label>
             </div>
             <div class="appearance-theme-setting">
-              <span><strong>{tr("Base theme", "Tema base")}</strong><small>{tr("Shared by Orb, Workspace, and terminals.", "Compartilhado pelo Orb, Workspace e terminais.")}</small></span>
+              <span><strong>{tr("Surface tint", "Tom das superfícies")}</strong></span>
               <div class="appearance-theme-list">
                 {#each appearanceThemes as theme (theme.value)}
-                  <button class:active={appearance.theme === theme.value && !appearance.accent} type="button" title={theme.label} aria-label={theme.label} onclick={() => void selectAppearanceTheme(theme.value)}>
+                  <button class:active={appearance.theme === theme.value} type="button" title={theme.label} aria-label={theme.label} onclick={() => void selectAppearanceTheme(theme.value)}>
                     <i style:--theme-accent={theme.accent} style:--theme-surface={effectiveDark ? theme.darkSurface : theme.lightSurface}></i>
                   </button>
                 {/each}
               </div>
             </div>
+            <div class="appearance-theme-setting">
+              <span><strong>{tr("Neutral surfaces", "Superfícies neutras")}</strong></span>
+              <div class="appearance-theme-list">
+                {#if effectiveDark}
+                  {#each darkBases as base (base.value)}
+                    <button class:active={preferences.darkBase === base.value} type="button" title={tr(base.label, base.labelPt)} aria-label={tr(base.label, base.labelPt)} onclick={() => void updateAppearancePatch({ darkBase: base.value })}>
+                      <i style:--theme-accent={appearance.accent ?? "#43b47d"} style:--theme-surface={base.pigments?.surface ?? appearanceThemes.find((theme) => theme.value === appearance.theme)?.darkSurface}></i>
+                    </button>
+                  {/each}
+                {:else}
+                  {#each lightBases as base (base.value)}
+                    <button class:active={preferences.lightBase === base.value} type="button" title={tr(base.label, base.labelPt)} aria-label={tr(base.label, base.labelPt)} onclick={() => void updateAppearancePatch({ lightBase: base.value })}>
+                      <i style:--theme-accent={appearance.accent ?? "#43b47d"} style:--theme-surface={base.pigments?.surface ?? appearanceThemes.find((theme) => theme.value === appearance.theme)?.lightSurface}></i>
+                    </button>
+                  {/each}
+                {/if}
+              </div>
+            </div>
             <div class="field-row appearance-accent-row">
-              <span><strong>{tr("Accent color", "Cor de destaque")}</strong><small>{appearance.accent ?? tr("Base theme color", "Cor do tema base")}</small></span>
-              <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} language={preferences.language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void updateAppearancePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void updateAppearancePatch({ accentColor: undefined, accentOpacity: 100 })} />
+              <span><strong>{tr("Accent color", "Cor de destaque")}</strong><small>{appearance.accent ?? tr("Following the surface tint", "Seguindo o tom das superfícies")}</small></span>
+              <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} readyColors={appearanceThemes.map((theme) => theme.accent)} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} language={preferences.language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void updateAppearancePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void updateAppearancePatch({ accentColor: undefined, accentOpacity: 100 })} />
             </div>
             <div class="field-row appearance-accent-row">
               <span><strong>{tr("Light workspace", "Workspace claro")}</strong><small>{preferences.workspaceLightBackgroundColor ?? tr("Light theme preset", "Preset do tema claro")} · {preferences.workspaceLightBackgroundOpacity}%</small></span>
@@ -3999,7 +3996,7 @@
               </label>
             </div>
             <div class="setting-row">
-              <div><strong>{tr("Subtle sounds", "Sons sutis")}</strong><span>{tr("Only when a task finishes, fails, or requests permission.", "Apenas ao finalizar, encontrar erro ou pedir permissão.")}</span></div>
+              <div><strong>{tr("Subtle sounds", "Sons sutis")}</strong><span>{tr("Only when a task finishes, fails, requests permission, or usage runs low.", "Apenas ao finalizar, encontrar erro, pedir permissão ou quando o uso estiver acabando.")}</span></div>
               <label class="switch">
                 <input
                   type="checkbox"
@@ -4671,6 +4668,11 @@
   .brand-lockup strong { color: #202d28; font-size: 13px; letter-spacing: -0.01em; }
   .brand-lockup div span { color: #75817c; font-size: 10px; }
 
+  .workspace-button { position: relative; }
+  .workspace-button.opening :global(svg) { opacity: .28; transition: opacity 120ms ease; }
+  .workspace-button.opening::after { position: absolute; inset: 7px; border: 2px solid color-mix(in srgb, currentColor 22%, transparent); border-top-color: currentColor; border-radius: 50%; content: ""; animation: workspace-opening 760ms linear infinite; }
+  @keyframes workspace-opening { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .workspace-button.opening::after { animation-duration: 2s; } }
   .add-button,
   .workspace-button,
   .palette-button,
@@ -4763,7 +4765,7 @@
   .shortcut-editor > small { color: #829089; font-size: 8px; line-height: 1.45; }
   .shortcut-capture { height: 44px; margin-top: 3px; border: 1px solid rgba(70, 113, 95, 0.28); border-radius: 10px; outline: 0; color: #3e6153; background: rgba(74, 122, 102, 0.07); cursor: text; }
   .shortcut-capture:focus { border-color: rgba(69, 130, 103, 0.58); box-shadow: 0 0 0 3px rgba(74, 122, 102, 0.1); }
-  .shortcut-capture kbd { font: 750 10px Inter, sans-serif; }
+  .shortcut-capture kbd { font: 750 10px var(--lume-font-ui, Inter, sans-serif); }
   .shortcut-editor-actions { margin-top: 4px; display: flex; justify-content: flex-end; gap: 6px; }
   .shortcut-editor-actions button { min-width: 60px; height: 28px; padding: 0 9px; border: 1px solid rgba(82, 105, 95, 0.15); border-radius: 8px; color: #66776e; background: transparent; font-size: 8px; font-weight: 750; cursor: pointer; }
   .shortcut-editor-actions button.primary { color: #fff; border-color: #317e59; background: #317e59; }
@@ -4794,7 +4796,7 @@
   .final-response > summary { padding: 10px; color: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
   .final-response-body { position: relative; padding: 8px 10px 12px; color: inherit; }
   .final-response-body .final-response-copy { position: relative; top: auto; right: auto; margin: 0 0 5px auto; }
-  .empty-session-actions button { min-height: 30px; padding: 5px 10px; border: 1px solid rgba(70, 109, 87, .3); border-radius: 7px; color: inherit; background: rgba(72, 131, 97, .08); font: 650 11px Inter, sans-serif; cursor: pointer; }
+  .empty-session-actions button { min-height: 30px; padding: 5px 10px; border: 1px solid rgba(70, 109, 87, .3); border-radius: 7px; color: inherit; background: rgba(72, 131, 97, .08); font: 650 11px var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .empty-session-actions button:hover { background: rgba(72, 131, 97, .16); }
   .empty-session-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
   .session-details .permission-block, .session-details .question-block { margin: 0 0 14px; padding: 11px; border: 1px solid rgba(166, 122, 49, .28); border-radius: 10px; font-size: 12px; line-height: 1.5; }
@@ -4895,7 +4897,7 @@
   .session-details { padding: 0 2px 13px 43px; }
   .session-action-bar { position: relative; margin: 0 0 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
   .cli-context-menu { position: fixed; z-index: 1200; width: min(196px, calc(100vw - 16px)); box-sizing: border-box; padding: 5px; border-radius: 10px; color: var(--lume-ink-light); background: var(--lume-raised-light); box-shadow: 0 8px 24px rgb(0 0 0 / 18%); }
-  .cli-context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 6px; color: inherit; background: transparent; font: 550 12px Inter, sans-serif; text-align: left; cursor: pointer; }
+  .cli-context-menu button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 34px; padding: 7px 9px; border: 0; border-radius: 6px; color: inherit; background: transparent; font: 550 12px var(--lume-font-ui, Inter, sans-serif); text-align: left; cursor: pointer; }
   .cli-context-menu button:hover, .cli-context-menu button:focus-visible { background: color-mix(in srgb, var(--lume-accent) 12%, transparent); }
   .cli-context-menu button:focus-visible { outline: 2px solid var(--lume-accent-strong); outline-offset: -2px; }
   .overlay-shell.dark .cli-context-menu { color: var(--lume-ink-dark); background: var(--lume-raised-dark); }
@@ -4925,7 +4927,7 @@
   .question-actions button { min-height: 26px; padding: 0 8px; border: 1px solid rgba(65, 112, 133, 0.16); border-radius: 7px; color: #425a61; background: rgba(255, 255, 255, 0.52); font-size: 9px; font-weight: 700; cursor: pointer; }
   .question-actions button.selected { border-color: rgba(44, 137, 178, 0.42); background: rgba(48, 145, 187, 0.12); }
   .question-actions button b { color: #2f83aa; }
-  code { padding: 7px 8px; overflow: hidden; border-radius: 7px; color: #46524d; background: rgba(70, 82, 77, 0.055); font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  code { padding: 7px 8px; overflow: hidden; border-radius: 7px; color: #46524d; background: rgba(70, 82, 77, 0.055); font-family: var(--lume-font-code, "SFMono-Regular", Consolas, monospace); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 
   .permission-actions { margin-top: 2px; display: flex; flex-wrap: wrap; gap: 5px; }
   .permission-actions button {
@@ -4957,12 +4959,12 @@
   .inline-queue-tray.read-only { cursor: default; }
   .inline-queue-tray.read-only:hover { border-color: rgba(80, 119, 160, 0.13); background: rgba(74, 119, 157, 0.055); }
   .inline-queue-tray:disabled { opacity: 0.58; cursor: default; }
-  .inline-queue-tray .queue-mark { width: 18px; height: 18px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 5px; color: #477fa9; background: rgba(66, 127, 174, 0.1); font: 800 11px Inter, sans-serif; }
+  .inline-queue-tray .queue-mark { width: 18px; height: 18px; display: grid; flex: 0 0 auto; place-items: center; border-radius: 5px; color: #477fa9; background: rgba(66, 127, 174, 0.1); font: 800 11px var(--lume-font-ui, Inter, sans-serif); }
   .inline-queue-tray .queue-copy { min-width: 0; flex: 1; display: grid; gap: 1px; }
   .inline-queue-tray .queue-copy small { color: #7790a1; font-size: 7px; font-weight: 760; letter-spacing: 0.035em; text-transform: uppercase; }
   .inline-queue-tray .queue-copy strong { overflow: hidden; color: #4c6576; font-size: 9px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
   .inline-queue-tray .queue-shortcut { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; color: #748b9a; }
-  .inline-queue-tray .queue-shortcut kbd { min-width: 24px; padding: 2px 4px; border: 1px solid rgba(75, 106, 127, 0.17); border-bottom-width: 2px; border-radius: 5px; color: #547286; background: rgba(255, 255, 255, 0.48); font: 750 7px Inter, sans-serif; text-align: center; }
+  .inline-queue-tray .queue-shortcut kbd { min-width: 24px; padding: 2px 4px; border: 1px solid rgba(75, 106, 127, 0.17); border-bottom-width: 2px; border-radius: 5px; color: #547286; background: rgba(255, 255, 255, 0.48); font: 750 7px var(--lume-font-ui, Inter, sans-serif); text-align: center; }
   .inline-queue-tray .queue-shortcut small { font-size: 7px; font-weight: 650; white-space: nowrap; }
   .inline-composer-controls { display: flex; align-items: flex-end; gap: 6px; }
   .inline-composer textarea { resize: none; outline: none; font: inherit; }
@@ -4993,45 +4995,72 @@
   .reset-settings-control button:disabled { opacity: 0.45; cursor: default; }
 
   .whiteboard { position: relative; max-height: 431px; min-height: 0; padding: 7px 16px 15px; display: flex; flex-direction: column; overflow: hidden; }
-  .layout-toolbar { padding: 8px 0 4px; display: flex; align-items: center; gap: 4px; }
-  .layout-toolbar input { min-width: 0; height: 27px; padding: 0 6px; flex: 1 1 auto; border: 1px solid rgba(87, 109, 99, 0.13); border-radius: 7px; outline: 0; color: #52625b; background: rgba(255, 255, 255, 0.42); font: inherit; font-size: 8px; }
-  .layout-toolbar :global(.lume-select) { flex: 1 1 auto; }
-  .layout-toolbar button { width: 27px; height: 27px; padding: 5px; flex: 0 0 27px; display: grid; place-items: center; border: 1px solid rgba(87, 109, 99, 0.13); border-radius: 7px; color: #567165; background: rgba(255, 255, 255, 0.4); font-size: 8px; cursor: pointer; }
-  .layout-toolbar button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-  .layout-toolbar button:disabled { opacity: 0.48; cursor: default; }
+
+
+
+
+
+
+  .whiteboard { --wb-line: var(--lume-line-light); --wb-raised: var(--lume-raised-light); --wb-subtle: var(--lume-subtle-light); --wb-surface: var(--lume-surface-light); --wb-text: var(--lume-ink-light); --wb-strong: var(--lume-ink-strong-light); --wb-muted: var(--lume-ink-muted-light); --wb-accent: var(--lume-accent-strong); --wb-accent-soft: var(--lume-accent-soft-light); --wb-danger: #b0524f; }
+  .overlay-shell.dark .whiteboard { --wb-line: var(--lume-line-dark); --wb-raised: var(--lume-raised-dark); --wb-subtle: var(--lume-subtle-dark); --wb-surface: var(--lume-surface-dark); --wb-text: var(--lume-ink-dark); --wb-strong: var(--lume-ink-strong-dark); --wb-muted: var(--lume-ink-muted-dark); --wb-accent: var(--lume-accent); --wb-accent-soft: var(--lume-accent-soft-dark); --wb-danger: #d98a86; }
+  .layout-toolbar { padding: 6px 0 8px; display: flex; align-items: center; gap: 6px; }
+  .layout-toolbar :global(.lume-select) { min-width: 0 !important; flex: 1 1 0; }
+  .layout-toolbar :global(.lume-select-trigger) { min-height: 34px; border-radius: 10px; }
+  .layout-toolbar input { min-width: 0; height: 34px; padding: 0 11px; flex: 1 1 0; border: 1px solid var(--wb-line); border-radius: 10px; outline: 0; color: var(--wb-strong); background: var(--wb-raised); font: 500 10px var(--lume-font-ui, Inter, sans-serif); transition: border-color 140ms ease, box-shadow 140ms ease; }
+  .layout-toolbar input::placeholder { color: var(--wb-muted); opacity: .75; }
+  .layout-toolbar input:focus { border-color: color-mix(in srgb, var(--wb-accent) 55%, var(--wb-line)); box-shadow: 0 0 0 3px var(--wb-accent-soft); }
+  .layout-toolbar button { width: 34px; height: 34px; padding: 0; flex: 0 0 34px; display: grid; place-items: center; border: 1px solid var(--wb-line); border-radius: 10px; color: var(--wb-muted); background: var(--wb-raised); cursor: pointer; transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 140ms ease; }
+  .layout-toolbar button:hover:not(:disabled) { color: var(--wb-accent); border-color: color-mix(in srgb, var(--wb-accent) 40%, var(--wb-line)); background: var(--wb-accent-soft); }
+  .layout-toolbar button:active:not(:disabled) { transform: scale(.94); }
+  .layout-toolbar button:disabled { opacity: .45; cursor: default; }
+  .layout-toolbar button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .layout-toolbar .layout-delete:hover:not(:disabled) { color: var(--wb-danger); border-color: color-mix(in srgb, var(--wb-danger) 40%, var(--wb-line)); background: color-mix(in srgb, var(--wb-danger) 10%, transparent); }
+  .workflow-global-mode { position: relative; margin: 0 0 6px; padding-bottom: 8px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--wb-line); }
+  .workflow-mode-switch { position: relative; height: 36px; padding: 3px; flex: 1 1 auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--wb-line); border-radius: 11px; background: var(--wb-subtle); isolation: isolate; }
+  .workflow-mode-switch::before { position: absolute; z-index: 0; top: 3px; bottom: 3px; left: 3px; width: calc((100% - 6px) / 2); border-radius: 8px; content: ""; background: var(--wb-surface); box-shadow: 0 1px 4px color-mix(in srgb, #000 16%, transparent), inset 0 0 0 1px color-mix(in srgb, var(--wb-line) 70%, transparent); transform: translateX(0); transition: transform 240ms cubic-bezier(.2, .85, .2, 1), background 180ms ease; }
+  .workflow-mode-switch.workflow-active::before { transform: translateX(100%); background: color-mix(in srgb, var(--wb-accent) 14%, var(--wb-surface)); }
+  .workflow-mode-switch button { position: relative; z-index: 1; min-width: 0; padding: 0 8px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: 8px; color: var(--wb-muted); background: transparent; font: 650 11px var(--lume-font-ui, Inter, sans-serif); cursor: pointer; transition: color 160ms ease, transform 160ms cubic-bezier(.2, .8, .2, 1); }
+  .workflow-mode-switch button:hover:not(.active):not(:disabled) { color: var(--wb-strong); }
+  .workflow-mode-switch button:active:not(:disabled) { transform: scale(.96); }
+  .workflow-mode-switch button.active { color: var(--wb-accent); }
+  .workflow-mode-switch button:disabled { opacity: .5; cursor: default; }
+  .mode-icon { width: 15px; height: 15px; flex: 0 0 15px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  .mode-icon circle { fill: var(--wb-surface); }
+  .workflow-settings-trigger { width: 36px; height: 36px; padding: 0; flex: 0 0 36px; display: grid; place-items: center; border: 1px solid var(--wb-line); border-radius: 11px; color: var(--wb-muted); background: var(--wb-raised); cursor: pointer; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
+  .workflow-settings-trigger:hover, .workflow-settings-trigger.active { color: var(--wb-accent); border-color: color-mix(in srgb, var(--wb-accent) 40%, var(--wb-line)); background: var(--wb-accent-soft); }
+  .workflow-settings-trigger svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+  .workflow-settings-trigger circle { fill: var(--wb-raised); }
   .layout-spinner { width: 12px; height: 12px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: layout-spin 650ms linear infinite; }
   @keyframes layout-spin { to { transform: rotate(360deg); } }
-  .layout-toolbar .layout-delete { color: #a45a58; }
-  .workflow-group-row { min-width: 0; padding: 7px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--lume-line-light); border-radius: 10px; background: var(--lume-raised-light); transition: border-color 160ms ease, background 160ms ease; }
-  .workflow-global-mode { position: relative; margin: 5px 0 1px; }
-  .workflow-group-row.enabled { border-color: color-mix(in srgb, var(--lume-accent-strong) 34%, transparent); background: var(--lume-accent-soft-light); }
-  .workflow-group-symbol { width: 27px; height: 22px; flex: 0 0 27px; display: grid; place-items: center; overflow: visible; }
-  .workflow-group-symbol svg { width: 24px; height: 20px; overflow: visible; }
-  .workflow-group-symbol path { fill: none; stroke-linejoin: round; }
-  .workflow-group-symbol .normal-link { stroke: var(--lume-ink-muted-light); opacity: 1; transition: opacity 150ms ease; }
-  .workflow-group-symbol .workflow-link { stroke: var(--lume-accent-strong); stroke-dasharray: 48; stroke-dashoffset: 48; opacity: 0; transition: opacity 130ms ease, stroke-dashoffset 420ms cubic-bezier(.2,.8,.2,1); }
-  .workflow-group-symbol circle { fill: var(--lume-surface-light); stroke: var(--lume-ink-muted-light); transform-box: fill-box; transform-origin: center; transition: transform 380ms cubic-bezier(.2,.85,.2,1), fill 180ms ease, stroke 180ms ease, filter 180ms ease; }
-  .workflow-group-symbol .node-start,
-  .workflow-group-symbol .node-end { transform: translateY(-7px); }
-  .workflow-group-symbol .node-center { transform: translateY(7.5px); }
-  .workflow-group-row.enabled .workflow-group-symbol .normal-link { opacity: 0; }
-  .workflow-group-row.enabled .workflow-group-symbol .workflow-link { stroke-dashoffset: 0; opacity: 1; }
-  .workflow-group-row.enabled .workflow-group-symbol circle { fill: color-mix(in srgb, var(--lume-accent) 20%, var(--lume-surface-light)); stroke: var(--lume-accent-strong); filter: drop-shadow(0 0 3px color-mix(in srgb, var(--lume-accent) 42%, transparent)); transform: translateY(0); }
-  .workflow-group-copy { min-width: 0; flex: 1; }
-  .workflow-group-copy strong { color: var(--lume-ink-strong-light); font-size: 9.5px; }
-  .workflow-mode-switch { position: relative; width: 101px; height: 28px; padding: 2px; flex: 0 0 101px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-radius: 8px; background: var(--lume-subtle-light); isolation: isolate; }
-  .workflow-mode-switch::before { position: absolute; z-index: 0; top: 2px; bottom: 2px; left: 2px; width: calc((100% - 4px) / 2); border-radius: 5px; content: ""; background: var(--lume-surface-light); box-shadow: 0 1px 4px color-mix(in srgb, var(--lume-canvas-dark) 13%, transparent); transform: translateX(0); transition: transform 240ms cubic-bezier(.2,.85,.2,1), background 180ms ease, box-shadow 180ms ease; }
-  .workflow-mode-switch.workflow-active::before { transform: translateX(100%); }
-  .workflow-mode-switch button { position: relative; z-index: 1; min-width: 0; height: 24px; padding: 0 4px; border: 0; border-radius: 6px; color: var(--lume-ink-muted-light); background: transparent; font: 720 8px Inter, sans-serif; cursor: pointer; transition: color 160ms ease, transform 160ms cubic-bezier(.2,.8,.2,1); }
-  .workflow-mode-switch button:active:not(:disabled) { transform: scale(.94); }
-  .workflow-mode-switch button.active { color: var(--lume-accent-strong); }
-  .workflow-mode-switch button:disabled { opacity: 0.5; cursor: default; }
-  .workflow-settings-trigger { width: 28px; height: 28px; padding: 5px; flex: 0 0 28px; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--lume-ink-muted-light); background: transparent; cursor: pointer; }
-  .workflow-settings-trigger:hover,
-  .workflow-settings-trigger.active { color: var(--lume-accent-strong); background: var(--lume-accent-soft-light); }
-  .workflow-settings-trigger svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   .workflow-settings-dismiss { position: fixed; z-index: 238; inset: 0; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: default; }
-  .workflow-settings-popover { position: absolute; z-index: 240; top: 84px; right: 16px; width: min(310px, calc(100% - 32px)); max-height: calc(100vh - 96px); overflow: hidden; isolation: isolate; border: 1px solid rgba(67, 105, 86, 0.18); border-radius: 12px; color: #485b51; background: #f7faf8; background-clip: padding-box; }
+  .workflow-settings-popover { position: absolute; z-index: 240; top: 98px; right: 16px; width: min(310px, calc(100% - 32px)); max-height: calc(100vh - 96px); overflow: hidden; isolation: isolate; border: 1px solid rgba(67, 105, 86, 0.18); border-radius: 12px; color: #485b51; background: #f7faf8; background-clip: padding-box; }
   .workflow-settings-scroll { box-sizing: border-box; width: 100%; max-height: calc(100vh - 96px); padding: 11px; display: grid; gap: 9px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
   .workflow-settings-scroll > header { display: flex; align-items: flex-start; gap: 8px; }
   .workflow-settings-scroll > header div { min-width: 0; flex: 1; display: grid; gap: 2px; }
@@ -5040,7 +5069,7 @@
   .workflow-settings-scroll > header button { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; color: #73827a; background: transparent; font-size: 16px; cursor: pointer; }
   .workflow-setting-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
   .workflow-setting-grid label { min-width: 0; display: grid; gap: 4px; color: #718078; font-size: 7.5px; font-weight: 700; }
-  .workflow-setting-grid input { width: 100%; min-width: 0; height: 29px; padding: 0 7px; border: 1px solid rgba(75, 105, 90, 0.15); border-radius: 7px; outline: 0; color: #3f574a; background: rgba(73, 105, 88, 0.045); font: 750 9px Inter, sans-serif; }
+  .workflow-setting-grid input { width: 100%; min-width: 0; height: 29px; padding: 0 7px; border: 1px solid rgba(75, 105, 90, 0.15); border-radius: 7px; outline: 0; color: #3f574a; background: rgba(73, 105, 88, 0.045); font: 750 9px var(--lume-font-ui, Inter, sans-serif); }
   .workflow-setting-grid input:focus { border-color: rgba(50, 143, 96, 0.45); box-shadow: 0 0 0 2px rgba(50, 143, 96, 0.07); }
   .workflow-setting-toggle { min-height: 29px; display: flex; align-items: center; gap: 8px; color: #596d62; font-size: 8.5px; font-weight: 700; cursor: pointer; }
   .workflow-setting-toggle span { min-width: 0; flex: 1; }
@@ -5324,16 +5353,9 @@
     background: #ebe8d6;
     box-shadow: 0 1px 3px rgba(42, 67, 55, 0.045);
   }
-  .overlay-shell:not(.dark) .workflow-group-row {
-    border-color: var(--lume-line-light);
-    background: var(--lume-raised-light);
-  }
-  .overlay-shell:not(.dark) .workflow-group-row.enabled {
-    border-color: color-mix(in srgb, var(--lume-accent-strong) 34%, transparent);
-    background: color-mix(in srgb, var(--lume-accent) 18%, var(--lume-surface-light));
-  }
-  .overlay-shell:not(.dark) .layout-toolbar input,
-  .overlay-shell:not(.dark) .layout-toolbar button,
+
+
+
   .overlay-shell:not(.dark) .terminal-picker-row > button,
   .overlay-shell:not(.dark) .shortcut-input,
   .overlay-shell:not(.dark) .inline-composer textarea,
@@ -5461,19 +5483,18 @@
   .overlay-shell.dark .workflow-missing-sessions { border-color: rgba(190, 209, 200, 0.09); }
   .overlay-shell.dark .terminal-picker-row > button { color: #b7c4be; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
   .overlay-shell.dark .terminal-picker-row > button:hover:not(:disabled) { background: rgba(222, 233, 228, 0.09); }
-  .overlay-shell.dark .workflow-group-row { border-color: var(--lume-line-dark); background: var(--lume-raised-dark); }
-  .overlay-shell.dark .workflow-group-row.enabled { border-color: color-mix(in srgb, var(--lume-accent) 28%, transparent); background: var(--lume-accent-soft-dark); }
-  .overlay-shell.dark .workflow-group-copy strong { color: var(--lume-ink-strong-dark); }
-  .overlay-shell.dark .workflow-group-symbol .normal-link { stroke: var(--lume-ink-muted-dark); }
-  .overlay-shell.dark .workflow-group-symbol circle { fill: var(--lume-surface-dark); stroke: var(--lume-ink-muted-dark); }
-  .overlay-shell.dark .workflow-group-row.enabled .workflow-group-symbol circle { fill: color-mix(in srgb, var(--lume-accent) 18%, var(--lume-surface-dark)); stroke: var(--lume-accent); }
-  .overlay-shell.dark .workflow-mode-switch { background: var(--lume-subtle-dark); }
-  .overlay-shell.dark .workflow-mode-switch::before { background: color-mix(in srgb, var(--lume-accent) 13%, var(--lume-surface-dark)); box-shadow: none; }
-  .overlay-shell.dark .workflow-mode-switch button { color: var(--lume-ink-muted-dark); }
-  .overlay-shell.dark .workflow-mode-switch button.active { color: var(--lume-accent); }
-  .overlay-shell.dark .workflow-settings-trigger { color: var(--lume-ink-muted-dark); }
-  .overlay-shell.dark .workflow-settings-trigger:hover,
-  .overlay-shell.dark .workflow-settings-trigger.active { color: var(--lume-accent); background: var(--lume-accent-soft-dark); }
+
+
+
+
+
+
+
+
+
+
+
+
   .overlay-shell.dark .workflow-settings-popover { color: #bdcbc4; border-color: rgba(202, 220, 211, 0.12); background: #18221d; box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38); }
   .overlay-shell.dark .workflow-settings-scroll > header strong { color: #d9e5df; }
   .overlay-shell.dark .workflow-settings-scroll > header small,
@@ -5496,8 +5517,7 @@
   .overlay-shell.dark .command-search input,
   .overlay-shell.dark .command-results strong { color: #dce7e1; }
   .overlay-shell.dark .command-results > button.active { background: rgba(213, 229, 221, 0.07); }
-  .overlay-shell.dark .layout-toolbar input,
-  .overlay-shell.dark .layout-toolbar button,
+
   .overlay-shell.dark .plugin-actions button,
   .overlay-shell.dark .profile-action,
   .overlay-shell.dark .agent-preferences button { color: #bdcbc4; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }

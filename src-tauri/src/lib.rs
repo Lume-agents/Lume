@@ -12,8 +12,10 @@ mod codex_permissions;
 mod codex_sessions;
 mod context_builder;
 mod control;
+mod custom_fonts;
 mod desktop_shortcuts;
 mod discovery;
+mod session_environments;
 pub mod distributed_protocol;
 mod domain;
 mod event_server;
@@ -41,6 +43,7 @@ mod session_filters;
 mod state;
 mod store;
 mod terminal_windows;
+mod usage_monitor;
 mod workflow_runtime;
 mod workspace_windows;
 
@@ -387,6 +390,39 @@ async fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSna
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_session_environments(app: AppHandle, state: State<'_, AppState>) -> Result<session_environments::EnvironmentSnapshot, String> {
+    let mut owners = state.environment_owners()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let agy = app.state::<antigravity_stream::AntigravityStream>().environment_roots();
+        let opencode = app.state::<opencode_acp::OpenCodeBridge>().environment_roots();
+        for owner in &mut owners {
+            if let Some(native_id) = &owner.native_id {
+                if owner.agent == AgentKind::ClaudeCode {
+                    owner.roots.extend(integrations::claude_registered_pids(native_id));
+                }
+                let roots = match owner.agent {
+                    AgentKind::Antigravity => &agy,
+                    AgentKind::OpenCode => &opencode,
+                    _ => continue,
+                };
+                owner.roots.extend(roots.iter().filter(|(id, _)| id == native_id).map(|(_, pid)| *pid));
+            }
+        }
+        app.state::<session_environments::EnvironmentMonitor>().snapshot(&owners)
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn stop_session_environment(app: AppHandle, state: State<'_, AppState>, session_id: String, environment_id: String) -> Result<(), String> {
+    if !state.environment_owners()?.iter().any(|owner| owner.session_id == session_id) {
+        return Err("Esta sessão não está mais aberta no Lume.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<session_environments::EnvironmentMonitor>().stop(&session_id, &environment_id)
+    }).await.map_err(|error| error.to_string())?
 }
 
 fn repository_directory(state: &AppState, session_id: &str) -> Result<String, String> {
@@ -842,12 +878,7 @@ fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
     std::thread::spawn(move || {
         let working_directory = std::env::temp_dir().to_string_lossy().into_owned();
         if let Ok(limits) = claude_control::usage(&working_directory) {
-            if state
-                .set_agent_rate_limits(AgentKind::ClaudeCode, limits)
-                .unwrap_or(false)
-            {
-                protocol::emit_sessions_changed(&app);
-            }
+            let _ = usage_monitor::publish(&app, &state, AgentKind::ClaudeCode, limits);
         }
         REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
     });
@@ -1664,6 +1695,31 @@ fn set_preferences(
     const APPEARANCE_THEMES: [&str; 5] = ["lume", "forest", "ocean", "violet", "ember"];
     if !APPEARANCE_THEMES.contains(&preferences.appearance_theme.as_str()) {
         return Err("Unknown appearance theme".into());
+    }
+    for font in [&preferences.ui_font, &preferences.code_font] {
+        let valid = !font.is_empty()
+            && font.len() <= 56
+            && font.chars().all(|character| {
+                character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || character == '-'
+                    || character == ':'
+            });
+        if !valid {
+            return Err("Unknown font".into());
+        }
+    }
+    if !matches!(
+        preferences.dark_base.as_str(),
+        "theme" | "graphite" | "black" | "slate"
+    ) {
+        return Err("Unknown dark base".into());
+    }
+    if !matches!(
+        preferences.light_base.as_str(),
+        "theme" | "white" | "gray" | "beige"
+    ) {
+        return Err("Unknown light base".into());
     }
     if !matches!(
         preferences.startup_mode.as_str(),
@@ -2736,6 +2792,7 @@ pub fn run() {
                 eprintln!("Could not register global shortcuts: {error}");
             }
             app.manage(state.clone());
+            app.manage(session_environments::EnvironmentMonitor::default());
             app.manage(opencode_acp::OpenCodeBridge::new(
                 state.clone(),
                 app.handle().clone(),
@@ -2786,6 +2843,7 @@ pub fn run() {
             discovery::start(state.clone(), app.handle().clone())?;
             codex_daemon_observer::start(state.clone(), app.handle().clone())?;
             overlay::start_fullscreen_guard(state.clone(), app.handle().clone())?;
+            usage_monitor::start(state.clone(), app.handle().clone());
 
             if let Some(window) = app.get_webview_window("main") {
                 let preferences = state.preferences()?;
@@ -2852,12 +2910,18 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            custom_fonts::list_custom_fonts,
+            custom_fonts::import_custom_font,
+            custom_fonts::read_custom_font,
+            custom_fonts::remove_custom_font,
             list_sessions,
             list_codex_cli_conversations,
             link_codex_cli_conversation,
             rename_session,
             fork_session_from_message,
             get_hub_snapshot,
+            get_session_environments,
+            stop_session_environment,
             get_session_repository,
             get_session_repository_diff,
             search_session_paths,

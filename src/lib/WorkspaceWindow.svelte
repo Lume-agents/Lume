@@ -20,16 +20,19 @@
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import WorkspaceSidebarToggleIcon from "$lib/WorkspaceSidebarToggleIcon.svelte";
   import { copyResolvedColorTokens } from "$lib/floatingTheme";
-  import { appearanceAttributes, appearanceThemes, type AppearanceTheme } from "$lib/appearance";
+  import { codeFonts, ensureCustomFonts, importCustomFont, listCustomFonts, removeCustomFont, uiFonts, type CustomFont } from "$lib/fonts";
+  import { appearanceAttributes, appearanceThemes, darkBases, lightBases, type AppearanceTheme } from "$lib/appearance";
   import LumeSelect from "$lib/LumeSelect.svelte";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
+  import { usageAlertDismissals } from "$lib/usageAlertDismissals";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import WorkspaceInspector from "$lib/WorkspaceInspector.svelte";
   import WorkspaceReviewCenter from "$lib/WorkspaceReviewCenter.svelte";
   import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
   import WorkflowBoard from "$lib/WorkflowBoard.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
+  import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
@@ -159,6 +162,29 @@
   let settingsLoadingSections = $state<SettingsSectionKey[]>([]);
   let settingsSaving = $state(false);
   let settingsError = $state("");
+  let customFonts = $state<CustomFont[]>([]);
+  const fontOptions = (choices: typeof uiFonts) => [
+    ...choices.map((choice) => ({ value: choice.value, label: tr(choice.label, choice.labelPt) })),
+    ...customFonts.map((font) => ({ value: "custom:" + font.id, label: font.name })),
+  ];
+  async function importFont(target: "uiFont" | "codeFont") {
+    const selected = await withNativeDialog(() => openDialog({ multiple: false, directory: false, title: tr("Import a font", "Importar uma fonte"), filters: [{ name: tr("Fonts", "Fontes"), extensions: ["ttf", "otf", "woff", "woff2"] }] }));
+    if (typeof selected !== "string") return;
+    try {
+      const font = await importCustomFont(selected);
+      customFonts = [...customFonts, font];
+      await savePreferencePatch({ [target]: "custom:" + font.id } as Partial<Preferences>);
+    } catch (reason) { settingsError = String(reason).replace(/^Error:\s*/, ""); }
+  }
+  async function deleteFont(font: CustomFont) {
+    await removeCustomFont(font.id).catch(() => undefined);
+    customFonts = customFonts.filter((item) => item.id !== font.id);
+    const patch: Partial<Preferences> = {};
+    if (preferences.uiFont === "custom:" + font.id) patch.uiFont = "default";
+    if (preferences.codeFont === "custom:" + font.id) patch.codeFont = "default";
+    if (Object.keys(patch).length) await savePreferencePatch(patch);
+  }
+  onMount(() => { void listCustomFonts().then((fonts) => { customFonts = fonts; }).catch(() => undefined); });
   let settingsSections = $state({
     appearance: false,
     preferences: false,
@@ -244,6 +270,7 @@
   let boardMounted = $state(false);
   let inspectorSection = $state<"session" | "repository">("session");
   let reviewOpen = $state(false);
+  let reviewWide = $state(false);
   let reviewInitialPath = $state<string | undefined>();
   let inspectorBeforeReview = $state(false);
   let splitRatio = $state(0.5);
@@ -254,6 +281,8 @@
   let workspaceDropIntent = $state<WorkspaceDropIntent | null>(null);
   let sidebarReleaseIntent = $state(false);
   let showDragPreview = $state(false);
+  /** While the dragged agent is over the board, the board shows it as a card and the floating preview steps aside. */
+  let dragOverBoard = $state(false);
   let dragPreviewElement = $state<HTMLDivElement | null>(null);
   let dragPreviewFrame = 0;
   let dragPreviewPosition: { x: number; y: number } | null = null;
@@ -573,11 +602,15 @@
     sessions.find((session) => session.id === maximizedPaneId)
       ?? null
   );
+  // While the review is open only the chat it was opened from keeps its column (the others stay mounted at
+  // zero width, so drafts and streams survive), which leaves the room to the diff.
+  const reviewFocusSession = $derived(reviewOpen && !boardOpen && !maximizedSession && secondary ? focusedSession : null);
   const darkMode = $derived(preferences.darkMode ?? systemDark);
   const appearanceMode = $derived<"system" | "light" | "dark">(
     preferences.darkMode === undefined ? "system" : preferences.darkMode ? "dark" : "light"
   );
   const appearance = $derived(appearanceAttributes(preferences));
+  $effect(() => { void ensureCustomFonts(preferences); });
   const selectedAppearanceTheme = $derived(
     appearanceThemes.find((theme) => theme.value === appearance.theme) ?? appearanceThemes[0]
   );
@@ -658,8 +691,8 @@
     if (launchError) items.push({ id: "launch-error", message: launchError, tone: "error", onDismiss: () => { launchError = ""; } });
     if (sessionContextError) items.push({ id: "session-error", message: sessionContextError, tone: "error", onDismiss: () => { sessionContextError = ""; } });
     const openedSessionIds = new Set([primary?.id, secondary?.id, tertiary?.id].filter(Boolean));
-    for (const alert of collectAgentAlerts(orderedSessions.filter((session) => !openedSessionIds.has(session.id)), language)) {
-      if (dismissedAgentAlertIds.includes(alert.id)) continue;
+    for (const alert of collectAgentAlerts(orderedSessions.filter((session) => !openedSessionIds.has(session.id)), language, Date.now(), { usageScope: "active" })) {
+      if (dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id)) continue;
       items.push({
         id: alert.id,
         message: alert.message,
@@ -674,6 +707,7 @@
   });
 
   function dismissAgentAlert(id: string) {
+    usageAlertDismissals.dismiss(id);
     if (dismissedAgentAlertIds.includes(id)) return;
     dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-200);
   }
@@ -1090,6 +1124,7 @@
     dragPreviewTarget = null;
     dragPreviewVelocity = { x: 0, y: 0 };
     showDragPreview = false;
+    dragOverBoard = false;
     draggingSessionId = null;
     workspaceDropIntent = null;
     workspaceDropGeometry = null;
@@ -1684,6 +1719,10 @@
 
   function workbenchColumns() {
     if (maximizedSession || !secondary) return undefined;
+    if (reviewFocusSession) {
+      const shown = [primary, secondary, tertiary].filter(Boolean).map((item) => item?.id === reviewFocusSession.id ? "minmax(0, 1fr)" : "0px");
+      return shown.join(" 0px ");
+    }
     if (!tertiary) return `minmax(0, ${splitRatio}fr) 7px minmax(0, ${1 - splitRatio}fr)`;
     const shared = 1 - tertiaryRatio;
     return `minmax(0, ${splitRatio * shared}fr) 7px minmax(0, ${(1 - splitRatio) * shared}fr) 7px minmax(0, ${tertiaryRatio}fr)`;
@@ -1772,7 +1811,7 @@
   }
 
   function selectTheme(theme: AppearanceTheme) {
-    void savePreferencePatch({ appearanceTheme: theme, accentColor: undefined, accentOpacity: 100 });
+    void savePreferencePatch({ appearanceTheme: theme });
   }
 
   async function savePreferencePatch(patch: Partial<Preferences>) {
@@ -2303,6 +2342,10 @@
       }, 160);
     };
 
+    // The window opens as soon as the shell is mounted, with its loading state, instead of staying
+    // hidden until the sessions have loaded. No animation frame is awaited: a hidden webview never runs one.
+    void tick().then(() => { if (!disposed) void markWorkspaceFrontendReady().catch(() => undefined); });
+
     void startup.run(async () => {
       await Promise.all([
         startup.subscribe(() => watchShortcutRegistrationError((error) => {
@@ -2373,6 +2416,7 @@
   class="workspace terminal-window"
   class:agent-message-surface={Boolean(workspaceBackgroundImage) && agentMessageSurface}
   data-appearance={appearance.theme}
+  style={appearance.baseCss}
   style:--lume-accent={appearance.accentCss}
   style:--lume-accent-strong={appearance.accentCss}
   style:--workspace-background-color={workspaceCanvasColor}
@@ -2566,6 +2610,7 @@
               </span>
             {/if}
             </button>
+            <span class="session-environment-marker"><SessionEnvironmentMenu sessionId={session.id} {language} variant="sidebar" compact={sidebarCollapsed} /></span>
           </div>
           {#if childAgents.length}
             <div id={`workspace-subagents-${session.id}`} class:open={expandedSubagentSessions.has(session.id)} class="subagent-list-shell" aria-hidden={!expandedSubagentSessions.has(session.id)}>
@@ -2703,12 +2748,13 @@
                 </button>
               {/each}
             </div>
-            <div class="theme-options" aria-label={tr("Base theme", "Tema base")}>
+            <p class="theme-label"><strong>{tr("Surface tint", "Tom das superfícies")}</strong>{#if (darkMode ? preferences.darkBase : preferences.lightBase) !== "theme"}<small>{tr("Not visible with a neutral surface.", "Sem efeito com superfície neutra.")}</small>{/if}</p>
+            <div class="theme-options" class:overridden={(darkMode ? preferences.darkBase : preferences.lightBase) !== "theme"} aria-label={tr("Surface tint", "Tom das superfícies")}>
               {#each appearanceThemes as theme (theme.value)}
                 <button
-                  class:active={appearance.theme === theme.value && !appearance.accent}
+                  class:active={appearance.theme === theme.value}
                   type="button"
-                  aria-pressed={appearance.theme === theme.value && !appearance.accent}
+                  aria-pressed={appearance.theme === theme.value}
                   onclick={() => selectTheme(theme.value)}
                 >
                   <span style:--theme-accent={theme.accent} style:--theme-surface={darkMode ? theme.darkSurface : theme.lightSurface}></span>
@@ -2716,10 +2762,46 @@
                 </button>
               {/each}
             </div>
+            <p class="theme-label"><strong>{tr("Neutral surfaces", "Superfícies neutras")}</strong></p>
+            {#if darkMode}
+              <div class="theme-options" aria-label={tr("Dark surface", "Superfície escura")}>
+                {#each darkBases as base (base.value)}
+                  <button class:active={preferences.darkBase === base.value} type="button" aria-pressed={preferences.darkBase === base.value} onclick={() => void savePreferencePatch({ darkBase: base.value })}>
+                    <span style:--theme-accent={appearance.accent ?? selectedAppearanceTheme.accent} style:--theme-surface={base.pigments?.surface ?? selectedAppearanceTheme.darkSurface}></span>
+                    {tr(base.label, base.labelPt)}
+                  </button>
+                {/each}
+              </div>
+            {:else}
+              <div class="theme-options" aria-label={tr("Light surface", "Superfície clara")}>
+                {#each lightBases as base (base.value)}
+                  <button class:active={preferences.lightBase === base.value} type="button" aria-pressed={preferences.lightBase === base.value} onclick={() => void savePreferencePatch({ lightBase: base.value })}>
+                    <span style:--theme-accent={appearance.accent ?? selectedAppearanceTheme.accent} style:--theme-surface={base.pigments?.surface ?? selectedAppearanceTheme.lightSurface}></span>
+                    {tr(base.label, base.labelPt)}
+                  </button>
+                {/each}
+              </div>
+            {/if}
             <div class="workspace-setting-row accent-setting">
-              <span><strong>{tr("Accent color", "Cor de destaque")}</strong><small>{appearance.accent ?? tr("Using the base theme", "Usando o tema base")}</small></span>
-              <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} {language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void savePreferencePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void savePreferencePatch({ accentColor: undefined, accentOpacity: 100 })} />
+              <span><strong>{tr("Accent color", "Cor de destaque")}</strong><small>{appearance.accent ?? tr("Following the surface tint", "Seguindo o tom das superfícies")}</small></span>
+              <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} readyColors={appearanceThemes.map((theme) => theme.accent)} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} {language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void savePreferencePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void savePreferencePatch({ accentColor: undefined, accentOpacity: 100 })} />
             </div>
+            <div class="workspace-setting-row font-setting">
+              <span><strong>{tr("Interface font", "Fonte da interface")}</strong></span>
+              <LumeSelect ariaLabel={tr("Interface font", "Fonte da interface")} value={preferences.uiFont} minWidth={150} options={fontOptions(uiFonts)} onValueChange={(value) => void savePreferencePatch({ uiFont: value })} />
+              <button class="font-import" type="button" title={tr("Import a font file", "Importar um arquivo de fonte")} onclick={() => void importFont("uiFont")}><LumeIcon name="plus" size={14} />{tr("Import", "Importar")}</button>
+            </div>
+            <div class="workspace-setting-row font-setting">
+              <span><strong>{tr("Code and terminal font", "Fonte de código e terminal")}</strong></span>
+              <LumeSelect ariaLabel={tr("Code and terminal font", "Fonte de código e terminal")} value={preferences.codeFont} minWidth={150} options={fontOptions(codeFonts)} onValueChange={(value) => void savePreferencePatch({ codeFont: value })} />
+              <button class="font-import" type="button" title={tr("Import a font file", "Importar um arquivo de fonte")} onclick={() => void importFont("codeFont")}><LumeIcon name="plus" size={14} />{tr("Import", "Importar")}</button>
+            </div>
+            {#each customFonts as font (font.id)}
+              <div class="workspace-setting-row font-setting imported-font">
+                <span><strong>{font.name}</strong></span>
+                <button class="font-import" type="button" onclick={() => void deleteFont(font)}><LumeIcon name="trash" size={14} />{tr("Remove", "Remover")}</button>
+              </div>
+            {/each}
             <div class="workspace-setting-row accent-setting">
               <span><strong>{tr("Light workspace", "Workspace claro")}</strong><small>{preferences.workspaceLightBackgroundColor ?? tr("Using the light preset", "Usando o preset claro")} · {preferences.workspaceLightBackgroundOpacity}%</small></span>
               <AccentColorPicker value={preferences.workspaceLightBackgroundColor} opacity={preferences.workspaceLightBackgroundOpacity} fallback={selectedAppearanceTheme.lightSurface} readyColors={["#f7f8f4", "#eef2ec", "#e9eee8", "#e9eee3", "#e5edf0", "#ece9f1", "#f0e9e2"]} minimumOpacity={35} {language} label={tr("Light workspace background", "Fundo claro do Workspace")} onValueChange={(color, opacity) => void savePreferencePatch({ workspaceLightBackgroundColor: color, workspaceLightBackgroundOpacity: opacity })} onReset={() => void savePreferencePatch({ workspaceLightBackgroundColor: undefined, workspaceLightBackgroundOpacity: 96 })} />
@@ -3055,12 +3137,14 @@
     </div>
   {/if}
 
-  <section class:inspector-open={inspectorOpen && !boardOpen} class:review-open={reviewOpen && !boardOpen} class:maximized={Boolean(maximizedSession) && !boardOpen} class="workspace-stage">
+  <section class:inspector-open={inspectorOpen && !boardOpen} class:review-open={reviewOpen && !boardOpen} class:maximized={Boolean(maximizedSession) && !boardOpen} class:review-wide={reviewWide && reviewOpen && !boardOpen} class="workspace-stage">
     <section
       bind:this={workbenchElement}
       class:split={Boolean(secondary) && !maximizedSession}
       class:three-pane={Boolean(tertiary) && !maximizedSession}
       class:resizing={resizingDivider !== null}
+      class:review-focus={Boolean(reviewFocusSession)}
+      inert={reviewWide && reviewOpen && !boardOpen}
       class:drag-active={draggingSessionId !== null}
       class:header-relocating={headerRelocatingSessionId !== null}
       class="workbench"
@@ -3234,6 +3318,8 @@
         onOpenChat={(session) => { showWorkflowBoard(false); selectSession(session); }}
         onClose={() => showWorkflowBoard(false)}
         onFinishSidebarDrag={finishSidebarSessionDrag}
+        {draggingSessionId}
+        onSidebarDragOverBoard={(over) => dragOverBoard = over}
       />
     {/if}
     </section>
@@ -3247,12 +3333,12 @@
     <div class:open={reviewOpen && !boardOpen} class="review-shell" aria-hidden={!reviewOpen || boardOpen} inert={!reviewOpen || boardOpen}>
       {#if reviewOpen && focusedSession}
         <div class="review-content" in:fly={{ x: 22, duration: motionDuration(220), easing: cubicOut }} out:fly={{ x: 16, duration: motionDuration(145), easing: cubicOut }}>
-          <WorkspaceReviewCenter session={focusedSession} {language} initialPath={reviewInitialPath} onClose={closeReview} />
+          <WorkspaceReviewCenter session={focusedSession} {language} initialPath={reviewInitialPath} wide={reviewWide} onToggleWide={() => (reviewWide = !reviewWide)} onClose={closeReview} />
         </div>
       {/if}
     </div>
   </section>
-  {#if showDragPreview && draggingSessionId}
+  {#if showDragPreview && draggingSessionId && !dragOverBoard}
     {@const dragSession = sessions.find((session) => session.id === draggingSessionId)}
     {#if dragSession}
       <div class="session-drag-preview" bind:this={dragPreviewElement} aria-hidden="true">
@@ -3303,7 +3389,7 @@
     overflow: hidden;
     color: var(--workspace-text);
     background: var(--workspace-bg);
-    font-family: "Segoe UI Variable", "SF Pro Text", ui-sans-serif, system-ui, sans-serif;
+    font-family: var(--lume-font-ui, "Segoe UI Variable", "SF Pro Text", ui-sans-serif, system-ui, sans-serif);
     accent-color: var(--workspace-accent);
     transition: grid-template-columns 240ms cubic-bezier(.16, 1, .3, 1);
   }
@@ -3414,19 +3500,26 @@
   .diagnostic-list i { width: 5px; height: 5px; border-radius: 50%; background: #c38b3e; }.diagnostic-list .diagnostic-ok i { background: #50a677; }.diagnostic-list .diagnostic-error i { background: #bd615e; }
   .diagnostic-list b { color: var(--workspace-text); font-weight: 700; }.diagnostic-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .inline-actions { padding-top: 10px; display: flex; justify-content: flex-end; gap: 6px; }
-  .shortcut-button { padding: 6px 8px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-subtle); font: 700 8px/1.2 ui-monospace, monospace; cursor: pointer; }
+  .theme-label { margin: 6px 0 -2px; display: grid; gap: 2px; }
+  .theme-label strong { color: var(--workspace-strong); font-size: 11px; }
+  .theme-label small { color: var(--workspace-muted); font-size: 10px; }
+  .theme-options.overridden { opacity: .5; }
+  .font-setting { align-items: center; }
+  .font-import { min-height: 28px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-text); background: var(--workspace-subtle); font-size: 10px; cursor: pointer; }
+  .font-import:hover { border-color: var(--workspace-accent); color: var(--workspace-accent); }
+  .shortcut-button { padding: 6px 8px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-subtle); font: 700 8px/1.2 var(--lume-font-code, ui-monospace, monospace); cursor: pointer; }
   .preferred-agents { padding: 10px 0; display: grid; gap: 7px; }
   .preferred-agents > span { display: flex; flex-wrap: wrap; gap: 5px; }
   .preferred-agents button { padding: 5px 7px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 7px; cursor: pointer; }
   .preferred-agents button.active { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 40%, transparent); background: var(--workspace-accent-soft); }
   .settings-empty, .about-settings p { margin: 4px 0 0; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }
   .mobile-pairing-action { padding: 10px 0 3px; }
-  .pairing-qr { padding: 10px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.pairing-qr img { width: 96px; height: 96px; border-radius: 7px; }.pairing-qr span { display: grid; gap: 3px; }.pairing-qr strong { color: var(--workspace-strong); font: 750 12px ui-monospace, monospace; }.pairing-qr small { color: var(--workspace-muted); font-size: 7px; }
+  .pairing-qr { padding: 10px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.pairing-qr img { width: 96px; height: 96px; border-radius: 7px; }.pairing-qr span { display: grid; gap: 3px; }.pairing-qr strong { color: var(--workspace-strong); font: 750 12px var(--lume-font-code, ui-monospace, monospace); }.pairing-qr small { color: var(--workspace-muted); font-size: 7px; }
   .device-card { margin-top: 9px; padding: 9px 10px 3px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.device-card header { display: flex; align-items: center; gap: 8px; }.device-card header span { min-width: 0; display: grid; gap: 2px; flex: 1; }.device-card header button { border: 0; color: #b7605c; background: transparent; font-size: 7px; cursor: pointer; }
   .about-settings { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; }.about-settings > span { display: grid; gap: 2px; }.about-settings p { grid-column: 1 / -1; }
   .reset-control { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }.reset-control > span { margin-right: auto; color: var(--workspace-muted); font-size: 8px; }.reset-control .danger { color: #b65d59; border-color: rgba(182, 93, 89, .28); }
   .shortcut-scrim { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; background: rgba(5, 11, 8, .45); backdrop-filter: blur(4px); }
-  .shortcut-dialog { width: min(310px, calc(100vw - 36px)); padding: 20px; display: grid; justify-items: center; gap: 15px; border: 1px solid var(--workspace-line); border-radius: 15px; outline: none; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(0, 0, 0, .25); }.shortcut-dialog > strong { color: var(--workspace-strong); font-size: 12px; }.shortcut-dialog > kbd { min-width: 160px; padding: 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-accent); background: var(--workspace-subtle); font: 750 10px ui-monospace, monospace; text-align: center; }.shortcut-dialog > span { display: flex; gap: 7px; }.shortcut-dialog button { min-height: 30px; padding: 0 11px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 730; cursor: pointer; }.shortcut-dialog button.primary { color: var(--workspace-raised); background: var(--workspace-accent); }
+  .shortcut-dialog { width: min(310px, calc(100vw - 36px)); padding: 20px; display: grid; justify-items: center; gap: 15px; border: 1px solid var(--workspace-line); border-radius: 15px; outline: none; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(0, 0, 0, .25); }.shortcut-dialog > strong { color: var(--workspace-strong); font-size: 12px; }.shortcut-dialog > kbd { min-width: 160px; padding: 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-accent); background: var(--workspace-subtle); font: 750 10px var(--lume-font-code, ui-monospace, monospace); text-align: center; }.shortcut-dialog > span { display: flex; gap: 7px; }.shortcut-dialog button { min-height: 30px; padding: 0 11px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 730; cursor: pointer; }.shortcut-dialog button.primary { color: var(--workspace-raised); background: var(--workspace-accent); }
   .integration-warning-dialog { width: min(440px, calc(100vw - 36px)); padding: 22px; display: grid; justify-items: start; gap: 12px; border: 1px solid var(--workspace-line); border-radius: 16px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(0, 0, 0, .28); }
   .integration-warning-icon { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-accent); background: var(--workspace-subtle); }
   .integration-warning-dialog > strong { color: var(--workspace-strong); font-size: 14px; }
@@ -3523,6 +3616,8 @@
   .session-copy .session-meta { display: flex; align-items: center; gap: 4px; }
   .session-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-meta .session-fork { flex: 0 0 auto; min-width: auto; display: inline-flex; color: var(--workspace-accent); }
+  .session-environment-marker { position: absolute; right: 8px; bottom: 5px; z-index: 2; }
+  .workspace.sidebar-collapsed .session-environment-marker { right: 0; bottom: 0; }
   .session-copy em { display: flex; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 8px; font-style: normal; font-weight: 650; }
   .session-copy em i { width: 5px; height: 5px; border-radius: 50%; background: #8a9891; }
   .session-copy em.status-running i { background: #4d99cc; }.session-copy em.status-completed i { background: #4daa77; }.session-copy em.status-permission_required i { background: #d6a441; }.session-copy em.status-failed i { background: #c86662; }
@@ -3567,7 +3662,9 @@
   .session-context-actions button:disabled { opacity: .55; cursor: wait; }
   .workspace-stage { position: relative; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 0px 0px; grid-template-rows: minmax(0, 1fr); overflow: hidden; background: transparent; transition: grid-template-columns 180ms cubic-bezier(.16, 1, .3, 1); }
   .workspace-stage.inspector-open { grid-template-columns: minmax(0, 1fr) clamp(270px, 23vw, 350px) 0px; }
-  .workspace-stage.review-open { grid-template-columns: minmax(340px, 1fr) 0px clamp(460px, 46vw, 760px); }
+  .workspace-stage.review-open { grid-template-columns: minmax(340px, 38fr) 0px minmax(480px, 62fr); }
+  .workspace-stage.review-open.review-wide { grid-template-columns: 0px 0px minmax(0, 1fr); }
+  .workspace-stage.review-wide .workbench { visibility: hidden; }
   .workspace-stage.maximized { grid-template-columns: minmax(0, 1fr) 0px 0px; }
   .inspector-shell { min-width: 0; min-height: 0; height: 100%; overflow: hidden; pointer-events: none; }
   .inspector-shell.open { pointer-events: auto; }
@@ -3596,6 +3693,7 @@
   .session-drag-preview small { display: flex; align-items: center; gap: 4px; color: var(--workspace-muted); font-size: 8px; }
   .session-drag-preview > :global(.lume-icon) { flex: 0 0 auto; color: var(--workspace-accent); }
   @keyframes drag-card-appear { from { opacity: .65; } to { opacity: 1; } }
+  .workbench.review-focus .pane-divider { width: 0; min-width: 0; visibility: hidden; pointer-events: none; }
   .pane-divider { position: relative; width: 7px; min-width: 7px; padding: 0; border: 0; outline: 0; background: transparent; cursor: col-resize; touch-action: none; }
   .pane-divider::before { position: absolute; inset: 0 3px; background: var(--workspace-line); content: ""; transition: inset 120ms ease, background 120ms ease; }
   .pane-divider:hover::before,

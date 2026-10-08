@@ -48,6 +48,8 @@
     | "arrow-right"
     | "arrow-up"
     | "trash"
+    | "server"
+    | "database"
     | "warning";
 </script>
 
@@ -73,7 +75,7 @@
   height={size}
   fill="none"
   stroke="currentColor"
-  stroke-width={strokeWidth}
+  stroke-width={name === "trash" ? Math.max(strokeWidth, 2) : strokeWidth}
   stroke-linecap="round"
   stroke-linejoin="round"
   role={label ? "img" : undefined}
@@ -82,7 +84,16 @@
   focusable="false"
 >
   {#if label}<title>{label}</title>{/if}
-  {#if name === "repository"}
+  {#if name === "server"}
+    <rect x="4" y="4" width="16" height="6" rx="2" />
+    <rect x="4" y="14" width="16" height="6" rx="2" />
+    <path d="M8 7h4m-4 10h4M7 10v4m10-4v4" />
+    <circle cx="16" cy="7" r="1" fill="currentColor" stroke="none" />
+    <circle cx="16" cy="17" r="1" fill="currentColor" stroke="none" />
+  {:else if name === "database"}
+    <ellipse cx="12" cy="5" rx="8" ry="3" />
+    <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" />
+  {:else if name === "repository"}
     <path d="M4 18.5V5a2 2 0 0 1 2-2h13v18H6a2 2 0 0 1 0-4h13M8 3v8l2.5-1.5L13 11V3" />
   {:else if name === "branch"}
     <circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="6" r="2" />
@@ -197,7 +208,7 @@
   {:else if name === "refresh"}
     <path d="M19 8a7.5 7.5 0 1 0 .4 7M19 4v4h-4" />
   {:else if name === "trash"}
-    <path d="M5 7h14M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
+    <path d="M3 7h18M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1.1 13.5a1.5 1.5 0 0 0 1.5 1.4h6.8a1.5 1.5 0 0 0 1.5-1.4L18 7M10 11v7M14 11v7" />
   {:else if name === "chevron-down"}
     <path d="m6.5 9 5.5 5.5L17.5 9" />
   {:else if name === "check"}

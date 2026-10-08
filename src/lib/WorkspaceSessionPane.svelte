@@ -14,6 +14,8 @@
   import { interruptNoticeText } from "$lib/interruptNotice";
   import { controlsDiffer, type ControlsSnapshot } from "$lib/agentControls";
   import ThinkingOrb from "$lib/ThinkingOrb.svelte";
+  import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
+  import { sessionEnvironments } from "$lib/sessionEnvironments";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SubagentPortals from "$lib/SubagentPortals.svelte";
   import WorkspaceWorkBookmarks from "$lib/WorkspaceWorkBookmarks.svelte";
@@ -21,6 +23,7 @@
   import BrandIcon from "$lib/BrandIcon.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import UsageBanner from "$lib/UsageBanner.svelte";
   import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
@@ -40,6 +43,7 @@
   import { displayFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
   import { activityThinkingLabel, activityThinkingState, formatAgentDuration, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
   import { collectAgentAlerts } from "$lib/agentAlerts";
+  import { usageAlertDismissals } from "$lib/usageAlertDismissals";
   import { renderWorkspaceMarkdownWithFileBadges } from "$lib/workspaceFileReferences.js";
   import { parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { BoundedRenderCache } from "$lib/boundedRenderCache";
@@ -127,6 +131,7 @@
   }>();
 
   const subagents = $derived(subagentsForSession(session));
+  const hasEnvironments = $derived($sessionEnvironments.environments.some((environment) => environment.sessionId === session.id));
   const waitingForSubagents = $derived(parentWaitingForSubagents(session, subagents));
   const presentedStatus = $derived(waitingForSubagents
     ? (language === "pt-BR" ? "Aguardando subagentes" : "Waiting for subagents")
@@ -307,8 +312,8 @@
       outgoingPrompts = outgoingPrompts.filter((outgoing) => !matchedIds.includes(outgoing.id));
     });
   });
-  const feed = $derived(buildConversationFeed(entries, { includeAnalysisInTrace: true }));
-  const filesByFinalResponse = $derived(fileChangesForFinalResponses(feed));
+  const feed = $derived(buildConversationFeed(entries, { includeAnalysisInTrace: true, workingDirectory: session.workingDirectory }));
+  const filesByFinalResponse = $derived(fileChangesForFinalResponses(feed, session.workingDirectory));
   const hasConversationMessage = $derived(entries.some((entry) =>
     entry.activity.kind === "prompt" || entry.activity.kind === "message"
   ));
@@ -632,7 +637,7 @@
 
   const agentAlerts = $derived(collectAgentAlerts([session], language));
   const archivedAgentAlerts = $derived(
-    agentAlerts.filter((alert) => dismissedAgentAlertIds.includes(alert.id)),
+    agentAlerts.filter((alert) => dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id)),
   );
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
     const items: SystemBannerItem[] = [];
@@ -641,7 +646,7 @@
     if (historyError) items.push({ id: "history-error", message: historyError, tone: "error", onDismiss: () => { historyError = ""; } });
     if (actionNotice) items.push({ id: "message-action", message: actionNotice, tone: "success", onDismiss: () => { actionNotice = ""; } });
     for (const alert of agentAlerts) {
-      if (alert.usage || dismissedAgentAlertIds.includes(alert.id)) continue;
+      if (alert.usage || dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id)) continue;
       items.push({
         id: alert.id,
         message: alert.message,
@@ -653,20 +658,13 @@
     return items;
   });
 
-  // Usage notices sit above the composer with no close button: a low-usage one
-  // leaves on its own after a while; under 10% it stays until the window resets.
+  // Dismissal is shared by all views of the account's current usage window.
   const usageNotices = $derived(
-    agentAlerts.filter((alert) => alert.usage && (alert.pinned || !dismissedAgentAlertIds.includes(alert.id))),
+    agentAlerts.filter((alert) => alert.usage && !dismissedAgentAlertIds.includes(alert.id) && !$usageAlertDismissals.includes(alert.id)),
   );
 
-  $effect(() => {
-    const timers = usageNotices
-      .filter((notice) => !notice.pinned)
-      .map((notice) => setTimeout(() => archiveAgentAlert(notice.id), notice.duration || 12_000));
-    return () => timers.forEach(clearTimeout);
-  });
-
   function archiveAgentAlert(id: string) {
+    usageAlertDismissals.dismiss(id);
     if (dismissedAgentAlertIds.includes(id)) return;
     dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-120);
   }
@@ -2029,6 +2027,7 @@
 <article
   bind:this={paneElement}
   class:focused
+  class:has-environments={hasEnvironments}
   class="session-pane status-{session.status}"
   data-workspace-pane={session.id}
   style:--workspace-chat-font-adjust={`${(textZoom - 1) * 9}px`}
@@ -2135,6 +2134,7 @@
         {/if}
       </div>
   </header>
+  <UsageBanner alerts={usageNotices} {language} onDismiss={archiveAgentAlert} />
 
   {#if subagents.length}
     <SubagentPortals {session} children={subagents} {language} />
@@ -2440,6 +2440,11 @@
     </div>
   {/if}
 
+  {#if !composerInIntroPosition}
+    <div class="environment-dock" style:bottom={`${composerHeight + 14}px`}>
+      <SessionEnvironmentMenu sessionId={session.id} {language} />
+    </div>
+  {/if}
   <form bind:this={composerElement} bind:clientHeight={composerHeight} class:fresh={composerInIntroPosition} class:crossfade-out={composerTransition === "out"} class:crossfade-in={composerTransition === "in"} class:unavailable={!canCompose} class="composer" onpaste={(event) => void pasteAttachments(event)} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
     {#if composerInIntroPosition}
       <div class="composer-welcome"><LumeMascot status="idle" awake size={45} /><strong>{tr("Hello. What shall we work on?", "Olá. No que vamos trabalhar?")}</strong></div>
@@ -2517,13 +2522,6 @@
           <button class="question-submit" type="button" disabled={questionSending} onclick={() => void submitSelectedQuestionAnswers()}>{tr("Answer", "Responder")}</button>
         {/if}
       </section>
-    {/if}
-    {#if usageNotices.length}
-      <div class="usage-notices" role="status" aria-live="polite">
-        {#each usageNotices as notice (notice.id)}
-          <p class="usage-notice tone-{notice.tone}" transition:slide={{ duration: 160, easing: cubicOut }}><LumeIcon name="warning" size={13} /><span>{notice.message}</span></p>
-        {/each}
-      </div>
     {/if}
     <div class:beam={composerInIntroPosition && canCompose} class="composer-field">
       <div class="composer-input-row">
@@ -2872,7 +2870,7 @@
   .final-actions button:disabled { cursor: wait; opacity: .55; }
   .final-actions button.loading :global(.lume-icon) { animation: history-loading 800ms linear infinite; }
   .markdown-content { min-width: 0; overflow-wrap: anywhere; font-size: var(--workspace-chat-font-size); line-height: 1.68; word-break: break-word; }
-  .agent-message .markdown-content { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: calc(13.5px + var(--workspace-chat-font-adjust)); font-weight: 430; line-height: 1.72; letter-spacing: -.012em; font-kerning: normal; }
+  .agent-message .markdown-content { font-family: var(--lume-font-ui, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); font-size: calc(13.5px + var(--workspace-chat-font-adjust)); font-weight: 430; line-height: 1.72; letter-spacing: -.012em; font-kerning: normal; }
   .agent-message .markdown-content :global(strong) { font-weight: 720; letter-spacing: -.018em; }
   .agent-message .markdown-content :global(pre) { font-size: calc(11px + var(--workspace-chat-small-adjust)); line-height: 1.62; }
   .markdown-content :global(p) { margin: 0 0 .75em; }.markdown-content :global(p:last-child) { margin-bottom: 0; }
@@ -2901,9 +2899,9 @@
   .markdown-content :global(h2) { font-size: 1.24em; font-weight: 770; }
   .markdown-content :global(h3) { font-size: 1.1em; font-weight: 750; }
   .markdown-content :global(h1 + p), .markdown-content :global(h2 + p), .markdown-content :global(h3 + p) { margin-top: .1em; }
-  .markdown-content :global(pre) { max-width: 100%; padding: 11px 12px; overflow: auto; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-code); font: var(--workspace-chat-small-size)/1.6 "SFMono-Regular", Consolas, monospace; }
+  .markdown-content :global(pre) { max-width: 100%; padding: 11px 12px; overflow: auto; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-code); font: var(--workspace-chat-small-size)/1.6 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); }
   .markdown-content :global(pre code) { padding: 0; color: inherit; background: transparent; white-space: pre-wrap; word-break: break-word; }
-  .markdown-content :global(code) { overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; }
+  .markdown-content :global(code) { overflow-wrap: anywhere; font-family: var(--lume-font-code, "SFMono-Regular", Consolas, monospace); }
   /* The wrapper scrolls; the table stays a real table so head and body share one set of column widths. */
   .markdown-content :global(.markdown-table-wrap) { box-sizing: border-box; width: 100%; max-width: 100%; margin: .7em 0; overflow-x: auto; border: 1px solid var(--workspace-line); border-radius: 9px; }
   .markdown-content :global(table) { width: 100%; border-collapse: collapse; }
@@ -2922,13 +2920,13 @@
   .analysis-message .markdown-content { font-size: calc(11px + var(--workspace-chat-small-adjust)); line-height: 1.62; }
   .changed-files { width: fit-content; max-width: 100%; min-width: 0; margin-top: 2px; }
   .changed-files.open { width: min(100%, 560px); }
-  .changed-files-toggle { min-height: 29px; max-width: 100%; padding: 5px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font: 720 var(--workspace-chat-tiny-size)/1.3 Inter, sans-serif; cursor: pointer; }
+  .changed-files-toggle { min-height: 29px; max-width: 100%; padding: 5px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font: 720 var(--workspace-chat-tiny-size)/1.3 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .changed-files-toggle:hover, .changed-files-toggle:focus-visible { color: var(--workspace-strong); border-color: var(--workspace-accent); }
   .changed-files-toggle > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .changed-files-toggle > :global(.lume-icon:last-child) { margin-left: 3px; transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }
   .changed-files.open .changed-files-toggle > :global(.lume-icon:last-child) { transform: rotate(180deg); }
   .changed-files-list { min-width: 0; margin: 4px 0 0 2px; display: grid; gap: 2px; }
-  .changed-file { min-width: 0; min-height: 28px; padding: 3px 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font: calc(9px + var(--workspace-chat-tiny-adjust))/1.4 "SFMono-Regular", Consolas, monospace; text-align: left; cursor: pointer; transition: color 120ms ease, background 120ms ease; }
+  .changed-file { min-width: 0; min-height: 28px; padding: 3px 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font: calc(9px + var(--workspace-chat-tiny-adjust))/1.4 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); text-align: left; cursor: pointer; transition: color 120ms ease, background 120ms ease; }
   .changed-file:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
   .changed-file > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .changed-file > :global(.lume-icon:last-child) { color: var(--workspace-faint); opacity: 0; transform: translateX(-3px) rotate(-90deg); transition: color 120ms ease, opacity 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
@@ -2944,6 +2942,8 @@
   .typing-elapsed { padding-left: 9px; border-left: 1px solid var(--workspace-line); color: var(--workspace-muted); font-size: 10px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .latest-button { position: absolute; right: 18px; bottom: calc(30px + var(--composer-overlap, 0px)); z-index: 3; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 5px 16px rgba(17, 35, 27, .09); cursor: pointer; animation: latest-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
   .latest-button:hover { transform: translateY(-1px); }
+  .environment-dock { position: absolute; left: 18px; z-index: 4; }
+  .session-pane.has-environments .conversation { padding-bottom: calc(66px + var(--composer-overlap, 0px)); }
   .sources-scrim { position: absolute; z-index: 5; inset: 64px 0 0; padding: 0; border: 0; background: color-mix(in srgb, var(--workspace-pane) 28%, transparent); backdrop-filter: blur(1px); cursor: default; animation: sources-fade 150ms ease-out both; }
   .sources-sidebar { position: absolute; z-index: 6; top: 64px; right: 0; bottom: 0; width: min(340px, 88%); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--workspace-line); color: var(--workspace-text); background: var(--workspace-raised); box-shadow: -16px 0 46px rgba(8, 18, 13, .13); animation: sources-arrive 220ms cubic-bezier(.16, 1, .3, 1) both; }
   .sources-sidebar > header { min-height: 57px; padding: 10px 12px 10px 15px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--workspace-line); }
@@ -3101,16 +3101,12 @@
   .composer-tools .model-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
   .composer button:hover:not(:disabled) { transform: translateY(-1px) scale(1.03); }.composer button:disabled { opacity: .28; cursor: default; }
   .composer button.launching:disabled { opacity: 1; }
-  .usage-notices { max-width: 760px; margin: 0 auto 8px; display: grid; gap: 5px; }
-  .usage-notice { --notice-tone: #c78d35; margin: 0; padding: 7px 11px; display: flex; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, var(--notice-tone) 34%, var(--workspace-line)); border-radius: 10px; color: var(--workspace-strong); background: color-mix(in srgb, var(--notice-tone) 10%, var(--workspace-raised)); font-size: var(--workspace-chat-small-size); font-weight: 620; line-height: 1.35; }
-  .usage-notice.tone-error { --notice-tone: #c45f5b; }
-  .usage-notice :global(.lume-icon) { flex: 0 0 auto; color: var(--notice-tone); }
   .composer .agent-permission { max-width: 760px; margin: 0 auto 8px; padding: 11px 12px; display: grid; gap: 9px; border: 1px solid color-mix(in srgb, #d0a142 55%, var(--workspace-line)); border-radius: 13px; color: var(--workspace-text); background: color-mix(in srgb, #d0a142 11%, var(--workspace-raised)); }
   .agent-permission.risk-high { border-color: color-mix(in srgb, #d85c64 60%, var(--workspace-line)); background: color-mix(in srgb, #d85c64 9%, var(--workspace-raised)); }
   .agent-permission header { min-width: 0; display: flex; align-items: center; gap: 8px; color: #b9852a; }
   .agent-permission.risk-high header { color: #d85c64; }
   .agent-permission header strong { min-width: 0; color: var(--workspace-strong); font-size: var(--workspace-chat-font-size); font-weight: 720; line-height: 1.35; overflow-wrap: anywhere; }
-  .agent-permission code { padding: 6px 8px; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: color-mix(in srgb, var(--workspace-raised) 70%, transparent); font: 600 var(--workspace-chat-small-size) "SFMono-Regular", Consolas, "Liberation Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .agent-permission code { padding: 6px 8px; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: color-mix(in srgb, var(--workspace-raised) 70%, transparent); font: 600 var(--workspace-chat-small-size) var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); text-overflow: ellipsis; white-space: nowrap; }
   .permission-actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .composer .permission-actions > button { width: auto; height: 30px; padding: 0 13px; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-text); background: var(--workspace-raised); font-size: var(--workspace-chat-small-size); font-weight: 750; }
   .composer .permission-actions > button.allow { border-color: transparent; color: #f5fbf7; background: var(--workspace-accent); }
@@ -3137,10 +3133,10 @@
   .composer .slash-command-menu > button:hover:not(:disabled) { transform: none; }
   .composer .slash-command-menu > button.active { color: var(--workspace-strong); background: var(--workspace-accent-soft); }
   .slash-command-loading { margin: 0; padding: 7px 8px; color: var(--workspace-muted); font-size: var(--workspace-chat-small-size); font-weight: 650; }
-  .slash-command-menu code { color: var(--workspace-accent); font: 750 var(--workspace-chat-small-size) "SFMono-Regular", Consolas, "Liberation Mono", monospace; white-space: nowrap; }
+  .slash-command-menu code { color: var(--workspace-accent); font: 750 var(--workspace-chat-small-size) var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); white-space: nowrap; }
   .slash-command-menu button > span { min-width: 0; display: grid; gap: 2px; overflow: hidden; font-size: var(--workspace-chat-small-size); font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
   .composer .mention-menu > button { grid-template-columns: 16px minmax(0, 1fr); }
-  .mention-menu button > span { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+  .mention-menu button > span { font-family: var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); }
   .history-indicator { position: absolute; right: 10px; bottom: calc(100% + 5px); padding: 2px 7px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: var(--workspace-raised); font-size: var(--workspace-chat-tiny-size); font-weight: 720; font-variant-numeric: tabular-nums; pointer-events: none; }
   .slash-command-menu button > span small { overflow: hidden; color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 650; text-overflow: ellipsis; text-transform: uppercase; }
   .plane-launch { width: 16px; height: 16px; display: grid; place-items: center; pointer-events: none; animation: plane-takeoff 450ms cubic-bezier(.22, .72, .26, 1) both; }

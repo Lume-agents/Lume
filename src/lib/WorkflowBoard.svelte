@@ -275,6 +275,20 @@
     try { localStorage.setItem(storageKey, JSON.stringify({ activeGroupId: activeId, layouts, objectives })); }
     catch { notify(tr("The board layout could not be saved on this computer.", "Não foi possível salvar a posição do board neste computador.")); }
   }
+  // High-rate pointers can report several moves per frame; only the latest one is worth drawing.
+  let queuedPatch: { patch: Partial<BoardLayout>; id: string } | null = null;
+  let patchFrame = 0;
+  function queuePatch(patch: Partial<BoardLayout>) {
+    queuedPatch = { patch, id: activeId };
+    if (!patchFrame) patchFrame = requestAnimationFrame(flushPatch);
+  }
+  function flushPatch() {
+    if (patchFrame) cancelAnimationFrame(patchFrame);
+    patchFrame = 0;
+    const next = queuedPatch;
+    queuedPatch = null;
+    if (next) patchLayout(next.patch, next.id);
+  }
   function patchLayout(patch: Partial<BoardLayout>, id = activeId) {
     layouts = { ...layouts, [id]: { ...(layouts[id] ?? normalizeLayout(null)), ...patch } };
     persistLayout();
@@ -556,12 +570,13 @@
       const bounds = viewport.getBoundingClientRect();
       cardOutside = event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
     }
-    if (gesture.kind === "pan") patchLayout({ view: { ...view, x: gesture.origin.x + dx, y: gesture.origin.y + dy } });
-    else if (gesture.kind === "card" && gesture.stepId) patchLayout({ positions: { ...layout.positions, [gesture.stepId]: { x: gesture.origin.x + dx / view.zoom, y: gesture.origin.y + dy / view.zoom } } });
+    if (gesture.kind === "pan") queuePatch({ view: { ...view, x: gesture.origin.x + dx, y: gesture.origin.y + dy } });
+    else if (gesture.kind === "card" && gesture.stepId) queuePatch({ positions: { ...layout.positions, [gesture.stepId]: { x: gesture.origin.x + dx / view.zoom, y: gesture.origin.y + dy / view.zoom } } });
   }
   function endPointer(event: PointerEvent) {
     const current = gesture;
     if (!current || current.pointerId !== event.pointerId) return;
+    flushPatch();
     // Connecting can end the gesture itself, so the checks below use the snapshot taken above.
     if (current.kind === "connection" && connectionTarget) connectTo(connectionTarget);
     if (current.kind === "card" && current.stepId && cardOutside) {
@@ -572,6 +587,7 @@
     cancelGesture();
   }
   function cancelGesture() {
+    flushPatch();
     const previous = gesture;
     gesture = null;
     cardOutside = false;
@@ -706,6 +722,8 @@
   });
   $effect(() => { if (ready && active && activeId) void refreshRun(activeId); });
   $effect(() => { if (!active) untrack(cancelGesture); });
+  // The canvas takes the focus when the board opens, so Esc works straight away.
+  $effect(() => { if (active && viewport) untrack(() => viewport?.focus({ preventScroll: true })); });
 
   $effect(() => { if (!draggingSessionId && dragPoint) endDragOver(); });
 
@@ -722,7 +740,7 @@
     void listen<WorkflowRun>("lume://workflow-run-changed", ({ payload }) => acceptRun(payload))
       .then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; })
       .catch((error) => { if (!disposed) notify(errorMessage(error)); });
-    return () => { writeLayout(); disposed = true; stop?.(); if (storageTimer) clearTimeout(storageTimer); };
+    return () => { if (patchFrame) cancelAnimationFrame(patchFrame); writeLayout(); disposed = true; stop?.(); if (storageTimer) clearTimeout(storageTimer); };
   });
 </script>
 
@@ -964,6 +982,7 @@
     <button class="add-agent" type="button" disabled={locked || adding} onclick={() => openPicker()}><LumeIcon name="plus" size={14} />{tr("Agent", "Agente")}</button>
     <span class="save-state" aria-live="polite">{saving ? tr("Saving…", "Salvando…") : saveFailed ? tr("Not saved", "Não salvo") : ""}</span>
     {#if saveFailed}<button type="button" title={tr("Retry saving", "Tentar salvar novamente")} aria-label={tr("Retry saving", "Tentar salvar novamente")} onclick={() => void retrySave()}><LumeIcon name="refresh" size={15} /></button>{/if}
+    <span class="exit-hint"><kbd>Esc</kbd>{tr("Back to chats", "Voltar aos chats")}</span>
     <button class="close-board" type="button" title={tr("Back to chats", "Voltar aos chats")} aria-label={tr("Back to chats", "Voltar aos chats")} onclick={onClose}><LumeIcon name="close" size={17} /></button>
   </header>
 
@@ -1277,6 +1296,9 @@
   .board-toolbar button:hover, .board-navigation button:hover, .board-panel > header button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .board-toolbar .add-agent { width: auto; display: flex; gap: 5px; padding: 0 8px; font-size: 11px; }
   .board-toolbar .close-board { margin-left: 6px; }
+  .exit-hint { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--workspace-muted); font-size: 10px; white-space: nowrap; pointer-events: none; }
+  .exit-hint kbd { padding: 1px 5px; border: 1px solid var(--workspace-line); border-radius: 4px; color: var(--workspace-strong); font: 700 9px/1.4 "SFMono-Regular", Consolas, monospace; }
+  @media (max-width: 860px) { .exit-hint { display: none; } }
   .board-toolbar .delete-workflow:hover:not(:disabled) { color: var(--board-danger); }
   .board-toolbar .delete-workflow:disabled { opacity: .4; }
   .board-toolbar .delete-workflow.confirm { width: auto; padding: 0 9px; display: flex; gap: 5px; color: var(--board-danger); background: color-mix(in srgb, var(--board-danger) 12%, transparent); font-size: 10px; font-weight: 700; }

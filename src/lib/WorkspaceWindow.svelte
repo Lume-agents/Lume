@@ -3260,7 +3260,7 @@
       ondragleave={leaveWorkspaceDrop}
       ondrop={dropSessionInWorkspace}
     >
-    <div class="board-chat-layer" inert={boardOpen} aria-hidden={boardOpen}>
+    <div class:covered={boardOpen} class="board-chat-layer" inert={boardOpen} aria-hidden={boardOpen}>
     {#if workspaceBackgroundImage}
       <div
         class="workspace-wallpaper"
@@ -3809,6 +3809,9 @@
   .review-content { min-width: 0; width: 100%; height: 100%; }
   .workbench { position: relative; width: 100%; max-width: 100%; min-width: 0; min-height: 0; isolation: isolate; contain: inline-size; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; background: var(--workspace-chat-background); }
   .board-chat-layer { display: contents; }
+  /* The board covers the chats: they stay mounted (scroll and drafts survive) but stop painting and animating. */
+  .board-chat-layer.covered { visibility: hidden; }
+  .board-chat-layer.covered :global(*), .board-chat-layer.covered :global(*::before), .board-chat-layer.covered :global(*::after) { animation-play-state: paused !important; }
   .workspace-wallpaper { position: absolute; z-index: -1; inset: 0; width: 100%; height: 100%; background-position: center; background-size: cover; background-repeat: no-repeat; pointer-events: none; }
   .workbench.split { grid-template-columns: minmax(0, 1fr) 7px minmax(0, 1fr); }
   .workbench.resizing { user-select: none; }

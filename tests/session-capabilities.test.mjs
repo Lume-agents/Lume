@@ -35,7 +35,16 @@ for (const agent of ["codex", "opencode", "antigravity"]) {
 }
 assert.equal(sessionCapabilities(session({ processId: 4242 })).canTerminate, true);
 assert.equal(sessionCapabilities(session({ nativeSessionId: " " })).canTerminate, false);
-assert.equal(sessionCapabilities(session({ agent: "claude_code" })).canTerminate, false);
+assert.equal(
+  sessionCapabilities(session({ agent: "claude_code" })).canTerminate,
+  true,
+  "a Claude conversation Lume runs without a terminal can be ended from Lume",
+);
+assert.equal(
+  sessionCapabilities(session({ agent: "claude_code", controlOrigin: "external" })).canTerminate,
+  false,
+  "an external Claude conversation is never closed from its session id alone",
+);
 assert.equal(
   sessionCapabilities(session({ agent: "claude_code" })).canInterrupt,
   true,

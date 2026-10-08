@@ -1958,7 +1958,28 @@
       toggleWorkspaceMaximized();
       return;
     }
-    void getCurrentWindow().startDragging();
+    if (!/Windows/i.test(navigator.userAgent)) {
+      void getCurrentWindow().startDragging();
+      return;
+    }
+    // Windows enters its own move loop on the press and swallows the second click of a double
+    // click, so the drag only starts once the pointer actually moves.
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+    };
+    const move = (next: PointerEvent) => {
+      if (!next.buttons) { stop(); return; }
+      if (Math.hypot(next.clientX - startX, next.clientY - startY) < 4) return;
+      stop();
+      void getCurrentWindow().startDragging();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
   }
 
   function beginWorkspaceResize(event: PointerEvent, direction: typeof workspaceResizeEdges[number]) {

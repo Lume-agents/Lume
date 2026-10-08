@@ -42,7 +42,9 @@
   import { sessionLauncherTransition } from "$lib/sessionLauncherTransition";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
+  import MacosAutomationDialog from "$lib/MacosAutomationDialog.svelte";
   import { agentConnectionMessage } from "$lib/agentConnection";
+  import { macosAutomationMessage } from "$lib/macosAutomation";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
@@ -216,6 +218,7 @@
   let launchingPhase = $state<"choosing" | "opening" | null>(null);
   let launchError = $state<string | null>(null);
   let connectionAgent = $state<IntegrationStatus["kind"] | null>(null);
+  let automationRequired = $state(false);
   let connectionMessage = $state("");
   let resumeAgent = $state<IntegrationStatus["kind"] | null>(null);
   let resumableSessions = $state<ResumableSession[]>([]);
@@ -2561,6 +2564,7 @@
     } catch (error) {
       const connection = agentConnectionMessage(error);
       if (connection) { connectionAgent = agent; connectionMessage = connection; }
+      else if (macosAutomationMessage(error)) automationRequired = true;
       else launchError = String(error).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
@@ -2617,6 +2621,7 @@
     } catch (error) {
       const connection = agentConnectionMessage(error);
       if (connection) { connectionAgent = stored.agent; connectionMessage = connection; }
+      else if (macosAutomationMessage(error)) automationRequired = true;
       else launchError = String(error).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
@@ -4456,6 +4461,9 @@
   {/if}
   {#if connectionAgent}
     <AgentConnectionDialog agent={connectionAgent} message={connectionMessage} language={preferences.language} onClose={() => { connectionAgent = null; }} />
+  {/if}
+  {#if automationRequired}
+    <MacosAutomationDialog language={preferences.language} onClose={() => { automationRequired = false; }} />
   {/if}
 </main>
 

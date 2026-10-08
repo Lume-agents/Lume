@@ -62,8 +62,13 @@ executável produzido por `tauri dev`.
 - [ ] Usar projeto cujo caminho contenha espaços, apóstrofo, aspas, `$` e caracteres acentuados.
 - [ ] Confirmar diretório, argumentos e agente corretos; não substituir comandos de terminais já abertos.
 - [ ] Autorizar Lume em **Privacidade e Segurança → Automação → Terminal** quando solicitado.
-- [ ] Negar a autorização e confirmar mensagem útil no Lume; depois autorizar e repetir.
+- [ ] Negar a autorização e confirmar que o Lume abre o diálogo de Automação; o botão
+      **Abrir Ajustes de Automação** deve abrir Privacidade e Segurança → Automação. Depois autorizar e repetir.
+- [ ] Deixar o pedido de permissão sem resposta por mais de 30 s e confirmar a mensagem
+      "Responda ao pedido e tente de novo" (sem erro técnico do `osascript`).
 - [ ] Confirmar que o payload temporário é removido após consumo ou falha de abertura.
+- [ ] Com o Terminal fechado, iniciar uma sessão: é esperado que apareçam **duas** janelas,
+      a da sessão e a janela vazia padrão do Terminal. Comportamento aceito, não é falha.
 
 O app declara a finalidade de Apple Events no Info.plist e o entitlement de
 Automation. Esse consentimento é específico do lançamento pelo Terminal.app.

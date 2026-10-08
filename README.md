@@ -109,6 +109,16 @@ The [latest GitHub release](https://github.com/Lume-agents/Lume/releases/latest)
 - Portable Linux AppImage
 - Android application (`Lume-Mobile.apk`)
 
+### macOS (preview)
+
+macOS support is experimental and requires Apple Silicon and macOS 15 or later. Until the build is signed with an Apple Developer ID ([#13](https://github.com/Lume-agents/Lume/issues/13)), install it from the terminal instead of the `.dmg`, which Gatekeeper blocks:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Lume-agents/Lume/main/scripts/install-macos.sh | sh
+```
+
+The script installs `Lume.app` in `/Applications` (or `~/Applications`) and running it again updates to the latest release. It does not change Gatekeeper settings. Because the preview build is not notarized, macOS may ask again for permission to control Terminal.app after an update.
+
 Lume checks for updates automatically and lets you install them from **Settings → About**. Each GitHub release includes curated patch notes describing user-visible improvements and fixes.
 
 If an older development build installed the retired Codex CLI Gateway, the first start removes only Lume's marked shell `PATH` blocks and wrapper files. Open a new terminal afterward (or refresh the shell command cache) so `codex` resolves directly to the official CLI again.

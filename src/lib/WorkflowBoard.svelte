@@ -15,6 +15,7 @@
   import { demoFrames, demoSession, demoTodoCount, type DemoState } from "$lib/boardSimulator";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import BrandIcon from "$lib/BrandIcon.svelte";
@@ -939,6 +940,7 @@
         {@const order = chain?.order.indexOf(step.id) ?? -1}
         {@const shown = demoCells ? demoSession(session, demoCells[group?.steps.indexOf(step) ?? 0], now) : session}
         {@const live = stepActivity(shown, run?.steps.find((item) => item.stepId === step.id), language, now)}
+        {@const trail = state === "running" || shown?.status === "running" ? activityFeed(shown, language, 3) : []}
         <article class="board-card" class:working={state === "running" || (state === "idle" && shown?.status === "running")} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? session?.status : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
           <button class="card-body" type="button" onpointerdown={(event) => beginCard(event, step.id)} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleName(step.role)}>
             <span class="card-role-fab" title={step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role)} aria-hidden="true">
@@ -951,6 +953,24 @@
             <span class="card-status"><i></i>{stepStatus(step) + (live.elapsed ? " · " + live.elapsed : "") + (live.progress ? " · " + live.progress.done + "/" + live.progress.total : "")}</span>
             {#if live.line}<span class="card-activity" class:live={state === "running" || shown?.status === "running"}><i></i><span>{live.line}</span></span>{/if}
           </button>
+          {#if trail.length}
+            <span class="card-trail" aria-hidden="true">
+              {#each trail as event, index (event.id)}
+                <span class="trail-item" class:newest={index === 0} class:running={event.status === "running"} style:--trail-fade={1 - index * 0.26}>
+                  <span class="trail-icon">
+                    {#if event.path}<FileTypeIcon path={event.path} size={14} />
+                    {:else if event.category === "command" || event.category === "test"}<svg viewBox="0 0 20 20" width="13" height="13"><path d="m4 6 4 4-4 4M10 15h6" /></svg>
+                    {:else if event.category === "git"}<LumeIcon name="branch" size={13} />
+                    {:else if event.category === "search" || event.category === "read"}<LumeIcon name="search" size={13} />
+                    {:else if event.category === "plan"}<LumeIcon name="task-list" size={13} />
+                    {:else if event.category === "message"}<LumeIcon name="send" size={13} />
+                    {:else}<LumeIcon name="bolt" size={13} />{/if}
+                  </span>
+                  <span class="trail-text"><b>{event.detail || event.title}</b>{#if event.detail}<small>{event.title}</small>{/if}</span>
+                </span>
+              {/each}
+            </span>
+          {/if}
           {#if live.progress}<span class="card-progress" aria-hidden="true"><i style:width={(live.progress.done / live.progress.total) * 100 + "%"}></i></span>{/if}
           {#if live.attention && session}
             <button class="card-attention" type="button" title={live.attention.text} aria-label={tr("Needs you: ", "Precisa de você: ") + live.attention.text} onpointerdown={(event) => event.stopPropagation()} onclick={() => onOpenChat(session)}><LumeIcon name="warning" size={11} />{live.attention.kind === "permission" ? tr("Approve", "Aprovar") : tr("Answer", "Responder")}</button>
@@ -1273,6 +1293,16 @@
   [data-state="failed"] .card-status i, [data-status="failed"] .run-state i { background: var(--board-danger); }
   [data-state="permission_required"] .card-status i, [data-status="waiting_for_approval"] .run-state i, [data-status="paused"] .run-state i { background: var(--board-warning); }
   @keyframes status-pulse { 50% { box-shadow: 0 0 0 5px rgba(86, 170, 218, 0); } }
+  .card-trail { position: absolute; z-index: 1; top: calc(100% + 7px); left: 10px; right: 10px; display: grid; gap: 4px; pointer-events: none; }
+  .trail-item { min-width: 0; width: fit-content; max-width: 100%; padding: 3px 9px 3px 6px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 999px; color: var(--workspace-muted); background: var(--workspace-raised); font-size: 10px; line-height: 1.3; opacity: var(--trail-fade, 1); animation: trail-in 220ms cubic-bezier(.16, 1, .3, 1) both; }
+  .trail-item.newest { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); }
+  .trail-item.running .trail-icon { animation: status-pulse 1.4s ease-in-out infinite; }
+  .trail-icon { width: 16px; height: 16px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
+  .trail-icon svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .trail-text { min-width: 0; display: flex; align-items: baseline; gap: 5px; overflow: hidden; white-space: nowrap; }
+  .trail-text b { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 650; }
+  .trail-text small { flex: 0 0 auto; color: var(--workspace-faint, var(--workspace-muted)); font-size: 9px; }
+  @keyframes trail-in { from { opacity: 0; transform: translateY(-4px); } }
   .card-activity { max-width: 100%; margin-top: -2px; display: inline-flex; align-items: center; gap: 6px; color: var(--workspace-muted); font-size: 10px; line-height: 1.3; }
   .card-activity > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-activity i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: color-mix(in srgb, var(--workspace-muted) 55%, transparent); }
@@ -1525,7 +1555,7 @@
     .board-navigation { right: 12px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .card-attention, .card-activity.live i, .board-card.working, .live .pipe-core { animation: none; }
+    .card-attention, .card-activity.live i, .board-card.working, .live .pipe-core, .trail-item, .trail-item.running .trail-icon { animation: none; }
     .board-card, .card-port i, .card-role-fab, .role-tooltip, .pipe-wall, .run-track i, .board-navigation button { transition: none; }
     .pipe-energy, .pipe-energy-glow, .card-status i { animation: none !important; }
     .pipe-energy, .pipe-energy-glow { stroke-dasharray: 2 24; opacity: .55; }

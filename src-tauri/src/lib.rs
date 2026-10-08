@@ -32,6 +32,7 @@ pub mod node_identity;
 pub mod node_inventory;
 pub mod node_network;
 pub mod node_pairing;
+pub mod node_relay;
 pub mod node_service;
 #[allow(dead_code)]
 pub mod relay_e2e;

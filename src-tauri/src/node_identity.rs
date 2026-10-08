@@ -101,6 +101,18 @@ impl NodeIdentity {
     }
 }
 
+impl crate::relay_e2e::Signer for NodeIdentity {
+    fn public_key(&self) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        key.copy_from_slice(KeyPair::public_key(&self.key_pair).as_ref());
+        key
+    }
+
+    fn sign(&self, message: &[u8]) -> Vec<u8> {
+        self.key_pair.sign(message).as_ref().to_vec()
+    }
+}
+
 pub fn verify(statement: &SignedDeviceStatement) -> Result<(), String> {
     if statement.identity.algorithm != ALGORITHM {
         return Err("unsupported Node identity algorithm".into());

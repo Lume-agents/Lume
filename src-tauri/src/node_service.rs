@@ -42,6 +42,8 @@ pub struct NodeConfig {
     pub ollama_inventory_enabled: bool,
     pub ollama_port: u16,
     pub allowed_project_roots: Vec<PathBuf>,
+    /// Lume Relay the Node connects to for access from other networks; `None` keeps the Node LAN-only.
+    pub relay_url: Option<String>,
 }
 
 impl Default for NodeConfig {
@@ -56,6 +58,7 @@ impl Default for NodeConfig {
             ollama_inventory_enabled: true,
             ollama_port: 11_434,
             allowed_project_roots: Vec::new(),
+            relay_url: None,
         }
     }
 }
@@ -180,7 +183,35 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             }
             let identity = NodeIdentity::load_or_create(&state_directory)?;
             let offer = node_pairing::begin_pairing(&state_directory, &config.node_id, &identity)?;
+            if let Some(url) = &config.relay_url {
+                let relay_uri = crate::node_relay::publish_offer(&state_directory, url, &offer)?;
+                let mut value = serde_json::to_value(&offer).map_err(|error| error.to_string())?;
+                value["relayPairingUri"] = serde_json::Value::String(relay_uri);
+                return Ok(Some(json(&value)?));
+            }
             Ok(Some(json(&offer)?))
+        }
+        "relay" => {
+            let value = positional_argument(arguments, 1).ok_or("relay requires a Relay address, or `off`")?;
+            let mut config = load_or_create_config(&state_directory)?;
+            config.relay_url = (value != "off").then(|| value.trim_end_matches('/').to_string());
+            if let Some(url) = &config.relay_url {
+                if !(url.starts_with("https://") || url.starts_with("wss://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost")) {
+                    return Err("the Relay address must start with https://".into());
+                }
+            }
+            save_config(&state_directory, &config)?;
+            Ok(Some(json(&serde_json::json!({ "relayUrl": config.relay_url, "restartRequired": true }))?))
+        }
+        "relay-pair" => {
+            let uri = positional_argument(arguments, 1).ok_or("relay-pair requires a lume://pair-relay URI")?;
+            Ok(Some(json(&crate::node_relay::pair(&state_directory, uri)?)?))
+        }
+        "relay-remotes" => Ok(Some(json(&crate::node_relay::remotes(&state_directory)?)?)),
+        "relay-health" | "relay-inventory" => {
+            let node = positional_argument(arguments, 1).ok_or("a Node ID is required")?;
+            let what = if command == "relay-health" { "health" } else { "inventory" };
+            Ok(Some(json(&crate::node_relay::query(&state_directory, node, what)?)?))
         }
         "clients" => Ok(Some(json(&node_pairing::clients(&state_directory)?)?)),
         "discover" => Ok(Some(json(&node_client::discover(Duration::from_secs(2))?)?)),
@@ -243,7 +274,7 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lume node <enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget> [VALUE] [--state-dir PATH] [--once]"
+    "Usage: lume node <enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|relay|relay-pair|relay-remotes|relay-health|relay-inventory> [VALUE] [--state-dir PATH] [--once]"
 }
 
 fn positional_argument(arguments: &[String], index: usize) -> Option<&str> {
@@ -432,6 +463,10 @@ fn run_service_inner(directory: &Path, once: bool, start_network: bool) -> Resul
             )
         })
         .transpose()?;
+    let _relay = start_network
+        .then(|| config.relay_url.clone())
+        .flatten()
+        .map(|url| crate::node_relay::RelayWorker::start(directory, url));
     let process_started_at = process_start_time(process::id())
         .ok_or_else(|| "could not identify the running Node process".to_string())?;
     let started_at = now_millis();
@@ -550,6 +585,10 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     }
     fs::rename(&temporary, path).map_err(|error| error.to_string())?;
     Ok(())
+}
+
+pub(crate) fn append_log_public(directory: &Path, message: &str) -> Result<(), String> {
+    append_log(directory, message)
 }
 
 fn append_log(directory: &Path, message: &str) -> Result<(), String> {

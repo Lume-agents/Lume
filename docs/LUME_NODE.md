@@ -44,3 +44,25 @@ Ollama probes use only `127.0.0.1:11434` on PC1, with a combined two-second dead
 On PC2, `discover` lists compatible LAN Nodes and `connect` consumes the QR payload emitted by `pair`. The client pins the advertised TLS certificate, verifies the signed Node identity and certificate binding against the QR fingerprint, and only then sends the pairing secret. No bearer token or private key is transferred. The client stores its own Ed25519 key and the remote public identity locally; `remote-health` and `remote-inventory` authenticate every request with a fresh signed nonce. If the Node address changes, the client may update it only from an mDNS record matching both the paired identity and pinned certificate. Phase 1 grants read-only `observe` access only.
 
 Orb and Workspace share **Settings → Remote computers** for discovery, pairing and manual health/inventory checks. A snapshot displays its query time; a failed check clears previously reachable state. **Forget** removes the local record. To remove authorization, use `clients` and `revoke DEVICE_ID` on PC1; client-side revocation is still pending. Update both Node and client for this development slice; older health-only Nodes do not expose `/v1/inventory`.
+
+## Access through the Lume Relay (prototype)
+
+For access from another network, a Node can connect **outbound** to a [Lume Relay](https://github.com/Lume-agents/lume-relay),
+which only forwards end-to-end encrypted frames:
+
+```bash
+lume node relay https://relay.example.com   # or `off`; the address is saved in the Node config
+lume node run                                # connects to the Relay and reconnects with backoff
+lume node pair                               # also prints `relayPairingUri` (lume://pair-relay?...)
+# on the other device:
+lume node relay-pair 'lume://pair-relay?...'
+lume node relay-remotes
+lume node relay-health NODE_ID
+lume node relay-inventory NODE_ID
+```
+
+The pairing secret travels only in the URI/QR code. The Relay learns a one-way derivative of it, and the pairing request
+is encrypted with a key derived separately, so the Relay can neither read nor forge it. After pairing, every message runs
+inside an Ed25519-authenticated X25519 session (ChaCha20-Poly1305, per-direction keys, increasing counters). Only the read-only
+`health` and `inventory` commands exist so far, with the `observe` scope. `lume node revoke` removes a device from the Node; the
+Relay drops its access the next time the Node connects.

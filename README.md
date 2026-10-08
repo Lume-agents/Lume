@@ -27,7 +27,13 @@ Lume watches the agent sessions you already run (Claude Code, Codex, Antigravity
 A small capsule at the top of the screen. Its color, counter, sound and notifications reflect what needs attention. Expand it to see every session, approve supported actions, continue a chat, read final responses, or open floating terminals. Sessions show the same groups you create in the Workspace.
 
 <p align="center">
-  <img src="docs/screenshots/lume-orb.png" width="320" alt="The expanded Lume Orb listing agent sessions" />
+  <img src="docs/media/lume-orb-panel.gif" width="840" alt="The Lume orb expanding into the live session panel" />
+</p>
+
+**Floating terminals.** Turn any monitored session into a focused floating chat with its conversation, live activity, changed files, TO DO and GOAL progress, rate limits, image attachments and prompt input in one window. Move and resize them freely, or dock them horizontally or vertically: docked terminals form a group that moves together while each stays an independent chat.
+
+<p align="center">
+  <img src="docs/media/lume-terminal-docking.gif" width="840" alt="Two Lume terminals docking side by side" />
 </p>
 
 ### Workspace

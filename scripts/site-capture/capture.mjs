@@ -1,6 +1,7 @@
 // Renders the real Lume Svelte surfaces in headless Chromium against illustrative fixture
 // sessions and writes PNG captures for the marketing site. Usage:
 //   node scripts/site-capture/capture.mjs <base-url> <out-dir> [only]
+// Set LUME_CAPTURE_PREFS to a JSON object to override preferences (for example the dark base theme).
 // <base-url> is a running `vite dev` server of this repository. No agent is ever started.
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
@@ -68,6 +69,9 @@ function nativeFixture(data, label, extra) {
   };
 }
 
+// LUME_CAPTURE_PREFS='{"darkBase":"graphite"}' overrides preferences, e.g. the appearance of a capture.
+const extraFor = (job) => ({ ...(job.extra || {}), preferences: { ...(job.extra?.preferences || {}), ...JSON.parse(process.env.LUME_CAPTURE_PREFS || "{}") } });
+
 const jobs = {
   workspace: { route: "/workspace", width: 1480, height: 860, wait: "document.querySelectorAll('[data-workspace-pane]').length >= 2" },
   orb: { route: "/", width: 420, height: 435, transparent: true, wait: "document.body.innerText.length > 20" },
@@ -98,7 +102,7 @@ try {
     await call("Emulation.setDeviceMetricsOverride", { width: job.width, height: job.height, deviceScaleFactor: 2, mobile: false });
     const data = buildFixture({ language: "en", dark: true });
     const label = job.route.slice(1) || "main";
-    await call("Page.addScriptToEvaluateOnNewDocument", { source: `localStorage.setItem("lume:workflow-board:open", ${job.board ? '"true"' : '"false"'}); ${job.storage ? `localStorage.setItem("lume:workflow-board:v1", ${JSON.stringify(JSON.stringify({ activeGroupId: data.group.id, layouts: { [data.group.id]: { name: "Ship the navigation", positions: Object.fromEntries(data.group.steps.map((step, index) => [step.id, { x: 90 + index * 380, y: 150 }])), view: { x: 0, y: 0, zoom: 1 } } }, objectives: { [data.group.id]: "Ship the responsive navigation" } }))});` : ""} localStorage.setItem("lume:workspace-layout:v1", ${JSON.stringify(JSON.stringify({ primaryId: "s1", secondaryId: "s2", focusedPaneId: "s1", splitRatio: 0.5, inspectorOpen: true, ...(job.layout || {}) }))}); (${nativeFixture.toString()})(${JSON.stringify(data)}, ${JSON.stringify(label)}, ${JSON.stringify(job.extra || {})});` });
+    await call("Page.addScriptToEvaluateOnNewDocument", { source: `localStorage.setItem("lume:workflow-board:open", ${job.board ? '"true"' : '"false"'}); ${job.storage ? `localStorage.setItem("lume:workflow-board:v1", ${JSON.stringify(JSON.stringify({ activeGroupId: data.group.id, layouts: { [data.group.id]: { name: "Ship the navigation", positions: Object.fromEntries(data.group.steps.map((step, index) => [step.id, { x: 90 + index * 380, y: 150 }])), view: { x: 0, y: 0, zoom: 1 } } }, objectives: { [data.group.id]: "Ship the responsive navigation" } }))});` : ""} localStorage.setItem("lume:workspace-layout:v1", ${JSON.stringify(JSON.stringify({ primaryId: "s1", secondaryId: "s2", focusedPaneId: "s1", splitRatio: 0.5, inspectorOpen: true, ...(job.layout || {}) }))}); (${nativeFixture.toString()})(${JSON.stringify(data)}, ${JSON.stringify(label)}, ${JSON.stringify(extraFor(job))});` });
     if (job.transparent) await call("Emulation.setDefaultBackgroundColorOverride", { color: { r: 0, g: 0, b: 0, a: 0 } });
     await call("Page.navigate", { url: baseUrl + job.route });
     const deadline = Date.now() + 20000;

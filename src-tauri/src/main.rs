@@ -111,8 +111,44 @@ fn configure_linux_display_backend() {
     }
 }
 
+/// The Windows release is a GUI-subsystem program, so a terminal gives it no stdout. The command-line
+/// subcommands attach to the parent terminal and fill in only the standard handles that are missing,
+/// leaving redirected ones (pipes, files) untouched.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+        fn GetStdHandle(handle_id: u32) -> *mut core::ffi::c_void;
+        fn SetStdHandle(handle_id: u32, handle: *mut core::ffi::c_void) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    // SAFETY: plain Win32 calls with valid constants; the opened handle is intentionally kept for the process lifetime.
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        for id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let current = GetStdHandle(id);
+            if current.is_null() || current as isize == -1 {
+                if let Ok(console) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                    SetStdHandle(id, console.as_raw_handle() as *mut core::ffi::c_void);
+                    std::mem::forget(console);
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
+    #[cfg(windows)]
+    if matches!(args.get(1).map(String::as_str), Some("node" | "identity-probe")) {
+        attach_parent_console();
+    }
     if args.get(1).map(String::as_str) == Some("node") {
         std::process::exit(lume_lib::run_node_cli(&args[2..]));
     }

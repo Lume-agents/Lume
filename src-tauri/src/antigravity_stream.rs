@@ -56,6 +56,11 @@ pub struct AntigravityStream {
 }
 
 impl AntigravityStream {
+    pub(crate) fn environment_roots(&self) -> Vec<(String, u32)> {
+        self.sessions.lock().map(|sessions| sessions.iter()
+            .map(|(id, runtime)| (id.clone(), runtime.child.id())).collect()).unwrap_or_default()
+    }
+
     pub fn new(state: AppState, app: AppHandle) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),

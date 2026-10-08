@@ -83,6 +83,12 @@ pub struct OpenCodeBridge {
 }
 
 impl OpenCodeBridge {
+    pub(crate) fn environment_roots(&self) -> Vec<(String, u32)> {
+        self.runtime.lock().map(|runtime| runtime.process.as_ref().map(|process|
+            runtime.loaded.iter().map(|id| (id.clone(), process.child.id())).collect()
+        ).unwrap_or_default()).unwrap_or_default()
+    }
+
     pub fn new(state: AppState, app: AppHandle) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(Runtime::default())),

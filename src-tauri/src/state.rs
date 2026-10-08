@@ -789,6 +789,21 @@ impl AppState {
             .map(|sessions| sessions.clone())
     }
 
+    /// Lightweight process ownership metadata; do not clone transcripts for a port poll.
+    pub(crate) fn environment_owners(&self) -> Result<Vec<crate::session_environments::EnvironmentOwner>, String> {
+        self.sessions.lock()
+            .map_err(|_| "Não foi possível acessar as sessões".to_string())
+            .map(|sessions| sessions.iter().map(|session| crate::session_environments::EnvironmentOwner {
+                session_id: session.id.clone(),
+                native_id: session.native_session_id.clone(),
+                agent: session.agent.clone(),
+                // Editor/browser PIDs are shared infrastructure, not a conversation's process.
+                roots: if session.source == SessionSource::Cli {
+                    session.process_id.into_iter().collect()
+                } else { Vec::new() },
+            }).collect())
+    }
+
     pub(crate) fn codex_cli_process_ids(&self) -> Result<Vec<u32>, String> {
         self.sessions
             .lock()

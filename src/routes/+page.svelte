@@ -43,7 +43,9 @@
   import { sessionLauncherTransition } from "$lib/sessionLauncherTransition";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
+  import MacosAutomationDialog from "$lib/MacosAutomationDialog.svelte";
   import { agentConnectionMessage } from "$lib/agentConnection";
+  import { macosAutomationMessage } from "$lib/macosAutomation";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import { usageAlertDismissals } from "$lib/usageAlertDismissals";
@@ -219,6 +221,7 @@
   let launchingPhase = $state<"choosing" | "opening" | null>(null);
   let launchError = $state<string | null>(null);
   let connectionAgent = $state<IntegrationStatus["kind"] | null>(null);
+  let automationRequired = $state(false);
   let connectionMessage = $state("");
   let resumeAgent = $state<IntegrationStatus["kind"] | null>(null);
   let resumableSessions = $state<ResumableSession[]>([]);
@@ -348,6 +351,7 @@
   let updateProgress = $state<number | null>(null);
   let dismissedAgentAlertIds = $state<string[]>([]);
   let rateLimitRefreshRequested = false;
+  let antigravityRateLimitRefreshRequested = false;
   let pendingUpdate: Update | null = null;
   let suppressCompactToggle = false;
   let dragState: {
@@ -799,6 +803,12 @@
       if (!rateLimitRefreshRequested && sessions.some((session) => session.agent === "codex")) {
         rateLimitRefreshRequested = true;
         void refreshAgentRateLimits("codex")
+          .then(() => refreshSessions(false))
+          .catch(() => undefined);
+      }
+      if (!antigravityRateLimitRefreshRequested && sessions.some((session) => session.agent === "antigravity")) {
+        antigravityRateLimitRefreshRequested = true;
+        void refreshAgentRateLimits("antigravity")
           .then(() => refreshSessions(false))
           .catch(() => undefined);
       }
@@ -2568,6 +2578,7 @@
     } catch (error) {
       const connection = agentConnectionMessage(error);
       if (connection) { connectionAgent = agent; connectionMessage = connection; }
+      else if (macosAutomationMessage(error)) automationRequired = true;
       else launchError = String(error).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
@@ -2624,6 +2635,7 @@
     } catch (error) {
       const connection = agentConnectionMessage(error);
       if (connection) { connectionAgent = stored.agent; connectionMessage = connection; }
+      else if (macosAutomationMessage(error)) automationRequired = true;
       else launchError = String(error).replace(/^Error:\s*/, "");
     } finally {
       launching = null;
@@ -4447,6 +4459,9 @@
   {#if connectionAgent}
     <AgentConnectionDialog agent={connectionAgent} message={connectionMessage} language={preferences.language} onClose={() => { connectionAgent = null; }} />
   {/if}
+  {#if automationRequired}
+    <MacosAutomationDialog language={preferences.language} onClose={() => { automationRequired = false; }} />
+  {/if}
 </main>
 
 <style>
@@ -4798,7 +4813,7 @@
   .final-response-body .final-response-copy { position: relative; top: auto; right: auto; margin: 0 0 5px auto; }
   .empty-session-actions button { min-height: 30px; padding: 5px 10px; border: 1px solid rgba(70, 109, 87, .3); border-radius: 7px; color: inherit; background: rgba(72, 131, 97, .08); font: 650 11px var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .empty-session-actions button:hover { background: rgba(72, 131, 97, .16); }
-  .empty-session-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+  .empty-session-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 14px; }
   .session-details .permission-block, .session-details .question-block { margin: 0 0 14px; padding: 11px; border: 1px solid rgba(166, 122, 49, .28); border-radius: 10px; font-size: 12px; line-height: 1.5; }
   .session-details .permission-block code { max-height: 120px; overflow: auto; text-overflow: clip; white-space: pre-wrap; overflow-wrap: anywhere; }
   .session-details .permission-actions button, .session-details .question-actions button { min-height: 32px; font-size: 11px; }

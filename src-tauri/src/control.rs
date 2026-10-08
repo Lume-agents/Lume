@@ -633,8 +633,13 @@ pub fn session_model_settings(
         let mut settings = app
             .state::<crate::antigravity_stream::AntigravityStream>()
             .model_settings(native_id)?;
-        if let Some(model) = state.session_model_override(session_id)?.model {
+        let selected = state.session_model_override(session_id)?;
+        if let Some(model) = selected.model {
             settings.model = model;
+        }
+        if let Some(effort) = selected.reasoning_effort {
+            settings.reasoning_effort =
+                crate::antigravity_stream::is_effort(&effort).then_some(effort);
         }
         return Ok(settings);
     }
@@ -689,8 +694,9 @@ pub fn set_session_model_settings(
                 "Retome esta sessão do Antigravity pelo Lume antes de alterar o modelo".into(),
             );
         }
-        if !effort.trim().is_empty() {
-            return Err("O Antigravity não oferece ajuste separado de esforço".into());
+        let effort = effort.trim();
+        if !effort.is_empty() && !crate::antigravity_stream::is_effort(effort) {
+            return Err("Esse esforço não é aceito pela CLI do Antigravity".into());
         }
         let native_id = session
             .native_session_id
@@ -703,11 +709,13 @@ pub fn set_session_model_settings(
             return Err("Esse modelo não está disponível na CLI do Antigravity".into());
         }
         settings.model = model.to_string();
+        settings.reasoning_effort = (!effort.is_empty()).then(|| effort.to_string());
         state.set_session_model_override(
             session_id,
             SessionModelOverride {
                 model: Some(model.to_string()),
-                reasoning_effort: None,
+                // Empty means "CLI default", so a stale level can't come back on restart.
+                reasoning_effort: Some(effort.to_string()),
             },
         )?;
         protocol::emit_sessions_changed(app);

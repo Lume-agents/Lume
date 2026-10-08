@@ -15,7 +15,6 @@ mod control;
 mod custom_fonts;
 mod desktop_shortcuts;
 mod discovery;
-mod session_environments;
 pub mod distributed_protocol;
 mod domain;
 mod event_server;
@@ -39,6 +38,7 @@ mod overlay;
 mod path_mentions;
 mod protocol;
 mod repository;
+mod session_environments;
 mod session_filters;
 mod state;
 mod store;
@@ -393,36 +393,65 @@ async fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSna
 }
 
 #[tauri::command]
-async fn get_session_environments(app: AppHandle, state: State<'_, AppState>) -> Result<session_environments::EnvironmentSnapshot, String> {
+async fn get_session_environments(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<session_environments::EnvironmentSnapshot, String> {
     let mut owners = state.environment_owners()?;
     tauri::async_runtime::spawn_blocking(move || {
-        let agy = app.state::<antigravity_stream::AntigravityStream>().environment_roots();
-        let opencode = app.state::<opencode_acp::OpenCodeBridge>().environment_roots();
+        let agy = app
+            .state::<antigravity_stream::AntigravityStream>()
+            .environment_roots();
+        let opencode = app
+            .state::<opencode_acp::OpenCodeBridge>()
+            .environment_roots();
         for owner in &mut owners {
             if let Some(native_id) = &owner.native_id {
                 if owner.agent == AgentKind::ClaudeCode {
-                    owner.roots.extend(integrations::claude_registered_pids(native_id));
+                    owner
+                        .roots
+                        .extend(integrations::claude_registered_pids(native_id));
                 }
                 let roots = match owner.agent {
                     AgentKind::Antigravity => &agy,
                     AgentKind::OpenCode => &opencode,
                     _ => continue,
                 };
-                owner.roots.extend(roots.iter().filter(|(id, _)| id == native_id).map(|(_, pid)| *pid));
+                owner.roots.extend(
+                    roots
+                        .iter()
+                        .filter(|(id, _)| id == native_id)
+                        .map(|(_, pid)| *pid),
+                );
             }
         }
-        app.state::<session_environments::EnvironmentMonitor>().snapshot(&owners)
-    }).await.map_err(|error| error.to_string())?
+        app.state::<session_environments::EnvironmentMonitor>()
+            .snapshot(&owners)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-async fn stop_session_environment(app: AppHandle, state: State<'_, AppState>, session_id: String, environment_id: String) -> Result<(), String> {
-    if !state.environment_owners()?.iter().any(|owner| owner.session_id == session_id) {
+async fn stop_session_environment(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    environment_id: String,
+) -> Result<(), String> {
+    if !state
+        .environment_owners()?
+        .iter()
+        .any(|owner| owner.session_id == session_id)
+    {
         return Err("Esta sessão não está mais aberta no Lume.".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<session_environments::EnvironmentMonitor>().stop(&session_id, &environment_id)
-    }).await.map_err(|error| error.to_string())?
+        app.state::<session_environments::EnvironmentMonitor>()
+            .stop(&session_id, &environment_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn repository_directory(state: &AppState, session_id: &str) -> Result<String, String> {
@@ -830,10 +859,7 @@ fn set_native_file_dialog_windows(
     let mut updated = 0usize;
     let mut first_error = None;
     for (window_label, window) in app.webview_windows() {
-        if window_label != "main"
-            && !window_label.starts_with("terminal-")
-            && !window_label.starts_with("workflow-bridge-")
-        {
+        if !overlay::is_overlay_window_label(&window_label) {
             continue;
         }
         match overlay::set_file_dialog_active(&window, active, show_over_fullscreen) {
@@ -866,8 +892,30 @@ fn refresh_agent_rate_limits(
             refresh_claude_rate_limits(app, state.inner().clone());
             Ok(())
         }
+        AgentKind::Antigravity => {
+            refresh_antigravity_rate_limits(app, state.inner().clone());
+            Ok(())
+        }
         _ => Ok(()),
     }
+}
+
+fn refresh_antigravity_rate_limits(app: AppHandle, state: AppState) {
+    static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        if let Ok(limits) = antigravity_stream::fetch_rate_limits() {
+            if state
+                .set_agent_rate_limits(AgentKind::Antigravity, limits)
+                .unwrap_or(false)
+            {
+                protocol::emit_sessions_changed(&app);
+            }
+        }
+        REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
 fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
@@ -1791,6 +1839,7 @@ fn set_preferences(
         return Err(error);
     }
     if overlay_configuration_changed {
+        overlay::apply_spaces_behavior_to_all(&app, preferences.show_over_fullscreen);
         let Some(window) = app.get_webview_window("main") else {
             return Ok(());
         };
@@ -2344,6 +2393,11 @@ fn reveal_plugin_directory(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn open_automation_settings() -> Result<(), String> {
+    launcher::open_automation_settings()
+}
+
+#[tauri::command]
 async fn launch_session(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -2415,6 +2469,7 @@ fn launch_session_impl(
                 .then_some(request.resume_id.as_deref())
                 .flatten(),
             request.model.as_deref(),
+            request.reasoning_effort.as_deref(),
             antigravity_stream::PERMISSION_DEFAULT,
         )?;
         if let Some(prompt) = request
@@ -2846,6 +2901,7 @@ pub fn run() {
             usage_monitor::start(state.clone(), app.handle().clone());
 
             if let Some(window) = app.get_webview_window("main") {
+                overlay::neutralize_text_scaling(&window);
                 let preferences = state.preferences()?;
                 let configured = overlay::configure(
                     &window,
@@ -2854,6 +2910,7 @@ pub fn run() {
                     preferences.overlay_x,
                     preferences.overlay_y,
                 );
+                overlay::apply_spaces_behavior(&window, preferences.show_over_fullscreen);
                 if !configured {
                     if let Ok((default_x, default_y)) =
                         overlay::default_position(&window, preferences.monitor_id.as_deref())
@@ -3047,7 +3104,8 @@ pub fn run() {
             install_external_plugin,
             remove_external_plugin,
             reveal_plugin_directory,
-            launch_session
+            launch_session,
+            open_automation_settings
         ])
         .run(tauri::generate_context!())
         .expect("erro ao executar o Lume");

@@ -257,15 +257,18 @@ fn antigravity_commands_from(home: &Path, cwd: &Path) -> Vec<AgentSlashCommand> 
             .into_iter()
             .for_each(&mut add);
     }
-    let config = home.join(".gemini/config");
+    let gemini = home.join(".gemini");
+    let config = gemini.join("config");
     for directory in ["global_workflows", "workflows"] {
         workflow_commands(&config.join(directory))
             .into_iter()
             .for_each(&mut add);
     }
+    // ~/.gemini/skills is where global skills live; config/skills is the older location.
     for directory in [
+        gemini.join("skills"),
         config.join("skills"),
-        home.join(".gemini/antigravity-cli/builtin/skills"),
+        gemini.join("antigravity-cli/builtin/skills"),
     ] {
         skill_commands(&directory).into_iter().for_each(&mut add);
     }
@@ -454,8 +457,20 @@ mod tests {
             "---\nname: lint\ndescription: \"Project lint\"\n---",
         );
         write(
-            home.join(".gemini/config/skills/lint/SKILL.md"),
+            home.join(".gemini/skills/lint/SKILL.md"),
             "---\nname: lint\ndescription: Global lint\n---",
+        );
+        write(
+            home.join(".gemini/skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Global review\n---",
+        );
+        write(
+            home.join(".gemini/config/skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Legacy review\n---",
+        );
+        write(
+            home.join(".gemini/config/skills/format/SKILL.md"),
+            "---\nname: format\ndescription: Legacy format\n---",
         );
         write(
             home.join(".gemini/antigravity-cli/builtin/skills/plugin/SKILL.md"),
@@ -478,6 +493,8 @@ mod tests {
             [
                 ("deploy", "Deploy the app", "workflow"),
                 ("lint", "Project lint", "skill"),
+                ("review", "Global review", "skill"),
+                ("format", "Legacy format", "skill"),
                 ("plugin", "Plugins", "skill"),
             ]
         );

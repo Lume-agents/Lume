@@ -67,6 +67,10 @@ function nativeFixture() {
     fake.emit("lume://workflow-run-changed", next);
     return structuredClone(next);
   };
+  // Keep the draft on the same chat that the board's first card opens. Without an
+  // explicit layout, equal-status fixture sessions are ordered by their timestamps
+  // and opening another card legitimately replaces the focused pane.
+  localStorage.setItem("lume:workspace-layout:v1", JSON.stringify({ primaryId: "session-0", focusedPaneId: "session-0" }));
   localStorage.setItem("lume:workflow-board:open", "true");
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_, id) => listeners.delete(id) };
   window.__TAURI_INTERNALS__ = {

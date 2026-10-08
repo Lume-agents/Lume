@@ -574,7 +574,11 @@ fn hook_activity(
             )
         })
         .flatten();
-    let detail_limit = if file_diff.is_some() { 48 * 1024 } else { 16 * 1024 };
+    let detail_limit = if file_diff.is_some() {
+        48 * 1024
+    } else {
+        16 * 1024
+    };
     let detail = if is_todo_tool {
         input_detail
     } else if file_diff.is_some() {
@@ -671,7 +675,11 @@ fn file_change_diff(input: Option<&Value>, response: Option<&Value>) -> Option<S
         for (old, new) in edits {
             let start = original
                 .as_deref()
-                .and_then(|content| content.find(&old).map(|at| content[..at].matches('\n').count() + 1))
+                .and_then(|content| {
+                    content
+                        .find(&old)
+                        .map(|at| content[..at].matches('\n').count() + 1)
+                })
                 .unwrap_or(1);
             let old_lines: Vec<&str> = old.lines().collect();
             let new_lines: Vec<&str> = new.lines().collect();
@@ -2398,7 +2406,10 @@ mod tests {
         .expect("activity");
         assert_eq!(activity.kind, "file");
         let detail = activity.detail.expect("detail");
-        assert!(detail.starts_with("diff --git a//work/app/src/a.rs"), "{detail}");
+        assert!(
+            detail.starts_with("diff --git a//work/app/src/a.rs"),
+            "{detail}"
+        );
         assert!(detail.contains("-x\n+y"));
         assert_eq!(activity.files, vec!["/work/app/src/a.rs".to_string()]);
     }
@@ -2427,7 +2438,9 @@ mod tests {
             Some(&json!({ "type": "create" })),
         )
         .expect("a new file");
-        assert!(created.contains("--- /dev/null") && created.contains("@@ -0,0 +1,2 @@\n+l1\n+l2\n"));
+        assert!(
+            created.contains("--- /dev/null") && created.contains("@@ -0,0 +1,2 @@\n+l1\n+l2\n")
+        );
 
         assert!(file_change_diff(Some(&json!({ "command": "ls" })), None).is_none());
     }

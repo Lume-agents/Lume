@@ -1208,11 +1208,7 @@
     try {
       if (session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity") {
         if ((session.agent !== "antigravity" && !selectedModel) || (session.agent === "codex" && !selectedEffort)) return;
-        const savedSettings = await setSessionModelSettings(
-          session.id,
-          selectedModel,
-          session.agent === "antigravity" ? "" : selectedEffort,
-        );
+        const savedSettings = await setSessionModelSettings(session.id, selectedModel, selectedEffort);
         modelSettings = savedSettings;
         selectedModel = savedSettings.model;
         selectedEffort = savedSettings.reasoningEffort
@@ -2616,7 +2612,7 @@
       <div class="composer-tools">
         <div class="agent-controls" bind:this={controlsRoot}>
           <button class:active={controlsOpen} class="model-trigger" type="button"
-            aria-label={session.agent === "antigravity" ? tr("Choose model and permissions", "Escolher modelo e permissões") : tr("Choose model and effort", "Escolher modelo e esforço")}
+            aria-label={tr("Choose model and effort", "Escolher modelo e esforço")}
             aria-haspopup="dialog" aria-expanded={controlsOpen}
             onclick={() => void toggleAgentControls()}>
             <span>{session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity"
@@ -2626,7 +2622,7 @@
             <LumeIcon name="chevron-down" size={12} />
           </button>
           {#if controlsOpen}
-            <section class="agent-controls-popover" aria-label={session.agent === "antigravity" ? tr("Model and permissions", "Modelo e permissões") : tr("Model and effort", "Modelo e esforço")}>
+            <section class="agent-controls-popover" aria-label={tr("Model and effort", "Modelo e esforço")}>
               {#if session.controlOrigin !== "lume"}
                 <p class="controls-note">{tr("Take control of this session to change its model.", "Assuma o controle desta sessão para mudar o modelo.")}</p>
               {:else if controlsLoading}

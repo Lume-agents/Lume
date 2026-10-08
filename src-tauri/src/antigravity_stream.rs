@@ -15,10 +15,10 @@ use serde_json::{json, Value};
 use tauri::AppHandle;
 
 use crate::{
-    codex_bridge::{CodexModelOption, CodexThreadModelSettings},
+    codex_bridge::{CodexModelOption, CodexReasoningEffortOption, CodexThreadModelSettings},
     domain::{
-        AccessMode, AgentKind, HookEvent, HookEventKind, PermissionProfile, SessionActivity,
-        SessionControlOrigin, SessionSource,
+        AccessMode, AgentKind, AgentRateLimit, HookEvent, HookEventKind, PermissionProfile,
+        SessionActivity, SessionControlOrigin, SessionSource,
     },
     event_server,
     opencode_acp::read_bounded_line,
@@ -31,6 +31,8 @@ pub const PERMISSION_PLAN: &str = "agy_plan";
 pub const PERMISSION_ALLOW_ALL: &str = "agy_allow_all";
 
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+const USAGE_TIMEOUT: Duration = Duration::from_secs(15);
+const EFFORT_LEVELS: [&str; 3] = ["low", "medium", "high"];
 
 struct ManagedSession {
     child: Child,
@@ -38,6 +40,7 @@ struct ManagedSession {
     active: Arc<AtomicBool>,
     turn: Arc<AtomicU64>,
     model: Option<String>,
+    effort: Option<String>,
     permission_mode: String,
 }
 
@@ -57,8 +60,15 @@ pub struct AntigravityStream {
 
 impl AntigravityStream {
     pub(crate) fn environment_roots(&self) -> Vec<(String, u32)> {
-        self.sessions.lock().map(|sessions| sessions.iter()
-            .map(|(id, runtime)| (id.clone(), runtime.child.id())).collect()).unwrap_or_default()
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .map(|(id, runtime)| (id.clone(), runtime.child.id()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn new(state: AppState, app: AppHandle) -> Self {
@@ -74,6 +84,7 @@ impl AntigravityStream {
         working_directory: &str,
         resume_id: Option<&str>,
         model: Option<&str>,
+        effort: Option<&str>,
         permission_mode: &str,
     ) -> Result<String, String> {
         let cwd = std::fs::canonicalize(working_directory)
@@ -98,6 +109,9 @@ impl AntigravityStream {
             .stderr(Stdio::null());
         if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
             command.args(["--model", model]);
+        }
+        if let Some(effort) = effort.filter(|effort| is_effort(effort)) {
+            command.args(["--effort", effort]);
         }
         match permission_mode {
             PERMISSION_ACCEPT_EDITS => {
@@ -183,6 +197,9 @@ impl AntigravityStream {
                 active,
                 turn,
                 model: model.map(str::to_string).filter(|model| !model.is_empty()),
+                effort: effort
+                    .filter(|effort| is_effort(effort))
+                    .map(str::to_string),
                 permission_mode: permission_mode.to_string(),
             },
         );
@@ -204,8 +221,9 @@ impl AntigravityStream {
     pub fn prompt(&self, id: &str, cwd: &str, prompt: &str) -> Result<(), String> {
         let model_override = self
             .state
-            .session_model_override_for_native_id(AgentKind::Antigravity, id)?
-            .model;
+            .session_model_override_for_native_id(AgentKind::Antigravity, id)?;
+        let effort_override = model_override.reasoning_effort;
+        let model_override = model_override.model;
         let permission_override = self
             .state
             .permission_mode_override_for_native_id(AgentKind::Antigravity, id)?;
@@ -225,10 +243,15 @@ impl AntigravityStream {
                         .as_deref()
                         .map(|model| (!model.trim().is_empty()).then(|| model.to_string()))
                         .unwrap_or_else(|| session.model.clone());
+                    let requested_effort = effort_override
+                        .as_deref()
+                        .map(|effort| is_effort(effort).then(|| effort.to_string()))
+                        .unwrap_or_else(|| session.effort.clone());
                     let requested_permission = permission_override
                         .clone()
                         .unwrap_or_else(|| session.permission_mode.clone());
                     let configuration_changed = requested_model != session.model
+                        || requested_effort != session.effort
                         || requested_permission != session.permission_mode;
                     if configuration_changed && session.active.load(Ordering::SeqCst) {
                         return Err(
@@ -237,7 +260,7 @@ impl AntigravityStream {
                     }
                     if stale || configuration_changed {
                         sessions.remove(id);
-                        Some((requested_model, requested_permission))
+                        Some((requested_model, requested_effort, requested_permission))
                     } else {
                         None
                     }
@@ -246,12 +269,19 @@ impl AntigravityStream {
                     model_override
                         .as_deref()
                         .and_then(|model| (!model.trim().is_empty()).then(|| model.to_string())),
+                    effort_override.filter(|effort| is_effort(effort)),
                     permission_override.unwrap_or_else(|| PERMISSION_DEFAULT.into()),
                 )),
             }
         };
-        if let Some((model, permission_mode)) = restart_settings {
-            self.launch(cwd, Some(id), model.as_deref(), &permission_mode)?;
+        if let Some((model, effort, permission_mode)) = restart_settings {
+            self.launch(
+                cwd,
+                Some(id),
+                model.as_deref(),
+                effort.as_deref(),
+                &permission_mode,
+            )?;
         }
         let (writer, active) = {
             let sessions = self
@@ -293,16 +323,16 @@ impl AntigravityStream {
 
     pub fn model_settings(&self, id: &str) -> Result<CodexThreadModelSettings, String> {
         let models = self.available_models()?;
-        let current_model = self
+        let (current_model, current_effort) = self
             .sessions
             .lock()
             .map_err(|_| "Antigravity session lock failed")?
             .get(id)
-            .and_then(|session| session.model.clone())
+            .map(|session| (session.model.clone(), session.effort.clone()))
             .unwrap_or_default();
         Ok(CodexThreadModelSettings {
-            model: current_model,
-            reasoning_effort: None,
+            model: current_model.unwrap_or_default(),
+            reasoning_effort: current_effort,
             service_tier: None,
             models,
             session_modes: None,
@@ -382,6 +412,112 @@ impl AntigravityStream {
     }
 }
 
+/// Quota windows of the `agy` CLI, read from `/usage` (zero tokens).
+pub fn fetch_rate_limits() -> Result<Vec<AgentRateLimit>, String> {
+    let mut command = crate::executables::command("agy")?;
+    command
+        .args(["-p", "/usage", "--output-format", "stream-json"])
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    // Drain stdout while waiting so a large payload cannot fill the pipe and stall the child.
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or("Antigravity stdout unavailable")?;
+    let reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stdout, &mut buffer);
+        buffer
+    });
+    let started = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            break;
+        }
+        if started.elapsed() >= USAGE_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("O consumo do Antigravity demorou demais para responder".into());
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
+    let output = reader.join().unwrap_or_default();
+    let listing = String::from_utf8_lossy(&output);
+    let limits = listing
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|message| {
+            message["event"] == "command_result" && message["command"]["name"] == "usage"
+        })
+        .map(|message| parse_usage_rate_limits(&message))
+        .unwrap_or_default();
+    if limits.is_empty() {
+        return Err("A CLI do Antigravity não retornou o consumo de quota".into());
+    }
+    Ok(limits)
+}
+
+/// Turns the `command_result` of `/usage` into one limit per group and window.
+pub fn parse_usage_rate_limits(output: &Value) -> Vec<AgentRateLimit> {
+    let mut limits = Vec::new();
+    let Some(groups) = output
+        .pointer("/command/data/groups")
+        .and_then(Value::as_array)
+    else {
+        return limits;
+    };
+    for group in groups {
+        let name = group.get("name").and_then(Value::as_str).unwrap_or("");
+        let group_label = if name.to_lowercase().contains("gemini") {
+            "Gemini"
+        } else {
+            "3P Models"
+        };
+        let Some(buckets) = group.get("buckets").and_then(Value::as_array) else {
+            continue;
+        };
+        for bucket in buckets {
+            let Some(id) = bucket.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let window = bucket.get("window").and_then(Value::as_str).unwrap_or("");
+            let remaining = bucket
+                .get("remaining_fraction")
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0);
+            let (window_minutes, window_label) = match window {
+                "5h" => (Some(300), "5h"),
+                "weekly" => (Some(10080), "Semanal"),
+                other => (None, other),
+            };
+            limits.push(AgentRateLimit {
+                id: format!("antigravity:{id}"),
+                label: format!("{group_label} · {window_label}"),
+                used_percent: ((1.0 - remaining).clamp(0.0, 1.0) * 100.0).round() as u8,
+                resets_at: bucket
+                    .get("reset_time")
+                    .and_then(Value::as_str)
+                    .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+                    .map(|stamp| stamp.timestamp_millis()),
+                window_minutes,
+            });
+        }
+    }
+    limits
+}
+
 /// The `<id>\t<label>` lines of `agy models`, without headings or anything else.
 fn parse_model_lines(output: &str) -> Vec<(String, String)> {
     let mut lines: Vec<(String, String)> = Vec::new();
@@ -419,7 +555,7 @@ fn parse_model_catalog(output: &str, default_label: Option<&str>) -> Vec<CodexMo
         },
         is_default: true,
         default_reasoning_effort: String::new(),
-        supported_reasoning_efforts: Vec::new(),
+        supported_reasoning_efforts: effort_options(),
     }];
     for (model, display_name) in parse_model_lines(output) {
         let is_the_default =
@@ -433,7 +569,7 @@ fn parse_model_catalog(output: &str, default_label: Option<&str>) -> Vec<CodexMo
             description: "Disponível na CLI do Antigravity".into(),
             is_default: false,
             default_reasoning_effort: String::new(),
-            supported_reasoning_efforts: Vec::new(),
+            supported_reasoning_efforts: effort_options(),
         });
     }
     models
@@ -454,6 +590,27 @@ fn read_default_model_label(path: &std::path::Path) -> Option<String> {
     let settings = serde_json::from_str::<Value>(&std::fs::read_to_string(path).ok()?).ok()?;
     let label = settings.get("model")?.as_str()?.trim();
     (!label.is_empty()).then(|| label.chars().take(MAX_DEFAULT_LABEL_CHARS).collect())
+}
+
+/// The CLI default comes first (empty value) so the slider can return to it.
+fn effort_options() -> Vec<CodexReasoningEffortOption> {
+    std::iter::once(CodexReasoningEffortOption {
+        value: String::new(),
+        description: "Usa o esforço padrão configurado na CLI do Antigravity".into(),
+    })
+    .chain(
+        EFFORT_LEVELS
+            .iter()
+            .map(|effort| CodexReasoningEffortOption {
+                value: (*effort).into(),
+                description: format!("--effort {effort}"),
+            }),
+    )
+    .collect()
+}
+
+pub fn is_effort(effort: &str) -> bool {
+    EFFORT_LEVELS.contains(&effort)
 }
 
 pub fn is_permission_mode(mode: &str) -> bool {
@@ -527,6 +684,56 @@ fn base_event(id: &str, event: HookEventKind) -> HookEvent {
     }
 }
 
+/// Reads stay `tool` on purpose: the UI treats `file` activities as edits
+/// and lists their paths among the turn's changed files.
+fn tool_activity(id: &str, step: &Value) -> SessionActivity {
+    let tool_name = step["tool_name"].as_str().unwrap_or("Ferramenta");
+    let tool_info = &step["tool_info"];
+    let params = &tool_info["parameters"];
+    let first_param = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| params[*key].as_str().filter(|value| !value.is_empty()))
+    };
+    let path = first_param(&["TargetFile", "AbsolutePath"]);
+    let edited_path = match tool_name {
+        "write_to_file" | "replace_file_content" => path,
+        _ => None,
+    };
+    let (kind, title) = match tool_name {
+        "run_command" => ("command", first_param(&["CommandLine", "toolSummary"])),
+        "manage_task" => ("tool", first_param(&["Action", "toolSummary"])),
+        _ if edited_path.is_some() => ("file", edited_path),
+        // Reads, and edits without a path: a summary must not pose as a file.
+        "view_file" | "write_to_file" | "replace_file_content" => {
+            ("tool", path.or_else(|| first_param(&["toolSummary"])))
+        }
+        _ => ("tool", first_param(&["toolSummary", "toolAction"])),
+    };
+    let title = title.unwrap_or(tool_name);
+    let done = step["state"].as_str() == Some("DONE");
+    let detail = tool_info["output"]
+        .as_str()
+        .filter(|output| done && !output.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            params
+                .as_object()
+                .filter(|params| !params.is_empty())
+                .and_then(|params| serde_json::to_string_pretty(params).ok())
+        });
+    SessionActivity {
+        id: format!("agy-tool:{id}:{}", step["step_index"].as_u64().unwrap_or(0)),
+        kind: kind.into(),
+        title: title.chars().take(180).collect(),
+        detail: detail.map(|text| text.chars().take(32 * 1024).collect()),
+        status: if done { "completed" } else { "running" }.into(),
+        created_at: now_millis(),
+        files: edited_path.map(str::to_string).into_iter().collect(),
+        attachments: Vec::new(),
+        append_detail: false,
+    }
+}
+
 fn read_stream(
     output: impl std::io::Read,
     init: mpsc::Sender<Result<String, String>>,
@@ -578,27 +785,7 @@ fn read_stream(
                             append_detail: true,
                         }
                     }
-                    Some("tool") => SessionActivity {
-                        id: format!("agy-tool:{id}:{}", step["step_index"].as_u64().unwrap_or(0)),
-                        kind: "tool".into(),
-                        title: step["tool_name"]
-                            .as_str()
-                            .unwrap_or("Ferramenta")
-                            .chars()
-                            .take(120)
-                            .collect(),
-                        detail: None,
-                        status: if step["state"].as_str() == Some("DONE") {
-                            "completed"
-                        } else {
-                            "running"
-                        }
-                        .into(),
-                        created_at: now_millis(),
-                        files: Vec::new(),
-                        attachments: Vec::new(),
-                        append_detail: false,
-                    },
+                    Some("tool") => tool_activity(id, step),
                     _ => continue,
                 };
                 let mut event = base_event(id, HookEventKind::Activity);
@@ -755,5 +942,250 @@ mod tests {
         assert_eq!(event.native_session_id.as_deref(), Some("conversation-1"));
         assert_eq!(event.control_origin, SessionControlOrigin::Lume);
         assert_eq!(event.source, Some(SessionSource::Desktop));
+    }
+
+    #[test]
+    fn model_catalog_offers_cli_effort_levels() {
+        let models = parse_model_catalog("gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n", None);
+        assert_eq!(models.len(), 2);
+        for model in &models {
+            let efforts = model
+                .supported_reasoning_efforts
+                .iter()
+                .map(|effort| effort.value.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(efforts, ["", "low", "medium", "high"]);
+            assert_eq!(model.default_reasoning_effort, "");
+        }
+        assert!(is_effort("high"));
+        assert!(!is_effort("xhigh"));
+        assert!(!is_effort("max"));
+        assert!(!is_effort(""));
+        assert!(!is_effort("ultra"));
+    }
+
+    #[test]
+    fn finished_command_shows_command_line_and_output() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "step_type": "tool",
+                "step_index": 4,
+                "state": "DONE",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "parameters": { "CommandLine": "cargo test", "toolSummary": "Run tests" },
+                    "output": "test result: ok. 12 passed",
+                },
+            }),
+        );
+        assert_eq!(activity.id, "agy-tool:conversation-1:4");
+        assert_eq!(activity.kind, "command");
+        assert_eq!(activity.title, "cargo test");
+        assert_eq!(
+            activity.detail.as_deref(),
+            Some("test result: ok. 12 passed")
+        );
+        assert_eq!(activity.status, "completed");
+    }
+
+    #[test]
+    fn running_task_shows_action_and_parameters() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "step_index": 2,
+                "state": "ACTIVE",
+                "tool_name": "manage_task",
+                "tool_info": { "parameters": { "Action": "create", "TaskName": "Fix CI" } },
+            }),
+        );
+        assert_eq!(activity.kind, "tool");
+        assert_eq!(activity.title, "create");
+        assert_eq!(activity.status, "running");
+        let detail = activity.detail.expect("parameters are shown while running");
+        assert!(detail.contains("\"TaskName\": \"Fix CI\""), "{detail}");
+    }
+
+    #[test]
+    fn running_tool_ignores_partial_output() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "ACTIVE",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "parameters": { "CommandLine": "npm run build" },
+                    "output": "vite v6 building...",
+                },
+            }),
+        );
+        let detail = activity.detail.expect("parameters are shown while running");
+        assert!(detail.contains("npm run build"), "{detail}");
+        assert!(!detail.contains("building"), "{detail}");
+    }
+
+    #[test]
+    fn finished_task_shows_its_output() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "DONE",
+                "tool_name": "manage_task",
+                "tool_info": {
+                    "parameters": { "Action": "complete" },
+                    "output": "Task Fix CI completed",
+                },
+            }),
+        );
+        assert_eq!(activity.title, "complete");
+        assert_eq!(activity.detail.as_deref(), Some("Task Fix CI completed"));
+        assert_eq!(activity.status, "completed");
+    }
+
+    #[test]
+    fn file_edits_report_their_target() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "DONE",
+                "tool_name": "replace_file_content",
+                "tool_info": { "parameters": { "TargetFile": "/repo/src/lib.rs" } },
+            }),
+        );
+        assert_eq!(activity.kind, "file");
+        assert_eq!(activity.title, "/repo/src/lib.rs");
+        assert_eq!(activity.files, ["/repo/src/lib.rs"]);
+
+        let pathless = tool_activity(
+            "conversation-1",
+            &json!({
+                "tool_name": "write_to_file",
+                "tool_info": { "parameters": { "toolSummary": "Write notes" } },
+            }),
+        );
+        assert_eq!(pathless.kind, "tool");
+        assert_eq!(pathless.title, "Write notes");
+        assert!(pathless.files.is_empty());
+    }
+
+    #[test]
+    fn file_reads_are_not_reported_as_edits() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "DONE",
+                "tool_name": "view_file",
+                "tool_info": { "parameters": { "AbsolutePath": "/repo/README.md" } },
+            }),
+        );
+        assert_eq!(activity.kind, "tool");
+        assert_eq!(activity.title, "/repo/README.md");
+        assert!(activity.files.is_empty());
+    }
+
+    #[test]
+    fn unknown_tools_fall_back_to_summary_then_name() {
+        let summarized = tool_activity(
+            "conversation-1",
+            &json!({
+                "tool_name": "grep_search",
+                "tool_info": { "parameters": { "toolSummary": "Search for TODO" } },
+            }),
+        );
+        assert_eq!(summarized.title, "Search for TODO");
+        let bare = tool_activity("conversation-1", &json!({ "tool_name": "list_dir" }));
+        assert_eq!(bare.title, "list_dir");
+        assert_eq!(bare.detail, None);
+        let unnamed = tool_activity("conversation-1", &json!({}));
+        assert_eq!(unnamed.title, "Ferramenta");
+    }
+
+    #[test]
+    fn tool_detail_and_title_are_bounded() {
+        let activity = tool_activity(
+            "conversation-1",
+            &json!({
+                "state": "DONE",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "parameters": { "CommandLine": "x".repeat(500) },
+                    "output": "y".repeat(64 * 1024),
+                },
+            }),
+        );
+        assert_eq!(activity.title.chars().count(), 180);
+        assert_eq!(
+            activity.detail.map(|text| text.chars().count()),
+            Some(32 * 1024)
+        );
+    }
+
+    const AGY_USAGE: &str = r#"{"event":"command_result","command":{"name":"usage","data":{"groups":[
+        {"name":"Gemini Models","buckets":[
+            {"id":"gemini-weekly","window":"weekly","remaining_fraction":0.9723,"reset_time":"2026-10-14T02:32:39Z"},
+            {"id":"gemini-5h","window":"5h","remaining_fraction":0.98,"reset_time":"2026-10-07T23:31:41Z"}]},
+        {"name":"Claude and GPT models","buckets":[
+            {"id":"3p-weekly","window":"weekly","remaining_fraction":0.12,"reset_time":"2026-10-11T19:08:56Z"},
+            {"id":"3p-5h","window":"5h","remaining_fraction":1,"reset_time":"2026-10-08T00:59:49Z"}]}]}}}"#;
+
+    #[test]
+    fn usage_buckets_become_labelled_rate_limits() {
+        let limits = parse_usage_rate_limits(&serde_json::from_str(AGY_USAGE).unwrap());
+        let shown: Vec<_> = limits
+            .iter()
+            .map(|limit| {
+                (
+                    limit.id.as_str(),
+                    limit.label.as_str(),
+                    limit.used_percent,
+                    limit.window_minutes,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                (
+                    "antigravity:gemini-weekly",
+                    "Gemini · Semanal",
+                    3,
+                    Some(10080)
+                ),
+                ("antigravity:gemini-5h", "Gemini · 5h", 2, Some(300)),
+                (
+                    "antigravity:3p-weekly",
+                    "3P Models · Semanal",
+                    88,
+                    Some(10080)
+                ),
+                ("antigravity:3p-5h", "3P Models · 5h", 0, Some(300)),
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_reset_time_is_unix_milliseconds() {
+        let limits = parse_usage_rate_limits(&serde_json::from_str(AGY_USAGE).unwrap());
+        assert_eq!(limits[1].resets_at, Some(1_791_415_901_000));
+    }
+
+    #[test]
+    fn usage_tolerates_missing_fields_and_foreign_payloads() {
+        assert!(parse_usage_rate_limits(&json!({ "event": "result" })).is_empty());
+        let limits = parse_usage_rate_limits(&json!({
+            "command": { "data": { "groups": [
+                { "name": "Gemini Models", "buckets": [
+                    { "id": "x", "window": "monthly", "remaining_fraction": -0.5, "reset_time": "soon" },
+                    { "window": "5h" }
+                ] },
+                { "name": "Empty" }
+            ] } }
+        }));
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].used_percent, 100);
+        assert_eq!(limits[0].label, "Gemini · monthly");
+        assert_eq!(limits[0].resets_at, None);
+        assert_eq!(limits[0].window_minutes, None);
     }
 }

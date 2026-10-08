@@ -770,16 +770,7 @@ fn launch_terminal(
     app_data_dir: &Path,
 ) -> Result<(), String> {
     let payload_path = persist_terminal_payload(&payload, app_data_dir)?;
-    let shell_command = format!(
-        "cd -- {} && exec {} terminal-run {}",
-        shell_quote(&payload.working_directory),
-        shell_quote(&executable.to_string_lossy()),
-        shell_quote(&payload_path.to_string_lossy()),
-    );
-    let script = format!(
-        "with timeout of 30 seconds\ntell application \"Terminal\"\ndo script {}\nactivate\nend tell\nend timeout",
-        applescript_string(&shell_command),
-    );
+    let script = terminal_app_script(executable, &payload_path, &payload.working_directory);
     let opened = Command::new("/usr/bin/osascript")
         .arg("-e")
         .arg(script)
@@ -789,16 +780,59 @@ fn launch_terminal(
             if output.status.success() {
                 return Ok(());
             }
-            let detail = String::from_utf8_lossy(&output.stderr);
-            if detail.contains("-1743") {
-                return Err("Permita que o Lume controle o Terminal em Ajustes do Sistema → Privacidade e Segurança → Automação.".into());
-            }
-            Err(format!("Não foi possível abrir o Terminal.app: {}", detail.trim()))
+            Err(terminal_app_error(&String::from_utf8_lossy(&output.stderr)))
         });
     if opened.is_err() {
         let _ = fs::remove_file(&payload_path);
     }
     opened
+}
+
+#[cfg(target_os = "macos")]
+pub fn open_automation_settings() -> Result<(), String> {
+    let status = Command::new("/usr/bin/open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+        .status()
+        .map_err(|error| format!("Não foi possível abrir os Ajustes do Sistema: {error}"))?;
+    if !status.success() {
+        return Err("Não foi possível abrir os Ajustes do Sistema".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_automation_settings() -> Result<(), String> {
+    Err("Os ajustes de Automação só existem no macOS".into())
+}
+
+#[cfg(target_os = "macos")]
+fn terminal_app_script(executable: &Path, payload_path: &Path, working_directory: &str) -> String {
+    let shell_command = format!(
+        "cd -- {} && exec {} terminal-run {}",
+        shell_quote(working_directory),
+        shell_quote(&executable.to_string_lossy()),
+        shell_quote(&payload_path.to_string_lossy()),
+    );
+    format!(
+        "with timeout of 30 seconds\ntell application \"Terminal\"\ndo script {}\nactivate\nend tell\nend timeout",
+        applescript_string(&shell_command),
+    )
+}
+
+/// Prefix the UI recognizes to offer a shortcut to the Automation settings.
+#[cfg(target_os = "macos")]
+const MACOS_AUTOMATION_REQUIRED: &str = "MACOS_AUTOMATION_REQUIRED:";
+
+#[cfg(target_os = "macos")]
+fn terminal_app_error(stderr: &str) -> String {
+    // -1743: Automation denied. -1712: the consent prompt outlived the script timeout.
+    if stderr.contains("(-1743)") {
+        return format!("{MACOS_AUTOMATION_REQUIRED}Permita que o Lume controle o Terminal em Ajustes do Sistema → Privacidade e Segurança → Automação.");
+    }
+    if stderr.contains("(-1712)") {
+        return "O macOS pediu permissão para o Lume controlar o Terminal. Responda ao pedido e tente de novo.".into();
+    }
+    format!("Não foi possível abrir o Terminal.app: {}", stderr.trim())
 }
 
 #[cfg(target_os = "macos")]
@@ -1239,6 +1273,91 @@ mod tests {
                 "--ask-for-approval",
                 "on-request"
             ]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn terminal_payloads_get_unique_names_and_read_back_intact() {
+        let app_data_dir =
+            std::env::temp_dir().join(format!("lume-launch-test-{}", std::process::id()));
+        let payload = TerminalPayload {
+            command: "codex".into(),
+            arguments: vec![
+                "resume".into(),
+                "thread-1".into(),
+                "Continue a tarefa".into(),
+            ],
+            working_directory: "/Users/me/proj it's \"a\"".into(),
+            retry_quick_resume: true,
+        };
+
+        let first = persist_terminal_payload(&payload, &app_data_dir).unwrap();
+        let second = persist_terminal_payload(&payload, &app_data_dir).unwrap();
+
+        let sequence_of = |path: &Path| -> u64 {
+            let stem = path.file_stem().unwrap().to_str().unwrap();
+            stem.split_once('-').unwrap().1.parse().unwrap()
+        };
+        assert!(sequence_of(&second) > sequence_of(&first));
+        for path in [&first, &second] {
+            assert_eq!(path.parent().unwrap(), app_data_dir.join("launches"));
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let (millis, sequence) = name.strip_suffix(".json").unwrap().split_once('-').unwrap();
+            assert!(
+                millis.parse::<u64>().is_ok() && sequence.parse::<u64>().is_ok(),
+                "{name}"
+            );
+            let stored: TerminalPayload =
+                serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            assert_eq!(stored.command, "codex");
+            assert_eq!(
+                stored.arguments,
+                ["resume", "thread-1", "Continue a tarefa"]
+            );
+            assert_eq!(stored.working_directory, "/Users/me/proj it's \"a\"");
+            assert!(stored.retry_quick_resume);
+        }
+        let _ = fs::remove_dir_all(app_data_dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn terminal_app_failures_explain_automation_permission() {
+        assert_eq!(
+            terminal_app_error(
+                "38:120: execution error: Not authorized to send Apple events to Terminal. (-1743)\n"
+            ),
+            "MACOS_AUTOMATION_REQUIRED:Permita que o Lume controle o Terminal em Ajustes do Sistema → Privacidade e Segurança → Automação."
+        );
+        assert_eq!(
+            terminal_app_error(
+                "38:120: execution error: Terminal got an error: AppleEvent timed out. (-1712)\n"
+            ),
+            "O macOS pediu permissão para o Lume controlar o Terminal. Responda ao pedido e tente de novo."
+        );
+        assert_eq!(
+            terminal_app_error("38:120: execution error: Terminal got an error: Connection is invalid. (-609)\n"),
+            "Não foi possível abrir o Terminal.app: 38:120: execution error: Terminal got an error: Connection is invalid. (-609)"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn terminal_app_script_keeps_hostile_paths_literal() {
+        let script = terminal_app_script(
+            Path::new("/Applications/Lume app's.app/Contents/MacOS/lume"),
+            Path::new("/Users/me/Library/Application Support/com.tulerws.lume/launches/1-0.json"),
+            "/Users/me/proj it's \"a\" $HOME ação \\ fim\nlinha",
+        );
+        assert_eq!(
+            script,
+            r#"with timeout of 30 seconds
+tell application "Terminal"
+do script "cd -- '/Users/me/proj it'\\''s \"a\" $HOME ação \\ fim\nlinha' && exec '/Applications/Lume app'\\''s.app/Contents/MacOS/lume' terminal-run '/Users/me/Library/Application Support/com.tulerws.lume/launches/1-0.json'"
+activate
+end tell
+end timeout"#
         );
     }
 }

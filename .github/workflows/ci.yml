@@ -40,3 +40,30 @@ jobs:
       - run: npm run build
       - name: Run Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+  macos-install-script:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shellcheck
+        run: |
+          command -v shellcheck >/dev/null || brew install shellcheck
+          shellcheck scripts/install-macos.sh
+      - name: Instalar a Release atual via script
+        shell: bash
+        run: |
+          apps="$RUNNER_TEMP/apps"
+          export LUME_INSTALL_DIR="$apps"
+          sh < scripts/install-macos.sh
+          # Segunda execução cobre o caminho de atualização sobre um Lume.app existente.
+          sh < scripts/install-macos.sh
+          test -x "$apps/Lume.app/Contents/MacOS/lume"
+          if xattr -p com.apple.quarantine "$apps/Lume.app" >/dev/null 2>&1; then
+            echo "::error::Lume.app instalado pelo script não deveria ter quarentena."
+            exit 1
+          fi
+          leftovers="$(find "$apps" -mindepth 1 -maxdepth 1 ! -name Lume.app)"
+          if [[ -n "$leftovers" ]]; then
+            echo "::error::Arquivos temporários ficaram em $apps: $leftovers"
+            exit 1
+          fi

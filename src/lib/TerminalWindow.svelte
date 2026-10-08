@@ -1561,6 +1561,12 @@
                 .catch(() => undefined);
             }
           }
+          if (session.agent === "antigravity" && !rateLimitRefreshRequested) {
+            rateLimitRefreshRequested = true;
+            void refreshAgentRateLimits(session.agent)
+              .then(() => refresh())
+              .catch(() => undefined);
+          }
           return;
         }
       } catch (error) {
@@ -2435,7 +2441,7 @@
         sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
         modelSettings = await getSessionModelSettings(session.id);
         selectedModel = modelSettings.model;
-        selectedEffort = "";
+        selectedEffort = modelSettings.reasoningEffort ?? "";
       } else if (session.agent === "codex" || session.agent === "opencode") {
         modelSettings = await getSessionModelSettings(session.id);
         if (session.agent === "codex") sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
@@ -2484,7 +2490,7 @@
         modelSettings = await setSessionModelSettings(
           session.id,
           selectedModel,
-          session.agent === "antigravity" ? "" : selectedEffort,
+          selectedEffort,
         );
       } else if (session.agent === "claude_code") {
         const settings = await setClaudeSessionModelSettings(

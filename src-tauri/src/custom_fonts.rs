@@ -72,9 +72,9 @@ fn slug(name: &str) -> String {
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 48
-        && id
-            .chars()
-            .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
+        && id.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
 }
 
 #[tauri::command]

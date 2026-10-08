@@ -93,10 +93,13 @@ export function collectReviewFiles(
   since = 0,
 ): ReviewFileChange[] {
   const files: ReviewFileChange[] = [];
+  const genericFileTitle = /^(?:(?:\d+\s+)?files?\s+(?:changed|modified|updated|created|deleted)|(?:changed|modified|updated|created|deleted)\s+files?|(?:\d+\s+)?arquivos?\s+(?:alterados?|modificados?|atualizados?|criados?|removidos?)|arquivo\s+(?:alterado|modificado|atualizado|criado|removido))$/i;
   for (const activity of activities) {
     if (activity.createdAt < since) continue;
     const reported = [...activity.files];
-    if (activity.kind === "file" && !reported.includes(activity.title)) reported.push(activity.title);
+    if (activity.kind === "file" && !reported.includes(activity.title) && !genericFileTitle.test(activity.title.trim())) {
+      reported.push(activity.title);
+    }
     mergeFileChanges(files, summarizeFileChanges(activity.detail ?? "", reported, workingDirectory), workingDirectory);
     const detail = activity.detail ?? "";
     for (const diff of [...recordedDiffs(detail), ...structuredDiffChunks(detail)]) {

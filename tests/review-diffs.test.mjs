@@ -48,7 +48,7 @@ assert.ok(lines.some((line) => line.kind === "added" && line.newLine === 1));
 assert.ok(lines.some((line) => line.kind === "context" && line.oldLine === 2 && line.newLine === 2));
 
 const activity = (id, kind, createdAt, detail = "", files = []) => ({
-  id, kind, createdAt, detail, files, title: id, status: "completed",
+  id, kind, createdAt, detail, files, title: kind === "file" ? "Files changed" : id, status: "completed",
 });
 const result = (id, createdAt, response, tests = []) => ({
   id, createdAt, response, tests, files: [],

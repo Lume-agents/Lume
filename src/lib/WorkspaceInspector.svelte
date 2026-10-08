@@ -14,6 +14,7 @@
   import { loadWorkspacePromptIndexPage, refreshAgentRateLimits, type WorkspacePromptIndexEntry } from "$lib/lume";
   import { buildLatestReviewTurn } from "$lib/reviewDiffs";
   import { subagentsForSession } from "$lib/workspaceAgents";
+  import { expectedUsageLimitCount, usageGaugeGroups } from "$lib/usageGauges";
 
   let {
     session,
@@ -70,6 +71,10 @@
   const totalRemoved = $derived(changes.reduce((total, file) => total + file.removed, 0));
   const tokenSamples = $derived((session?.promptTokenUsage ?? []).slice(-14));
   const tokenGraph = $derived(tokenGraphGeometry(tokenSamples));
+  const usageGroups = $derived(usageGaugeGroups(session?.rateLimits ?? [], language));
+  const usagePlaceholders = $derived(session ? expectedUsageLimitCount(session.agent) : 0);
+  // Beyond two gauges (Antigravity) the chart no longer fits beside them, so it moves below.
+  const usageStacked = $derived(Math.max(session?.rateLimits?.length ?? 0, usagePlaceholders) > 2);
   const automaticAccess = $derived(session?.permissionProfile.mode !== "full_access" && ["auto_review", "approve_for_me"].includes(session?.permissionProfile.approvalsReviewer?.replaceAll("-", "_") ?? ""));
   const fullAccess = $derived(session?.permissionProfile.mode === "full_access");
 
@@ -101,19 +106,6 @@
 
   function tr(english: string, portuguese: string) {
     return language === "pt-BR" ? portuguese : english;
-  }
-
-  function remainingRate(used: number) {
-    return Math.max(0, Math.min(100, Math.round(100 - used)));
-  }
-
-  function rateWindowLabel(windowMinutes?: number, fallback = "") {
-    if (windowMinutes) {
-      if (windowMinutes >= 1_440) return `${Math.round(windowMinutes / 1_440)}d`;
-      if (windowMinutes >= 60) return `${Math.round(windowMinutes / 60)}h`;
-      return `${windowMinutes}m`;
-    }
-    return fallback.match(/\b\d+\s*[dhm]\b/i)?.[0]?.replaceAll(" ", "") ?? fallback;
   }
 
   function promptTime(value: number) {
@@ -218,20 +210,27 @@
     {:else}
     <div class="inspector-scroll" use:transientScrollbar>
       {#if hasUsage(session.agent)}
-        <section class="usage-section" aria-label={tr(`${session.agentLabel} usage`, `Uso do ${session.agentLabel}`)}>
-          <div class="usage-gauges" class:loading={usageRefreshing && !session.rateLimits?.length}>
-            {#each session.rateLimits ?? [] as limit (limit.id)}
-              {@const remaining = remainingRate(Number(limit.usedPercent))}
-              <div class="usage-gauge" style:--usage-remaining={remaining}>
-                <svg viewBox="0 0 60 39" aria-hidden="true">
-                  <path class="gauge-track" pathLength="100" d="M7 33a23 23 0 0 1 46 0" />
-                  <path class="gauge-progress" pathLength="100" d="M7 33a23 23 0 0 1 46 0" style:stroke-dasharray={`${remaining} 100`} />
-                </svg>
-                <strong>{remaining}</strong>
-                <em>{rateWindowLabel(limit.windowMinutes, limit.label)}</em>
+        <section class="usage-section" class:stacked={usageStacked} aria-label={tr(`${session.agentLabel} usage`, `Uso do ${session.agentLabel}`)}>
+          <div class="usage-gauges" class:loading={usageRefreshing && !usageGroups.length}>
+            {#each usageGroups as group (group.label)}
+              <div class="usage-group" role={group.label ? "group" : undefined} aria-label={group.label || undefined}>
+                {#if group.label}<span class="usage-group-label">{group.label}</span>{/if}
+                <div class="usage-group-gauges">
+                  {#each group.gauges as gauge (gauge.id)}
+                    <div class="usage-gauge" style:--usage-remaining={gauge.remaining} role="img" aria-label={gauge.title} title={gauge.title}>
+                      <svg viewBox="0 0 60 39" aria-hidden="true">
+                        <path class="gauge-track" pathLength="100" d="M7 33a23 23 0 0 1 46 0" />
+                        <path class="gauge-progress" pathLength="100" d="M7 33a23 23 0 0 1 46 0" style:stroke-dasharray={`${gauge.remaining} 100`} />
+                      </svg>
+                      <strong aria-hidden="true">{gauge.remaining}</strong>
+                      <em aria-hidden="true">{gauge.window}</em>
+                    </div>
+                  {/each}
+                </div>
               </div>
+            {:else}
+              {#each { length: usagePlaceholders }, index (index)}<i></i>{/each}
             {/each}
-            {#if !session.rateLimits?.length}<i></i><i></i>{/if}
           </div>
           <div class="token-chart">
             <span>{tr("Tokens / prompt", "Tokens / prompt")}</span>
@@ -342,9 +341,9 @@
   .inspector-scroll::-webkit-scrollbar { width: 5px; }
   .inspector-scroll::-webkit-scrollbar-thumb { border-radius: 5px; background: transparent; }
   .inspector-scroll:global(.is-scrolling)::-webkit-scrollbar-thumb { background: var(--workspace-scroll-thumb); }
-  .usage-section { min-height: 72px; margin: 13px 0 3px; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 12px; }
+  .usage-section { min-height: 72px; margin: 13px 0 3px; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 12px; }.usage-section.stacked { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .token-graph :is(path, polyline, circle) { vector-effect: non-scaling-stroke; }
-  .usage-gauges { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; }.usage-gauge { position: relative; width: 62px; height: 51px; flex: 0 1 62px; --usage-color: color-mix(in srgb, #43a873 calc(var(--usage-remaining) * 1%), #ca605c); }.usage-gauge svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; fill: none; stroke-linecap: round; }.gauge-track { stroke: var(--workspace-line); stroke-width: 5.5; }.gauge-progress { stroke: var(--usage-color); stroke-width: 5.5; transition: stroke-dasharray 360ms cubic-bezier(.16, 1, .3, 1); }.usage-gauge strong { position: absolute; right: 0; bottom: 3px; left: 0; color: var(--workspace-strong); font-size: 15px; font-variant-numeric: tabular-nums; line-height: 1; text-align: center; }.usage-gauge em { position: absolute; top: 1px; right: 2px; color: var(--workspace-muted); font-size: 7px; font-style: normal; font-weight: 780; }.usage-gauges > i { width: 56px; height: 30px; border: 5px solid var(--workspace-line); border-bottom: 0; border-radius: 32px 32px 0 0; opacity: .5; }.usage-gauges.loading > i { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
+  .usage-gauges { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; }.usage-section.stacked .usage-gauges { justify-content: space-evenly; gap: 10px; }.usage-group { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 2px; }.usage-group-label { max-width: 100%; overflow: hidden; color: var(--workspace-muted); font-size: 8px; font-weight: 720; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }.usage-group-gauges { width: 100%; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; }.usage-gauge { position: relative; min-width: 0; width: 62px; height: 51px; flex: 0 1 62px; --usage-color: color-mix(in srgb, #43a873 calc(var(--usage-remaining) * 1%), #ca605c); }.usage-gauge svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; fill: none; stroke-linecap: round; }.gauge-track { stroke: var(--workspace-line); stroke-width: 5.5; }.gauge-progress { stroke: var(--usage-color); stroke-width: 5.5; transition: stroke-dasharray 360ms cubic-bezier(.16, 1, .3, 1); }.usage-gauge strong { position: absolute; right: 0; bottom: 3px; left: 0; color: var(--workspace-strong); font-size: 15px; font-variant-numeric: tabular-nums; line-height: 1; text-align: center; }.usage-gauge em { position: absolute; top: 1px; right: 2px; color: var(--workspace-muted); font-size: 7px; font-style: normal; font-weight: 780; }.usage-gauges > i { width: 56px; min-width: 0; flex: 0 1 56px; height: 30px; border: 5px solid var(--workspace-line); border-bottom: 0; border-radius: 32px 32px 0 0; opacity: .5; }.usage-gauges.loading > i { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
   .token-chart { min-width: 0; display: grid; grid-template-rows: auto 48px auto; gap: 3px; }.token-chart > span, .token-chart > small { color: var(--workspace-muted); font-size: 10px; font-weight: 720; line-height: 1.2; }.token-chart > small { color: var(--workspace-faint); text-align: right; }.token-graph { width: 100%; min-width: 0; height: 48px; overflow: visible; }.token-graph .graph-grid { fill: none; stroke: color-mix(in srgb, var(--workspace-line) 54%, transparent); stroke-width: .7; }.token-graph polygon { fill: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }.token-graph polyline { fill: none; stroke: var(--workspace-accent); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }.token-graph.empty polyline { stroke: var(--workspace-line); stroke-dasharray: 3 4; }.token-graph circle { fill: var(--workspace-raised); stroke: var(--workspace-accent); stroke-width: 1.3; }
   .inspector-section { border-bottom: 1px solid var(--workspace-line); }.inspector-section > summary { min-height: 40px; display: flex; align-items: center; gap: 7px; color: var(--workspace-strong); font-size: 11px; font-weight: 600; list-style: none; cursor: pointer; }.inspector-section > summary::-webkit-details-marker { display: none; }.inspector-section > summary::after { width: 6px; height: 6px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .5; transform: rotate(45deg); transition: transform 160ms ease; }.inspector-section[open] > summary::after { transform: rotate(225deg); }.inspector-section > summary em { min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 9px; font-style: normal; }.inspector-section[open] { padding-bottom: 13px; }
   .prompt-events { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }

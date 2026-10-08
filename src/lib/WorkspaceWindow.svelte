@@ -2746,6 +2746,7 @@
       </div>
     </div>
 
+    <div class="session-tools">
     <div class="session-filters" aria-label={tr("Filter agents", "Filtrar agentes")}>
       <button class:active={filter === "all"} type="button" onclick={() => filter = "all"}>{tr("All", "Todos")}</button>
       <button class:active={filter === "active"} type="button" onclick={() => filter = "active"}>{tr("Active", "Ativos")}</button>
@@ -2754,6 +2755,7 @@
     {#if !sidebarCollapsed}
       <button class="new-group" type="button" onclick={createSidebarGroup}><LumeIcon name="plus" size={12} />{tr("New group", "Novo grupo")}</button>
     {/if}
+    </div>
 
     <nav class:releasing={sidebarReleaseIntent} class="session-list" aria-label={tr("Agent sessions", "Sessões de agentes")} ondragover={trackSidebarRelease} ondrop={dropSidebarRelease}>
       {#if loading}

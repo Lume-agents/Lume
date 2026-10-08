@@ -665,15 +665,15 @@
       const list = members.get(groupAssignments[sessionGroupKey(session)]);
       if (list) list.push(session); else loose.push(session);
     }
+    if (loose.length || !filtering) {
+      rows.push({ key: "group:none", kind: "header", group: null, count: loose.length });
+      loose.forEach(push);
+    }
     for (const group of sidebarGroups) {
       const list = members.get(group.id) ?? [];
       if (filtering && !list.length) continue;
       rows.push({ key: `group:${group.id}`, kind: "header", group, count: list.length });
       if (!group.collapsed || filtering) list.forEach(push);
-    }
-    if (loose.length || !filtering) {
-      rows.push({ key: "group:none", kind: "header", group: null, count: loose.length });
-      loose.forEach(push);
     }
     return { rows, visible };
   });
@@ -2764,7 +2764,7 @@
         {#each sidebarLayout.rows as row (row.key)}
           {#if row.kind === "header"}
             <div class:drop-target={groupDropTarget === (row.group?.id ?? "none")} class:collapsed={row.group?.collapsed} class="group-heading" role="group" aria-label={row.group?.name ?? tr("No group", "Sem grupo")}
-              ondragover={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragleave={() => (groupDropTarget = null)} ondrop={(event) => dropOnGroup(event, row.group?.id ?? null)}>
+              ondragenter={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragover={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragleave={() => (groupDropTarget = null)} ondrop={(event) => dropOnGroup(event, row.group?.id ?? null)}>
               {#if row.group}
                 {#if renamingGroupId === row.group.id}
                   <form class="group-rename" onsubmit={(event) => { event.preventDefault(); commitGroupRename(); }}>

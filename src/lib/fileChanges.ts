@@ -21,12 +21,17 @@ function cleanPath(value: string, workingDirectory?: string): string | null {
   path = path.split(/\s@@\s/, 1)[0].split(/\s\*\*\*\s/, 1)[0].trim();
   if (/[\r\n]/.test(path)) return null;
   if (path === "/dev/null") return null;
+  path = path.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
   if (path.startsWith("a/") || path.startsWith("b/")) path = path.slice(2);
-  const root = workingDirectory?.replace(/[\\/]+$/, "");
+  const root = workingDirectory?.replace(/\\/g, "/").replace(/\/+$/, "");
   if (root && (path === root || path.startsWith(`${root}/`) || path.startsWith(`${root}\\`))) {
     path = path.slice(root.length).replace(/^[\\/]+/, "");
   }
   return path || null;
+}
+
+export function normalizeFileChangePath(path: string, workingDirectory?: string): string {
+  return cleanPath(path, workingDirectory) ?? path.trim();
 }
 
 function record(
@@ -51,6 +56,7 @@ export function summarizeFileChanges(
   workingDirectory?: string,
 ): FileChangeSummary[] {
   const summaries = new Map<string, FileChangeSummary>();
+  const explicitlyReportedPaths = new Set<string>();
   let currentPath: string | null = null;
   let added = 0;
   let removed = 0;
@@ -105,27 +111,37 @@ export function summarizeFileChanges(
     ) {
       for (const summary of summarizeFileChanges(reported, [], workingDirectory)) {
         record(summaries, summary.path, summary.added, summary.removed);
+        explicitlyReportedPaths.add(summary.path);
       }
       continue;
     }
-    record(summaries, cleanPath(reported, workingDirectory));
+    const path = cleanPath(reported, workingDirectory);
+    record(summaries, path);
+    if (path) explicitlyReportedPaths.add(path);
   }
+  // Keep path-only entries only when the provider explicitly reported the
+  // file. Free-form Codex text can contain patch-like `+++` lines that are
+  // not real file changes.
   return [...summaries.values()].filter(
-    (change) => change.added > 0 || change.removed > 0,
+    (change) => change.added > 0 || change.removed > 0 || explicitlyReportedPaths.has(change.path),
   );
 }
 
 export function mergeFileChanges(
   target: FileChangeSummary[],
   incoming: FileChangeSummary[],
+  workingDirectory?: string,
 ): void {
-  for (const change of incoming) {
-    const current = target.find((item) => item.path === change.path);
+  const merged = new Map<string, FileChangeSummary>();
+  for (const change of [...target, ...incoming]) {
+    const path = normalizeFileChangePath(change.path, workingDirectory);
+    const current = merged.get(path);
     if (current) {
       current.added = Math.max(current.added, change.added);
       current.removed = Math.max(current.removed, change.removed);
     } else {
-      target.push({ ...change });
+      merged.set(path, { ...change, path });
     }
   }
+  target.splice(0, target.length, ...merged.values());
 }

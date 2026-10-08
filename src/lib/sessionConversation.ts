@@ -1,6 +1,6 @@
 import type { AgentSession, SessionActivity } from "$lib/domain";
 import type { FileChangeSummary } from "$lib/fileChanges";
-import { mergeFileChanges, summarizeFileChanges } from "$lib/fileChanges";
+import { mergeFileChanges, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
 import { cleanPromptTransport, promptTextKey } from "$lib/chatAttachments";
 import { activityCategory, isHiddenAgentActivity, isPresentableTraceActivity } from "$lib/activityPresentation";
 import { latestResponseText, sameResponseText } from "$lib/responseDedup.js";
@@ -25,9 +25,9 @@ function textKey(value?: string): string {
     .trim();
 }
 
-function fileChangesKey(files: FileChangeSummary[]): string {
+function fileChangesKey(files: FileChangeSummary[], workingDirectory?: string): string {
   return files
-    .map((file) => `${file.path}\u0000${file.added}\u0000${file.removed}`)
+    .map((file) => `${normalizeFileChangePath(file.path, workingDirectory)}\u0000${file.added}\u0000${file.removed}`)
     .sort()
     .join("\u0001");
 }
@@ -166,19 +166,19 @@ export function buildConversationEntries(
           detail: matchingMessage.activity.detail,
         };
       }
-      mergeFileChanges(matchingMessage.files, files);
+      mergeFileChanges(matchingMessage.files, files, session?.workingDirectory);
       continue;
     }
 
     if (activity.kind === "file" && files.length) {
-      const signature = fileChangesKey(files);
+      const signature = fileChangesKey(files, session?.workingDirectory);
       const duplicateFileEntry = entries.findLast((entry) =>
         entry.activity.kind === "file"
         && promptSegment(entry.activity.createdAt) === promptSegment(activity.createdAt)
-        && fileChangesKey(entry.files) === signature
+        && fileChangesKey(entry.files, session?.workingDirectory) === signature
       );
       if (duplicateFileEntry) {
-        mergeFileChanges(duplicateFileEntry.files, files);
+        mergeFileChanges(duplicateFileEntry.files, files, session?.workingDirectory);
         continue;
       }
     }
@@ -214,7 +214,7 @@ export function buildConversationEntries(
       if (result.createdAt >= matchingMessage.activity.createdAt) {
         matchingMessage.activity.status = "completed";
       }
-      mergeFileChanges(matchingMessage.files, resultFiles);
+      mergeFileChanges(matchingMessage.files, resultFiles, session?.workingDirectory);
       matchingMessage.durationMs = durationFromPrompt(result.createdAt);
       matchingMessage.isFinalResponse = true;
       matchingMessage.activity.files = Array.from(new Set([
@@ -304,7 +304,7 @@ export function buildConversationEntries(
 
 export function buildConversationFeed(
   entries: ConversationEntry[],
-  options: { includeAnalysisInTrace?: boolean } = {},
+  options: { includeAnalysisInTrace?: boolean; workingDirectory?: string } = {},
 ): ConversationFeedItem[] {
   const feed: ConversationFeedItem[] = [];
   let trace: Extract<ConversationFeedItem, { kind: "trace" }> | null = null;
@@ -316,7 +316,7 @@ export function buildConversationFeed(
         ? entry.files
         : entry.activity.files.map((path) => ({ path, added: 0, removed: 0 }));
       if (fileChanges.length || finalResponse.files.length) {
-        mergeFileChanges(finalResponse.files, fileChanges);
+        mergeFileChanges(finalResponse.files, fileChanges, options.workingDirectory);
         finalResponse.activity.files = [...new Set([
           ...finalResponse.activity.files,
           ...entry.activity.files,
@@ -335,7 +335,7 @@ export function buildConversationFeed(
         feed.push(trace);
       }
       trace.entries.push(entry);
-      mergeFileChanges(trace.files, entry.files);
+      mergeFileChanges(trace.files, entry.files, options.workingDirectory);
       continue;
     }
     trace = null;
@@ -348,19 +348,22 @@ export function buildConversationFeed(
   return feed;
 }
 
-export function fileChangesForFinalResponses(feed: ConversationFeedItem[]): Map<string, FileChangeSummary[]> {
+export function fileChangesForFinalResponses(
+  feed: ConversationFeedItem[],
+  workingDirectory?: string,
+): Map<string, FileChangeSummary[]> {
   const byResponse = new Map<string, FileChangeSummary[]>();
   let turnFiles: FileChangeSummary[] = [];
   for (const item of feed) {
     if (item.kind === "trace") {
-      mergeFileChanges(turnFiles, item.files);
+      mergeFileChanges(turnFiles, item.files, workingDirectory);
       continue;
     }
     if (item.entry.activity.kind === "prompt") {
       turnFiles = [];
       continue;
     }
-    mergeFileChanges(turnFiles, item.entry.files);
+    mergeFileChanges(turnFiles, item.entry.files, workingDirectory);
     if (item.entry.isFinalResponse) {
       byResponse.set(item.entry.id, turnFiles);
       turnFiles = [];

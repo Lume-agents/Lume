@@ -35,6 +35,13 @@ assert.deepEqual(subagentFiles.map(({ path, added, removed }) => ({ path, added,
 ]);
 assert.equal(subagentFiles[0].diff, subagentPatch);
 
+
+// Claude's edit tools are recorded as a diff on an absolute path; it is shown relative to the project.
+const claudeDiff = "diff --git a//work/project/src/a.ts b//work/project/src/a.ts\n--- a//work/project/src/a.ts\n+++ b//work/project/src/a.ts\n@@ -4,2 +4,2 @@\n keep\n-old\n+new\n";
+const claudeFiles = collectReviewFiles([{ id: "claude-edit", kind: "file", title: "/work/project/src/a.ts", detail: claudeDiff, status: "completed", createdAt: 30, files: ["/work/project/src/a.ts"] }], "/work/project");
+assert.deepEqual(claudeFiles.map(({ path, added, removed }) => ({ path, added, removed })), [{ path: "src/a.ts", added: 1, removed: 1 }]);
+assert.ok(parseReviewDiff(claudeFiles[0].diff).some((line) => line.kind === "added" && line.newLine === 5), "line numbers follow the hunk header");
+
 const lines = parseReviewDiff(detail);
 assert.ok(lines.some((line) => line.kind === "removed" && line.oldLine === 1));
 assert.ok(lines.some((line) => line.kind === "added" && line.newLine === 1));

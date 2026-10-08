@@ -97,7 +97,7 @@ export function collectReviewFiles(
     if (activity.createdAt < since) continue;
     const reported = [...activity.files];
     if (activity.kind === "file" && !reported.includes(activity.title)) reported.push(activity.title);
-    mergeFileChanges(files, summarizeFileChanges(activity.detail ?? "", reported, workingDirectory));
+    mergeFileChanges(files, summarizeFileChanges(activity.detail ?? "", reported, workingDirectory), workingDirectory);
     const detail = activity.detail ?? "";
     for (const diff of [...recordedDiffs(detail), ...structuredDiffChunks(detail)]) {
       const [summary] = summarizeFileChanges(diff, [], workingDirectory);

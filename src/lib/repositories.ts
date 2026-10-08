@@ -115,6 +115,7 @@ export function observeRepository(session: Pick<AgentSession, "id" | "workingDir
 
 export const getGitHubAccount = (refresh = false) => invoke<GitHubAccountSnapshot>("get_github_account", { refresh });
 export const getSessionGitHub = (sessionId: string, refresh = false) => invoke<GitHubRepoSnapshot>("get_session_github", { sessionId, refresh });
+export const getRepositorySnapshot = (sessionId: string, refresh = true) => invoke<RepositorySnapshot>("get_session_repository", { sessionId, refresh });
 export const getRepositoryDiff = (sessionId: string, path: string) => invoke<RepositoryDiff>("get_session_repository_diff", { sessionId, path });
 
 export async function openGitHub(url: string) {

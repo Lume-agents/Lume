@@ -562,8 +562,23 @@ fn hook_activity(
         .or_else(|| raw.get("result"))
         .and_then(|value| serde_json::to_string_pretty(value).ok());
     let input_detail = input.and_then(|value| serde_json::to_string_pretty(value).ok());
+    // Claude's edit tools report a structured patch or the old and new strings, never a diff:
+    // build one so the review center can show the changed lines.
+    let file_diff = (kind == "file")
+        .then(|| {
+            file_change_diff(
+                input,
+                raw.get("tool_response")
+                    .or_else(|| raw.get("tool_result"))
+                    .or_else(|| raw.get("toolResponse")),
+            )
+        })
+        .flatten();
+    let detail_limit = if file_diff.is_some() { 48 * 1024 } else { 16 * 1024 };
     let detail = if is_todo_tool {
         input_detail
+    } else if file_diff.is_some() {
+        file_diff
     } else {
         result.or(input_detail)
     };
@@ -587,13 +602,112 @@ fn hook_activity(
         id: format!("{provider}:{session_id}:tool:{tool_id}"),
         kind: kind.into(),
         title: truncate(if is_todo_tool { &tool_name } else { &resource }, 240),
-        detail: detail.map(|detail| truncate(&detail, 16 * 1024)),
+        detail: detail.map(|detail| truncate(&detail, detail_limit)),
         status: status.into(),
         created_at: now_millis(),
         files,
         attachments: Vec::new(),
         append_detail: false,
     })
+}
+
+/// A unified diff for a file edit made with an edit tool, when its payload allows one.
+fn file_change_diff(input: Option<&Value>, response: Option<&Value>) -> Option<String> {
+    let path = response
+        .and_then(|value| string(value, "filePath"))
+        .or_else(|| input.and_then(|value| string(value, "file_path")))?;
+    let header = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n");
+
+    let patch = response
+        .and_then(|value| value.get("structuredPatch"))
+        .and_then(Value::as_array)
+        .filter(|hunks| !hunks.is_empty());
+    if let Some(hunks) = patch {
+        let mut diff = header;
+        for hunk in hunks {
+            let number = |key: &str| hunk.get(key).and_then(Value::as_u64).unwrap_or(0);
+            diff.push_str(&format!(
+                "@@ -{},{} +{},{} @@\n",
+                number("oldStart"),
+                number("oldLines"),
+                number("newStart"),
+                number("newLines")
+            ));
+            for line in hunk
+                .get("lines")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                diff.push_str(line);
+                diff.push('\n');
+            }
+        }
+        return Some(diff);
+    }
+
+    let input = input?;
+    let edits: Vec<(String, String)> = match input.get("edits").and_then(Value::as_array) {
+        Some(list) => list
+            .iter()
+            .filter_map(|edit| Some((string(edit, "old_string")?, string(edit, "new_string")?)))
+            .collect(),
+        None => string(input, "old_string")
+            .zip(string(input, "new_string"))
+            .into_iter()
+            .collect(),
+    };
+    if !edits.is_empty() {
+        let original = response
+            .and_then(|value| string(value, "originalFile"))
+            .or_else(|| {
+                std::fs::metadata(&path)
+                    .ok()
+                    .filter(|meta| meta.len() < 2 * 1024 * 1024)
+                    .and_then(|_| std::fs::read_to_string(&path).ok())
+            });
+        let mut diff = header;
+        for (old, new) in edits {
+            let start = original
+                .as_deref()
+                .and_then(|content| content.find(&old).map(|at| content[..at].matches('\n').count() + 1))
+                .unwrap_or(1);
+            let old_lines: Vec<&str> = old.lines().collect();
+            let new_lines: Vec<&str> = new.lines().collect();
+            diff.push_str(&format!(
+                "@@ -{start},{} +{start},{} @@\n",
+                old_lines.len(),
+                new_lines.len()
+            ));
+            for line in old_lines {
+                diff.push_str(&format!("-{line}\n"));
+            }
+            for line in new_lines {
+                diff.push_str(&format!("+{line}\n"));
+            }
+        }
+        return Some(diff);
+    }
+
+    // A new file: Write reports its whole content, and nothing existed before.
+    let content = string(input, "content")?;
+    let created = match response.and_then(|value| string(value, "type")) {
+        Some(kind) => kind == "create",
+        None => !std::path::Path::new(&path).exists(),
+    };
+    if !created {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut diff = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    for line in lines {
+        diff.push_str(&format!("+{line}\n"));
+    }
+    Some(diff)
 }
 
 fn is_test_command(command: &str) -> bool {
@@ -2261,6 +2375,61 @@ mod tests {
             }
             assert!(map_event("claude", &raw).is_none());
         }
+    }
+
+    #[test]
+    fn claude_edit_hook_activity_carries_the_diff() {
+        let activity = hook_activity(
+            "claude",
+            "PostToolUse",
+            &json!({
+                "tool_name": "Edit",
+                "tool_use_id": "toolu_1",
+                "tool_input": { "file_path": "/work/app/src/a.rs", "old_string": "x", "new_string": "y" },
+                "tool_response": {
+                    "filePath": "/work/app/src/a.rs", "oldString": "x", "newString": "y",
+                    "originalFile": "a\nb\nx\n", "userModified": false, "replaceAll": false,
+                    "structuredPatch": [{ "oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 3, "lines": [" a", " b", "-x", "+y"] }]
+                }
+            }),
+            "session-1",
+            None,
+        )
+        .expect("activity");
+        assert_eq!(activity.kind, "file");
+        let detail = activity.detail.expect("detail");
+        assert!(detail.starts_with("diff --git a//work/app/src/a.rs"), "{detail}");
+        assert!(detail.contains("-x\n+y"));
+        assert_eq!(activity.files, vec!["/work/app/src/a.rs".to_string()]);
+    }
+
+    #[test]
+    fn claude_edit_tools_become_reviewable_diffs() {
+        let patched = file_change_diff(
+            Some(&json!({ "file_path": "/work/a.ts", "old_string": "x", "new_string": "y" })),
+            Some(&json!({ "filePath": "/work/a.ts", "structuredPatch": [
+                { "oldStart": 4, "oldLines": 2, "newStart": 4, "newLines": 2, "lines": [" keep", "-x", "+y"] }
+            ] })),
+        )
+        .expect("structured patch");
+        assert!(patched.starts_with("diff --git a//work/a.ts b//work/a.ts\n"));
+        assert!(patched.contains("@@ -4,2 +4,2 @@\n keep\n-x\n+y\n"));
+
+        let edited = file_change_diff(
+            Some(&json!({ "file_path": "/nonexistent/b.ts", "old_string": "a\nb", "new_string": "c" })),
+            Some(&json!({ "originalFile": "one\na\nb\ntwo" })),
+        )
+        .expect("old and new strings");
+        assert!(edited.contains("@@ -2,2 +2,1 @@\n-a\n-b\n+c\n"));
+
+        let created = file_change_diff(
+            Some(&json!({ "file_path": "/nonexistent/c.ts", "content": "l1\nl2" })),
+            Some(&json!({ "type": "create" })),
+        )
+        .expect("a new file");
+        assert!(created.contains("--- /dev/null") && created.contains("@@ -0,0 +1,2 @@\n+l1\n+l2\n"));
+
+        assert!(file_change_diff(Some(&json!({ "command": "ls" })), None).is_none());
     }
 
     #[test]

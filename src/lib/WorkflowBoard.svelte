@@ -975,15 +975,15 @@
   <header class="board-toolbar">
     <span class="board-title"><WorkspaceHeaderIcon name="workflow" size={19} /><strong>Workflow</strong></span>
     {#if groups.length}<LumeSelect value={activeId} options={groups.map((item, index) => ({ value: item.id, label: groupName(item, index) }))} ariaLabel={tr("Select workflow", "Selecionar workflow")} minWidth={132} variant="heading" onValueChange={activate} />{/if}
-    <span class="toolbar-divider"></span>
     <button type="button" title={tr("New workflow", "Novo workflow")} aria-label={tr("New workflow", "Novo workflow")} onclick={createGroup}><LumeIcon name="plus" size={16} /></button>
     <button class:confirm={confirmingDelete} class="delete-workflow" type="button" disabled={!group || locked || deleting} title={confirmingDelete ? tr("Click again to delete this workflow", "Clique de novo para excluir este workflow") : tr("Delete workflow", "Excluir workflow")} aria-label={confirmingDelete ? tr("Confirm deleting this workflow", "Confirmar exclusão deste workflow") : tr("Delete workflow", "Excluir workflow")} onclick={requestDeleteGroup}><LumeIcon name="trash" size={15} />{#if confirmingDelete}<span>{tr("Delete?", "Excluir?")}</span>{/if}</button>
+    <span class="toolbar-divider"></span>
     {#if simulatorAvailable}<button class="sim-toggle" class:active={Boolean(demo)} type="button" title={tr("Preview card and pipe states", "Visualizar estados dos cards e canos")} aria-pressed={Boolean(demo)} onclick={toggleDemo}><LumeIcon name="bolt" size={14} />{tr("Simulate", "Simular")}</button>{/if}
     <button class="add-agent" type="button" disabled={locked || adding} onclick={() => openPicker()}><LumeIcon name="plus" size={14} />{tr("Agent", "Agente")}</button>
     <span class="save-state" aria-live="polite">{saving ? tr("Saving…", "Salvando…") : saveFailed ? tr("Not saved", "Não salvo") : ""}</span>
     {#if saveFailed}<button type="button" title={tr("Retry saving", "Tentar salvar novamente")} aria-label={tr("Retry saving", "Tentar salvar novamente")} onclick={() => void retrySave()}><LumeIcon name="refresh" size={15} /></button>{/if}
     <span class="exit-hint"><kbd>Esc</kbd>{tr("Back to chats", "Voltar aos chats")}</span>
-    <button class="close-board" type="button" title={tr("Back to chats", "Voltar aos chats")} aria-label={tr("Back to chats", "Voltar aos chats")} onclick={onClose}><LumeIcon name="close" size={17} /></button>
+    <button class="close-board" type="button" title={tr("Back to chats", "Voltar aos chats")} aria-label={tr("Back to chats", "Voltar aos chats")} onclick={onClose}><svg class="exit-icon" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 3v18M21 3l-4.4 1.7v14.6L21 21" /><circle cx="7.4" cy="6.4" r="1.7" /><path d="M7 9.2l1.4 4.6M7.6 10.5l3.4 1.6M7.4 10.2 4.4 11.8M8.4 13.8l2.7 3 .3 3.9M8.4 13.8l-2.9 2.6-1.3 3.5" /></svg></button>
   </header>
 
   {#if !group?.steps.length && !pickerOpen}
@@ -1296,6 +1296,8 @@
   .board-toolbar button:hover, .board-navigation button:hover, .board-panel > header button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .board-toolbar .add-agent { width: auto; display: flex; gap: 5px; padding: 0 8px; font-size: 11px; }
   .board-toolbar .close-board { margin-left: 6px; }
+  .board-toolbar .close-board:hover .exit-icon { transform: translateX(1px); }
+  .exit-icon { transition: transform 160ms ease; }
   .exit-hint { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--workspace-muted); font-size: 10px; white-space: nowrap; pointer-events: none; }
   .exit-hint kbd { padding: 1px 5px; border: 1px solid var(--workspace-line); border-radius: 4px; color: var(--workspace-strong); font: 700 9px/1.4 "SFMono-Regular", Consolas, monospace; }
   @media (max-width: 860px) { .exit-hint { display: none; } }

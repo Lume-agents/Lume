@@ -132,23 +132,28 @@
     <div class="environment-list">
       {#each environments as environment (environment.id)}
         <article class="environment-row" class:stopped={environment.status === "stopped"}>
-          <span class="environment-mark"><LumeIcon name={environment.kind === "database" ? "database" : "server"} size={21} /></span>
-          <div class="environment-details">
-            <div class="environment-name"><strong>{environment.name}</strong><time>{environmentElapsed(environment)}</time></div>
-            <div class="environment-state"><i class:live={environment.status === "running"}></i><span>{status(environment)}</span><span class="environment-pid">PID {environment.processId}</span></div>
+          <div class="environment-head">
+            <span class="environment-mark"><LumeIcon name={environment.kind === "database" ? "database" : "server"} size={19} /></span>
+            <div class="environment-name"><strong>{environment.name}</strong><div class="environment-state"><i class:live={environment.status === "running"}></i><span>{status(environment)}</span></div></div>
+            <time>{environmentElapsed(environment)}</time>
+          </div>
+          <div class="environment-foot">
             <div class="environment-ports">
               {#each environment.ports as port (`${port.address}:${port.port}`)}
                 {#if port.url && environment.status === "running"}
                   <button type="button" class="port-link" data-tooltip={tr("Open in browser", "Abrir no navegador")} onclick={() => void browse(port.url!)}><span>:{port.port}</span><LumeIcon name="external" size={11} /></button>
                 {:else}<span class="port-label">:{port.port}</span>{/if}
               {/each}
+              <span class="environment-pid">PID {environment.processId}</span>
             </div>
+            {#if environment.status !== "stopped"}
+              <button class="stop-environment" type="button" disabled={!environment.canStop || busy === environment.id}
+                aria-label={tr(`Stop ${environment.name}`, `Parar ${environment.name}`)} title={tr("Stop this process", "Parar este processo")}
+                onclick={() => void stop(environment)}>
+                {#if busy === environment.id || environment.status === "stopping"}<LumeIcon name="refresh" size={13} />{tr("Stopping", "Parando")}{:else}<LumeIcon name="stop" size={13} />{tr("Stop", "Parar")}{/if}
+              </button>
+            {/if}
           </div>
-          {#if environment.status !== "stopped"}
-            <button class="stop-environment" type="button" disabled={!environment.canStop || busy === environment.id}
-              aria-label={tr(`Stop ${environment.name}`, `Parar ${environment.name}`)} data-tooltip={tr("Stop this process", "Parar este processo")}
-              onclick={() => void stop(environment)}><LumeIcon name={busy === environment.id || environment.status === "stopping" ? "refresh" : "stop"} size={15} /></button>
-          {/if}
         </article>
       {/each}
     </div>
@@ -160,9 +165,10 @@
   .environment-trigger { position: relative; width: 24px; height: 24px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
   .environment-trigger.active { color: var(--workspace-accent); }
   .environment-trigger:hover, .environment-trigger.open { color: var(--workspace-accent); background: var(--workspace-accent-soft); }
-  .environment-trigger.fab { width: 36px; height: 36px; border-radius: 12px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 5px 16px rgba(17, 35, 27, .12); }
+  .environment-trigger.fab { width: 38px; height: 38px; border-radius: 13px; color: var(--workspace-text); background: linear-gradient(180deg, color-mix(in srgb, var(--workspace-raised) 82%, #fff) 0%, var(--workspace-raised) 55%, color-mix(in srgb, var(--workspace-raised) 90%, #000) 100%); box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 70%, transparent), inset 0 -2px 0 color-mix(in srgb, #000 12%, transparent), 0 2px 0 color-mix(in srgb, var(--workspace-line) 90%, #000), 0 7px 14px rgba(17, 35, 27, .22); transition: color 140ms ease, transform 120ms ease, box-shadow 120ms ease; }
   .environment-trigger.fab.active { color: var(--workspace-accent); }
-  .environment-trigger.fab:hover, .environment-trigger.fab.open { background: var(--workspace-accent-soft); }
+  .environment-trigger.fab:hover, .environment-trigger.fab.open { transform: translateY(-1px); box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 70%, transparent), inset 0 -2px 0 color-mix(in srgb, #000 12%, transparent), 0 3px 0 color-mix(in srgb, var(--workspace-line) 90%, #000), 0 10px 18px rgba(17, 35, 27, .26); }
+  .environment-trigger.fab:active { transform: translateY(2px); box-shadow: inset 0 1px 2px color-mix(in srgb, #000 20%, transparent), 0 0 0 color-mix(in srgb, var(--workspace-line) 90%, #000), 0 2px 5px rgba(17, 35, 27, .2); }
   .environment-trigger.compact { width: 24px; height: 24px; border-radius: 7px; background: var(--workspace-sidebar); }
   .environment-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
   .environment-count { position: absolute; top: -3px; right: -3px; min-width: 15px; height: 15px; padding: 0 3px; display: grid; place-items: center; border-radius: 8px; color: var(--workspace-raised); background: var(--workspace-accent); font-size: 9px; font-weight: 750; font-variant-numeric: tabular-nums; }
@@ -173,24 +179,25 @@
   .environment-menu button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
   .environment-menu header > button { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; }
   .environment-menu button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
-  .environment-list { display: grid; gap: 3px; }
-  .environment-row { min-width: 0; display: flex; align-items: flex-start; gap: 10px; padding: 10px 7px; }
-  .environment-row + .environment-row { border-top: 1px solid var(--workspace-line); }
-  .environment-mark { display: grid; place-items: center; width: 26px; height: 26px; flex: 0 0 auto; color: var(--workspace-accent); }
-  .environment-row.stopped .environment-mark { color: var(--workspace-muted); }
-  .environment-details { flex: 1; min-width: 0; display: grid; gap: 5px; }
-  .environment-name { display: flex; align-items: baseline; gap: 9px; justify-content: space-between; }
-  .environment-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-strong); font-size: 12px; font-weight: 670; }
-  .environment-name time { color: var(--workspace-muted); font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .environment-state { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; color: var(--workspace-muted); font-size: 10px; }
-  .environment-state i { width: 5px; height: 5px; border-radius: 50%; background: var(--workspace-muted); }
-  .environment-state i.live { background: var(--workspace-accent); }
-  .environment-pid { margin-left: auto; font-size: 9px; font-variant-numeric: tabular-nums; }
-  .environment-ports { display: flex; flex-wrap: wrap; gap: 5px; }
-  .environment-menu .port-link, .port-label { display: inline-flex; align-items: center; gap: 5px; padding: 3px 6px; border-radius: 5px; color: var(--workspace-accent); background: var(--workspace-subtle); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .environment-list { display: grid; gap: 7px; }
+  .environment-row { min-width: 0; display: grid; gap: 9px; padding: 10px; border: 1px solid var(--workspace-line); border-radius: 11px; background: var(--workspace-subtle); }
+  .environment-head { min-width: 0; display: flex; align-items: center; gap: 9px; }
+  .environment-mark { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 auto; border-radius: 9px; color: var(--workspace-accent); background: var(--workspace-accent-soft); }
+  .environment-row.stopped .environment-mark { color: var(--workspace-muted); background: transparent; border: 1px solid var(--workspace-line); }
+  .environment-name { flex: 1; min-width: 0; display: grid; gap: 3px; }
+  .environment-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-strong); font-size: 12px; font-weight: 700; }
+  .environment-head time { align-self: flex-start; color: var(--workspace-muted); font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .environment-state { display: flex; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 10px; }
+  .environment-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--workspace-muted); }
+  .environment-state i.live { background: #3f9b69; box-shadow: 0 0 0 3px color-mix(in srgb, #3f9b69 22%, transparent); }
+  .environment-foot { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .environment-ports { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+  .environment-pid { color: var(--workspace-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+  .environment-menu .port-link, .port-label { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 6px; color: var(--workspace-accent); background: var(--workspace-raised); border: 1px solid var(--workspace-line); font-size: 10px; font-variant-numeric: tabular-nums; }
   .port-label { color: var(--workspace-muted); }
-  .environment-menu .stop-environment { width: 26px; height: 26px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 7px; }
-  .environment-menu .stop-environment:disabled { opacity: .35; cursor: default; }
+  .environment-menu .stop-environment { height: 26px; padding: 0 10px 0 8px; display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; border: 1px solid color-mix(in srgb, #c0554f 55%, transparent); border-radius: 7px; color: #c0554f; background: color-mix(in srgb, #c0554f 10%, transparent); font-size: 10px; font-weight: 750; transition: color 120ms ease, background 120ms ease; }
+  .environment-menu .stop-environment:hover:not(:disabled) { color: #fff; background: #c0554f; }
+  .environment-menu .stop-environment:disabled { opacity: .5; cursor: default; }
   .environment-error { margin: 5px; padding: 8px; border-radius: 7px; color: var(--workspace-text); background: var(--workspace-subtle); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-  @media (prefers-reduced-motion: reduce) { .environment-trigger { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .environment-trigger, .environment-trigger.fab { transition: none; } }
 </style>

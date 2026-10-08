@@ -746,7 +746,11 @@ impl CodexBridge {
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| "The Codex App Server did not return the thread id".to_string())?
             .to_string();
-        state.rebind_codex_thread(session_id, thread_id.clone())?;
+        if let Some(previous) = state.rebind_codex_thread(session_id, thread_id.clone())? {
+            // A workflow step keeps pointing at the id the chat had before its first prompt.
+            tauri::Manager::state::<crate::workflow_runtime::WorkflowRuntime>(&app)
+                .rename_session(&app, &state, &previous, &thread_id);
+        }
 
         let monitor_profile = profile.clone();
         let profiles = HashMap::from([(thread_id.clone(), profile)]);

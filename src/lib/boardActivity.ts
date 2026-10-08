@@ -80,6 +80,8 @@ export type FeedItem = {
   detail: string;
   status: SessionActivity["status"];
   at: number;
+  /** The first file an edit touches, for its file-type icon. */
+  path?: string;
 };
 
 const feedHidden = new Set(["prompt", "queued_prompt", "codex_queued_prompt", "interrupt"]);
@@ -100,7 +102,7 @@ export function activityFeed(session: HubSession | undefined, language: Language
       const detail = category === "edit" && files.length
         ? shorten(files.slice(0, 2).join(", ") + (files.length > 2 ? ` +${files.length - 2}` : ""), 80)
         : category === "command" || category === "test" ? shorten(activityPreview(activity), 80) : "";
-      return { id: activity.id, category, title: activityDisplayTitle(activity, language), detail, status: activity.status, at: activity.createdAt };
+      return { id: activity.id, category, title: activityDisplayTitle(activity, language), detail, status: activity.status, at: activity.createdAt, path: category === "edit" ? activity.files[0] : undefined };
     })
     .sort((a, b) => b.at - a.at)
     .slice(0, limit);

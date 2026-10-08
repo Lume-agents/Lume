@@ -566,6 +566,119 @@
       ].some((value) => value.toLocaleLowerCase().includes(needle));
     });
   });
+  // Agent groups: folders in the sidebar. Kept on this computer; a session belongs to one group.
+  type SidebarGroup = { id: string; name: string; collapsed: boolean };
+  type SidebarRow =
+    | { key: string; kind: "header"; group: SidebarGroup | null; count: number }
+    | { key: string; kind: "session"; session: HubSession; index: number };
+  const sidebarGroupsKey = "lume:sidebar-groups:v1";
+  let sidebarGroups = $state<SidebarGroup[]>([]);
+  let groupAssignments = $state<Record<string, string>>({});
+  let groupDropTarget = $state<string | null>(null);
+  let renamingGroupId = $state<string | null>(null);
+  let groupNameDraft = $state("");
+  let confirmingGroupId = $state<string | null>(null);
+  let confirmGroupTimer: ReturnType<typeof setTimeout> | undefined;
+  const sessionGroupKey = (session: HubSession) => session.nativeSessionId || session.id;
+
+  function loadSidebarGroups() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(sidebarGroupsKey) || "{}");
+      sidebarGroups = Array.isArray(raw.groups)
+        ? raw.groups.filter((group: SidebarGroup) => typeof group?.id === "string" && typeof group?.name === "string").map((group: SidebarGroup) => ({ id: group.id, name: group.name, collapsed: Boolean(group.collapsed) }))
+        : [];
+      groupAssignments = raw.assignments && typeof raw.assignments === "object" ? raw.assignments : {};
+    } catch { /* Start without groups when the saved ones cannot be read. */ }
+  }
+  function saveSidebarGroups() {
+    try { localStorage.setItem(sidebarGroupsKey, JSON.stringify({ groups: sidebarGroups, assignments: groupAssignments })); }
+    catch { /* Groups still work for this run when storage is unavailable. */ }
+  }
+  function newSidebarGroup(): SidebarGroup {
+    const group = { id: crypto.randomUUID(), name: tr(`Group ${sidebarGroups.length + 1}`, `Grupo ${sidebarGroups.length + 1}`), collapsed: false };
+    sidebarGroups = [...sidebarGroups, group];
+    saveSidebarGroups();
+    return group;
+  }
+  function createSidebarGroup() {
+    const group = newSidebarGroup();
+    renamingGroupId = group.id;
+    groupNameDraft = group.name;
+  }
+  function assignToGroup(session: HubSession, groupId: string | null) {
+    const next = { ...groupAssignments };
+    if (groupId) next[sessionGroupKey(session)] = groupId;
+    else delete next[sessionGroupKey(session)];
+    groupAssignments = next;
+    saveSidebarGroups();
+  }
+  function commitGroupRename() {
+    const id = renamingGroupId;
+    renamingGroupId = null;
+    const name = groupNameDraft.trim().slice(0, 40);
+    if (!id || !name) return;
+    sidebarGroups = sidebarGroups.map((group) => group.id === id ? { ...group, name } : group);
+    saveSidebarGroups();
+  }
+  function toggleSidebarGroup(id: string) {
+    sidebarGroups = sidebarGroups.map((group) => group.id === id ? { ...group, collapsed: !group.collapsed } : group);
+    saveSidebarGroups();
+  }
+  function requestDeleteGroup(id: string) {
+    if (confirmingGroupId !== id) {
+      confirmingGroupId = id;
+      clearTimeout(confirmGroupTimer);
+      confirmGroupTimer = setTimeout(() => { confirmingGroupId = null; }, 3500);
+      return;
+    }
+    confirmingGroupId = null;
+    sidebarGroups = sidebarGroups.filter((group) => group.id !== id);
+    groupAssignments = Object.fromEntries(Object.entries(groupAssignments).filter(([, value]) => value !== id));
+    saveSidebarGroups();
+  }
+  function dragOverGroup(event: DragEvent, id: string) {
+    if (!draggingSessionId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    groupDropTarget = id;
+  }
+  function dropOnGroup(event: DragEvent, id: string | null) {
+    event.preventDefault();
+    event.stopPropagation();
+    const session = sessions.find((item) => item.id === draggingSessionId);
+    groupDropTarget = null;
+    if (session) assignToGroup(session, id);
+    finishSidebarSessionDrag();
+  }
+  function focusOnMount(node: HTMLInputElement) { node.focus(); node.select(); }
+
+  const sidebarLayout = $derived.by(() => {
+    const filtering = Boolean(query.trim()) || filter !== "all";
+    const rows: SidebarRow[] = [];
+    const visible: HubSession[] = [];
+    const push = (session: HubSession) => { rows.push({ key: session.id, kind: "session", session, index: visible.length }); visible.push(session); };
+    if (sidebarCollapsed || !sidebarGroups.length) { filteredSessions.forEach(push); return { rows, visible }; }
+    const members = new Map<string, HubSession[]>(sidebarGroups.map((group) => [group.id, []]));
+    const loose: HubSession[] = [];
+    for (const session of filteredSessions) {
+      const list = members.get(groupAssignments[sessionGroupKey(session)]);
+      if (list) list.push(session); else loose.push(session);
+    }
+    if (loose.length || (!filtering && draggingSessionId)) {
+      rows.push({ key: "group:none", kind: "header", group: null, count: loose.length });
+      loose.forEach(push);
+    }
+    for (const group of sidebarGroups) {
+      const list = members.get(group.id) ?? [];
+      if (filtering && !list.length) continue;
+      rows.push({ key: `group:${group.id}`, kind: "header", group, count: list.length });
+      if (!group.collapsed || filtering) list.forEach(push);
+    }
+    return { rows, visible };
+  });
+  onMount(loadSidebarGroups);
+
   const filteredInternalServices = $derived(
     projectFilter === "all" && filter !== "attention"
       ? internalServices.filter((service) =>
@@ -2633,10 +2746,15 @@
       </div>
     </div>
 
+    <div class="session-tools">
     <div class="session-filters" aria-label={tr("Filter agents", "Filtrar agentes")}>
       <button class:active={filter === "all"} type="button" onclick={() => filter = "all"}>{tr("All", "Todos")}</button>
       <button class:active={filter === "active"} type="button" onclick={() => filter = "active"}>{tr("Active", "Ativos")}</button>
       <button class:active={filter === "attention"} type="button" onclick={() => filter = "attention"}>{tr("Attention", "Atenção")}</button>
+    </div>
+    {#if !sidebarCollapsed}
+      <button class="new-group" type="button" onclick={createSidebarGroup}><LumeIcon name="plus" size={12} />{tr("New group", "Novo grupo")}</button>
+    {/if}
     </div>
 
     <nav class:releasing={sidebarReleaseIntent} class="session-list" aria-label={tr("Agent sessions", "Sessões de agentes")} ondragover={trackSidebarRelease} ondrop={dropSidebarRelease}>
@@ -2645,11 +2763,35 @@
           <div class="session-skeleton" aria-hidden="true"><i></i><span></span></div>
         {/each}
       {:else if filteredSessions.length}
-        {#each filteredSessions as session, index (session.id)}
+        {#each sidebarLayout.rows as row (row.key)}
+          {#if row.kind === "header"}
+            <div class:drop-target={groupDropTarget === (row.group?.id ?? "none")} class:collapsed={row.group?.collapsed} class="group-heading" role="group" aria-label={row.group?.name ?? tr("No group", "Sem grupo")}
+              ondragenter={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragover={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragleave={() => (groupDropTarget = null)} ondrop={(event) => dropOnGroup(event, row.group?.id ?? null)}>
+              {#if row.group}
+                {#if renamingGroupId === row.group.id}
+                  <form class="group-rename" onsubmit={(event) => { event.preventDefault(); commitGroupRename(); }}>
+                    <input use:focusOnMount bind:value={groupNameDraft} maxlength="40" aria-label={tr("Group name", "Nome do grupo")} onblur={commitGroupRename} onkeydown={(event) => { if (event.key === "Escape") { event.stopPropagation(); renamingGroupId = null; } }} />
+                  </form>
+                {:else}
+                  <button class="group-toggle" type="button" aria-expanded={!row.group.collapsed} onclick={() => toggleSidebarGroup(row.group!.id)}>
+                    <span class="group-chevron"><LumeIcon name="chevron-down" size={12} /></span><LumeIcon name="folder" size={13} /><strong>{row.group.name}</strong><small>{row.count}</small>
+                  </button>
+                  <span class="group-actions">
+                    <button type="button" title={tr("Rename group", "Renomear grupo")} aria-label={tr("Rename group", "Renomear grupo")} onclick={() => { renamingGroupId = row.group!.id; groupNameDraft = row.group!.name; }}><LumeIcon name="rename" size={12} /></button>
+                    <button class:confirm={confirmingGroupId === row.group.id} type="button" title={confirmingGroupId === row.group.id ? tr("Click again: agents stay, only the group goes", "Clique de novo: os agentes ficam, só o grupo some") : tr("Delete group", "Excluir grupo")} aria-label={tr("Delete group", "Excluir grupo")} onclick={() => requestDeleteGroup(row.group!.id)}><LumeIcon name="trash" size={12} /></button>
+                  </span>
+                {/if}
+              {:else}
+                <span class="group-label">{tr("No group", "Sem grupo")}</span><small>{row.count}</small>
+              {/if}
+            </div>
+          {:else}
+          {@const session = row.session}
+          {@const index = row.index}
           {@const childAgents = subagentsBySession.get(session.id) ?? []}
           {@const waitingForChildren = parentWaitingForSubagents(session, childAgents)}
           {@const selected = currentPaneIds().includes(session.id)}
-          <div class:focused={session.id === focusedPaneId} class:secondary-selected={selected && session.id !== focusedPaneId} class:connected={selected} class:connected-above={selected && index > 0 && currentPaneIds().includes(filteredSessions[index - 1].id)} class:connected-below={selected && index < filteredSessions.length - 1 && currentPaneIds().includes(filteredSessions[index + 1].id)} class="session-tree-item">
+          <div class:focused={session.id === focusedPaneId} class:secondary-selected={selected && session.id !== focusedPaneId} class:connected={selected} class:connected-above={selected && index > 0 && currentPaneIds().includes(sidebarLayout.visible[index - 1].id)} class:connected-below={selected && index < sidebarLayout.visible.length - 1 && currentPaneIds().includes(sidebarLayout.visible[index + 1].id)} class="session-tree-item" transition:slide={{ duration: motionDuration(190), easing: cubicOut }}>
           <div
             class:dragging={draggingSessionId === session.id}
             class="session-row"
@@ -2690,6 +2832,7 @@
             </div>
           {/if}
           </div>
+          {/if}
         {/each}
       {:else if !filteredInternalServices.length}
         <p class="no-results">{query ? tr("No matching agents", "Nenhum agente encontrado") : tr("No agents detected", "Nenhum agente detectado")}</p>
@@ -2739,6 +2882,18 @@
           <LumeIcon name="rename" size={15} />
           <span>{tr("Rename session", "Renomear sessão")}</span>
         </button>
+        <div class="session-context-groups" role="group" aria-label={tr("Group", "Grupo")}>
+          <small>{tr("Group", "Grupo")}</small>
+          {#each sidebarGroups as group (group.id)}
+            <button class:current={groupAssignments[sessionGroupKey(contextSession)] === group.id} class="session-context-command" type="button" role="menuitem" onclick={() => { assignToGroup(contextSession, group.id); sessionContextMenu = null; }}>
+              <LumeIcon name="folder" size={14} /><span>{group.name}</span>{#if groupAssignments[sessionGroupKey(contextSession)] === group.id}<LumeIcon name="check" size={13} />{/if}
+            </button>
+          {/each}
+          {#if groupAssignments[sessionGroupKey(contextSession)]}
+            <button class="session-context-command" type="button" role="menuitem" onclick={() => { assignToGroup(contextSession, null); sessionContextMenu = null; }}><LumeIcon name="close" size={14} /><span>{tr("Remove from group", "Tirar do grupo")}</span></button>
+          {/if}
+          <button class="session-context-command" type="button" role="menuitem" onclick={() => { const group = newSidebarGroup(); assignToGroup(contextSession, group.id); sessionContextMenu = null; renamingGroupId = group.id; groupNameDraft = group.name; }}><LumeIcon name="plus" size={14} /><span>{tr("New group…", "Novo grupo…")}</span></button>
+        </div>
         {#if canLinkCodexCli(contextSession)}
           <button class="session-context-command" type="button" role="menuitem" onclick={() => { cliAssociationSessionId = contextSession.id; sessionContextMenu = null; }}>
             <LumeIcon name="split" size={15} />
@@ -3723,6 +3878,26 @@
   .session-filters button:hover { color: var(--workspace-strong); }
   .session-filters button.active { color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(26, 42, 34, .08); }
   .session-filters button:active { transform: scale(.97); }
+  .new-group { margin: -3px 11px 8px; padding: 0 8px; height: 24px; display: flex; align-items: center; gap: 6px; border: 1px dashed var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 700; cursor: pointer; }
+  .new-group:hover { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); }
+  .group-heading { margin: 9px 0 3px; padding: 2px 4px 2px 2px; display: flex; align-items: center; gap: 4px; border-radius: 8px; color: var(--workspace-faint); transition: background 120ms ease; }
+  .group-heading.drop-target { background: var(--workspace-accent-soft); outline: 1px dashed var(--workspace-accent); }
+  .group-toggle { min-width: 0; height: 24px; padding: 0 6px 0 2px; flex: 1; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+  .group-toggle strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-strong); font-size: 10px; font-weight: 720; }
+  .group-toggle small, .group-label + small { margin-left: auto; font-size: 9px; font-variant-numeric: tabular-nums; }
+  .group-chevron { display: grid; transition: transform 160ms ease; }
+  .group-heading.collapsed .group-chevron { transform: rotate(-90deg); }
+  .group-label { padding: 0 6px; font-size: 9px; font-weight: 720; letter-spacing: .04em; text-transform: uppercase; }
+  .group-actions { display: flex; opacity: 0; transition: opacity 120ms ease; }
+  .group-heading:hover .group-actions, .group-actions:focus-within { opacity: 1; }
+  .group-actions button { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .group-actions button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .group-actions button.confirm { color: #c0554f; background: color-mix(in srgb, #c0554f 14%, transparent); }
+  .group-rename { flex: 1; min-width: 0; }
+  .group-rename input { box-sizing: border-box; width: 100%; height: 24px; padding: 0 7px; border: 1px solid var(--workspace-accent); border-radius: 6px; outline: 0; color: var(--workspace-strong); background: var(--workspace-raised); font: inherit; font-size: 11px; }
+  .session-context-groups { margin: 2px 0; padding: 4px 0; display: grid; border-block: 1px solid var(--workspace-line); }
+  .session-context-groups > small { padding: 2px 9px 3px; color: var(--workspace-faint); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+  .session-context-groups .current { color: var(--workspace-accent); }
   .session-list.releasing { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 35%, transparent); }
   .session-list { min-height: 0; padding: 0 8px 14px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   .session-row { position: relative; display: flex; align-items: stretch; border-radius: 10px; cursor: grab; transition: background 140ms ease, opacity 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }

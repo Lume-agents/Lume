@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
-  import { slide } from "svelte/transition";
+  import { onMount, tick, untrack } from "svelte";
+  import { fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { openPath } from "@tauri-apps/plugin-opener";
@@ -209,6 +209,99 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let conversationElement = $state<HTMLDivElement | null>(null);
   let conversationContentElement = $state<HTMLDivElement | null>(null);
   let composerElement = $state<HTMLFormElement | null>(null);
+
+  // Ctrl/Cmd+F: find text inside this conversation.
+  let findOpen = $state(false);
+  let findQuery = $state("");
+  let findInput = $state<HTMLInputElement | null>(null);
+  let findRanges: Range[] = [];
+  let findCount = $state(0);
+  let findIndex = $state(0);
+  let findTimer: ReturnType<typeof setTimeout> | undefined;
+  const findLimit = 500;
+
+  function clearFindHighlights() {
+    try { CSS.highlights?.delete("lume-find"); CSS.highlights?.delete("lume-find-current"); } catch { /* No highlight API: the current match is selected instead. */ }
+  }
+  function collectFindMatches() {
+    findRanges = [];
+    const needle = findQuery.trim().toLowerCase();
+    if (!needle || !conversationContentElement) { findCount = 0; findIndex = 0; clearFindHighlights(); return; }
+    const walker = document.createTreeWalker(conversationContentElement, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => node.parentElement?.closest("script, style, [aria-hidden='true']") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    });
+    for (let node = walker.nextNode(); node && findRanges.length < findLimit; node = walker.nextNode()) {
+      const text = (node.nodeValue ?? "").toLowerCase();
+      for (let at = text.indexOf(needle); at >= 0 && findRanges.length < findLimit; at = text.indexOf(needle, at + needle.length)) {
+        const range = document.createRange();
+        range.setStart(node, at);
+        range.setEnd(node, at + needle.length);
+        findRanges.push(range);
+      }
+    }
+    findCount = findRanges.length;
+    findIndex = Math.min(findIndex, Math.max(0, findCount - 1));
+    showFindMatch(false);
+  }
+  function showFindMatch(scroll = true) {
+    clearFindHighlights();
+    const current = findRanges[findIndex];
+    if (!current) return;
+    try {
+      if (CSS.highlights && typeof Highlight !== "undefined") {
+        CSS.highlights.set("lume-find", new Highlight(...findRanges));
+        CSS.highlights.set("lume-find-current", new Highlight(current));
+      } else {
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(current);
+      }
+    } catch { /* Highlighting is a nicety; scrolling to the match still works. */ }
+    if (scroll) current.startContainer.parentElement?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+  function stepFind(direction: 1 | -1) {
+    if (!findCount) return;
+    findIndex = (findIndex + direction + findCount) % findCount;
+    showFindMatch();
+  }
+  async function openFind() {
+    findOpen = true;
+    const selected = window.getSelection()?.toString().trim();
+    if (selected && selected.length < 120 && !selected.includes("\n")) findQuery = selected;
+    await tick();
+    findInput?.focus();
+    findInput?.select();
+    collectFindMatches();
+  }
+  function closeFind() {
+    findOpen = false;
+    findRanges = [];
+    findCount = 0;
+    clearFindHighlights();
+    promptInput?.focus();
+  }
+  function onFindInput() {
+    findIndex = 0;
+    clearTimeout(findTimer);
+    findTimer = setTimeout(() => { collectFindMatches(); showFindMatch(); }, 120);
+  }
+  function onFindKeydown(event: KeyboardEvent) {
+    if (event.key === "Enter") { event.preventDefault(); stepFind(event.shiftKey ? -1 : 1); }
+    else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeFind(); }
+  }
+  function handleFindShortcut(event: KeyboardEvent) {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "f") return;
+    if (!visible || document.querySelector(".workflow-board:not([hidden])")) return;
+    const pane = conversationElement?.closest(".session-pane");
+    if (!pane || !(focused || pane.contains(document.activeElement))) return;
+    event.preventDefault();
+    void openFind();
+  }
+  $effect(() => {
+    window.addEventListener("keydown", handleFindShortcut);
+    return () => { window.removeEventListener("keydown", handleFindShortcut); clearTimeout(findTimer); clearFindHighlights(); };
+  });
+  $effect(() => { session.id; untrack(() => { if (findOpen) closeFind(); }); });
   let composerHeight = $state(0);
   let introDismissed = $state(false);
   let composerTransition = $state<"idle" | "out" | "in">("idle");
@@ -2162,6 +2255,17 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   <WorkspaceWorkBookmarks {session} {language} hasSubagents={subagents.length > 0} />
 
+  {#if findOpen}
+    <div class="find-bar" role="search" transition:fly={{ y: -6, duration: 140 }}>
+      <LumeIcon name="search" size={14} />
+      <input bind:this={findInput} bind:value={findQuery} type="text" spellcheck="false" autocomplete="off" placeholder={tr("Find in this chat", "Buscar neste chat")} aria-label={tr("Find in this chat", "Buscar neste chat")} oninput={onFindInput} onkeydown={onFindKeydown} />
+      <span class="find-count" aria-live="polite">{findQuery.trim() ? (findCount ? `${findIndex + 1}/${findCount}${findCount >= findLimit ? "+" : ""}` : tr("No results", "Sem resultados")) : ""}</span>
+      <button type="button" disabled={!findCount} title={tr("Previous (Shift+Enter)", "Anterior (Shift+Enter)")} aria-label={tr("Previous match", "Resultado anterior")} onclick={() => stepFind(-1)}><span class="flip"><LumeIcon name="chevron-down" size={14} /></span></button>
+      <button type="button" disabled={!findCount} title={tr("Next (Enter)", "Próximo (Enter)")} aria-label={tr("Next match", "Próximo resultado")} onclick={() => stepFind(1)}><LumeIcon name="chevron-down" size={14} /></button>
+      <button type="button" title={tr("Close (Esc)", "Fechar (Esc)")} aria-label={tr("Close search", "Fechar busca")} onclick={closeFind}><LumeIcon name="close" size={14} /></button>
+    </div>
+  {/if}
+
   <div class="conversation-shell" style:--composer-overlap={composerInIntroPosition ? "0px" : `${composerHeight}px`}>
   <div class="conversation" role="region" aria-label={tr("Conversation", "Conversa")} bind:this={conversationElement} onscroll={trackConversationScroll}>
     <div class="conversation-content" bind:this={conversationContentElement}>
@@ -2764,6 +2868,15 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 {/if}
 
 <style>
+  :global(::highlight(lume-find)) { color: inherit; background: color-mix(in srgb, #e9b94a 38%, transparent); }
+  :global(::highlight(lume-find-current)) { color: #1b1403; background: #f0b73c; }
+  .find-bar { position: absolute; z-index: 14; top: 62px; right: 18px; width: min(340px, calc(100% - 36px)); padding: 5px 6px 5px 10px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: var(--workspace-raised); box-shadow: 0 10px 30px rgba(8, 18, 13, .2); }
+  .find-bar input { min-width: 0; flex: 1; height: 26px; padding: 0 2px; border: 0; outline: 0; color: var(--workspace-strong); background: transparent; font: inherit; font-size: 12px; }
+  .find-count { min-width: 38px; color: var(--workspace-muted); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .find-bar button { width: 24px; height: 24px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .find-bar button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .find-bar button:disabled { opacity: .35; cursor: default; }
+  .find-bar .flip { display: grid; transform: rotate(180deg); }
   .session-pane { --pane-status-color: #84948c; --workspace-chat-font-size: calc(12px + var(--workspace-chat-font-adjust)); --workspace-chat-small-size: calc(10px + var(--workspace-chat-small-adjust)); --workspace-chat-tiny-size: calc(8px + var(--workspace-chat-tiny-adjust)); --chat-small-font-size: var(--workspace-chat-small-size); --chat-tiny-font-size: var(--workspace-chat-tiny-size); --activity-summary-height: calc(44px + var(--workspace-chat-font-adjust)); --activity-row-height: calc(42px + var(--workspace-chat-font-adjust)); --activity-title-size: calc(11px + var(--workspace-chat-small-adjust)); --activity-detail-size: calc(9px + var(--workspace-chat-tiny-adjust)); position: relative; min-width: 0; min-height: 0; height: 100%; container-type: inline-size; display: flex; flex-direction: column; overflow: hidden; background: transparent; animation: pane-arrive 280ms cubic-bezier(.16, 1, .3, 1) both; }
   .session-pane.status-running { --pane-status-color: #4e98ca; }
   .session-pane.status-completed { --pane-status-color: #50aa79; }

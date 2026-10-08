@@ -15,6 +15,7 @@
   import { demoFrames, demoSession, demoTodoCount, type DemoState } from "$lib/boardSimulator";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import BrandIcon from "$lib/BrandIcon.svelte";
@@ -251,6 +252,10 @@
   }
   function runStatus(status: WorkflowRun["status"]) {
     return { draft: tr("Draft", "Rascunho"), ready: tr("Ready for next step", "Pronto para a próxima etapa"), running: tr("Running", "Executando"), waiting_for_approval: tr("Waiting for approval", "Aguardando aprovação"), paused: tr("Paused", "Pausado"), completed: tr("Completed", "Concluído"), failed: tr("Failed", "Falhou"), cancelled: tr("Cancelled", "Cancelado") }[status];
+  }
+  // "Manual" and "approval" were the same pause with an extra click, so a handoff is either automatic or asks first.
+  function handoffMode(connection: WorkflowConnectionDefinition) {
+    return connection.advanceMode === "automatic" && !connection.requiresApproval ? "automatic" : "approval";
   }
   function stepStatus(step: WorkflowStepDefinition) {
     const state = stepVisualState(run, step.id);
@@ -811,11 +816,10 @@
       </section>
 
       <div class="behavior-row">
-        <span class="transition-toggle" class:manual-active={connection.advanceMode === "manual"}>
-          <button class:active={connection.advanceMode === "manual"} type="button" disabled={locked} aria-label={tr("Manual", "Manual")} onclick={() => editConnection({ advanceMode: "manual" })}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4v12M9 6v8M13 7.5v5M17 9v2" /></svg><span>{tr("Manual", "Manual")}</span></button>
-          <button class:active={connection.advanceMode === "automatic"} type="button" disabled={locked} aria-label={tr("Automatic", "Automático")} title={tr("Continue automatically when the step is ready", "Continuar automaticamente quando a etapa estiver pronta")} onclick={() => editConnection({ advanceMode: "automatic" })}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m11.5 2.5-6 8H10l-1.5 7 6-9H10Z" /></svg><span>Auto</span></button>
+        <span class="transition-toggle" class:manual-active={handoffMode(connection) === "approval"} role="radiogroup" aria-label={tr("Handoff", "Passagem")}>
+          <button class:active={handoffMode(connection) === "approval"} type="button" role="radio" aria-checked={handoffMode(connection) === "approval"} disabled={locked} aria-label={tr("Ask for approval, then continue by itself", "Pedir aprovação e depois seguir sozinho")} title={tr("Pauses for your OK, then continues by itself", "Para e espera seu OK, depois segue sozinho")} onclick={() => editConnection({ requiresApproval: true, advanceMode: "automatic" })}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 16 5v4c0 4-2.5 6.5-6 8-3.5-1.5-6-4-6-8V5Z" /></svg><span>{tr("Approve", "Aprovar")}</span></button>
+          <button class:active={handoffMode(connection) === "automatic"} type="button" role="radio" aria-checked={handoffMode(connection) === "automatic"} disabled={locked} aria-label={tr("Automatic", "Automático")} title={tr("Passes the result on without stopping", "Passa o resultado adiante sem parar")} onclick={() => editConnection({ requiresApproval: false, advanceMode: "automatic" })}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m11.5 2.5-6 8H10l-1.5 7 6-9H10Z" /></svg><span>Auto</span></button>
         </span>
-        <button class:active={connection.requiresApproval} class="approval" type="button" role="switch" aria-checked={connection.requiresApproval} disabled={locked} onclick={() => editConnection({ requiresApproval: !connection.requiresApproval })}><svg viewBox="0 0 20 20"><path d="M10 3 16 5v4c0 4-2.5 6.5-6 8-3.5-1.5-6-4-6-8V5Z" /></svg><span>{tr("Approval", "Aprovação")}</span><i></i></button>
       </div>
 
       <button class:open={instructionOpen} class="instruction-toggle" type="button" onclick={() => { instructionOpen = !instructionOpen; if (instructionOpen) previewControlsOpen = false; }}>
@@ -939,6 +943,7 @@
         {@const order = chain?.order.indexOf(step.id) ?? -1}
         {@const shown = demoCells ? demoSession(session, demoCells[group?.steps.indexOf(step) ?? 0], now) : session}
         {@const live = stepActivity(shown, run?.steps.find((item) => item.stepId === step.id), language, now)}
+        {@const trail = state === "running" || shown?.status === "running" ? activityFeed(shown, language, 3) : []}
         <article class="board-card" class:working={state === "running" || (state === "idle" && shown?.status === "running")} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? session?.status : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
           <button class="card-body" type="button" onpointerdown={(event) => beginCard(event, step.id)} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleName(step.role)}>
             <span class="card-role-fab" title={step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role)} aria-hidden="true">
@@ -951,6 +956,24 @@
             <span class="card-status"><i></i>{stepStatus(step) + (live.elapsed ? " · " + live.elapsed : "") + (live.progress ? " · " + live.progress.done + "/" + live.progress.total : "")}</span>
             {#if live.line}<span class="card-activity" class:live={state === "running" || shown?.status === "running"}><i></i><span>{live.line}</span></span>{/if}
           </button>
+          {#if trail.length}
+            <span class="card-trail" aria-hidden="true">
+              {#each trail as event, index (event.id)}
+                <span class="trail-item" class:newest={index === 0} class:running={event.status === "running"} style:--trail-fade={1 - index * 0.26}>
+                  <span class="trail-icon">
+                    {#if event.path}<FileTypeIcon path={event.path} size={14} />
+                    {:else if event.category === "command" || event.category === "test"}<svg viewBox="0 0 20 20" width="13" height="13"><path d="m4 6 4 4-4 4M10 15h6" /></svg>
+                    {:else if event.category === "git"}<LumeIcon name="branch" size={13} />
+                    {:else if event.category === "search" || event.category === "read"}<LumeIcon name="search" size={13} />
+                    {:else if event.category === "plan"}<LumeIcon name="task-list" size={13} />
+                    {:else if event.category === "message"}<LumeIcon name="send" size={13} />
+                    {:else}<LumeIcon name="bolt" size={13} />{/if}
+                  </span>
+                  <span class="trail-text"><b>{event.detail || event.title}</b>{#if event.detail}<small>{event.title}</small>{/if}</span>
+                </span>
+              {/each}
+            </span>
+          {/if}
           {#if live.progress}<span class="card-progress" aria-hidden="true"><i style:width={(live.progress.done / live.progress.total) * 100 + "%"}></i></span>{/if}
           {#if live.attention && session}
             <button class="card-attention" type="button" title={live.attention.text} aria-label={tr("Needs you: ", "Precisa de você: ") + live.attention.text} onpointerdown={(event) => event.stopPropagation()} onclick={() => onOpenChat(session)}><LumeIcon name="warning" size={11} />{live.attention.kind === "permission" ? tr("Approve", "Aprovar") : tr("Answer", "Responder")}</button>
@@ -1273,6 +1296,16 @@
   [data-state="failed"] .card-status i, [data-status="failed"] .run-state i { background: var(--board-danger); }
   [data-state="permission_required"] .card-status i, [data-status="waiting_for_approval"] .run-state i, [data-status="paused"] .run-state i { background: var(--board-warning); }
   @keyframes status-pulse { 50% { box-shadow: 0 0 0 5px rgba(86, 170, 218, 0); } }
+  .card-trail { position: absolute; z-index: 1; top: calc(100% + 7px); left: 10px; right: 10px; display: grid; gap: 4px; pointer-events: none; }
+  .trail-item { min-width: 0; width: fit-content; max-width: 100%; padding: 3px 9px 3px 6px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 999px; color: var(--workspace-muted); background: var(--workspace-raised); font-size: 10px; line-height: 1.3; opacity: var(--trail-fade, 1); animation: trail-in 220ms cubic-bezier(.16, 1, .3, 1) both; }
+  .trail-item.newest { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); }
+  .trail-item.running .trail-icon { animation: status-pulse 1.4s ease-in-out infinite; }
+  .trail-icon { width: 16px; height: 16px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent); }
+  .trail-icon svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .trail-text { min-width: 0; display: flex; align-items: baseline; gap: 5px; overflow: hidden; white-space: nowrap; }
+  .trail-text b { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 650; }
+  .trail-text small { flex: 0 0 auto; color: var(--workspace-faint, var(--workspace-muted)); font-size: 9px; }
+  @keyframes trail-in { from { opacity: 0; transform: translateY(-4px); } }
   .card-activity { max-width: 100%; margin-top: -2px; display: inline-flex; align-items: center; gap: 6px; color: var(--workspace-muted); font-size: 10px; line-height: 1.3; }
   .card-activity > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-activity i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: color-mix(in srgb, var(--workspace-muted) 55%, transparent); }
@@ -1361,21 +1394,13 @@
   .share-options span { width: 100%; overflow: hidden; font-size: 9px; font-weight: 700; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
   .share-options i { position: absolute; top: 4px; right: 4px; width: 11px; height: 11px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 50%; color: transparent; font: 800 7px var(--lume-font-ui, Inter, sans-serif); font-style: normal; }
   .share-options button.active i { color: #fff; border-color: var(--workspace-accent); background: var(--workspace-accent); }
-  .behavior-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .behavior-row { display: grid; grid-template-columns: 1fr; gap: 6px; }
   .transition-toggle { height: 38px; padding: 3px; display: flex; gap: 2px; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }
   .transition-toggle button { width: 30px; min-width: 30px; padding: 0; display: flex; align-items: center; justify-content: center; gap: 3px; overflow: hidden; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 9.5px; font-weight: 700; transition: width 180ms cubic-bezier(.2, .8, .2, 1), color 140ms ease, background 160ms ease, box-shadow 160ms ease; }
   .transition-toggle button svg { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
   .transition-toggle button span { max-width: 0; overflow: hidden; opacity: 0; transform: translateX(-3px); white-space: nowrap; transition: max-width 180ms cubic-bezier(.2, .8, .2, 1), opacity 120ms ease, transform 180ms ease; }
   .transition-toggle button.active { width: calc(100% - 32px); color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 2px 6px rgba(20, 38, 30, .12); }
   .transition-toggle button.active span { max-width: 52px; opacity: 1; transform: translateX(0); }
-  .approval { height: 38px; padding: 0 9px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-muted); background: var(--workspace-subtle); }
-  .approval svg { width: 15px; height: 15px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-  .approval span { min-width: 0; flex: 1; overflow: hidden; font-size: 10px; font-weight: 700; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-  .approval > i { width: 23px; height: 13px; padding: 2px; box-sizing: border-box; flex: 0 0 auto; border-radius: 7px; background: color-mix(in srgb, var(--workspace-muted) 40%, transparent); transition: background 140ms ease; }
-  .approval > i::before { width: 9px; height: 9px; display: block; border-radius: 50%; content: ""; background: #fff; transition: transform 140ms ease; }
-  .approval.active { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 40%, var(--workspace-line)); background: var(--workspace-accent-soft); }
-  .approval.active > i { background: var(--workspace-accent); }
-  .approval.active > i::before { transform: translateX(10px); }
   .instruction-toggle { height: 32px; padding: 0 7px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 10.5px; font-weight: 700; }
   .instruction-toggle:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .instruction-toggle span { min-width: 0; flex: 1; text-align: left; }
@@ -1388,7 +1413,7 @@
   .edge-popover.compact .share-options { gap: 4px; }
   .edge-popover.compact .share-options button { height: 40px; gap: 2px; }
   .edge-popover.compact .share-options button > svg { width: 15px; height: 15px; }
-  .edge-popover.compact .transition-toggle, .edge-popover.compact .approval { height: 32px; }
+  .edge-popover.compact .transition-toggle { height: 32px; }
   .edge-popover.compact .instruction-toggle { height: 28px; }
   .edge-popover.compact .bridge textarea { min-height: 46px; }
   .bridge textarea { box-sizing: border-box; width: 100%; min-width: 0; min-height: 56px; padding: 8px 9px; resize: none; border: 1px solid var(--workspace-line); border-radius: 9px; outline: none; color: var(--workspace-strong); background: var(--workspace-subtle); font: 10.5px/1.45 inherit; caret-color: var(--workspace-accent); }
@@ -1525,7 +1550,7 @@
     .board-navigation { right: 12px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .card-attention, .card-activity.live i, .board-card.working, .live .pipe-core { animation: none; }
+    .card-attention, .card-activity.live i, .board-card.working, .live .pipe-core, .trail-item, .trail-item.running .trail-icon { animation: none; }
     .board-card, .card-port i, .card-role-fab, .role-tooltip, .pipe-wall, .run-track i, .board-navigation button { transition: none; }
     .pipe-energy, .pipe-energy-glow, .card-status i { animation: none !important; }
     .pipe-energy, .pipe-energy-glow { stroke-dasharray: 2 24; opacity: .55; }

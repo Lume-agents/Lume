@@ -79,8 +79,12 @@ Automation. Esse consentimento é específico do lançamento pelo Terminal.app.
 - [ ] Repetir com Dock embaixo, à esquerda e à direita; testar ocultação automática.
 - [ ] Repetir em dois monitores, com escala diferente e posições negativas.
 - [ ] Confirmar que o Orb e os mini terminais respeitam a área útil do monitor.
-- [ ] Entrar/sair do fullscreen nativo de outro app e trocar Spaces com `show_over_fullscreen` desligado.
-- [ ] Repetir com `show_over_fullscreen` ligado e conferir a sobreposição esperada.
+- [ ] Trocar entre Spaces normais: Orb, mini terminais e conectores acompanham; a janela de Workspace não.
+- [ ] Entrar/sair do fullscreen nativo de outro app com `show_over_fullscreen` desligado: o Orb não aparece no Space do app.
+- [ ] Fullscreen não nativo (Keynote "Reproduzir" e um player com fullscreen não nativo) com
+      `show_over_fullscreen` desligado: o Orb recua em até ~1 s e volta ao sair.
+- [ ] Repetir os dois tipos de fullscreen com `show_over_fullscreen` ligado: o Orb aparece por cima.
+- [ ] Alternar `show_over_fullscreen` com Orb, terminais e conectores abertos: todos atualizam sem reiniciar.
 - [ ] Abrir diálogo de arquivo e confirmar restauração da ordem das janelas ao fechar.
 - [ ] Observar renderização após vários encaixes, sem rastros, cortes ou saltos.
 
@@ -88,6 +92,12 @@ A detecção usa `currentSystemPresentationOptions` no thread principal. A área
 útil vem de `NSScreen.visibleFrame` por meio do Tauri. O comportamento em Spaces
 e Stage Manager depende da validação nativa; não presumir que `always_on_top`
 garanta presença em todos os Spaces.
+
+A posição inicial do Orb (12 px do topo do monitor, perto da menu bar e do notch)
+é intencional. Registrar o resultado também como comentário na #9.
+
+**Hiato de testes:** a validação da #9 é feita somente no macOS 27. Não há
+validação do macOS 15.0 (mínimo suportado) até o 26 (Tahoe).
 
 ## Identidade dos processos (#10)
 

@@ -798,6 +798,11 @@ impl TerminalWindows {
         emit_windows_changed(app);
         let layered =
             overlay::configure_workflow_editor(&window, Some(&monitor_id), bridge_x, bridge_y);
+        let show_over_fullscreen = app
+            .try_state::<crate::state::AppState>()
+            .and_then(|state| state.preferences().ok())
+            .is_some_and(|preferences| preferences.show_over_fullscreen);
+        overlay::apply_spaces_behavior(&window, show_over_fullscreen);
         if layered {
             let _ = overlay::resize_surface(&window, bridge_width, bridge_height);
         } else {
@@ -1217,6 +1222,7 @@ impl TerminalWindows {
             x,
             y,
         );
+        overlay::apply_spaces_behavior(&window, show_over_fullscreen);
         if !layered {
             overlay::move_to(&window, x, y, Some(&resolved_monitor_id))?;
         } else {

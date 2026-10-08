@@ -1757,6 +1757,7 @@ fn set_preferences(
         return Err(error);
     }
     if overlay_configuration_changed {
+        overlay::apply_spaces_behavior_to_all(&app, preferences.show_over_fullscreen);
         let Some(window) = app.get_webview_window("main") else {
             return Ok(());
         };
@@ -2825,6 +2826,7 @@ pub fn run() {
                     preferences.overlay_x,
                     preferences.overlay_y,
                 );
+                overlay::apply_spaces_behavior(&window, preferences.show_over_fullscreen);
                 if !configured {
                     if let Ok((default_x, default_y)) =
                         overlay::default_position(&window, preferences.monitor_id.as_deref())

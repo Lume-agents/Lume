@@ -11,6 +11,7 @@ export type SlashCommandAction =
   | "fullscreen"
   | "zoom-in"
   | "zoom-out"
+  | "clear"
   | "close";
 
 /** A command as the agent itself reports it (see src-tauri/src/agent_commands.rs). */
@@ -32,6 +33,12 @@ export type SlashCommand = {
   action?: SlashCommandAction;
 };
 
+/**
+ * Agents differ on what these do: Claude's `/clear` swaps the conversation under a new session id and
+ * answers nothing, and Codex has no such command, so Lume starts the fresh conversation itself.
+ */
+const clearAliases = ["clear", "new", "reset"];
+
 /** Lume owns model selection for these agents, so `/model` opens Lume's picker. */
 const lumeModelAgents: AgentKind[] = ["codex", "claude_code", "opencode", "antigravity"];
 
@@ -42,6 +49,7 @@ export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKi
   const reported = commands
     .filter((command) => !(lumeModel && command.prefix === "/" && command.name === "model"))
     .filter((command) => !(lumePlan && command.prefix === "/" && command.name === "plan"))
+    .filter((command) => !(command.prefix === "/" && clearAliases.includes(command.name)))
     .map((command): SlashCommand => ({
       name: command.name,
       description: command.description,
@@ -59,6 +67,13 @@ export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKi
       action: "model",
     });
   }
+  owned.push({
+    name: "clear",
+    description: "Start a new conversation in this pane",
+    source: "lume",
+    prefix: "/",
+    action: "clear",
+  });
   if (lumePlan) {
     owned.push({ name: "plan", description: "Switch Plan mode on or off", source: "lume", prefix: "/", action: "plan" });
   }
@@ -95,7 +110,11 @@ export function slashCommandText(command: SlashCommand): string {
 
 export function findSlashCommand(commands: SlashCommand[], prompt: string): SlashCommand | undefined {
   const value = prompt.trim().toLowerCase();
-  return commands.find((command) => `${command.prefix}${command.name}`.toLowerCase() === value);
+  const exact = commands.find((command) => `${command.prefix}${command.name}`.toLowerCase() === value);
+  if (exact) return exact;
+  return clearAliases.some((alias) => value === `/${alias}`)
+    ? commands.find((command) => command.action === "clear")
+    : undefined;
 }
 
 const requests = new Map<string, Promise<AgentSlashCommand[]>>();

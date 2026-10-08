@@ -27,20 +27,38 @@ test("the menu lists what the agent reported, with /model owned by Lume", () => 
   const commands = agentSlashCommands(claudeReported, "claude_code");
   assert.deepEqual(commands.map((command) => [command.source, command.name]), [
     ["lume", "model"],
+    ["lume", "clear"],
     ["agent", "compact"],
     ["agent", "code-review"],
   ]);
   assert.equal(findSlashCommand(commands, "/model").action, "model");
   assert.equal(findSlashCommand(commands, "/code-review").argumentHint, "[low|high]");
   const antigravity = agentSlashCommands([], "antigravity");
-  assert.deepEqual(antigravity.map((command) => [command.source, command.name]), [["lume", "model"]]);
+  assert.deepEqual(antigravity.map((command) => [command.source, command.name]), [["lume", "model"], ["lume", "clear"]]);
   assert.equal(antigravity[0].description, "Choose the model and permissions");
   const reportedByAntigravity = agentSlashCommands(claudeReported, "antigravity");
   assert.deepEqual(reportedByAntigravity.map((command) => [command.source, command.name]), [
     ["lume", "model"],
+    ["lume", "clear"],
     ["agent", "compact"],
     ["agent", "code-review"],
   ]);
+});
+
+test("/clear starts a new conversation instead of being sent, whatever the agent reports", () => {
+  const reported = [
+    ...claudeReported,
+    { name: "clear", description: "Clear conversation history", argumentHint: null, prefix: "/", kind: "command" },
+    { name: "reset", description: "Alias of clear", argumentHint: null, prefix: "/", kind: "command" },
+  ];
+  for (const agent of ["claude_code", "codex", "opencode", "antigravity"]) {
+    const commands = agentSlashCommands(reported, agent);
+    assert.equal(commands.filter((command) => command.name === "clear").length, 1);
+    assert.equal(findSlashCommand(commands, "/clear").action, "clear");
+    assert.equal(findSlashCommand(commands, "/new").action, "clear");
+    assert.equal(findSlashCommand(commands, "/reset").action, "clear");
+    assert.equal(commands.some((command) => command.name === "reset"), false);
+  }
 });
 
 test("slash browses everything and dollar narrows to Codex skills", () => {
@@ -49,7 +67,7 @@ test("slash browses everything and dollar narrows to Codex skills", () => {
     "codex",
   );
   assert.deepEqual(filterSlashCommands(commands, null), []);
-  assert.equal(filterSlashCommands(commands, slashCommandQuery("/")).length, 3, "model and plan are Lume's, plus the skill");
+  assert.equal(filterSlashCommands(commands, slashCommandQuery("/")).length, 4, "model, clear and plan are Lume's, plus the skill");
   assert.deepEqual(
     filterSlashCommands(commands, slashCommandQuery("$")).map((command) => command.name),
     ["lint"],

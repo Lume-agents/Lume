@@ -109,6 +109,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     onOpenReview,
     onOpenRepository,
     onFork,
+    onNewConversation,
     onToggleMaximize,
     onDismissExternalWriterConflict,
     onResolveExternalWriterConflict,
@@ -126,6 +127,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     onOpenReview?: (path: string) => void;
     onOpenRepository?: () => void;
     onFork?: (threadId: string) => void | Promise<void>;
+    onNewConversation?: () => void | Promise<void>;
     onToggleMaximize?: () => void;
     onDismissExternalWriterConflict?: (conflict: ExternalWriterConflict) => void;
     onResolveExternalWriterConflict?: (action: "keep_lume" | "open_branch") => void | Promise<void>;
@@ -1419,6 +1421,13 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       case "zoom-out":
         setTextZoom(textZoom - 0.1);
         break;
+      case "clear":
+        if (!onNewConversation) return false;
+        prompt = "";
+        slashMenuDismissed = false;
+        try { await onNewConversation(); }
+        catch (error) { sendError = error instanceof Error ? error.message : String(error); }
+        return true;
       case "close":
         onClose?.();
         break;

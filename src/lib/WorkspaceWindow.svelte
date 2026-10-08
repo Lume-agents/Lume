@@ -382,7 +382,7 @@
     headerControl = control;
   }
   let launchError = $state("");
-  let pendingOpenedSession: { nativeId?: string; agent: string; knownIds: Set<string>; startedAt: number } | null = null;
+  let pendingOpenedSession: { nativeId?: string; agent: string; knownIds: Set<string>; startedAt: number; replacePaneId?: string } | null = null;
   let namedLayoutRestored = false;
   let workbenchElement = $state<HTMLElement | null>(null);
   let workspaceDropGeometry: WorkspaceDropGeometry | null = null;
@@ -1009,6 +1009,26 @@
     if (!automation) return error;
     automationRequired = true;
     return new Error(automation);
+  }
+
+  /** `/clear`: a fresh conversation of the same agent and project takes the place of this pane. */
+  async function startNewConversation(source: HubSession) {
+    const workingDirectory = source.workingDirectory?.trim();
+    if (!workingDirectory) throw new Error(tr("This session has no project folder to start from.", "Esta sessão não tem uma pasta de projeto para começar."));
+    const agent = (source.agent === "claude_code" ? "claude" : source.agent) as IntegrationStatus["kind"];
+    const profile = preferences.projectProfiles[projectKey(workingDirectory)];
+    pendingOpenedSession = {
+      agent: source.agent,
+      knownIds: new Set(sessions.map((session) => session.id)),
+      startedAt: Date.now(),
+      replacePaneId: source.id,
+    };
+    try {
+      await launchAgentSession(agent, workingDirectory, false, undefined, profile?.launchTarget ?? preferences.launchTarget, profile?.permissionMode, profile?.approvalPolicy);
+    } catch (error) {
+      pendingOpenedSession = null;
+      throw flagAutomationError(error);
+    }
   }
 
   async function openForkedCodexSession(threadId: string, source: HubSession) {
@@ -2340,7 +2360,14 @@
             ));
             if (opened) {
               projectFilter = "all";
-              if (!hadOpenPane) {
+              if (pending.replacePaneId && [primaryId, secondaryId, tertiaryId].includes(pending.replacePaneId)) {
+                if (primaryId === pending.replacePaneId) primaryId = opened.id;
+                else if (secondaryId === pending.replacePaneId) secondaryId = opened.id;
+                else tertiaryId = opened.id;
+                if (focusedPaneId === pending.replacePaneId) focusedPaneId = opened.id;
+                if (maximizedPaneId === pending.replacePaneId) maximizedPaneId = opened.id;
+                persistWorkspaceLayout();
+              } else if (!hadOpenPane) {
                 maximizedPaneId = null;
                 selectSession(opened);
               }
@@ -3253,6 +3280,7 @@
           maximized
           onFocus={() => focusPane(maximizedSession.id)}
           onFork={(threadId) => openForkedCodexSession(threadId, maximizedSession)}
+          onNewConversation={() => startNewConversation(maximizedSession)}
           onOpenReview={(path) => openReview(path, maximizedSession.id)}
           onOpenRepository={() => openRepository(maximizedSession.id)}
           onToggleMaximize={() => togglePaneMaximize(maximizedSession.id)}
@@ -3270,6 +3298,7 @@
           focused={focusedPaneId === primary.id}
           onFocus={() => focusPane(primary.id)}
           onFork={(threadId) => openForkedCodexSession(threadId, primary)}
+          onNewConversation={() => startNewConversation(primary)}
           onOpenReview={(path) => openReview(path, primary.id)}
           onOpenRepository={() => openRepository(primary.id)}
           onToggleMaximize={() => togglePaneMaximize(primary.id)}
@@ -3307,6 +3336,7 @@
             onClose={() => closeSidePane(secondary.id)}
             onFocus={() => focusPane(secondary.id)}
             onFork={(threadId) => openForkedCodexSession(threadId, secondary)}
+          onNewConversation={() => startNewConversation(secondary)}
           onOpenReview={(path) => openReview(path, secondary.id)}
           onOpenRepository={() => openRepository(secondary.id)}
             onToggleMaximize={() => togglePaneMaximize(secondary.id)}
@@ -3344,6 +3374,7 @@
               onClose={() => closeSidePane(tertiary.id)}
               onFocus={() => focusPane(tertiary.id)}
               onFork={(threadId) => openForkedCodexSession(threadId, tertiary)}
+          onNewConversation={() => startNewConversation(tertiary)}
               onOpenReview={(path) => openReview(path, tertiary.id)}
               onOpenRepository={() => openRepository(tertiary.id)}
               onToggleMaximize={() => togglePaneMaximize(tertiary.id)}

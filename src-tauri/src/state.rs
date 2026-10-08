@@ -74,6 +74,7 @@ pub struct AppState {
     resolved_external_writer_attempts: Arc<Mutex<HashSet<(u32, String)>>>,
     workspace_snapshots: Arc<Mutex<HashMap<String, WorkspaceSnapshot>>>,
     agent_rate_limits: Arc<Mutex<HashMap<AgentKind, Vec<AgentRateLimit>>>>,
+    agent_rate_limit_errors: Arc<Mutex<HashMap<AgentKind, String>>>,
     session_aliases: Arc<Mutex<HashMap<String, String>>>,
     archived_conversations: Arc<Mutex<HashMap<String, Vec<SessionActivity>>>>,
     session_model_overrides: Arc<Mutex<HashMap<(AgentKind, String), SessionModelOverride>>>,
@@ -159,6 +160,7 @@ impl AppState {
             resolved_external_writer_attempts: Arc::new(Mutex::new(HashSet::new())),
             workspace_snapshots: Arc::new(Mutex::new(HashMap::new())),
             agent_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            agent_rate_limit_errors: Arc::new(Mutex::new(HashMap::new())),
             session_aliases: Arc::new(Mutex::new(preferences.session_aliases)),
             archived_conversations: Arc::new(Mutex::new(HashMap::new())),
             session_model_overrides: Arc::new(Mutex::new(HashMap::new())),
@@ -1002,11 +1004,17 @@ impl AppState {
             .lock()
             .map_err(|_| "Não foi possível acessar os limites dos agentes".to_string())?
             .clone();
+        let agent_rate_limit_errors = self
+            .agent_rate_limit_errors
+            .lock()
+            .map_err(|_| "Não foi possível acessar os limites dos agentes".to_string())?
+            .clone();
         for session in &mut sessions {
             session.rate_limits = agent_rate_limits
                 .get(&session.agent)
                 .cloned()
                 .unwrap_or_default();
+            session.rate_limits_error = agent_rate_limit_errors.get(&session.agent).cloned();
         }
         let mut deduplicated = Vec::<AgentSession>::new();
         for mut session in sessions {
@@ -1857,9 +1865,28 @@ impl AppState {
             .agent_rate_limits
             .lock()
             .map_err(|_| "Não foi possível atualizar os limites dos agentes".to_string())?;
+        let cleared = self
+            .agent_rate_limit_errors
+            .lock()
+            .map_err(|_| "Não foi possível atualizar os limites dos agentes".to_string())?
+            .remove(&agent)
+            .is_some();
         let changed = current.get(&agent) != Some(&limits);
         current.insert(agent, limits);
-        Ok(changed)
+        Ok(changed || cleared)
+    }
+
+    /// Remembers why the limits could not be read; the last known limits stay.
+    pub fn set_agent_rate_limits_error(
+        &self,
+        agent: AgentKind,
+        error: String,
+    ) -> Result<bool, String> {
+        let mut current = self
+            .agent_rate_limit_errors
+            .lock()
+            .map_err(|_| "Não foi possível atualizar os limites dos agentes".to_string())?;
+        Ok(current.insert(agent, error.clone()).as_ref() != Some(&error))
     }
 
     pub fn record_codex_turn_token_usage(
@@ -3577,6 +3604,7 @@ impl AppState {
                     .cloned()
                     .unwrap_or_default(),
                 rate_limits: Vec::new(),
+                rate_limits_error: None,
                 prompt_token_usage: Vec::new(),
                 forked_from: None,
             };
@@ -3723,6 +3751,7 @@ fn session_from_event(event: &HookEvent, now: i64) -> AgentSession {
         results: Vec::new(),
         activities: Vec::new(),
         rate_limits: Vec::new(),
+        rate_limits_error: None,
         prompt_token_usage: Vec::new(),
         forked_from: None,
     }
@@ -5803,6 +5832,43 @@ mod tests {
                 .expect("reconciliação final");
         }
         assert!(state.sessions().expect("sessões").is_empty());
+    }
+
+    #[test]
+    fn usage_errors_reach_the_agent_sessions_until_limits_arrive() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut event = started_event("claude:usage", 4242);
+        event.agent = AgentKind::ClaudeCode;
+        state.ingest(event).expect("session");
+        let error = || state.sessions().expect("sessions")[0].rate_limits_error.clone();
+        assert_eq!(error(), None);
+
+        assert!(state
+            .set_agent_rate_limits_error(AgentKind::ClaudeCode, "Sign in".into())
+            .expect("error"));
+        assert!(!state
+            .set_agent_rate_limits_error(AgentKind::ClaudeCode, "Sign in".into())
+            .expect("same error"));
+        assert_eq!(error().as_deref(), Some("Sign in"));
+        // Another agent's failure leaves this one's error alone.
+        state
+            .set_agent_rate_limits_error(AgentKind::Codex, "other".into())
+            .expect("other agent");
+        assert_eq!(error().as_deref(), Some("Sign in"));
+
+        let limit = AgentRateLimit {
+            id: "claude:session".into(),
+            label: "5h".into(),
+            used_percent: 10,
+            resets_at: None,
+            window_minutes: Some(300),
+        };
+        assert!(state
+            .set_agent_rate_limits(AgentKind::ClaudeCode, vec![limit])
+            .expect("limits"));
+        let session = state.sessions().expect("sessions").remove(0);
+        assert_eq!(session.rate_limits.len(), 1);
+        assert_eq!(session.rate_limits_error, None);
     }
 
     #[test]

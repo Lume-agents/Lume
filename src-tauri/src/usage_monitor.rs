@@ -70,6 +70,20 @@ pub fn publish(
     Ok(changed)
 }
 
+/// Shows why the limits could not be read instead of leaving the gauges empty.
+pub fn publish_error(
+    app: &AppHandle,
+    state: &AppState,
+    agent: AgentKind,
+    error: String,
+) -> Result<bool, String> {
+    let changed = state.set_agent_rate_limits_error(agent, error)?;
+    if changed {
+        protocol::emit_sessions_changed(app);
+    }
+    Ok(changed)
+}
+
 struct UsageAlert {
     agent: AgentKind,
     window: String,

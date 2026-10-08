@@ -99,6 +99,8 @@ export interface AgentSession {
   results: SessionResult[];
   activities: SessionActivity[];
   rateLimits?: AgentRateLimit[];
+  /** Why the last refresh could not read the agent's account limits. */
+  rateLimitsError?: string;
   promptTokenUsage?: PromptTokenUsage[];
   /** Native id of the conversation this one was forked from. */
   forkedFrom?: string;

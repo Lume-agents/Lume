@@ -1690,6 +1690,7 @@ mod tests {
             results: Vec::new(),
             activities: Vec::new(),
             rate_limits: Vec::new(),
+            rate_limits_error: None,
             prompt_token_usage: Vec::new(),
             forked_from: None,
         }

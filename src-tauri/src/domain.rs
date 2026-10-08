@@ -341,6 +341,9 @@ pub struct AgentSession {
     pub activities: Vec<SessionActivity>,
     #[serde(default)]
     pub rate_limits: Vec<AgentRateLimit>,
+    /// Why the last refresh could not read the agent's account limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits_error: Option<String>,
     #[serde(default)]
     pub prompt_token_usage: Vec<PromptTokenUsage>,
     /// Native id of the conversation this one was forked from.

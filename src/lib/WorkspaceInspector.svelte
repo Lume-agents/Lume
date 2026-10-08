@@ -117,6 +117,8 @@
   // The first read of a session's limits is the only wait worth showing; later refreshes keep the last values.
   const usageLoading = $derived(Boolean(session && hasUsage(session.agent) && usagePendingKey !== usageSettledKey && !session.rateLimits?.length));
   const usageGroups = $derived(usageGaugeGroups(session?.rateLimits ?? [], language));
+  // Say why the last refresh failed, so empty or stale gauges are not mistaken for current usage.
+  const usageError = $derived(usageLoading ? "" : session?.rateLimitsError ?? "");
   const usagePlaceholders = $derived(session ? expectedUsageLimitCount(session.agent) : 0);
   const usageStacked = $derived(session ? stacksUsageGauges(session.agent, session.rateLimits?.length ?? 0) : false);
   const automaticAccess = $derived(session?.permissionProfile.mode !== "full_access" && ["auto_review", "approve_for_me"].includes(session?.permissionProfile.approvalsReviewer?.replaceAll("-", "_") ?? ""));
@@ -293,6 +295,9 @@
             </svg>
             <small>{usageLoading && !tokenSamples.length ? tr("Loading…", "Carregando…") : tr("Time →", "Tempo →")}</small>
           </div>
+          {#if usageError}
+            <p class="usage-error" role="status"><strong>{tr("Usage unavailable", "Uso indisponível")}</strong> {usageError}</p>
+          {/if}
         </section>
       {/if}
 
@@ -429,6 +434,7 @@
   .gauge-progress { stroke: var(--usage-color); stroke-width: 5.5; transition: stroke-dasharray 360ms cubic-bezier(.16, 1, .3, 1); }
   .usage-gauge strong { position: absolute; right: 0; bottom: 3px; left: 0; color: var(--workspace-strong); font-size: 15px; font-variant-numeric: tabular-nums; line-height: 1; text-align: center; }
   .usage-gauge em { position: absolute; top: 1px; right: 2px; max-width: 45%; overflow: hidden; color: var(--workspace-strong); font-size: 10px; font-style: normal; font-weight: 780; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+  .usage-error { grid-column: 1 / -1; margin: 0; color: var(--workspace-muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }.usage-error strong { color: var(--workspace-strong); font-weight: 720; }
   .usage-gauges > i { width: 56px; min-width: 0; flex: 0 1 56px; height: 30px; border: 5px solid var(--workspace-line); border-bottom: 0; border-radius: 32px 32px 0 0; opacity: .5; }
   .usage-gauges.loading > i { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
   .token-chart { min-width: 0; display: grid; grid-template-rows: auto 48px auto; gap: 3px; }.token-chart > span, .token-chart > small { color: var(--workspace-muted); font-size: 10px; font-weight: 720; line-height: 1.2; }.token-chart > small { color: var(--workspace-faint); text-align: right; }.token-graph { width: 100%; min-width: 0; height: 48px; overflow: visible; }.token-graph .graph-grid { fill: none; stroke: color-mix(in srgb, var(--workspace-line) 54%, transparent); stroke-width: .7; }.token-graph polygon { fill: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }.token-graph polyline { fill: none; stroke: var(--workspace-accent); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }.token-graph.empty polyline { stroke: var(--workspace-line); stroke-dasharray: 3 4; }.token-graph circle { fill: var(--workspace-raised); stroke: var(--workspace-accent); stroke-width: 1.3; }

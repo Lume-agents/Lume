@@ -931,11 +931,24 @@ fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
         return;
     }
     std::thread::spawn(move || {
-        let working_directory = std::env::temp_dir().to_string_lossy().into_owned();
-        if let Ok(limits) = claude_control::usage(&working_directory) {
-            let _ = usage_monitor::publish(&app, &state, AgentKind::ClaudeCode, limits);
+        // Released even if the probe panics, so later refreshes are not skipped forever.
+        struct Release;
+        impl Drop for Release {
+            fn drop(&mut self) {
+                REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
         }
-        REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _release = Release;
+        let working_directory = std::env::temp_dir().to_string_lossy().into_owned();
+        match claude_control::usage(&working_directory) {
+            Ok(limits) => {
+                let _ = usage_monitor::publish(&app, &state, AgentKind::ClaudeCode, limits);
+            }
+            Err(error) => {
+                eprintln!("Claude Code usage: {error}");
+                let _ = usage_monitor::publish_error(&app, &state, AgentKind::ClaudeCode, error);
+            }
+        }
     });
 }
 

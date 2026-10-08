@@ -2,6 +2,7 @@
   import { dev } from "$app/environment";
   import { onMount, setContext, tick } from "svelte";
   import { flip } from "svelte/animate";
+  import { groupSessions, readSidebarGroups, sidebarGroupsKey, writeSidebarGroups, type SidebarGroupState } from "$lib/sidebarGroups";
   import { cubicOut } from "svelte/easing";
   import { fade, fly, slide } from "svelte/transition";
   import { getVersion } from "@tauri-apps/api/app";
@@ -206,6 +207,20 @@
     detail: "Verificando…",
   });
   let selectedId = $state<string | null>(null);
+  // The Workspace's agent groups, shown here too. They are kept in localStorage, shared by both windows.
+  let sidebarGroupState = $state<SidebarGroupState>({ groups: [], assignments: {}, order: [] });
+  const orbSections = $derived(groupSessions(visibleAgentSessions, sidebarGroupState));
+  function toggleOrbGroup(id: string) {
+    sidebarGroupState = readSidebarGroups();
+    sidebarGroupState = { ...sidebarGroupState, groups: sidebarGroupState.groups.map((group) => group.id === id ? { ...group, collapsed: !group.collapsed } : group) };
+    writeSidebarGroups(sidebarGroupState);
+  }
+  $effect(() => {
+    sidebarGroupState = readSidebarGroups();
+    const sync = (event: StorageEvent) => { if (event.key === sidebarGroupsKey || event.key === null) sidebarGroupState = readSidebarGroups(); };
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  });
   let inspectorSessionId = $state<string | null>(null);
   let orbInspectorSection = $state<"session" | "repository">("session");
   let permissionError = $state<string | null>(null);
@@ -3343,7 +3358,16 @@
         {#if view === "sessions"}
           <div class="session-list" use:revealScrollbarWhileScrolling>
             {#if visibleAgentSessions.length}
-              {#each visibleAgentSessions as session (session.id)}
+              {#each orbSections as section (section.key)}
+              {#if section.group || orbSections.length > 1}
+                <button class:collapsed={section.group?.collapsed} class="orb-group-heading" type="button" disabled={!section.group} aria-expanded={section.group ? !section.group.collapsed : undefined} onclick={() => section.group && toggleOrbGroup(section.group.id)}>
+                  {#if section.group}<span class="orb-group-chevron"><svg viewBox="0 0 20 20" width="11" height="11" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg></span>{/if}
+                  <strong>{section.group?.name ?? tr("No group", "Sem grupo")}</strong><small>{section.sessions.length}</small>
+                </button>
+              {/if}
+              {#if !section.group?.collapsed}
+              <div class="orb-group-body" transition:slide={{ duration: 180 }}>
+              {#each section.sessions as session (session.id)}
                 {@const visibleLastResponse = stripInternalAgentMetadata(session.lastResponse)}
                 <article
                   animate:flip={{ duration: 220 }}
@@ -3638,6 +3662,9 @@
                     </div>
                   {/if}
                 </article>
+              {/each}
+              </div>
+              {/if}
               {/each}
             {:else}
               <div class="empty-state" transition:fade>
@@ -4802,6 +4829,15 @@
   .terminal-picker::-webkit-scrollbar-thumb { border-radius: 999px; background: #cad2ce; }
 
   .session-list { padding: 5px 14px 8px; }
+  .orb-group-heading { width: 100%; margin: 8px 0 2px; padding: 3px 4px; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 8px; color: #73807a; background: transparent; font: inherit; font-size: 10px; text-align: left; cursor: pointer; }
+  .orb-group-heading:disabled { cursor: default; }
+  .orb-group-heading:not(:disabled):hover { background: rgba(76, 104, 92, 0.07); }
+  .orb-group-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 720; letter-spacing: .02em; }
+  .orb-group-heading small { margin-left: auto; font-size: 9px; font-variant-numeric: tabular-nums; }
+  .orb-group-chevron { display: grid; transition: transform 160ms ease; }
+  .orb-group-heading.collapsed .orb-group-chevron { transform: rotate(-90deg); }
+  .orb-group-chevron svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .orb-group-body { overflow: hidden; }
   .session-list:not(.is-scrolling),
   .terminal-picker:not(.is-scrolling) { scrollbar-color: transparent transparent; }
   .session-list::-webkit-scrollbar-thumb,

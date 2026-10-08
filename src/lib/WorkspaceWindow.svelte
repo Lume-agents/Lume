@@ -575,6 +575,18 @@
   let sidebarGroups = $state<SidebarGroup[]>([]);
   let groupAssignments = $state<Record<string, string>>({});
   let groupDropTarget = $state<string | null>(null);
+  // Sections (the groups and the "No group" list) can be dragged into any order.
+  let sectionOrder = $state<string[]>([]);
+  let draggingSectionId = $state<string | null>(null);
+  let reorderTarget = $state<{ id: string; after: boolean } | null>(null);
+  const orderedSections = $derived.by(() => {
+    const valid = new Set(["none", ...sidebarGroups.map((group) => group.id)]);
+    const order = sectionOrder.filter((id) => valid.has(id));
+    const missing = sidebarGroups.map((group) => group.id).filter((id) => !order.includes(id));
+    const next = [...order, ...missing];
+    if (!next.includes("none")) next.unshift("none");
+    return next;
+  });
   let renamingGroupId = $state<string | null>(null);
   let groupNameDraft = $state("");
   let confirmingGroupId = $state<string | null>(null);
@@ -588,10 +600,11 @@
         ? raw.groups.filter((group: SidebarGroup) => typeof group?.id === "string" && typeof group?.name === "string").map((group: SidebarGroup) => ({ id: group.id, name: group.name, collapsed: Boolean(group.collapsed) }))
         : [];
       groupAssignments = raw.assignments && typeof raw.assignments === "object" ? raw.assignments : {};
+      sectionOrder = Array.isArray(raw.order) ? raw.order.filter((id: unknown) => typeof id === "string") : [];
     } catch { /* Start without groups when the saved ones cannot be read. */ }
   }
   function saveSidebarGroups() {
-    try { localStorage.setItem(sidebarGroupsKey, JSON.stringify({ groups: sidebarGroups, assignments: groupAssignments })); }
+    try { localStorage.setItem(sidebarGroupsKey, JSON.stringify({ groups: sidebarGroups, assignments: groupAssignments, order: sectionOrder })); }
     catch { /* Groups still work for this run when storage is unavailable. */ }
   }
   function newSidebarGroup(): SidebarGroup {
@@ -637,6 +650,16 @@
     saveSidebarGroups();
   }
   function dragOverGroup(event: DragEvent, id: string) {
+    if (draggingSectionId) {
+      if (draggingSectionId === id) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      const after = event.clientY > rect.top + rect.height / 2;
+      if (reorderTarget?.id !== id || reorderTarget.after !== after) reorderTarget = { id, after };
+      return;
+    }
     if (!draggingSessionId) return;
     event.preventDefault();
     event.stopPropagation();
@@ -646,11 +669,34 @@
   function dropOnGroup(event: DragEvent, id: string | null) {
     event.preventDefault();
     event.stopPropagation();
+    if (draggingSectionId) {
+      const target = reorderTarget;
+      const moving = draggingSectionId;
+      draggingSectionId = null;
+      reorderTarget = null;
+      if (target && target.id !== moving) {
+        const order = orderedSections.filter((item) => item !== moving);
+        const at = order.indexOf(target.id) + (target.after ? 1 : 0);
+        order.splice(at, 0, moving);
+        sectionOrder = order;
+        saveSidebarGroups();
+      }
+      return;
+    }
     const session = sessions.find((item) => item.id === draggingSessionId);
     groupDropTarget = null;
     if (session) assignToGroup(session, id);
     finishSidebarSessionDrag();
   }
+  function beginSectionDrag(event: DragEvent, id: string) {
+    if ((event.target as HTMLElement | null)?.closest("input, .group-actions")) { event.preventDefault(); return; }
+    draggingSectionId = id;
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/x-lume-section", id);
+    }
+  }
+  function endSectionDrag() { draggingSectionId = null; reorderTarget = null; groupDropTarget = null; }
   function focusOnMount(node: HTMLInputElement) { node.focus(); node.select(); }
 
   const sidebarLayout = $derived.by(() => {
@@ -665,14 +711,18 @@
       const list = members.get(groupAssignments[sessionGroupKey(session)]);
       if (list) list.push(session); else loose.push(session);
     }
-    if (loose.length || (!filtering && draggingSessionId)) {
-      rows.push({ key: "group:none", kind: "header", group: null, count: loose.length });
-      loose.forEach(push);
-    }
-    for (const group of sidebarGroups) {
-      const list = members.get(group.id) ?? [];
-      if (filtering && !list.length) continue;
-      rows.push({ key: `group:${group.id}`, kind: "header", group, count: list.length });
+    for (const id of orderedSections) {
+      if (id === "none") {
+        if (loose.length || (!filtering && (draggingSessionId || draggingSectionId))) {
+          rows.push({ key: "group:none", kind: "header", group: null, count: loose.length });
+          loose.forEach(push);
+        }
+        continue;
+      }
+      const group = sidebarGroups.find((item) => item.id === id);
+      const list = members.get(id) ?? [];
+      if (!group || (filtering && !list.length)) continue;
+      rows.push({ key: `group:${id}`, kind: "header", group, count: list.length });
       if (!group.collapsed || filtering) list.forEach(push);
     }
     return { rows, visible };
@@ -2765,8 +2815,10 @@
       {:else if filteredSessions.length}
         {#each sidebarLayout.rows as row (row.key)}
           {#if row.kind === "header"}
-            <div class:drop-target={groupDropTarget === (row.group?.id ?? "none")} class:collapsed={row.group?.collapsed} class="group-heading" role="group" aria-label={row.group?.name ?? tr("No group", "Sem grupo")}
-              ondragenter={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragover={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragleave={() => (groupDropTarget = null)} ondrop={(event) => dropOnGroup(event, row.group?.id ?? null)}>
+            <div class:drop-target={groupDropTarget === (row.group?.id ?? "none")} class:collapsed={row.group?.collapsed} class:dragging-section={draggingSectionId === (row.group?.id ?? "none")} class:reorder-before={reorderTarget?.id === (row.group?.id ?? "none") && !reorderTarget.after} class:reorder-after={reorderTarget?.id === (row.group?.id ?? "none") && reorderTarget.after} class="group-heading" role="group" aria-label={row.group?.name ?? tr("No group", "Sem grupo")}
+              draggable={renamingGroupId === null} title={tr("Drag to reorder", "Arraste para reordenar")}
+              ondragstart={(event) => beginSectionDrag(event, row.group?.id ?? "none")} ondragend={endSectionDrag}
+              ondragenter={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragover={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragleave={() => { groupDropTarget = null; reorderTarget = null; }} ondrop={(event) => dropOnGroup(event, row.group?.id ?? null)}>
               {#if row.group}
                 {#if renamingGroupId === row.group.id}
                   <form class="group-rename" onsubmit={(event) => { event.preventDefault(); commitGroupRename(); }}>
@@ -3881,6 +3933,10 @@
   .new-group { margin: -3px 11px 8px; padding: 0 8px; height: 24px; display: flex; align-items: center; gap: 6px; border: 1px dashed var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 700; cursor: pointer; }
   .new-group:hover { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); }
   .group-heading { margin: 9px 0 3px; padding: 2px 4px 2px 2px; display: flex; align-items: center; gap: 4px; border-radius: 8px; color: var(--workspace-faint); transition: background 120ms ease; }
+  .group-heading { cursor: grab; }
+  .group-heading.dragging-section { opacity: .45; }
+  .group-heading.reorder-before { box-shadow: 0 -2px 0 var(--workspace-accent); }
+  .group-heading.reorder-after { box-shadow: 0 2px 0 var(--workspace-accent); }
   .group-heading.drop-target { background: var(--workspace-accent-soft); outline: 1px dashed var(--workspace-accent); }
   .group-toggle { min-width: 0; height: 24px; padding: 0 6px 0 2px; flex: 1; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font: inherit; text-align: left; cursor: pointer; }
   .group-toggle strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-strong); font-size: 10px; font-weight: 720; }

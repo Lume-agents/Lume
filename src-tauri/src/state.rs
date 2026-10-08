@@ -974,6 +974,7 @@ impl AppState {
                     .working_directory
                     .as_deref()
                     .is_some_and(crate::session_filters::is_codex_internal_workspace))
+                && !is_empty_scratch_session(session)
         });
         let aliases = self
             .session_aliases
@@ -3944,6 +3945,29 @@ fn visible_work_activity_ids(activities: &[SessionActivity]) -> HashSet<String> 
     ids
 }
 
+/// Helper conversations other tools start in a temp folder, or in the home folder with no
+/// terminal behind them (titles, probes, hook handshakes), never say anything. They are not
+/// listed unless Lume opened them. A live CLI in the home folder is a person's session.
+fn is_empty_scratch_session(session: &AgentSession) -> bool {
+    session.control_origin != SessionControlOrigin::Lume
+        && session
+            .working_directory
+            .as_deref()
+            .is_some_and(|directory| {
+                crate::session_filters::is_temp_workspace(directory)
+                    || (session.process_id.is_none()
+                        && crate::session_filters::is_home_workspace(directory))
+            })
+        && session.last_response.is_none()
+        && session.results.is_empty()
+        && !session.activities.iter().any(|activity| {
+            matches!(
+                activity.kind.as_str(),
+                "prompt" | "message" | "queued_prompt" | "codex_queued_prompt"
+            )
+        })
+}
+
 fn prune_transient_activities(activities: &mut Vec<SessionActivity>, limit: usize) {
     let recent_subagents = visible_subagent_ids(activities);
     let current_work = visible_work_activity_ids(activities);
@@ -5294,6 +5318,35 @@ mod tests {
         state.ingest(event).expect("evento interno ignorado");
 
         assert!(state.sessions().expect("sessões").is_empty());
+    }
+
+    #[test]
+    fn empty_helper_sessions_in_the_temp_folder_are_not_listed() {
+        let mut event = started_event("claude:helper", 4242);
+        event.agent = AgentKind::ClaudeCode;
+        event.working_directory = Some("/tmp".into());
+        let mut helper = session_from_event(&event, 1);
+        assert!(is_empty_scratch_session(&helper));
+        remember_activity(
+            &mut helper,
+            SessionActivity {
+                id: "prompt".into(),
+                kind: "prompt".into(),
+                title: "Prompt".into(),
+                detail: Some("hello".into()),
+                status: "completed".into(),
+                created_at: 2,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            },
+        );
+        assert!(
+            !is_empty_scratch_session(&helper),
+            "a conversation with content stays listed"
+        );
+        event.working_directory = Some("/home/user/Documents/Projetos/Lume".into());
+        assert!(!is_empty_scratch_session(&session_from_event(&event, 1)));
     }
 
     #[test]

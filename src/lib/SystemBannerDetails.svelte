@@ -59,7 +59,7 @@
   .copy { min-height: 30px; margin: 12px 0 0 auto; padding: 0 9px; color: var(--detail-accent); background: color-mix(in srgb, var(--detail-accent) 12%, transparent); font-size: 11px; font-weight: 650; }
   button:hover { background: color-mix(in srgb, var(--detail-accent) 15%, transparent); }
   button:focus-visible, textarea:focus-visible { outline: 2px solid var(--detail-accent); outline-offset: 2px; }
-  textarea { display: block; width: 100%; max-height: calc(100dvh - 150px); box-sizing: border-box; margin: 0; padding: 10px; resize: vertical; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 0; border-radius: 8px; background: color-mix(in srgb, var(--detail-text) 5%, transparent); color: inherit; font: 11px/1.65 ui-monospace, "SFMono-Regular", Consolas, monospace; user-select: text; scrollbar-width: thin; scrollbar-color: var(--detail-line) transparent; }
+  textarea { display: block; width: 100%; max-height: calc(100dvh - 150px); box-sizing: border-box; margin: 0; padding: 10px; resize: vertical; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 0; border-radius: 8px; background: color-mix(in srgb, var(--detail-text) 5%, transparent); color: inherit; font: 11px/1.65 var(--lume-font-code, ui-monospace, "SFMono-Regular", Consolas, monospace); user-select: text; scrollbar-width: thin; scrollbar-color: var(--detail-line) transparent; }
   textarea::-webkit-scrollbar { width: 6px; height: 6px; }
   textarea::-webkit-scrollbar-thumb { border-radius: 3px; background: var(--detail-line); }
 </style>

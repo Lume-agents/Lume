@@ -1,4 +1,5 @@
-/* Base palette for every Lume surface. Presets only set pigments; components consume roles. */
+/* Base palette for every Lume surface. Presets only set pigments; components consume roles.
+   A neutral base (see appearance.ts) overrides the surface pigments and the ink seeds inline. */
 :root {
   --lume-accent: #43b47d;
   --lume-accent-strong: #267a57;
@@ -18,16 +19,16 @@
   --lume-subtle-dark: color-mix(in srgb, var(--lume-accent) 6%, transparent);
   --lume-raised-light: color-mix(in srgb, var(--lume-surface-light) 92%, white);
   --lume-raised-dark: color-mix(in srgb, var(--lume-surface-dark) 88%, white);
-  --lume-ink-strong-light: color-mix(in srgb, var(--lume-canvas-dark) 88%, black);
-  --lume-ink-light: color-mix(in srgb, var(--lume-canvas-dark) 74%, #6b766f);
-  --lume-ink-muted-light: color-mix(in srgb, var(--lume-canvas-dark) 48%, #a0aba3);
-  --lume-ink-faint-light: color-mix(in srgb, var(--lume-canvas-dark) 35%, #aab6ad);
-  --lume-ink-strong-dark: color-mix(in srgb, var(--lume-surface-light) 92%, white);
-  --lume-ink-dark: color-mix(in srgb, var(--lume-surface-light) 78%, #8e9c94);
-  --lume-ink-muted-dark: color-mix(in srgb, var(--lume-surface-light) 53%, #6d7f73);
-  --lume-ink-faint-dark: color-mix(in srgb, var(--lume-surface-light) 30%, #51665a);
-  --lume-line-light: color-mix(in srgb, var(--lume-canvas-dark) 13%, transparent);
-  --lume-line-dark: color-mix(in srgb, var(--lume-surface-light) 11%, transparent);
+  --lume-ink-strong-light: color-mix(in srgb, var(--lume-ink-seed-light, var(--lume-canvas-dark)) 88%, black);
+  --lume-ink-light: color-mix(in srgb, var(--lume-ink-seed-light, var(--lume-canvas-dark)) 74%, #6b766f);
+  --lume-ink-muted-light: color-mix(in srgb, var(--lume-ink-seed-light, var(--lume-canvas-dark)) 48%, #a0aba3);
+  --lume-ink-faint-light: color-mix(in srgb, var(--lume-ink-seed-light, var(--lume-canvas-dark)) 35%, #aab6ad);
+  --lume-ink-strong-dark: color-mix(in srgb, var(--lume-ink-seed-dark, var(--lume-surface-light)) 92%, white);
+  --lume-ink-dark: color-mix(in srgb, var(--lume-ink-seed-dark, var(--lume-surface-light)) 78%, #8e9c94);
+  --lume-ink-muted-dark: color-mix(in srgb, var(--lume-ink-seed-dark, var(--lume-surface-light)) 53%, #6d7f73);
+  --lume-ink-faint-dark: color-mix(in srgb, var(--lume-ink-seed-dark, var(--lume-surface-light)) 30%, #51665a);
+  --lume-line-light: color-mix(in srgb, var(--lume-ink-seed-light, var(--lume-canvas-dark)) 13%, transparent);
+  --lume-line-dark: color-mix(in srgb, var(--lume-ink-seed-dark, var(--lume-surface-light)) 11%, transparent);
   --lume-message-light: color-mix(in srgb, var(--lume-surface-light) 96%, white);
   --lume-message-dark: color-mix(in srgb, var(--lume-surface-dark) 92%, var(--lume-sidebar-dark));
   --lume-code-light: color-mix(in srgb, var(--lume-sidebar-light) 70%, var(--lume-surface-light));
@@ -36,8 +37,8 @@
   --lume-user-dark: color-mix(in srgb, var(--lume-accent) 17%, var(--lume-surface-dark));
   --lume-user-line-light: color-mix(in srgb, var(--lume-accent-strong) 23%, transparent);
   --lume-user-line-dark: color-mix(in srgb, var(--lume-accent) 27%, transparent);
-  --lume-scroll-light: color-mix(in srgb, var(--lume-canvas-dark) 30%, var(--lume-sidebar-light));
-  --lume-scroll-dark: color-mix(in srgb, var(--lume-surface-light) 25%, var(--lume-sidebar-dark));
+  --lume-scroll-light: color-mix(in srgb, var(--lume-ink-seed-light, var(--lume-canvas-dark)) 30%, var(--lume-sidebar-light));
+  --lume-scroll-dark: color-mix(in srgb, var(--lume-ink-seed-dark, var(--lume-surface-light)) 25%, var(--lume-sidebar-dark));
 }
 
 [data-appearance="forest"] {

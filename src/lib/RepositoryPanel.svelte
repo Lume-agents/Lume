@@ -330,7 +330,7 @@
   .diff-code:global(.is-scrolling)::-webkit-scrollbar-thumb { background: var(--workspace-scroll-thumb); }
   .diff-line { min-width: max-content; display: grid; grid-template-columns: 26px 26px minmax(0, 1fr); white-space: pre; }
   .diff-line > code { padding: 0 10px 0 5px; }
-  .line-number { padding-inline: 3px; color: var(--workspace-muted); font: 9px ui-monospace, monospace; line-height: inherit; text-align: right; user-select: none; }
+  .line-number { padding-inline: 3px; color: var(--workspace-muted); font: 9px var(--lume-font-code, ui-monospace, monospace); line-height: inherit; text-align: right; user-select: none; }
   .diff-code .added { background: color-mix(in srgb, var(--workspace-accent) 10%, transparent); color: var(--workspace-accent); }
   .diff-code .removed { background: rgba(190, 81, 69, .1); color: #c36c60; }
   .diff-code .hunk { color: var(--workspace-muted); background: var(--workspace-subtle); }
@@ -345,7 +345,7 @@
   .commit-copy > strong { color: var(--workspace-text); font-size: 11px; font-weight: 500; line-height: 1.55; overflow-wrap: anywhere; }
   .commit-meta { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; color: var(--workspace-muted); font-size: 10px; }
   .commit-meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .commit-hash, .commit-meta code { padding: 1px 0; border: 0; background: transparent; color: var(--workspace-muted); font: 9px ui-monospace, monospace; }
+  .commit-hash, .commit-meta code { padding: 1px 0; border: 0; background: transparent; color: var(--workspace-muted); font: 9px var(--lume-font-code, ui-monospace, monospace); }
   .commit-hash:hover { color: var(--workspace-accent); }
   .github-items { margin-top: 4px; }
   .github-items > button { width: 100%; min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 13px 5px; border: 0; border-bottom: 1px solid var(--workspace-line); color: var(--workspace-muted); background: transparent; text-align: left; }

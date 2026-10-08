@@ -65,25 +65,25 @@
 
 <style>
   .git-chips { --git-tone: #cf673d; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-  .git-chip { box-sizing: border-box; max-width: 100%; min-height: 17px; padding: 1px 6px 1px 5px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid color-mix(in srgb, var(--git-tone) 22%, var(--workspace-line, rgba(65, 94, 80, .18))); border-radius: 999px; color: var(--workspace-strong, #52665c); background: color-mix(in srgb, var(--git-tone) 7%, transparent); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.25 "SFMono-Regular", Consolas, "Liberation Mono", monospace; white-space: nowrap; }
+  .git-chip { box-sizing: border-box; max-width: 100%; min-height: 17px; padding: 1px 6px 1px 5px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid color-mix(in srgb, var(--git-tone) 22%, var(--workspace-line, rgba(65, 94, 80, .18))); border-radius: 999px; color: var(--workspace-strong, #52665c); background: color-mix(in srgb, var(--git-tone) 7%, transparent); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.25 var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); white-space: nowrap; }
   .git-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .git-chip :global(.lume-icon) { flex: 0 0 auto; color: var(--git-tone); }
   .git-chip i { color: var(--workspace-faint, #89958f); font-style: normal; }
   .git-chip.place { color: var(--workspace-muted, #61736a); }
   .git-chip.branch { color: color-mix(in srgb, var(--git-tone) 70%, var(--workspace-strong, #52665c)); background: color-mix(in srgb, var(--git-tone) 11%, transparent); }
   .git-chip.hash { color: var(--workspace-muted, #61736a); }
-  .git-chip.subject { max-width: 26ch; padding-left: 6px; color: var(--workspace-muted, #61736a); font-family: Inter, sans-serif; }
+  .git-chip.subject { max-width: 26ch; padding-left: 6px; color: var(--workspace-muted, #61736a); font-family: var(--lume-font-ui, Inter, sans-serif); }
   .git-chip.sync { padding-left: 6px; gap: 5px; }
   .git-chip.sync b, .git-chip.stats b { font-weight: 700; font-variant-numeric: tabular-nums; }
   .git-chip.sync .added { color: #3f9b69; }
   .git-chip.sync .removed { color: #c0605b; }
-  .git-chip.clean { padding-left: 6px; color: #3f9b69; border-color: color-mix(in srgb, #3f9b69 32%, transparent); background: color-mix(in srgb, #3f9b69 9%, transparent); font-family: Inter, sans-serif; }
-  .git-chip.stats { gap: 5px; padding-left: 6px; color: var(--workspace-muted, #61736a); font-family: Inter, sans-serif; }
-  .git-chip.stats b { font: 700 inherit; font-family: "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
+  .git-chip.clean { padding-left: 6px; color: #3f9b69; border-color: color-mix(in srgb, #3f9b69 32%, transparent); background: color-mix(in srgb, #3f9b69 9%, transparent); font-family: var(--lume-font-ui, Inter, sans-serif); }
+  .git-chip.stats { gap: 5px; padding-left: 6px; color: var(--workspace-muted, #61736a); font-family: var(--lume-font-ui, Inter, sans-serif); }
+  .git-chip.stats b { font: 700 inherit; font-family: var(--lume-font-code, "SFMono-Regular", Consolas, monospace); font-variant-numeric: tabular-nums; }
   .git-chip.stats .added { color: #3f9b69; }
   .git-chip.stats .removed { color: #c0605b; }
-  .git-chip.caution { padding-left: 6px; border-color: color-mix(in srgb, #c78d35 38%, transparent); color: #a8741f; background: color-mix(in srgb, #c78d35 12%, transparent); font-family: Inter, sans-serif; }
-  .git-chip.result { padding-left: 6px; font-family: Inter, sans-serif; }
+  .git-chip.caution { padding-left: 6px; border-color: color-mix(in srgb, #c78d35 38%, transparent); color: #a8741f; background: color-mix(in srgb, #c78d35 12%, transparent); font-family: var(--lume-font-ui, Inter, sans-serif); }
+  .git-chip.result { padding-left: 6px; font-family: var(--lume-font-ui, Inter, sans-serif); }
   .git-chip.result.failed, .git-chip.result.conflict { border-color: color-mix(in srgb, #c45f5b 40%, transparent); color: #b45450; background: color-mix(in srgb, #c45f5b 11%, transparent); }
   .git-chip.result.noop { color: var(--workspace-muted, #61736a); background: transparent; }
   :global(.terminal-window.dark) .git-chips, :global(.workspace.dark) .git-chips { --git-tone: #e48a62; }

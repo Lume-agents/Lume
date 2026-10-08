@@ -142,8 +142,8 @@
   .resource-preview img { width: 100%; height: 100%; display: block; object-fit: cover; }
   .resource-preview svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .resource-name { min-width: 0; padding: 2px 0; display: grid; gap: 2px; text-align: left; }
-  .resource-name strong { min-width: 0; overflow: hidden; color: var(--workspace-strong, #4c6358); font: 700 var(--chat-small-font-size, 9px)/1.25 Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-  .resource-name small { overflow: hidden; color: var(--workspace-faint, #84958c); font: 600 var(--chat-tiny-font-size, 7px)/1.2 Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+  .resource-name strong { min-width: 0; overflow: hidden; color: var(--workspace-strong, #4c6358); font: 700 var(--chat-small-font-size, 9px)/1.25 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
+  .resource-name small { overflow: hidden; color: var(--workspace-faint, #84958c); font: 600 var(--chat-tiny-font-size, 7px)/1.2 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
   .resource-download { width: 28px; height: 28px; padding: 6px; display: grid; place-items: center; border-radius: 7px; color: var(--workspace-accent, var(--lume-accent-strong)); }
   .resource-download:hover:not(:disabled) { color: var(--workspace-accent, var(--lume-accent-strong)); background: var(--workspace-accent-soft, var(--lume-accent-soft-light)); }
   .resource-download:disabled { opacity: 0.45; cursor: wait; }

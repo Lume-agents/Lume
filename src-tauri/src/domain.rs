@@ -714,6 +714,14 @@ pub struct Preferences {
     pub appearance_theme: String,
     pub accent_color: Option<String>,
     pub accent_opacity: u8,
+    /// Neutral surface preset for dark mode ("theme" keeps the tinted theme surfaces).
+    pub dark_base: String,
+    /// Neutral surface preset for light mode ("theme" keeps the tinted theme surfaces).
+    pub light_base: String,
+    /// Interface font: "default", a bundled id, "system", or "custom:<id>".
+    pub ui_font: String,
+    /// Code and terminal font, with the same ids as the interface font.
+    pub code_font: String,
     pub workspace_background_color: Option<String>,
     pub workspace_background_opacity: u8,
     pub workspace_light_background_color: Option<String>,
@@ -753,6 +761,10 @@ impl Default for Preferences {
             appearance_theme: "lume".into(),
             accent_color: None,
             accent_opacity: 100,
+            dark_base: "theme".into(),
+            light_base: "theme".into(),
+            ui_font: "default".into(),
+            code_font: "default".into(),
             workspace_background_color: None,
             workspace_background_opacity: 96,
             workspace_light_background_color: None,

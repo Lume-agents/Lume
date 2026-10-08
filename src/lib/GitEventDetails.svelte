@@ -54,13 +54,13 @@
 <style>
   .git-details { --git-tone: #cf673d; min-width: 0; margin: 0 8px 8px 20px; display: grid; gap: 7px; }
   .git-sequence { margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 3px; list-style: none; }
-  .git-sequence li { display: flex; align-items: center; gap: 3px; color: var(--workspace-muted, #61736a); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.3 Inter, sans-serif; }
+  .git-sequence li { display: flex; align-items: center; gap: 3px; color: var(--workspace-muted, #61736a); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.3 var(--lume-font-ui, Inter, sans-serif); }
   .git-sequence li + li::before { color: var(--workspace-faint, #89958f); content: "›"; }
   .git-sequence li.headline { color: var(--git-tone); }
   dl { margin: 0; min-width: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; }
-  dt { color: var(--workspace-faint, #89958f); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.5 Inter, sans-serif; }
-  dd { min-width: 0; margin: 0; overflow: hidden; color: var(--workspace-strong, #52665c); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.5 "SFMono-Regular", Consolas, "Liberation Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
-  pre { min-width: 0; max-width: 100%; max-height: 180px; margin: 0; padding: 7px 8px; overflow: auto; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .12)); border-radius: 7px; color: var(--workspace-text, #4f6258); background: var(--workspace-pane, #eaf0ed); font: var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.5 "SFMono-Regular", Consolas, "Liberation Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+  dt { color: var(--workspace-faint, #89958f); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.5 var(--lume-font-ui, Inter, sans-serif); }
+  dd { min-width: 0; margin: 0; overflow: hidden; color: var(--workspace-strong, #52665c); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.5 var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); text-overflow: ellipsis; white-space: nowrap; }
+  pre { min-width: 0; max-width: 100%; max-height: 180px; margin: 0; padding: 7px 8px; overflow: auto; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .12)); border-radius: 7px; color: var(--workspace-text, #4f6258); background: var(--workspace-pane, #eaf0ed); font: var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.5 var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
   .git-command { border-left: 2px solid color-mix(in srgb, var(--git-tone) 55%, transparent); color: var(--workspace-strong, #52665c); }
   .git-command span { color: var(--git-tone); }
   :global(.terminal-window.dark) .git-details, :global(.workspace.dark) .git-details { --git-tone: #e48a62; }

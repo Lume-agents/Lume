@@ -1,0 +1,13 @@
+/* Fonts bundled with Lume (SIL Open Font License; see static/fonts/LICENSE-*.txt). Latin subset: it covers English and Portuguese. */
+@font-face { font-family: "Lume Inter"; font-style: normal; font-weight: 100 900; font-display: swap; src: url("/fonts/inter-latin-wght-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Source Serif"; font-style: normal; font-weight: 200 900; font-display: swap; src: url("/fonts/source-serif-4-latin-wght-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume JetBrains Mono"; font-style: normal; font-weight: 100 800; font-display: swap; src: url("/fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Fira Code"; font-style: normal; font-weight: 300 700; font-display: swap; src: url("/fonts/fira-code-latin-wght-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Plex Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/ibm-plex-sans-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Plex Sans"; font-style: normal; font-weight: 500; font-display: swap; src: url("/fonts/ibm-plex-sans-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Plex Sans"; font-style: normal; font-weight: 600; font-display: swap; src: url("/fonts/ibm-plex-sans-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Plex Sans"; font-style: normal; font-weight: 700; font-display: swap; src: url("/fonts/ibm-plex-sans-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Plex Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Plex Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("/fonts/ibm-plex-mono-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Plex Mono"; font-style: normal; font-weight: 600; font-display: swap; src: url("/fonts/ibm-plex-mono-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Lume Plex Mono"; font-style: normal; font-weight: 700; font-display: swap; src: url("/fonts/ibm-plex-mono-latin-700-normal.woff2") format("woff2"); }

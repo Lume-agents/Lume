@@ -566,7 +566,7 @@
   .subagent-file summary small { color: var(--workspace-muted); font-size: 8px; white-space: nowrap; }
   .subagent-file summary :global(.lume-icon) { transition: transform 160ms ease; }
   .subagent-file[open] summary :global(.lume-icon) { transform: rotate(180deg); }
-  .subagent-diff { max-height: 230px; margin: 1px 0 8px 6px; overflow: auto; border-radius: 6px; background: var(--workspace-subtle); font: 9px/1.5 "SFMono-Regular", Consolas, monospace; }
+  .subagent-diff { max-height: 230px; margin: 1px 0 8px 6px; overflow: auto; border-radius: 6px; background: var(--workspace-subtle); font: 9px/1.5 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); }
   .diff-line { min-width: max-content; padding: 0 7px; white-space: pre; }
   .diff-line.kind-added { color: #3e9870; background: color-mix(in srgb, #4aa87a 10%, transparent); }
   .diff-line.kind-removed { color: #b36a68; background: color-mix(in srgb, #c07170 9%, transparent); }

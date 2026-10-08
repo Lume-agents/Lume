@@ -35,7 +35,7 @@
   .orb-response :global(ul), .orb-response :global(ol) { margin: 7px 0 12px; padding-left: 19px; }
   .orb-response :global(li) { margin: 4px 0; }
   .orb-response :global(a) { color: var(--lume-accent-strong, #397b5c); text-decoration: underline; text-underline-offset: 3px; }
-  .orb-response :global(code) { padding: 2px 4px; border-radius: 4px; background: color-mix(in srgb, currentColor 7%, transparent); font-family: "SFMono-Regular", Consolas, monospace; font-size: .92em; }
+  .orb-response :global(code) { padding: 2px 4px; border-radius: 4px; background: color-mix(in srgb, currentColor 7%, transparent); font-family: var(--lume-font-code, "SFMono-Regular", Consolas, monospace); font-size: .92em; }
   .orb-response :global(pre) { max-width: 100%; margin: 10px 0; padding: 10px; overflow-x: auto; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 8px; background: color-mix(in srgb, currentColor 4%, transparent); }
   .orb-response :global(pre code) { padding: 0; background: transparent; white-space: pre; }
   .orb-response :global(blockquote) { margin: 10px 0; padding: 0 0 0 11px; border-left: 1px solid currentColor; }

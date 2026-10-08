@@ -201,7 +201,7 @@
   .lume-select-trigger:disabled { opacity: .55; cursor: not-allowed; }
   .lume-select-trigger:hover,
   .lume-select-trigger.open { border-color: color-mix(in srgb, var(--select-accent) 35%, var(--select-line)); background: color-mix(in srgb, var(--select-accent) 5%, var(--select-surface)); }
-  .lume-select-trigger > span:first-child { min-width: 0; flex: 1; overflow: hidden; font: 700 9px Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+  .lume-select-trigger > span:first-child { min-width: 0; flex: 1; overflow: hidden; font: 700 9px var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
   .heading .lume-select-trigger { min-height: 22px; padding: 2px 4px; border: 0; border-radius: 4px; color: var(--workspace-strong, var(--select-text)); background: transparent; }
   .heading .lume-select-trigger > span:first-child { flex: 0 1 auto; font: inherit; font-size: 11px; font-weight: 700; letter-spacing: -.015em; }
   .heading .lume-select-trigger:hover,
@@ -215,7 +215,7 @@
   .lume-select-menu > button.focused { background: var(--select-hover); }
   .lume-select-menu > button.active { color: var(--select-accent); background: var(--select-active); }
   .lume-select-menu > button > span { min-width: 0; flex: 1; display: grid; gap: 1px; }
-  .lume-select-menu strong { overflow: hidden; font: 750 8px Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
-  .lume-select-menu small { overflow: hidden; color: var(--select-muted); font: 7px Inter, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+  .lume-select-menu strong { overflow: hidden; font: 750 8px var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
+  .lume-select-menu small { overflow: hidden; color: var(--select-muted); font: 7px var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
   @media (prefers-reduced-motion: reduce) { .select-chevron { transition: none; } }
 </style>

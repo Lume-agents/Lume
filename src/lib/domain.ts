@@ -220,6 +220,13 @@ export interface Preferences {
   appearanceTheme: "lume" | "forest" | "ocean" | "violet" | "ember";
   accentColor?: string;
   accentOpacity: number;
+  /** Neutral dark surfaces; "theme" keeps the tinted ones of the base theme. */
+  darkBase: "theme" | "graphite" | "black" | "slate";
+  /** Neutral light surfaces; "theme" keeps the tinted ones of the base theme. */
+  lightBase: "theme" | "white" | "gray" | "beige";
+  /** "default", a bundled font id, "system", or "custom:<id>". */
+  uiFont: string;
+  codeFont: string;
   workspaceBackgroundColor?: string;
   workspaceBackgroundOpacity: number;
   workspaceLightBackgroundColor?: string;

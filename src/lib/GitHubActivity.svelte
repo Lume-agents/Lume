@@ -202,6 +202,6 @@
   .top-repositories strong { display: grid; gap: 3px; color: var(--workspace-strong); font-size: 12px; font-weight: 550; font-variant-numeric: tabular-nums; text-align: right; }
   .top-repositories strong > small { color: var(--workspace-muted); font-size: 8px; font-weight: 400; }
   .activity-error { position: relative; z-index: 1; margin: 7px 0 10px; color: var(--workspace-text); font-size: 10px; line-height: 1.5; }
-  .activity-tooltip { position: fixed; z-index: 1000; pointer-events: none; max-width: calc(100vw - 16px); padding: 7px 9px; border-radius: 7px; font: 500 11px/1.4 Inter, sans-serif; box-shadow: 0 4px 14px rgba(0, 0, 0, .18); box-sizing: border-box; }
+  .activity-tooltip { position: fixed; z-index: 1000; pointer-events: none; max-width: calc(100vw - 16px); padding: 7px 9px; border-radius: 7px; font: 500 11px/1.4 var(--lume-font-ui, Inter, sans-serif); box-shadow: 0 4px 14px rgba(0, 0, 0, .18); box-sizing: border-box; }
   @media (prefers-reduced-motion: reduce) { .repository-overlay, .expand-chevron :global(svg) { transition: none; } }
 </style>

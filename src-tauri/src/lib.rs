@@ -27,6 +27,7 @@ mod legacy_cli_gateway_cleanup;
 mod macos_process_supervisor;
 mod mobile_gateway;
 mod mobile_server;
+pub mod cli_ui;
 pub mod node_client;
 mod node_http;
 pub mod node_identity;

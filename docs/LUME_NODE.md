@@ -66,3 +66,16 @@ is encrypted with a key derived separately, so the Relay can neither read nor fo
 inside an Ed25519-authenticated X25519 session (ChaCha20-Poly1305, per-direction keys, increasing counters). Only the read-only
 `health` and `inventory` commands exist so far, with the `observe` scope. `lume node revoke` removes a device from the Node; the
 Relay drops its access the next time the Node connects.
+
+## Friendlier terminal
+
+Run `lume node` with no command in a terminal to open an interactive menu (arrow keys): status, turn the Node on, connect to a
+Relay, start the Node, pair devices and check paired computers. Commands also print a readable summary instead of JSON when the output
+is a terminal; pipe the output or add `--json` for the raw JSON. `lume node pair --qr` also prints the pairing QR code. The
+language follows `LUME_LANG`, `LC_ALL` or `LANG` (and the Windows UI language).
+
+## Windows installer
+
+The installer is branded (header and sidebar drawn by `scripts/installer-art.mjs`), offers English and Portuguese, and installs a
+`lume` launcher into `%LOCALAPPDATA%\Microsoft\WindowsApps`, which Windows already keeps on the PATH, so `lume node …` works from any
+terminal. The launcher is removed on uninstall.

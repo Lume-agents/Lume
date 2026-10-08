@@ -127,13 +127,60 @@ struct NodeRuntime {
 }
 
 pub fn run_cli(arguments: &[String]) -> i32 {
-    match run_cli_inner(arguments) {
+    crate::cli_ui::prepare_terminal();
+    let plain = arguments.iter().any(|argument| argument == "--json");
+    crate::cli_ui::show_qr(arguments.iter().any(|argument| argument == "--qr"));
+    let arguments = arguments.iter().filter(|argument| !matches!(argument.as_str(), "--json" | "--qr")).cloned().collect::<Vec<_>>();
+    // No command (only options, such as --state-dir) opens the menu in a terminal.
+    let command = arguments.first().map(String::as_str).filter(|value| !value.starts_with("--")).unwrap_or("menu");
+    if command == "menu" {
+        return run_menu(&arguments);
+    }
+    match run_cli_inner(&arguments) {
         Ok(message) => {
             if let Some(message) = message {
-                println!("{message}");
+                let rendered = (!plain && crate::cli_ui::is_terminal())
+                    .then(|| serde_json::from_str::<serde_json::Value>(&message).ok())
+                    .flatten()
+                    .and_then(|value| crate::cli_ui::pretty(command, &value));
+                match rendered {
+                    Some(text) => println!("{text}"),
+                    None if matches!(command, "help" | "--help" | "-h") && crate::cli_ui::is_terminal() => {
+                        print!("{}", crate::cli_ui::banner());
+                        println!("{message}");
+                    }
+                    None => println!("{message}"),
+                }
             }
             0
         }
+        Err(error) => {
+            eprintln!("Lume Node: {error}");
+            1
+        }
+    }
+}
+
+fn run_menu(arguments: &[String]) -> i32 {
+    if !crate::cli_ui::is_interactive() {
+        println!("{}", help_text());
+        return 0;
+    }
+    // Keep `--state-dir PATH` for every action the menu runs.
+    let state_arguments = arguments
+        .iter()
+        .position(|argument| argument == "--state-dir")
+        .map(|index| arguments[index..].iter().take(2).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let directory = match state_directory(arguments) {
+        Ok(directory) => directory,
+        Err(error) => {
+            eprintln!("Lume Node: {error}");
+            return 1;
+        }
+    };
+    match crate::cli_ui::menu(&state_arguments, &|command| run_cli_inner(command), &|| run_service(&directory, false)) {
+        Ok(()) => 0,
         Err(error) => {
             eprintln!("Lume Node: {error}");
             1
@@ -274,7 +321,7 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lume node <enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|relay|relay-pair|relay-remotes|relay-health|relay-inventory> [VALUE] [--state-dir PATH] [--once]"
+    "Usage: lume node [menu|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|relay|relay-pair|relay-remotes|relay-health|relay-inventory> [VALUE] [--state-dir PATH] [--once]"
 }
 
 fn positional_argument(arguments: &[String], index: usize) -> Option<&str> {

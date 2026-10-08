@@ -255,9 +255,14 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             Ok(Some(json(&crate::node_relay::pair(&state_directory, uri)?)?))
         }
         "relay-remotes" => Ok(Some(json(&crate::node_relay::remotes(&state_directory)?)?)),
-        "relay-health" | "relay-inventory" => {
+        "sessions" => Ok(Some(json(&crate::node_sessions::snapshot()?)?)),
+        "relay-health" | "relay-inventory" | "relay-sessions" => {
             let node = positional_argument(arguments, 1).ok_or("a Node ID is required")?;
-            let what = if command == "relay-health" { "health" } else { "inventory" };
+            let what = match command {
+                "relay-health" => "health",
+                "relay-inventory" => "inventory",
+                _ => "sessions",
+            };
             Ok(Some(json(&crate::node_relay::query(&state_directory, node, what)?)?))
         }
         "clients" => Ok(Some(json(&node_pairing::clients(&state_directory)?)?)),
@@ -321,7 +326,7 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lume node [menu|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|relay|relay-pair|relay-remotes|relay-health|relay-inventory> [VALUE] [--state-dir PATH] [--once]"
+    "Usage: lume node [menu|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|sessions|relay|relay-pair|relay-remotes|relay-health|relay-inventory|relay-sessions> [VALUE] [--state-dir PATH] [--once]"
 }
 
 fn positional_argument(arguments: &[String], index: usize) -> Option<&str> {

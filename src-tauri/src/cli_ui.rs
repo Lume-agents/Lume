@@ -314,6 +314,34 @@ fn pairing(value: &Value) -> String {
     out
 }
 
+fn sessions(value: &Value) -> String {
+    let items = value["sessions"].as_array().cloned().unwrap_or_default();
+    if value["appFound"] == false {
+        return format!("\n  {}\n", style(t("The Lume app has not been opened on that computer yet.", "O app do Lume ainda não foi aberto naquele computador.")).dim());
+    }
+    if items.is_empty() {
+        return format!("\n  {}\n", style(t("No agent sessions there.", "Nenhuma sessão de agente por lá.")).dim());
+    }
+    let mut out = String::from("\n");
+    for item in &items {
+        let status = item["status"].as_str().unwrap_or("");
+        let dot = match status {
+            "running" => style("●").green(),
+            "permission_required" | "waiting_for_input" => style("●").yellow(),
+            "failed" => style("●").red(),
+            _ => style("●").dim(),
+        };
+        let name = item["name"].as_str().filter(|name| !name.is_empty()).unwrap_or_else(|| item["project"].as_str().unwrap_or("?"));
+        out.push_str(&format!(
+            "  {dot} {}  {}\n{}{} · {}\n",
+            style(name).bold(),
+            style(format!("({})", item["agentLabel"].as_str().unwrap_or("?"))).dim(),
+            label(t("Status", "Estado")), item["statusLabel"].as_str().unwrap_or(status), ago(item["updatedAt"].as_i64()),
+        ));
+    }
+    out
+}
+
 /// A readable version of a command's JSON result, or `None` to keep the JSON.
 pub fn pretty(command: &str, value: &Value) -> Option<String> {
     Some(match command {
@@ -337,6 +365,7 @@ pub fn pretty(command: &str, value: &Value) -> Option<String> {
                 label(t("Paired", "Pareado")), ago(remote["pairedAt"].as_i64()),
             )
         }),
+        "sessions" | "relay-sessions" => sessions(value),
         "relay" => {
             let url = value["relayUrl"].as_str();
             format!(

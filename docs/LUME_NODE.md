@@ -59,12 +59,16 @@ lume node relay-pair 'lume://pair-relay?...'
 lume node relay-remotes
 lume node relay-health NODE_ID
 lume node relay-inventory NODE_ID
+lume node relay-sessions NODE_ID            # the agent sessions of the other computer (read-only)
+lume node sessions                           # the same list for this computer
 ```
 
 The pairing secret travels only in the URI/QR code. The Relay learns a one-way derivative of it, and the pairing request
 is encrypted with a key derived separately, so the Relay can neither read nor forge it. After pairing, every message runs
 inside an Ed25519-authenticated X25519 session (ChaCha20-Poly1305, per-direction keys, increasing counters). Only the read-only
-`health` and `inventory` commands exist so far, with the `observe` scope. `lume node revoke` removes a device from the Node; the
+`health`, `inventory` and `sessions` commands exist so far, with the `observe` scope. `sessions` lists the agent sessions
+of the Lume app on the Node (agent, project folder name, status, whether it waits for a permission or an answer). It reads the
+app's database read-only and never includes the conversation, the working directory or the permission details. `lume node revoke` removes a device from the Node; the
 Relay drops its access the next time the Node connects.
 
 ## Friendlier terminal

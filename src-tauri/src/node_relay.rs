@@ -263,6 +263,7 @@ fn answer_command(directory: &Path, command: &Value) -> Value {
     let result = match command["cmd"].as_str() {
         Some("health") => node_service::health(directory).and_then(|health| serde_json::to_value(health).map_err(io)),
         Some("inventory") => crate::node_inventory::InventoryCache::default().snapshot(directory).and_then(|inventory| serde_json::to_value(inventory).map_err(io)),
+        Some("sessions") => crate::node_sessions::snapshot().and_then(|snapshot| serde_json::to_value(snapshot).map_err(io)),
         _ => Err("unsupported command".into()),
     };
     match result {
@@ -458,6 +459,8 @@ mod tests {
         assert!(!node_dir.join(OFFER_FILE).exists(), "the offer is single use");
         let health = query(&client_dir, &config.node_id, "health").expect("health through the Relay");
         assert_eq!(health["nodeId"], config.node_id.as_str());
+        let sessions = query(&client_dir, &config.node_id, "sessions").expect("sessions through the Relay");
+        assert!(sessions["sessions"].is_array());
         assert!(query(&client_dir, &config.node_id, "launch-missiles").is_err());
         // The offer cannot be reused by another device.
         assert!(pair(&std::env::temp_dir().join(format!("lume-relay-other-{unique}")), &uri).is_err());

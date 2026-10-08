@@ -665,7 +665,7 @@
       const list = members.get(groupAssignments[sessionGroupKey(session)]);
       if (list) list.push(session); else loose.push(session);
     }
-    if (loose.length || !filtering) {
+    if (loose.length || (!filtering && draggingSessionId)) {
       rows.push({ key: "group:none", kind: "header", group: null, count: loose.length });
       loose.forEach(push);
     }

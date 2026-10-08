@@ -2795,9 +2795,7 @@ fn wait_for_rate_limits_response(
                 .to_string());
         }
         let limits = rate_limits_from_message(&value);
-        if state.set_agent_rate_limits(AgentKind::Codex, limits)? {
-            crate::protocol::emit_sessions_changed(app);
-        }
+        crate::usage_monitor::publish(app, state, AgentKind::Codex, limits)?;
         return Ok(());
     }
 }
@@ -3040,8 +3038,8 @@ fn intercept_server_message(
     }
     if method == "account/rateLimits/updated" {
         let limits = rate_limits_from_message(&value);
-        if !limits.is_empty() && state.set_agent_rate_limits(AgentKind::Codex, limits)? {
-            crate::protocol::emit_sessions_changed(app);
+        if !limits.is_empty() {
+            crate::usage_monitor::publish(app, state, AgentKind::Codex, limits)?;
         }
     }
     if method == "thread/tokenUsage/updated" {

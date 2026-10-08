@@ -10,10 +10,12 @@ export type AgentAlert = {
   duration: number;
   occurredAt: number;
   priority: number;
-  /** Usage notices live above the composer instead of the dismissible banners. */
+  /** Usage notices have a dedicated meter in the chat. */
   usage?: boolean;
-  /** Stays on screen until the usage window resets. */
+  /** Remains visible until manually dismissed or the usage window resets. */
   pinned?: boolean;
+  /** What a usage alert is about, for the banner's meter and reset countdown. */
+  usageInfo?: { agent: AgentSession["agent"]; agentLabel: string; windowLabel: string; remaining: number; resetsAt?: number };
 };
 
 const RECENT_FAILURE_WINDOW = 10 * 60 * 1_000;
@@ -37,9 +39,12 @@ function isMcpFailure(activity: SessionActivity) {
   return activity.status === "failed" && /(?:^|\b)mcp(?:\b|\s*[·:])/i.test(`${activity.title} ${activity.detail ?? ""}`);
 }
 
+function isUsageLimitText(text: string) {
+  return /(?:rate|usage|token)[_\s-]+limit|quota|limit[_\s-]+(?:reached|exceeded)|limite\s+(?:de uso|atingido|excedido)/i.test(text);
+}
+
 function isUsageLimitFailure(activity: SessionActivity) {
-  return activity.status === "failed"
-    && /(?:rate|usage|token)\s+limit|quota|limit\s+(?:reached|exceeded)|limite\s+(?:de uso|atingido|excedido)/i.test(`${activity.title} ${activity.detail ?? ""}`);
+  return activity.status === "failed" && isUsageLimitText(`${activity.title} ${activity.detail ?? ""}`);
 }
 
 function failedActivityMessage(session: AgentSession, activity: SessionActivity, language: Language) {
@@ -65,6 +70,7 @@ export function collectAgentAlerts(
   sessions: AgentSession[],
   language: Language,
   now = Date.now(),
+  options: { usageScope?: "all" | "active" } = {},
 ): AgentAlert[] {
   const alerts = new Map<string, AgentAlert>();
   const add = (alert: AgentAlert) => {
@@ -74,8 +80,14 @@ export function collectAgentAlerts(
 
   for (const session of sessions) {
     const name = sessionName(session);
+    const usageActive = options.usageScope !== "active"
+      || session.status === "running"
+      || session.status === "permission_required"
+      || (session.status === "failed" && session.activities.some((activity) =>
+        isUsageLimitFailure(activity) && now - activity.createdAt <= RECENT_FAILURE_WINDOW));
 
-    for (const limit of session.rateLimits ?? []) {
+    for (const limit of usageActive ? session.rateLimits ?? [] : []) {
+      if (limit.resetsAt != null && limit.resetsAt <= now) continue;
       const used = Number(limit.usedPercent);
       if (!Number.isFinite(used)) continue;
       const remaining = Math.max(0, Math.min(100, Math.round(100 - used)));
@@ -93,6 +105,7 @@ export function collectAgentAlerts(
         priority: exhausted ? 100 : 70,
         usage: true,
         pinned: remaining < USAGE_PINNED_REMAINING,
+        usageInfo: { agent: session.agent, agentLabel: session.agentLabel, windowLabel, remaining, resetsAt: limit.resetsAt },
       });
     }
 
@@ -137,8 +150,9 @@ export function collectAgentAlerts(
       .filter((activity) => activity.status === "failed" && now - activity.createdAt <= RECENT_FAILURE_WINDOW)
       .slice(-3);
     for (const activity of recentFailures) {
+      const usageFailure = isUsageLimitFailure(activity);
       add({
-        id: `activity:${session.id}:${activity.id}`,
+        id: usageFailure ? `usage:failure:${session.agent}:${session.nativeSessionId ?? session.id}:${activity.id}` : `activity:${session.id}:${activity.id}`,
         message: failedActivityMessage(session, activity, language),
         tone: "error",
         duration: isMcpFailure(activity) || isUsageLimitFailure(activity) ? 0 : 9_000,
@@ -150,7 +164,7 @@ export function collectAgentAlerts(
     const latestFailure = recentFailures.at(-1);
     if (session.status === "failed" && !latestFailure) {
       add({
-        id: `session:${session.id}:failed:${session.statusLabel}`,
+        id: `${isUsageLimitText(session.statusLabel) ? "usage:" : ""}session:${session.id}:failed:${session.statusLabel}`,
         message: tr(language, `${name} failed: ${compact(session.statusLabel)}.`, `${name} falhou: ${compact(session.statusLabel)}.`),
         tone: "error",
         duration: 0,

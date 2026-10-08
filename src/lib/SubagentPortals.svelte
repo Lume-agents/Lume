@@ -281,7 +281,7 @@
   });
 </script>
 
-<section class:compact={railCollapsed} class="subagent-portals" bind:this={root} aria-label={tr("Subagent activity", "Atividade dos subagentes")}
+<section class:compact={railCollapsed} class:timeline-open={!railCollapsed && expanded && Boolean(selectedChild)} class="subagent-portals" bind:this={root} aria-label={tr("Subagent activity", "Atividade dos subagentes")}
   style={`--portal-origin:${portalOrigin}px`}
   style:background={railCollapsed ? "transparent" : undefined}
   style:border-bottom-color={railCollapsed ? "transparent" : undefined}>
@@ -462,14 +462,16 @@
 </section>
 
 <style>
-  .subagent-portals { position: relative; min-width: 0; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); background: color-mix(in srgb, var(--workspace-pane) 94%, transparent); }
-  .subagent-portals.compact { border: 0; background: none; }
+  /* Expanded, the card hangs from the header like a bubble sized to its subagents; it only spans the chat once they no longer fit. */
+  .subagent-portals { position: relative; z-index: 3; width: fit-content; min-width: min(calc(100% - 20px), 176px); max-width: calc(100% - 20px); margin: -1px auto 6px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-top: 0; border-radius: 0 0 18px 18px; background: color-mix(in srgb, var(--workspace-pane) 96%, var(--workspace-raised)); box-shadow: 0 12px 26px rgba(0, 0, 0, .13); transition: width 200ms cubic-bezier(.16, 1, .3, 1); }
+  .subagent-portals.timeline-open { width: min(calc(100% - 20px), 560px); }
+  .subagent-portals.compact { width: auto; min-width: 0; max-width: none; margin: 0; border: 0; border-radius: 0; background: none; box-shadow: none; }
   .portal-rail-content { display: grid; grid-template-rows: minmax(0, 1fr); overflow: hidden; opacity: 1; transform: translateY(0); transition: grid-template-rows 240ms cubic-bezier(.16, 1, .3, 1), opacity 170ms ease, transform 240ms cubic-bezier(.16, 1, .3, 1); }
   .portal-rail-content.collapsed { grid-template-rows: minmax(0, 0fr); opacity: 0; pointer-events: none; transform: translateY(-8px); }
   .portal-rail-content-inner { min-height: 0; overflow: hidden; }
-  .portal-rail-toolbar { position: relative; min-height: 24px; padding: 2px 10px 0; display: flex; align-items: center; justify-content: space-between; color: var(--workspace-faint); font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .portal-rail-toolbar { position: relative; min-height: 26px; padding: 4px 8px 0 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--workspace-faint); font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
   .portal-rail-toolbar b { margin-left: 4px; color: var(--workspace-muted); font-size: 8px; font-variant-numeric: tabular-nums; }
-  .portal-rail-toolbar button { position: absolute; left: 50%; width: 24px; height: 20px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 5px; color: var(--workspace-accent); background: transparent; cursor: pointer; transform: translateX(-50%); }
+  .portal-rail-toolbar button { width: 24px; height: 20px; padding: 0; display: grid; flex: 0 0 auto; place-items: center; border: 0; border-radius: 5px; color: var(--workspace-accent); background: transparent; cursor: pointer; }
   .portal-rail-toolbar button:hover, .portal-rail-toolbar button:focus-visible { background: var(--workspace-subtle); }
   .portal-rail-toolbar button:focus-visible, .compact-expand:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 1px; }
   .portal-rail-toolbar svg, .compact-expand svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
@@ -493,7 +495,7 @@
   .compact-expand { width: 26px; height: 18px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 5px; color: var(--workspace-accent); background: transparent; cursor: pointer; transition: color 150ms ease, transform 150ms ease; }
   .compact-expand:hover { color: var(--workspace-strong); transform: translateY(1px); }
   .portal-rail-shell { position: relative; min-width: 0; }
-  .portal-rail { min-width: 0; min-height: 81px; padding: 9px 12px 7px; display: flex; align-items: start; gap: 10px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .portal-rail { min-width: 0; min-height: 81px; padding: 6px 14px 10px; display: flex; align-items: start; gap: 10px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   .portal-overflow-control { position: absolute; z-index: 2; top: 0; bottom: 0; width: 40px; padding: 0; display: flex; align-items: center; border: 0; color: var(--workspace-accent); background: transparent; cursor: pointer; }
   .portal-overflow-control::before { position: absolute; inset: 0; z-index: 0; pointer-events: none; content: ""; backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
   .portal-overflow-control.left { left: 0; justify-content: flex-start; padding-left: 9px; }
@@ -505,6 +507,8 @@
   .portal-overflow-control.left:hover > span { transform: translateX(-2px); }
   .portal-overflow-control.right:hover > span { transform: translateX(2px); }
   .portal-overflow-control:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -3px; }
+  .portal-button:first-child { margin-left: auto; }
+  .portal-button:last-child { margin-right: auto; }
   .portal-button { position: relative; width: 60px; min-width: 60px; padding: 0; display: grid; justify-items: center; gap: 5px; border: 0; color: var(--workspace-muted); background: transparent; cursor: pointer; text-align: center; }
   .portal-button.status-running { --portal-color: #4d99cc; --portal-speed: 2.9s; }
   .portal-button.status-waiting { --portal-color: #d2a257; --portal-speed: 9s; }

@@ -266,7 +266,7 @@ try {
   await wait("document.querySelector('.edge-popover .bridge .context-policy')");
   await screenshot("edge-settings");
   assert.equal(await evaluate("document.querySelectorAll('.edge-popover .share-options button').length"), 6, "the connection window's context chips");
-  assert.equal(await evaluate("!!document.querySelector('.edge-popover .transition-toggle') && !!document.querySelector('.edge-popover .approval[role=switch]')"), true, "manual/auto slider and approval switch");
+  assert.equal(await evaluate("document.querySelectorAll('.edge-popover .transition-toggle [role=radio]').length === 2 && !document.querySelector('.edge-popover .approval')"), true, "one handoff choice: approval or automatic");
   await click(".edge-popover .context-policy button:nth-child(3)");
   await wait("window.__fixture.preferences.workflowGroups[0].connections[0].contextPolicy === 'detailed'");
   await click(".edge-popover .share-options button:nth-child(2)");

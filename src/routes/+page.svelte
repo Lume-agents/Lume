@@ -1364,13 +1364,24 @@
     );
   }
 
+  // `detail` of a pointerdown is not a click count in every webview (WebView2 reports 0), so a double
+  // press is also recognized from two presses close in time and place.
+  let lastOverlayPress = { at: 0, x: 0, y: 0 };
+  function isOverlayDoublePress(event: PointerEvent) {
+    const double = event.detail === 2
+      || (event.timeStamp - lastOverlayPress.at < 420
+        && Math.hypot(event.clientX - lastOverlayPress.x, event.clientY - lastOverlayPress.y) < 6);
+    lastOverlayPress = double ? { at: 0, x: 0, y: 0 } : { at: event.timeStamp, x: event.clientX, y: event.clientY };
+    return double;
+  }
+
   function beginOverlayDrag(event: PointerEvent, compact = false) {
     if (!isTauri || !overlayReady || event.button !== 0 || morphing) return;
     bringOverlayToFront();
     if (!compact && (event.target as HTMLElement).closest("button, input, select, textarea, .system-banner-stack")) {
       return;
     }
-    if (!compact && event.detail === 2) {
+    if (!compact && isOverlayDoublePress(event)) {
       event.preventDefault();
       void toggleExpanded();
       return;

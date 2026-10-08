@@ -418,6 +418,19 @@ export async function setSessionCollaborationMode(
   return invoke<CollaborationMode>("set_session_collaboration_mode", { sessionId, mode });
 }
 
+export type McpServer = {
+  name: string;
+  transport: "stdio" | "http" | "sse" | string;
+  target: string;
+  scope: "user" | "project" | "local" | "account" | string;
+  status: "connected" | "needs_auth" | "failed" | "disabled" | "unknown" | string;
+};
+
+/** The agent's MCP servers; `probe` also asks Claude Code for their live health, which is slow. */
+export async function listSessionMcpServers(sessionId: string, probe: boolean): Promise<McpServer[]> {
+  return invoke<McpServer[]>("list_session_mcp_servers", { sessionId, probe });
+}
+
 export async function listSessionSlashCommands(sessionId: string): Promise<AgentSlashCommand[]> {
   return invoke<AgentSlashCommand[]>("list_session_slash_commands", { sessionId });
 }

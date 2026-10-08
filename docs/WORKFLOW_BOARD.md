@@ -19,7 +19,7 @@ Uma segunda forma de **ver e conectar** o workflow que o orb já executa. A func
 
 1. Abra pelo ícone **Workflow board** no cabeçalho da sidebar, ao lado do Inspector; escolha um workflow existente ou crie um novo.
 2. Arraste uma sessão da sidebar para o canvas, ou use **Agente** para escolhê-la. Mova os cards livremente e arraste a alça de saída até outro card para desenhar uma seta.
-3. Selecione um card para editar papel e contrato; selecione uma seta para editar contexto, aprovação e avanço, ou visualizar o contexto exato. O "+" da seta permite inserir outro agente.
+3. Selecione um card para editar papel e contrato; o botão no meio de cada seta abre um menu com "Configurações da conexão" (contexto, aprovação, avanço, contexto exato) e "Adicionar agente intermediário"; os dois abrem logo abaixo do botão.
 4. Informe o objetivo e execute; os controles de aprovação, próxima etapa, pausa, retomada, tentativa, ignorar e parada aparecem conforme o estado.
 5. Use **Voltar aos chats** ou **Abrir chat** no card para sair do board. Os chats permanecem montados.
 
@@ -47,10 +47,10 @@ Uma seta que viole essas regras é **recusada na hora**, com o motivo (`checkCon
 
 ## Interações
 
-- **Adicionar:** soltar uma sessão da sidebar no canvas (payload de arrastar `text/x-lume-session` com o id da sessão) cria o card onde foi solto; também há um seletor de sessões. Sessões sem identificador nativo (ainda não conectadas) não podem entrar.
-- **Mover:** arrastar o card. **Navegar:** arrastar o fundo para mover a vista; rolar para deslocar; Ctrl/Cmd + rolar (e botões) para dar zoom em torno do cursor; botão de ajustar à tela.
+- **Adicionar:** soltar uma sessão da sidebar no canvas (payload de arrastar `text/x-lume-session` com o id da sessão) mostra o card do agente sob o cursor assim que o arrasto entra no board (com ícone do tipo de agente) e o fixa onde for solto; também há um seletor de sessões. Sessões sem identificador nativo (ainda não conectadas) não podem entrar.
+- **Mover:** arrastar o card. **Navegar:** arrastar o fundo para mover a vista; a roda do mouse (ou os botões) dá zoom em torno do cursor; botão de ajustar à tela.
 - **Conectar:** arrastar da alça do card até outro card. Enquanto arrasta, o card sob o cursor mostra se a seta seria aceita ou recusada.
-- **Selecionar uma seta:** abre o painel com contexto (mínimo, padrão, detalhado; "personalizado" só é editado no orb), pedir aprovação, avanço manual ou automático, instrução extra, **ver o contexto exato** (`previewWorkflowContext`, com tokens estimados) e remover. Um botão "+" no meio da seta insere uma etapa ali.
+- **Botão da seta:** abre um menu; as configurações abrem num popover ancorado ao botão, com contexto (mínimo, padrão, detalhado; "personalizado" só é editado no orb), pedir aprovação, avanço manual ou automático, instrução extra, **ver o contexto exato** (`previewWorkflowContext`, com tokens estimados) e remover. Um botão "+" no meio da seta insere uma etapa ali.
 - **Selecionar um card:** painel com papel, nome do papel personalizado e os quatro campos do contrato, "abrir chat" e remover. Ao trocar o papel, campos que diferem do padrão anterior são preservados; só os que ainda seguem aquele padrão recebem o padrão do novo papel (`preserveRoleOverrides`). A sessão e o agente não são trocados.
 - **Remover um card no meio da cadeia** religa os vizinhos (A → B → C vira A → C, mantendo o que A passava).
 - Selo no meio da seta: cadeado (pede aprovação) e raio (avança sozinha). Setas esperando aprovação destacadas. Cards numerados pela ordem da cadeia e o primeiro marcado.

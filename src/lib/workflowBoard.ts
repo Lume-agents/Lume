@@ -16,7 +16,7 @@ import type {
  */
 
 export const BOARD_CARD_WIDTH = 252;
-export const BOARD_CARD_HEIGHT = 118;
+export const BOARD_CARD_HEIGHT = 168;
 export const BOARD_MIN_ZOOM = 0.35;
 export const BOARD_MAX_ZOOM = 1.6;
 
@@ -253,7 +253,11 @@ export function cardRect(position: BoardPoint): BoardRect {
   return { ...position, width: BOARD_CARD_WIDTH, height: BOARD_CARD_HEIGHT };
 }
 
-export type EdgeGeometry = { path: string; start: BoardPoint; end: BoardPoint; mid: BoardPoint };
+/** Length of the arrowhead drawn over the end of a connection. */
+export const BOARD_ARROW_LENGTH = 13;
+
+/** `path` runs from side to side; `pipe` stops where the arrowhead begins so the pipe never pokes out of its tip. */
+export type EdgeGeometry = { path: string; pipe: string; start: BoardPoint; end: BoardPoint; mid: BoardPoint };
 
 /** A smooth arrow between two cards, leaving and entering on the sides that face each other. */
 export function edgeGeometry(from: BoardRect, to: BoardRect): EdgeGeometry {
@@ -284,8 +288,10 @@ export function edgeGeometry(from: BoardRect, to: BoardRect): EdgeGeometry {
   const c2 = { x: end.x + endDirection.x * reach, y: end.y + endDirection.y * reach };
   const at = (t: number, a: number, b: number, c: number, d: number) =>
     (1 - t) ** 3 * a + 3 * (1 - t) ** 2 * t * b + 3 * (1 - t) * t ** 2 * c + t ** 3 * d;
+  const pipeEnd = { x: end.x + endDirection.x * BOARD_ARROW_LENGTH, y: end.y + endDirection.y * BOARD_ARROW_LENGTH };
   return {
     path: `M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`,
+    pipe: `M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${pipeEnd.x} ${pipeEnd.y}`,
     start,
     end,
     mid: { x: at(0.5, start.x, c1.x, c2.x, end.x), y: at(0.5, start.y, c1.y, c2.y, end.y) },

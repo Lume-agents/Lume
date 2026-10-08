@@ -22,6 +22,8 @@ await build({
     contents: 'import "./src/app.css"; import { mount } from "svelte"; import Workspace from "./src/lib/WorkspaceWindow.svelte"; import { defaultPreferences } from "./src/lib/lume"; window.__fixtureDefaults = defaultPreferences; window.__workspace = mount(Workspace, { target: document.getElementById("app") });',
     resolveDir: root,
   },
+  external: ["/fonts/*"],
+  define: { "import.meta.env": "{\"DEV\":true}" },
   outfile: join(output, "app.js"), bundle: true, format: "esm", platform: "browser", conditions: ["browser", "svelte"],
   loader: { ".woff2": "file", ".woff": "file", ".png": "file", ".svg": "file" },
   plugins: [{
@@ -210,12 +212,28 @@ try {
   }
   await call("Page.navigate", { url: "http://127.0.0.1:" + server.address().port });
   await wait("document.querySelectorAll('.board-card').length === 2");
+  await wait("document.querySelector('.workflow-board.entered')");
+  await wait("getComputedStyle(document.querySelector('.workflow-board')).opacity === '1'"); // the board fades in
   await click('[aria-label="Aumentar zoom"]');
   assert.equal(await evaluate("document.querySelector('.zoom-label').textContent"), "120%");
   await click('[aria-label="Restaurar zoom"]');
   assert.equal(await evaluate("document.querySelector('.zoom-label').textContent"), "100%");
+  // The wheel zooms around the cursor (it never scrolls the grid), with or without Ctrl.
+  const worldBefore = await evaluate("document.querySelector('.board-world').style.transform");
+  await evaluate("document.querySelector('.board-viewport').dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: 600, clientY: 400, bubbles: true, cancelable: true }))");
+  assert.ok(Number(await evaluate("parseInt(document.querySelector('.zoom-label').textContent)")) > 100, "wheel up zooms in");
+  await evaluate("document.querySelector('.board-viewport').dispatchEvent(new WheelEvent('wheel', { deltaY: 300, clientX: 600, clientY: 400, bubbles: true, cancelable: true }))");
+  assert.ok(Number(await evaluate("parseInt(document.querySelector('.zoom-label').textContent)")) < 100, "wheel down zooms out");
+  assert.notEqual(await evaluate("document.querySelector('.board-world').style.transform"), worldBefore);
+  await click('[aria-label="Restaurar zoom"]');
   assert.equal(await evaluate("document.querySelector('.board-chat-layer').inert"), true);
   await evaluate("document.querySelector('[aria-label=\"Preserved chat draft\"]').value = 'rascunho preservado'");
+  await evaluate("document.querySelector('.session-row[aria-label=\"Revisão\"]')?.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }))");
+  await evaluate("(() => { const target = document.querySelector('.board-viewport'); const r = target.getBoundingClientRect(); const dataTransfer = new DataTransfer(); dataTransfer.setData('text/x-lume-session', 'session-2'); target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer, clientX: r.left + 820, clientY: r.top + 270 })); })()");
+  await wait("document.querySelector('.board-card.ghost')");
+  await screenshot("drag-ghost");
+  assert.equal(await evaluate("document.querySelector('.session-drag-preview')"), null, "the floating preview gives way to the board card");
+  assert.equal(await evaluate("document.querySelector('.board-card.ghost .agent-badge') !== null"), true, "the card shows the agent type");
   await evaluate("(() => { const target = document.querySelector('.board-viewport'); const r = target.getBoundingClientRect(); const dataTransfer = new DataTransfer(); dataTransfer.setData('text/x-lume-session', 'session-2'); target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer, clientX: r.left + 820, clientY: r.top + 270 })); })()");
   await wait("document.querySelectorAll('.board-card').length === 3");
   await click('[aria-label="Fechar painel"]');
@@ -237,19 +255,34 @@ try {
   assert.equal(await evaluate("document.querySelector('.board-card.selected')?.dataset.boardCard"), "step-native-0", "settings Escape does not clear the board selection");
   await checkSemanticContrast("dark");
   await click('[aria-label="Fechar painel"]');
-  await click(".edge-policy");
+  await click(".edge-hub");
+  await wait("document.querySelector('.edge-popover .edge-menu')");
+  await screenshot("edge-menu");
+  assert.equal(await evaluate("document.querySelectorAll('.edge-menu button').length"), 2, "the pipe button offers settings and an intermediate agent");
+  assert.equal(await evaluate("(() => { const hub = document.querySelector('.edge-hub').getBoundingClientRect(); const pop = document.querySelector('.edge-popover').getBoundingClientRect(); return pop.top >= hub.bottom - 2 && pop.left < hub.left + hub.width / 2 && pop.right > hub.left + hub.width / 2; })()"), true, "the menu opens under the pipe button");
+  await click('[data-edge-action="settings"]');
+  await wait("document.querySelector('.edge-popover .bridge .context-policy')");
+  await screenshot("edge-settings");
+  assert.equal(await evaluate("document.querySelectorAll('.edge-popover .share-options button').length"), 6, "the connection window's context chips");
+  assert.equal(await evaluate("!!document.querySelector('.edge-popover .transition-toggle') && !!document.querySelector('.edge-popover .approval[role=switch]')"), true, "manual/auto slider and approval switch");
+  await click(".edge-popover .context-policy button:nth-child(3)");
+  await wait("window.__fixture.preferences.workflowGroups[0].connections[0].contextPolicy === 'detailed'");
+  await click(".edge-popover .share-options button:nth-child(2)");
+  await wait("window.__fixture.preferences.workflowGroups[0].connections[0].contextPolicy === 'custom'");
   await evaluate("(() => { const field = document.querySelector('[aria-label=\"Objetivo do workflow\"]'); field.value = 'Teste de encadeamento'; field.dispatchEvent(new Event('input', { bubbles: true })); })()");
-  await click(".preview-button");
-  await wait("document.querySelector('.context-preview')?.textContent.includes('42')");
+  await click(".edge-popover .instruction-toggle:nth-of-type(2)");
+  await click(".edge-popover .preview-run");
+  await wait("document.querySelector('.bridge-preview')?.textContent.includes('42')");
   await screenshot("desktop-dark");
   await click(".board-run .primary");
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
+  assert.match(await evaluate("getComputedStyle(document.querySelector('.board-card.working') || document.body).animationName"), /card-sway/, "the running step's card sways");
   await click(".board-run .run-actions button:not(.primary):not(.danger)");
   await wait("document.querySelector('.board-run').dataset.status === 'paused'");
   await click(".board-run .primary");
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
   await evaluate("window.__fixture.status('waiting_for_approval', { pendingConnectionId: 'connection-fixture' })");
-  await wait("document.querySelector('.edge-policy.waiting')");
+  await wait("document.querySelector('.edge-hub.waiting')");
   await click(".board-run .primary");
   await wait("document.querySelector('.board-run').dataset.status === 'ready'");
   await click(".board-run .primary");
@@ -291,10 +324,25 @@ try {
   await call("Input.dispatchKeyEvent", { type: "keyUp", key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 });
   await wait("window.__fixture.preferences.workflowGroups[0].steps.length === 2");
   assert.equal(await evaluate("window.__fixture.preferences.workflowGroups[0].connections[0].toStepId"), "step-native-2", "removing a middle step reconnects its neighbors");
-  await click(".edge-insert");
+  await click(".edge-hub");
+  await click('[data-edge-action="insert"]');
+  await wait("document.querySelector('.edge-popover .agent-options')");
   await evaluate("Array.from(document.querySelectorAll('.agent-options button')).find(button => button.textContent.includes('Implementação')).click()");
   await wait("window.__fixture.preferences.workflowGroups[0].steps.length === 3");
   assert.equal(await evaluate("window.__fixture.preferences.workflowGroups[0].connections.length"), 2, "an optional intermediate agent splits the arrow");
+  // The simulator previews card and pipe states without a real run.
+  await wait("document.querySelector('.sim-toggle')");
+  await click(".sim-toggle");
+  await wait("document.querySelector('.board-sim')");
+  assert.equal(await evaluate("document.querySelectorAll('.board-card.working').length"), 1, "the simulated running step sways");
+  assert.ok(await evaluate("document.querySelector('.board-card.working .card-activity')?.textContent.length > 3"), "and shows what it is doing");
+  await evaluate("(() => { const select = document.querySelector('.sim-step select[aria-label=\"Precisa de atenção\"]'); select.value = 'permission'; select.dispatchEvent(new Event('change', { bubbles: true })); })()");
+  await wait("document.querySelector('.card-attention')");
+  await screenshot("simulator");
+  assert.equal(await evaluate("document.querySelector('.board-run')"), null, "the real run bar steps aside during a simulation");
+  await click('.board-sim [aria-label="Fechar a simulação"]');
+  await wait("!document.querySelector('.board-sim') && document.querySelector('.board-run')");
+  await click('[data-board-card="step-native-0"] .card-body');
   await call("Emulation.setDeviceMetricsOverride", { width: 1024, height: 720, deviceScaleFactor: 1, mobile: false });
   await wait("document.querySelector('.board-viewport').clientWidth < 800");
   await click('[aria-label="Ajustar à tela"]');
@@ -303,6 +351,24 @@ try {
   await evaluate("(async () => { const p = window.__fixture.preferences; p.darkMode = true; await window.__TAURI_INTERNALS__.invoke('set_preferences', { preferences: p }); window.__fixture.emit('lume://preferences-changed', p); })()");
   await screenshot("compact-dark");
   assert.equal(await evaluate("(() => { const canvas = document.querySelector('.board-viewport').getBoundingClientRect(); const panel = document.querySelector('.board-panel').getBoundingClientRect(); return Array.from(document.querySelectorAll('.board-card')).every(card => { const r = card.getBoundingClientRect(); return r.left >= canvas.left && r.right <= panel.left && r.top >= canvas.top + 65; }); })()"), true, "fit keeps cards clear of the editor and toolbar after resizing");
+  for (const height of [720, 560]) {
+    await call("Emulation.setDeviceMetricsOverride", { width: 1024, height, deviceScaleFactor: 1, mobile: false });
+    await wait("document.querySelector('.board-viewport').clientHeight > " + (height - 120));
+    await click('[aria-label="Ajustar à tela"]');
+    await click(".edge-hub");
+    await click('[data-edge-action="settings"]');
+    await wait("document.querySelector('.edge-popover .bridge')");
+    await click(".edge-popover .instruction-toggle");
+    await delay(220);
+    assert.equal(await evaluate("(() => { const pop = document.querySelector('.edge-popover'); const bridge = pop.querySelector('.bridge'); const r = pop.getBoundingClientRect(); const board = document.querySelector('.workflow-board').getBoundingClientRect(); return bridge.scrollHeight <= bridge.clientHeight + 1 && r.top >= board.top && r.bottom <= board.bottom; })()"), true, "the connection window fits at " + height + "px without vertical overflow");
+    await screenshot("edge-settings-" + height);
+    await evaluate("document.querySelector('.help-trigger').focus()");
+    await delay(220);
+    assert.equal(await evaluate("(() => { const tip = document.querySelector('.help-tooltip'); const pop = document.querySelector('.edge-popover').getBoundingClientRect(); const r = tip.getBoundingClientRect(); const board = document.querySelector('.workflow-board').getBoundingClientRect(); return Number(getComputedStyle(tip).opacity) > .9 && r.height > 250 && r.width >= 250 && tip.scrollHeight <= tip.clientHeight + 1 && r.top >= board.top && r.bottom <= board.bottom && r.left >= board.left && r.right <= board.right && (tip.classList.contains('inside') || r.left >= pop.right - 1 || r.right <= pop.left + 1); })()"), true, "the help is large and fits inside the window at " + height + "px");
+    await screenshot("edge-help-" + height);
+    await evaluate("document.activeElement.blur()");
+    await click('[aria-label="Fechar"]');
+  }
   assert.deepEqual(failures, [], "no browser exceptions");
   console.log("Workflow board UI passed: Orb import, sidebar drop, arrows, cycle refusal, free drag, preview, zoom, all run controls, recovery, event order, draft/layout persistence, removal, insertion, overlay keyboard ownership, fit, light/dark contrast.");
   console.log("Screenshots: " + output);

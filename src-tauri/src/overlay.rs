@@ -1499,14 +1499,84 @@ fn update_fullscreen_visibility(state: &crate::state::AppState, app: &tauri::App
     if let Some(fullscreen) = foreground_is_fullscreen() {
         let topmost = !native_dialog_active() && (show_over_fullscreen || !fullscreen);
         for (label, window) in tauri::Manager::webview_windows(app) {
-            if label == "main"
-                || label.starts_with("terminal-")
-                || label.starts_with("workflow-bridge-")
-            {
+            if is_overlay_window_label(&label) {
                 let _ = window.set_always_on_top(topmost);
             }
         }
     }
+}
+
+/// The Orb, mini terminals and workflow connectors float with the user; the
+/// Workspace window is an ordinary window.
+pub fn is_overlay_window_label(label: &str) -> bool {
+    label == "main" || label.starts_with("terminal-") || label.starts_with("workflow-bridge-")
+}
+
+/// Lets an overlay window follow the user across Spaces. Native fullscreen apps
+/// get a Space of their own, so the overlay only enters it as a full screen
+/// auxiliary window when `show_over_fullscreen` is on. No-op off macOS.
+pub fn apply_spaces_behavior(window: &tauri::WebviewWindow, show_over_fullscreen: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let target = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            use objc2_app_kit::NSWindow;
+            let Ok(pointer) = target.ns_window() else {
+                return;
+            };
+            // SAFETY: Tauri hands out the live NSWindow of this webview window,
+            // and AppKit is only touched here on the main thread.
+            let Some(ns_window) = (unsafe { pointer.cast::<NSWindow>().as_ref() }) else {
+                return;
+            };
+            let behavior =
+                spaces_collection_behavior(ns_window.collectionBehavior(), show_over_fullscreen);
+            ns_window.setCollectionBehavior(behavior);
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, show_over_fullscreen);
+}
+
+/// Applies the Spaces behavior to every overlay window currently open.
+pub fn apply_spaces_behavior_to_all(app: &tauri::AppHandle, show_over_fullscreen: bool) {
+    for (label, window) in tauri::Manager::webview_windows(app) {
+        if is_overlay_window_label(&label) {
+            apply_spaces_behavior(&window, show_over_fullscreen);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn spaces_collection_behavior(
+    current: objc2_app_kit::NSWindowCollectionBehavior,
+    show_over_fullscreen: bool,
+) -> objc2_app_kit::NSWindowCollectionBehavior {
+    use objc2_app_kit::NSWindowCollectionBehavior as Behavior;
+    // AppKit raises if CanJoinAllSpaces is combined with MoveToActiveSpace, or
+    // if a window carries more than one full screen role.
+    let mut behavior = (current - Behavior::MoveToActiveSpace) | Behavior::CanJoinAllSpaces;
+    if show_over_fullscreen {
+        behavior -= Behavior::FullScreenPrimary | Behavior::FullScreenNone;
+        behavior |= Behavior::FullScreenAuxiliary;
+    } else {
+        behavior -= Behavior::FullScreenAuxiliary;
+    }
+    behavior
+}
+
+/// Native fullscreen sets `FullScreen`; presentations, games and players that
+/// cover the screen in place hide the Dock or menu bar, or lock app switching.
+/// Auto-hiding alone is not fullscreen.
+#[cfg(target_os = "macos")]
+fn presentation_is_fullscreen(options: objc2_app_kit::NSApplicationPresentationOptions) -> bool {
+    use objc2_app_kit::NSApplicationPresentationOptions as Options;
+    options.intersects(
+        Options::FullScreen
+            | Options::HideDock
+            | Options::HideMenuBar
+            | Options::DisableProcessSwitching,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -1515,14 +1585,12 @@ static MACOS_FULLSCREEN_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::
 #[cfg(target_os = "macos")]
 fn foreground_is_fullscreen() -> Option<bool> {
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSApplicationPresentationOptions};
+    use objc2_app_kit::NSApplication;
     use std::sync::atomic::Ordering;
 
     if let Some(main_thread) = MainThreadMarker::new() {
         let application = NSApplication::sharedApplication(main_thread);
-        let fullscreen = application
-            .currentSystemPresentationOptions()
-            .contains(NSApplicationPresentationOptions::FullScreen);
+        let fullscreen = presentation_is_fullscreen(application.currentSystemPresentationOptions());
         MACOS_FULLSCREEN_STATE.store(if fullscreen { 2 } else { 1 }, Ordering::Release);
         return Some(fullscreen);
     }
@@ -1596,4 +1664,82 @@ fn foreground_is_fullscreen() -> Option<bool> {
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn foreground_is_fullscreen() -> Option<bool> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_labels_cover_orb_terminals_and_bridges_only() {
+        assert!(is_overlay_window_label("main"));
+        assert!(is_overlay_window_label("terminal-abc"));
+        assert!(is_overlay_window_label("workflow-bridge-abc-right"));
+        assert!(!is_overlay_window_label("workspace"));
+        assert!(!is_overlay_window_label("workspace-abc"));
+        assert!(!is_overlay_window_label("mainframe"));
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use super::super::*;
+        use objc2_app_kit::{
+            NSApplicationPresentationOptions as Options, NSWindowCollectionBehavior as Behavior,
+        };
+
+        #[test]
+        fn overlay_joins_all_spaces_without_fullscreen_auxiliary_by_default() {
+            let behavior = spaces_collection_behavior(Behavior::Default, false);
+            assert!(behavior.contains(Behavior::CanJoinAllSpaces));
+            assert!(!behavior.contains(Behavior::FullScreenAuxiliary));
+        }
+
+        #[test]
+        fn overlay_becomes_fullscreen_auxiliary_when_shown_over_fullscreen() {
+            let behavior = spaces_collection_behavior(Behavior::FullScreenPrimary, true);
+            assert!(behavior.contains(Behavior::CanJoinAllSpaces | Behavior::FullScreenAuxiliary));
+            // AppKit rejects more than one full screen role on the same window.
+            assert!(!behavior.intersects(Behavior::FullScreenPrimary | Behavior::FullScreenNone));
+        }
+
+        #[test]
+        fn turning_show_over_fullscreen_off_drops_fullscreen_auxiliary() {
+            let current = Behavior::CanJoinAllSpaces | Behavior::FullScreenAuxiliary;
+            let behavior = spaces_collection_behavior(current, false);
+            assert_eq!(behavior, Behavior::CanJoinAllSpaces);
+        }
+
+        #[test]
+        fn joining_all_spaces_clears_move_to_active_space_and_keeps_unrelated_flags() {
+            let current = Behavior::MoveToActiveSpace | Behavior::IgnoresCycle;
+            let behavior = spaces_collection_behavior(current, false);
+            // AppKit raises when CanJoinAllSpaces and MoveToActiveSpace are combined.
+            assert!(!behavior.contains(Behavior::MoveToActiveSpace));
+            assert!(behavior.contains(Behavior::IgnoresCycle | Behavior::CanJoinAllSpaces));
+        }
+
+        #[test]
+        fn native_and_in_place_fullscreen_both_count_as_fullscreen() {
+            for options in [
+                Options::FullScreen | Options::AutoHideMenuBar | Options::AutoHideDock,
+                Options::HideDock | Options::HideMenuBar,
+                Options::HideDock,
+                Options::HideMenuBar,
+                Options::DisableProcessSwitching,
+            ] {
+                assert!(presentation_is_fullscreen(options), "{options:?}");
+            }
+        }
+
+        #[test]
+        fn ordinary_and_auto_hide_presentations_are_not_fullscreen() {
+            for options in [
+                Options::Default,
+                Options::AutoHideDock,
+                Options::AutoHideMenuBar | Options::AutoHideDock,
+            ] {
+                assert!(!presentation_is_fullscreen(options), "{options:?}");
+            }
+        }
+    }
 }

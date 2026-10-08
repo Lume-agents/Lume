@@ -296,6 +296,13 @@ pub fn queue_claude_prompt(session_id: &str, activity_id: String, prompt: String
     }
 }
 
+/// Drops the messages waiting to be sent to a conversation that is being closed.
+pub fn clear_claude_queue(session_id: &str) {
+    if let Ok(mut queues) = claude_queues().lock() {
+        queues.remove(session_id);
+    }
+}
+
 pub fn claude_queue_len(session_id: &str) -> usize {
     claude_queues()
         .lock()

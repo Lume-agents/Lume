@@ -1556,6 +1556,18 @@ fn is_managed_native_session(session: &AgentSession) -> bool {
         )
 }
 
+/// A Claude conversation Lume runs without a terminal: a process exists only while a prompt runs.
+fn is_headless_claude_session(session: &AgentSession) -> bool {
+    session.agent == AgentKind::ClaudeCode
+        && session.control_origin == SessionControlOrigin::Lume
+        && matches!(session.source, SessionSource::Cli | SessionSource::Desktop)
+        && session.process_id.is_none()
+        && session
+            .native_session_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+}
+
 pub fn terminate_session(
     app: &AppHandle,
     state: &AppState,
@@ -1617,6 +1629,31 @@ pub fn terminate_session(
             .ok_or("Antigravity conversation ID missing")?;
         app.state::<crate::antigravity_stream::AntigravityStream>()
             .stop(native_id)?;
+        state.mark_session_terminated(session_id)?;
+        protocol::emit_sessions_changed(app);
+        return Ok(());
+    }
+    if is_headless_claude_session(&session) {
+        let native_session_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or_else(|| "The Claude session did not provide its session id".to_string())?;
+        // Drop the waiting messages first so ending the run cannot start the next one.
+        launcher::clear_claude_queue(session_id);
+        if matches!(
+            session.status,
+            SessionStatus::Running | SessionStatus::PermissionRequired
+        ) {
+            launcher::note_claude_interrupt(session_id, launcher::ClaudeInterrupt::Cancel);
+            if let Err(error) =
+                discovery::interrupt_resumed_prompt_process(native_session_id, &session.agent)
+            {
+                launcher::forget_claude_interrupt(session_id);
+                if !is_no_active_prompt(&error) {
+                    return Err(error);
+                }
+            }
+        }
         state.mark_session_terminated(session_id)?;
         protocol::emit_sessions_changed(app);
         return Ok(());

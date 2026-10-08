@@ -110,6 +110,11 @@ impl SessionCapabilities {
                     AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
                 ) && session.source == SessionSource::Desktop
                     && session.control_origin == SessionControlOrigin::Lume
+                    && has_nonempty_value(session.native_session_id.as_deref()))
+                || (session.agent == AgentKind::ClaudeCode
+                    && matches!(session.source, SessionSource::Cli | SessionSource::Desktop)
+                    && session.process_id.is_none()
+                    && session.control_origin == SessionControlOrigin::Lume
                     && has_nonempty_value(session.native_session_id.as_deref())),
             can_open_source: matches!(session.source, SessionSource::Web | SessionSource::Vscode),
             can_read_results: !session.results.is_empty() || session.last_response.is_some(),
@@ -1874,6 +1879,19 @@ mod tests {
         );
         managed.control_origin = SessionControlOrigin::External;
         assert!(!SessionCapabilities::for_session(&managed).can_prompt);
+    }
+
+    #[test]
+    fn claude_opened_by_lume_without_a_terminal_can_be_ended() {
+        let mut headless = session();
+        headless.agent = AgentKind::ClaudeCode;
+        headless.source = SessionSource::Cli;
+        headless.process_id = None;
+        headless.control_origin = SessionControlOrigin::Lume;
+        headless.native_session_id = Some("claude-session".into());
+        assert!(SessionCapabilities::for_session(&headless).can_terminate);
+        headless.control_origin = SessionControlOrigin::External;
+        assert!(!SessionCapabilities::for_session(&headless).can_terminate);
     }
 
     #[test]

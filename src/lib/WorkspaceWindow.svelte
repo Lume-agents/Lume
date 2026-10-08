@@ -2791,7 +2791,7 @@
           {@const childAgents = subagentsBySession.get(session.id) ?? []}
           {@const waitingForChildren = parentWaitingForSubagents(session, childAgents)}
           {@const selected = currentPaneIds().includes(session.id)}
-          <div class:focused={session.id === focusedPaneId} class:secondary-selected={selected && session.id !== focusedPaneId} class:connected={selected} class:connected-above={selected && index > 0 && currentPaneIds().includes(sidebarLayout.visible[index - 1].id)} class:connected-below={selected && index < sidebarLayout.visible.length - 1 && currentPaneIds().includes(sidebarLayout.visible[index + 1].id)} class="session-tree-item">
+          <div class:focused={session.id === focusedPaneId} class:secondary-selected={selected && session.id !== focusedPaneId} class:connected={selected} class:connected-above={selected && index > 0 && currentPaneIds().includes(sidebarLayout.visible[index - 1].id)} class:connected-below={selected && index < sidebarLayout.visible.length - 1 && currentPaneIds().includes(sidebarLayout.visible[index + 1].id)} class="session-tree-item" transition:slide={{ duration: motionDuration(190), easing: cubicOut }}>
           <div
             class:dragging={draggingSessionId === session.id}
             class="session-row"

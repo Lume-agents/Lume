@@ -1,5 +1,5 @@
 // Browser smoke test of the real Workspace/Board, with native IPC and chat contents stubbed.
-// No provider prompt is sent. Run with LUME_TEST_BROWSER pointing to Chromium if needed.
+// No provider prompt is sent. Uses runner-installed Chrome or the Puppeteer cache; custom environments can set LUME_TEST_BROWSER.
 import assert from "node:assert/strict";
 import { build } from "esbuild";
 import { compile } from "svelte/compiler";
@@ -7,16 +7,52 @@ import { readFileSync, existsSync, readdirSync, mkdtempSync, writeFileSync } fro
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { join, dirname, extname } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const output = mkdtempSync(join(tmpdir(), "lume-workflow-board-ui-"));
-const cache = join(process.env.HOME, ".cache/puppeteer/chrome-headless-shell");
-const cached = existsSync(cache) ? readdirSync(cache).sort().reverse().map((version) => join(cache, version, "chrome-headless-shell-linux64/chrome-headless-shell")).find(existsSync) : undefined;
-const executable = process.env.LUME_TEST_BROWSER || cached;
-assert.ok(executable, "Set LUME_TEST_BROWSER to a Chromium executable");
+const cache = join(homedir(), ".cache/puppeteer/chrome-headless-shell");
+const puppeteerPlatform = process.platform === "win32" ? "win64" : process.platform === "darwin" ? (process.arch === "arm64" ? "mac-arm64" : "mac-x64") : "linux64";
+const puppeteerExecutable = process.platform === "win32" ? "chrome-headless-shell.exe" : "chrome-headless-shell";
+const cached = existsSync(cache)
+  ? readdirSync(cache).sort().reverse().map((version) => join(cache, version, `chrome-headless-shell-${puppeteerPlatform}`, puppeteerExecutable))
+  : [];
+const browserCandidates = [
+  process.env.LUME_TEST_BROWSER,
+  process.env.CHROME_BIN,
+  process.env.CHROME_PATH,
+  process.env.CHROMIUM_BIN,
+  process.env.PUPPETEER_EXECUTABLE_PATH,
+  ...cached,
+  ...(process.platform === "win32"
+    ? [
+        join(process.env.ProgramFiles || "C:\\Program Files", "Google/Chrome/Application/chrome.exe"),
+        join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Google/Chrome/Application/chrome.exe"),
+        join(process.env.LOCALAPPDATA || "", "Google/Chrome/Application/chrome.exe"),
+      ]
+    : process.platform === "darwin"
+      ? [
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+          join(homedir(), "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ]
+      : [
+          "/usr/bin/google-chrome",
+          "/usr/bin/google-chrome-stable",
+          "/opt/google/chrome/chrome",
+          "/usr/bin/chromium",
+          "/usr/bin/chromium-browser",
+          "/snap/bin/chromium",
+        ]),
+];
+const executable = browserCandidates.find((candidate) => candidate && existsSync(candidate));
+assert.ok(
+  executable,
+  `Chromium not found. Set LUME_TEST_BROWSER to its executable. Searched: ${browserCandidates.filter(Boolean).join(", ")}`,
+);
+console.log(`Workflow board UI test using Chromium: ${executable}`);
 await build({
   stdin: {
     contents: 'import "./src/app.css"; import { mount } from "svelte"; import Workspace from "./src/lib/WorkspaceWindow.svelte"; import { defaultPreferences } from "./src/lib/lume"; window.__fixtureDefaults = defaultPreferences; window.__workspace = mount(Workspace, { target: document.getElementById("app") });',

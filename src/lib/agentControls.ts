@@ -1,6 +1,10 @@
 /** What the model picker holds for a conversation: model, reasoning effort and Fast mode. */
 export type ControlsSnapshot = { model: string; effort: string; fast: boolean };
 
+export function isFastServiceTier(serviceTier?: string | null): boolean {
+  return serviceTier === "fast" || serviceTier === "priority";
+}
+
 /**
  * Whether the picker differs from the settings the conversation opened with, which is what
  * enables "restore the original". Fast only counts for agents that have it.

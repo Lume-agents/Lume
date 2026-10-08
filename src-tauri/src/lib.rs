@@ -1119,12 +1119,22 @@ async fn set_session_agent_mode(
 
 #[tauri::command]
 fn set_session_fast_mode(
+    app: AppHandle,
     state: State<'_, AppState>,
     bridge: State<'_, codex_bridge::CodexBridge>,
     session_id: String,
     enabled: bool,
 ) -> Result<bool, String> {
-    control::set_session_fast_mode(state.inner(), bridge.inner(), &session_id, enabled)
+    control::set_session_fast_mode(&app, state.inner(), bridge.inner(), &session_id, enabled)
+}
+
+#[tauri::command]
+fn get_session_fast_mode(
+    state: State<'_, AppState>,
+    bridge: State<'_, codex_bridge::CodexBridge>,
+    session_id: String,
+) -> Result<bool, String> {
+    control::session_fast_mode(state.inner(), bridge.inner(), &session_id)
 }
 
 // Both may start a short Claude probe, so they stay off the main thread.
@@ -3012,6 +3022,7 @@ pub fn run() {
             get_session_model_settings,
             set_session_model_settings,
             set_session_agent_mode,
+            get_session_fast_mode,
             set_session_fast_mode,
             get_claude_session_model_settings,
             set_claude_session_model_settings,
@@ -3323,6 +3334,7 @@ mod tests {
             approval_policy: None,
             model: None,
             reasoning_effort: None,
+            fast_mode: None,
         };
         let event = prepared_codex_session_event(
             &request,
@@ -3366,6 +3378,7 @@ mod tests {
             approval_policy: None,
             model: None,
             reasoning_effort: None,
+            fast_mode: None,
         };
 
         assert!(uses_headless_codex(&request));
@@ -3388,6 +3401,7 @@ mod tests {
             approval_policy: None,
             model: None,
             reasoning_effort: None,
+            fast_mode: None,
         };
         let event = prepared_codex_session_event(
             &request,
@@ -3431,6 +3445,7 @@ mod tests {
             approval_policy: None,
             model: None,
             reasoning_effort: None,
+            fast_mode: None,
         };
         let state = AppState::new(std::path::Path::new(":memory:")).expect("estado");
         state
@@ -3477,6 +3492,7 @@ mod tests {
             approval_policy: None,
             model: None,
             reasoning_effort: None,
+            fast_mode: None,
         };
         let event = prepared_resume_preview_event(
             &request,

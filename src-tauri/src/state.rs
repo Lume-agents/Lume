@@ -77,6 +77,7 @@ pub struct AppState {
     session_aliases: Arc<Mutex<HashMap<String, String>>>,
     archived_conversations: Arc<Mutex<HashMap<String, Vec<SessionActivity>>>>,
     session_model_overrides: Arc<Mutex<HashMap<(AgentKind, String), SessionModelOverride>>>,
+    session_fast_mode_overrides: Arc<Mutex<HashMap<(AgentKind, String), bool>>>,
     /// The permission mode picked in Lume for a conversation, by agent and native id.
     permission_mode_overrides: Arc<Mutex<HashMap<(AgentKind, String), String>>>,
     active_codex_turns: Arc<Mutex<HashMap<String, String>>>,
@@ -161,6 +162,7 @@ impl AppState {
             session_aliases: Arc::new(Mutex::new(preferences.session_aliases)),
             archived_conversations: Arc::new(Mutex::new(HashMap::new())),
             session_model_overrides: Arc::new(Mutex::new(HashMap::new())),
+            session_fast_mode_overrides: Arc::new(Mutex::new(HashMap::new())),
             permission_mode_overrides: Arc::new(Mutex::new(HashMap::new())),
             active_codex_turns: Arc::new(Mutex::new(HashMap::new())),
             hub_command_responses: Arc::new(Mutex::new(HashMap::new())),
@@ -1506,6 +1508,39 @@ impl AppState {
             .map_err(|_| "Could not save the session model settings".to_string())?
             .insert(key, settings.clone());
         Ok(settings)
+    }
+
+    pub fn session_fast_mode_override(&self, session_id: &str) -> Result<Option<bool>, String> {
+        let session = self.connected_session(session_id)?;
+        let key = (
+            session.agent,
+            session
+                .native_session_id
+                .unwrap_or_else(|| session.id.clone()),
+        );
+        self.session_fast_mode_overrides
+            .lock()
+            .map_err(|_| "Could not read the session Fast mode".to_string())
+            .map(|settings| settings.get(&key).copied())
+    }
+
+    pub fn set_session_fast_mode_override(
+        &self,
+        session_id: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let session = self.connected_session(session_id)?;
+        let key = (
+            session.agent,
+            session
+                .native_session_id
+                .unwrap_or_else(|| session.id.clone()),
+        );
+        self.session_fast_mode_overrides
+            .lock()
+            .map_err(|_| "Could not save the session Fast mode".to_string())?
+            .insert(key, enabled);
+        Ok(())
     }
 
     pub fn permission_mode_override(&self, session_id: &str) -> Result<Option<String>, String> {

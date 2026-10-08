@@ -12,6 +12,7 @@
   import LumeSelect from "$lib/LumeSelect.svelte";
   import { claudeEffortForModel, claudeEffortValues, claudeModelOptions } from "$lib/claudeModels";
   import { permissionDescription, permissionLabel } from "$lib/sessionPermissions";
+  import { isFastServiceTier } from "$lib/agentControls";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
   import { agentConnectionMessage, type ConnectableAgent } from "$lib/agentConnection";
   import { appearanceFontCss, ensureCustomFonts } from "$lib/fonts";
@@ -87,6 +88,7 @@
     getSessionPermissionMode,
     setSessionPermissionMode,
     getSessionModelSettings,
+    getSessionFastMode,
     listSessionSlashCommands,
     interruptPrompt,
     loadDisplayBackend,
@@ -113,6 +115,7 @@
     setSessionCollaborationMode,
     setClaudeSessionModelSettings,
     setSessionModelSettings,
+    setSessionFastMode,
     setSessionAgentMode,
     setTerminalFileDialogActive,
     steerQueuedPrompt,
@@ -182,11 +185,14 @@
   let claudeModel = $state("");
   let claudeEffort = $state("");
   let claudeModels = $state<CodexModelOption[]>([]);
+  let fastMode = $state(false);
+  let fastSaving = $state(false);
   let sessionPermission = $state<PermissionSettings | null>(null);
   let permissionSaving = $state(false);
   let modelLoading = $state(false);
   let modelSaving = $state(false);
   let modelError = $state<string | null>(null);
+  const claudeFastModeAvailable = $derived(claudeModels.some((option) => option.supportsFastMode));
   let questionSelections = $state<Record<string, string>>({});
   let dragging = $state(false);
   let dragMoved = false;
@@ -2446,16 +2452,21 @@
         modelSettings = await getSessionModelSettings(session.id);
         if (session.agent === "codex") sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
         selectedModel = modelSettings.model;
+        if (session.agent === "codex") fastMode = isFastServiceTier(modelSettings.serviceTier);
         const option = currentModelOption();
         selectedEffort = modelSettings.reasoningEffort
           ?? option?.defaultReasoningEffort
           ?? option?.supportedReasoningEfforts[0]?.value
           ?? "";
       } else {
-        const settings = await getClaudeSessionModelSettings(session.id);
+        const [settings, fast] = await Promise.all([
+          getClaudeSessionModelSettings(session.id),
+          getSessionFastMode(session.id),
+        ]);
         claudeModels = settings.models;
         claudeModel = settings.model;
         claudeEffort = settings.reasoningEffort ?? "";
+        fastMode = fast;
         sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
       }
     } catch (error) {
@@ -2479,6 +2490,32 @@
     }
   }
 
+  async function toggleFastMode() {
+    if (!session || fastSaving || modelLoading || modelSaving || promptIsRunning) return;
+    if (session.agent !== "codex" && session.agent !== "claude_code") return;
+    fastSaving = true;
+    modelError = null;
+    try {
+      fastMode = await setSessionFastMode(session.id, !fastMode);
+      if (session.agent === "claude_code") {
+        const settings = await getClaudeSessionModelSettings(session.id);
+        claudeModels = settings.models;
+        claudeModel = settings.model;
+        claudeEffort = settings.reasoningEffort ?? "";
+      } else if (modelSettings) {
+        modelSettings = { ...modelSettings, serviceTier: fastMode ? "priority" : "default" };
+      }
+      message = tr(
+        fastMode ? "Fast mode will apply to the next prompt." : "Fast mode is off for the next prompt.",
+        fastMode ? "O modo Fast será aplicado ao próximo prompt." : "O modo Fast está desligado para o próximo prompt.",
+      );
+    } catch (error) {
+      modelError = String(error).replace(/^Error:\s*/, "");
+    } finally {
+      fastSaving = false;
+    }
+  }
+
   async function saveModelSettings() {
     if (!session || modelSaving) return;
     if (session.agent === "codex" && (!modelSettings || !selectedModel || !selectedEffort)) return;
@@ -2492,6 +2529,7 @@
           selectedModel,
           selectedEffort,
         );
+        if (session.agent === "codex") fastMode = isFastServiceTier(modelSettings.serviceTier);
       } else if (session.agent === "claude_code") {
         const settings = await setClaudeSessionModelSettings(
           session.id,
@@ -2501,6 +2539,7 @@
         claudeModels = settings.models;
         claudeModel = settings.model;
         claudeEffort = settings.reasoningEffort ?? "";
+        fastMode = await getSessionFastMode(session.id);
       } else {
         return;
       }
@@ -3772,6 +3811,33 @@
               </div>
             {/if}
 
+            {#snippet fastModeSection()}
+              {#if session && (session.agent === "codex" || session.agent === "claude_code")}
+                <section class="model-settings-section fast-mode-section">
+                  <div class="fast-mode-setting">
+                    <div>
+                      <span class="model-settings-label">{tr("Fast mode", "Modo Fast")}</span>
+                      <small>{session.agent === "claude_code"
+                        ? tr("Supported Opus models · higher usage", "Modelos Opus compatíveis · maior consumo")
+                        : tr("Faster responses · may use more credits", "Respostas mais rápidas · pode consumir mais créditos")}</small>
+                    </div>
+                    <button
+                      class="fast-mode-toggle"
+                      class:active={fastMode}
+                      type="button"
+                      disabled={fastSaving || modelLoading || modelSaving || promptIsRunning || (session.agent === "claude_code" && !claudeFastModeAvailable)}
+                      aria-pressed={fastMode}
+                      aria-label={fastMode ? tr("Disable Fast mode", "Desativar modo Fast") : tr("Enable Fast mode", "Ativar modo Fast")}
+                      onclick={() => void toggleFastMode()}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m13.4 2.8-8 10.1h5.8l-.7 8.3 8.1-12h-5.9l.7-6.4Z" /></svg>
+                      <span>{fastSaving ? tr("Saving…", "Salvando…") : fastMode ? tr("On", "Ligado") : tr("Off", "Desligado")}</span>
+                    </button>
+                  </div>
+                </section>
+              {/if}
+            {/snippet}
+
             {#snippet permissionSection()}
               {#if sessionPermission}
                 <section class="model-settings-section claude-model-settings">
@@ -3798,6 +3864,7 @@
                 <small>{tr("Choose an available model for the next prompt.", "Escolha um modelo para o próximo prompt.")}</small>
               </section>
               {@render permissionSection()}
+              {@render fastModeSection()}
               {#if effortValues().length}
               <section class="model-settings-section">
                 <span class="model-settings-label">{tr("Reasoning effort", "Nível de raciocínio")}<b>{effortLabel()}</b></span>
@@ -3843,6 +3910,7 @@
                 </div>
               </section>
               {#if session.agent === "codex"}{@render permissionSection()}{/if}
+              {#if session.agent === "codex"}{@render fastModeSection()}{/if}
 
               {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
                 <section class="model-settings-section">
@@ -4615,6 +4683,14 @@
   .model-settings-icon svg { width: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
   .model-settings-section { min-height: 0; display: grid; gap: 6px; }
   .model-settings-section:first-of-type { overflow: hidden; }
+  .fast-mode-setting { min-height: 48px; padding: 7px 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid rgba(68, 126, 96, .13); border-radius: 10px; background: linear-gradient(110deg, rgba(58, 145, 99, .055), rgba(63, 108, 87, .025)); }
+  .fast-mode-setting > div { min-width: 0; display: grid; gap: 3px; }
+  .fast-mode-setting > div small { color: #7b8982; font: 550 var(--chat-tiny-font-size)/1.35 var(--lume-font-ui, Inter, sans-serif); }
+  .fast-mode-toggle { min-width: 69px; height: 31px; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid rgba(78, 107, 93, .16); border-radius: 8px; color: #6f7e75; background: rgba(80, 107, 94, .055); font: 760 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); cursor: pointer; transition: border-color 140ms ease, color 140ms ease, background 140ms ease, transform 140ms ease; }
+  .fast-mode-toggle:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(54, 141, 95, .28); }
+  .fast-mode-toggle.active { border-color: rgba(53, 143, 96, .34); color: #347d58; background: rgba(57, 143, 99, .11); }
+  .fast-mode-toggle:disabled { opacity: .48; cursor: default; }
+  .fast-mode-toggle svg { width: 13px; height: 13px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
   .model-settings-error { min-width: 0; padding: 8px; display: flex; align-items: center; gap: 8px; border: 1px solid rgba(184, 95, 89, 0.2); border-radius: 9px; color: #9e514c; background: rgba(184, 95, 89, 0.07); font: 620 var(--chat-tiny-font-size)/1.45 var(--lume-font-ui, Inter, sans-serif); }
   .model-settings-error > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
   .model-settings-error > button { flex: 0 0 auto; color: #9e514c; border-color: rgba(184, 95, 89, 0.22); background: rgba(184, 95, 89, 0.06); }
@@ -4931,6 +5007,10 @@
   .terminal-window.dark .model-settings-icon { color: #8ed0b0; background: rgba(99, 181, 141, 0.1); }
   .terminal-window.dark .model-settings-label,
   .terminal-window.dark .model-settings-loading { color: #91a299; }
+  .terminal-window.dark .fast-mode-setting { border-color: rgba(117, 194, 155, .14); background: linear-gradient(110deg, rgba(84, 171, 127, .09), rgba(84, 171, 127, .025)); }
+  .terminal-window.dark .fast-mode-setting > div small { color: #91a299; }
+  .terminal-window.dark .fast-mode-toggle { border-color: rgba(205, 222, 213, .13); color: #aab8b1; background: rgba(213, 233, 223, .045); }
+  .terminal-window.dark .fast-mode-toggle.active { border-color: rgba(112, 203, 157, .36); color: #9de1bb; background: rgba(84, 171, 127, .13); }
   .terminal-window.dark .model-settings-error { color: #e0a39d; border-color: rgba(211, 128, 121, 0.19); background: rgba(211, 128, 121, 0.08); }
   .terminal-window.dark .model-settings-error > button { color: #e0a39d; border-color: rgba(211, 128, 121, 0.22); background: rgba(211, 128, 121, 0.07); }
   .terminal-window.dark .model-settings-label b { color: #8fd0af; background: rgba(91, 177, 136, 0.1); }

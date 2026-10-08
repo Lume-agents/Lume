@@ -379,6 +379,8 @@ export interface CodexReasoningEffortOption {
 export interface CodexModelOption {
   /** Claude Code only: whether the model can run in auto permission mode. */
   supportsAutoMode?: boolean;
+  /** Claude Code only: whether the model supports Fast mode. */
+  supportsFastMode?: boolean;
   model: string;
   displayName: string;
   description: string;
@@ -444,6 +446,10 @@ export async function setSessionAgentMode(sessionId: string, mode: string): Prom
 
 export async function setSessionFastMode(sessionId: string, enabled: boolean): Promise<boolean> {
   return invoke<boolean>("set_session_fast_mode", { sessionId, enabled });
+}
+
+export async function getSessionFastMode(sessionId: string): Promise<boolean> {
+  return invoke<boolean>("get_session_fast_mode", { sessionId });
 }
 
 /** The models Claude Code offers and the model and effort this session runs with. */

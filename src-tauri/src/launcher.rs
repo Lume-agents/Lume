@@ -43,6 +43,8 @@ pub struct LaunchRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub fast_mode: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -179,6 +181,12 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
     }
     apply_permission_profile(request, &mut arguments);
     if request.agent == IntegrationKind::Claude {
+        if let Some(enabled) = request.fast_mode {
+            arguments.extend([
+                "--settings".into(),
+                serde_json::json!({ "fastMode": enabled }).to_string(),
+            ]);
+        }
         if let Some(model) = request
             .model
             .as_deref()
@@ -607,9 +615,34 @@ fn add_scoped_claude_hooks(payload: &mut TerminalPayload, executable: &Path) -> 
         &executable.to_string_lossy(),
         &payload.working_directory,
     )? {
-        payload
-            .arguments
-            .splice(0..0, ["--settings".into(), settings]);
+        merge_claude_settings(&mut payload.arguments, &settings)?;
+    }
+    Ok(())
+}
+
+fn merge_claude_settings(arguments: &mut Vec<String>, incoming: &str) -> Result<(), String> {
+    let incoming = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(incoming)
+        .map_err(|error| format!("Claude returned invalid Lume settings: {error}"))?;
+    if let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--settings")
+    {
+        let existing = arguments
+            .get(index + 1)
+            .ok_or("Claude settings are missing their value")?;
+        let mut merged =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(existing)
+                .map_err(|error| format!("Claude settings are invalid: {error}"))?;
+        merged.extend(incoming);
+        arguments[index + 1] = serde_json::Value::Object(merged).to_string();
+    } else {
+        arguments.splice(
+            0..0,
+            [
+                "--settings".into(),
+                serde_json::Value::Object(incoming).to_string(),
+            ],
+        );
     }
     Ok(())
 }
@@ -981,6 +1014,7 @@ mod tests {
             approval_policy: None,
             model: None,
             reasoning_effort: None,
+            fast_mode: None,
         }
     }
 

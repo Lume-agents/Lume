@@ -37,6 +37,7 @@ pub struct ClaudeModelOption {
     pub default_reasoning_effort: String,
     pub supported_reasoning_efforts: Vec<ClaudeEffortOption>,
     pub supports_auto_mode: bool,
+    pub supports_fast_mode: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -291,6 +292,10 @@ pub fn model_catalog(initialize: &Value) -> ClaudeModelCatalog {
                 .map(|effort| effort.value.clone())
                 .unwrap_or_default()
         };
+        let supports_fast_mode = model
+            .get("supportsFastMode")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| supports_fast_mode_model(&id));
         catalog.options.push(ClaudeModelOption {
             is_default: default_model.as_deref() == Some(id.as_str()),
             model: id,
@@ -310,9 +315,22 @@ pub fn model_catalog(initialize: &Value) -> ClaudeModelCatalog {
                 .get("supportsAutoMode")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            supports_fast_mode,
         });
     }
     catalog
+}
+
+pub fn supports_fast_mode_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"]
+        .iter()
+        .any(|supported| {
+            model == *supported
+                || model
+                    .strip_prefix(supported)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+        })
 }
 
 impl ClaudeModelCatalog {

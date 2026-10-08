@@ -12,7 +12,7 @@
   import StreamedMessage from "$lib/StreamedMessage.svelte";
   import { MAX_HOLD_MS } from "$lib/streamPacing";
   import { interruptNoticeText } from "$lib/interruptNotice";
-  import { controlsDiffer, type ControlsSnapshot } from "$lib/agentControls";
+import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/agentControls";
   import ThinkingOrb from "$lib/ThinkingOrb.svelte";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
   import { sessionEnvironments } from "$lib/sessionEnvironments";
@@ -63,6 +63,7 @@
   } from "$lib/imageAttachments";
   import {
     getClaudeSessionModelSettings,
+    getSessionFastMode,
     getSessionCollaborationMode,
     getSessionModelSettings,
     listSessionSlashCommands,
@@ -457,6 +458,7 @@
       || modeSaving
       || promptBlocksSettings
   );
+  const claudeFastModeAvailable = $derived(claudeModels.some((option) => option.supportsFastMode));
   const sourceEntry = $derived(sourceEntryId
     ? entries.find((entry) => entry.id === sourceEntryId) ?? null
     : null);
@@ -1090,7 +1092,7 @@
         ]);
         collaborationMode = mode;
         modelSettings = settings;
-        if (!promptIsRunning) fastMode = settings.serviceTier === "fast";
+        if (!promptIsRunning) fastMode = isFastServiceTier(settings.serviceTier);
         selectedModel = settings.model;
         const option = settings.models.find((candidate) => candidate.model === settings.model);
         selectedEffort = settings.reasoningEffort
@@ -1098,13 +1100,17 @@
           ?? option?.supportedReasoningEfforts[0]?.value
           ?? "";
       } else if (session.agent === "claude_code") {
-        const settings = await getClaudeSessionModelSettings(session.id);
+        const [settings, fast] = await Promise.all([
+          getClaudeSessionModelSettings(session.id),
+          getSessionFastMode(session.id),
+        ]);
         claudeModels = settings.models;
         claudeModel = settings.model;
         claudeEffort = settings.reasoningEffort ?? "";
+        fastMode = fast;
       }
       originalControls ??= session.agent === "claude_code"
-        ? { model: claudeModel, effort: claudeEffort, fast: false }
+        ? { model: claudeModel, effort: claudeEffort, fast: fastMode }
         : { model: selectedModel, effort: selectedEffort, fast: fastMode };
   }
 
@@ -1115,9 +1121,9 @@
     controlsDiffer(
       originalControls,
       session.agent === "claude_code"
-        ? { model: claudeModel, effort: claudeEffort, fast: false }
+        ? { model: claudeModel, effort: claudeEffort, fast: fastMode }
         : { model: selectedModel, effort: selectedEffort, fast: fastMode },
-      session.agent === "codex",
+      session.agent === "codex" || session.agent === "claude_code",
     ),
   );
 
@@ -1128,6 +1134,7 @@
       claudeModel = original.model;
       claudeEffort = original.effort;
       await saveAgentControls();
+      if (fastMode !== original.fast) await toggleFastMode();
       return;
     }
     selectedModel = original.model;
@@ -1169,12 +1176,19 @@
   }
 
   async function toggleFastMode() {
-    if (session.agent !== "codex" || runtimeControlsDisabled || fastSaving) return;
+    if ((session.agent !== "codex" && session.agent !== "claude_code") || runtimeControlsDisabled || fastSaving) return;
     fastSaving = true;
     sendError = "";
     try {
       fastMode = await setSessionFastMode(session.id, !fastMode);
-      if (modelSettings) modelSettings = { ...modelSettings, serviceTier: fastMode ? "fast" : "default" };
+      if (session.agent === "claude_code") {
+        const settings = await getClaudeSessionModelSettings(session.id);
+        claudeModels = settings.models;
+        claudeModel = settings.model;
+        claudeEffort = settings.reasoningEffort ?? "";
+      } else if (modelSettings) {
+        modelSettings = { ...modelSettings, serviceTier: fastMode ? "priority" : "default" };
+      }
     } catch (error) {
       const message = String(error).replace(/^Error:\s*/, "");
       sendError = /(?:command|comando).*set_session_fast_mode.*(?:not found|não encontrado)/i.test(message)
@@ -1214,7 +1228,7 @@
         selectedEffort = savedSettings.reasoningEffort
           ?? savedSettings.models.find((option) => option.model === savedSettings.model)?.defaultReasoningEffort
           ?? "";
-        if (!promptIsRunning) fastMode = modelSettings.serviceTier === "fast";
+        if (!promptIsRunning) fastMode = isFastServiceTier(modelSettings.serviceTier);
       } else if (session.agent === "claude_code") {
         const settings = await setClaudeSessionModelSettings(
           session.id,
@@ -1224,6 +1238,7 @@
         claudeModels = settings.models;
         claudeModel = settings.model;
         claudeEffort = settings.reasoningEffort ?? "";
+        fastMode = await getSessionFastMode(session.id);
       }
     } catch (error) {
       controlsError = String(error).replace(/^Error:\s*/, "");
@@ -2618,7 +2633,7 @@
             <span>{session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity"
               ? (modelSettings?.models.find((option) => option.model === selectedModel)?.displayName || selectedModel || "Model")
               : (claudeModels.find((option) => option.model === claudeModel)?.displayName || claudeModel || tr("Model", "Modelo"))}</span>
-            {#if session.agent === "codex" && fastMode}<span class="fast-indicator" title={tr("Fast mode is on", "Modo Fast ligado")}><WorkspaceChatIcon name="fast" size={13} active /></span>{/if}
+            {#if (session.agent === "codex" || session.agent === "claude_code") && fastMode}<span class="fast-indicator" title={tr("Fast mode is on", "Modo Fast ligado")}><WorkspaceChatIcon name="fast" size={13} active /></span>{/if}
             <LumeIcon name="chevron-down" size={12} />
           </button>
           {#if controlsOpen}
@@ -2637,11 +2652,11 @@
                   </button>
                 {/snippet}
                 {#snippet modelFastButton()}
-                  {#if session.agent === "codex"}
+                  {#if session.agent === "codex" || session.agent === "claude_code"}
                     <button class="controls-icon-button model-fast" class:enabled={fastMode} type="button"
-                      disabled={runtimeControlsDisabled || fastSaving || !modelSettings} aria-pressed={fastMode}
+                      disabled={runtimeControlsDisabled || fastSaving || (session.agent === "codex" && !modelSettings) || (session.agent === "claude_code" && !claudeFastModeAvailable)} aria-pressed={fastMode}
                       aria-label={fastMode ? tr("Disable Fast mode", "Desativar modo Fast") : tr("Enable Fast mode", "Ativar modo Fast")}
-                      title={tr("Fast mode · higher credit usage", "Modo Fast · maior consumo de créditos")}
+                      title={session.agent === "claude_code" ? tr("Fast mode needs a supported Opus model and can use more credits", "O modo Fast exige um modelo Opus compatível e pode consumir mais créditos") : tr("Fast mode · higher credit usage", "Modo Fast · maior consumo de créditos")}
                       onclick={() => void toggleFastMode()}>
                       {#key fastMode}<WorkspaceChatIcon name="fast" size={18} active={fastMode} />{/key}
                     </button>
@@ -2666,7 +2681,7 @@
                       <LumeSelect value={claudeModel} options={claudeModelOptions(claudeModels, tr)}
                         ariaLabel={tr("Model", "Modelo")} disabled={modelControlsDisabled} minWidth={0} variant="heading" onValueChange={chooseClaudeModel} />
                     </div>
-                    <span class="model-control-spacer" aria-hidden="true"></span>
+                    {@render modelFastButton()}
                   </div>
                 {/if}
                 {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
@@ -2844,7 +2859,7 @@
   .conversation-row { position: relative; width: 100%; min-width: 0; }
   .conversation-entry { min-width: 0; display: flex; flex-direction: column; gap: 9px; }
   .time-gutter { position: absolute; top: 0; bottom: 0; left: calc(-1 * var(--chat-edge-gutter)); width: var(--chat-edge-gutter); padding: 6px 4px 0 0; display: flex; justify-content: flex-end; align-items: flex-start; box-sizing: border-box; cursor: default; }
-  .time-gutter time { opacity: 0; transform: translateX(3px); transition: opacity 120ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
+  .time-gutter time { font-size: calc(11px + var(--workspace-chat-small-adjust)); opacity: 0; transform: translateX(3px); transition: opacity 120ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
   .time-gutter:hover time, .conversation-row:focus-within .time-gutter time { opacity: 1; transform: translateX(0); }
   .message { width: min(92%, 940px); min-width: 0; color: var(--workspace-text); font-size: var(--workspace-chat-font-size); }
   .user-message { --message-collapse-surface: var(--workspace-user); --user-message-font: inherit; --user-message-muted: var(--workspace-muted); --user-message-accent: var(--workspace-accent); width: fit-content; max-width: min(92%, 940px); align-self: flex-end; padding: 9px 12px; border: 1px solid var(--workspace-user-line); border-radius: 14px 14px 4px 14px; background: var(--workspace-user); }

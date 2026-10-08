@@ -12,6 +12,7 @@
   import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
   import QRCode from "qrcode";
   import BrandIcon from "$lib/BrandIcon.svelte";
+  import LumeLogo from "$lib/LumeLogo.svelte";
   import AccentColorPicker from "$lib/AccentColorPicker.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
@@ -234,6 +235,7 @@
   let updateState = $state<"idle" | "checking" | "available" | "up_to_date" | "downloading" | "ready" | "error">("idle");
   let availableVersion = $state<string | null>(null);
   let updateDetail = $state("");
+  let updateProgress = $state<number | null>(null);
   let pendingUpdate: Update | null = null;
   let resetConfirming = $state(false);
   let loading = $state(true);
@@ -2126,6 +2128,7 @@
     if (["checking", "downloading", "ready"].includes(updateState)) return;
     updateState = "checking";
     updateDetail = tr("Checking for updates…", "Procurando atualizações…");
+    updateProgress = null;
     try {
       pendingUpdate = await check({ timeout: 15_000, headers: { "Cache-Control": "no-cache" } });
       availableVersion = pendingUpdate?.version ?? null;
@@ -2140,15 +2143,32 @@
   }
 
   async function installUpdate() {
-    if (!pendingUpdate) return;
+    if (!pendingUpdate || updateState === "downloading") return;
     updateState = "downloading";
+    updateDetail = tr("Downloading and preparing the update…", "Baixando e preparando a atualização…");
+    updateProgress = 0;
+    let downloaded = 0;
+    let total: number | undefined;
     try {
-      await pendingUpdate.downloadAndInstall();
+      await pendingUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength;
+          return;
+        }
+        if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          updateProgress = total ? Math.min(99, Math.round((downloaded / total) * 100)) : null;
+          return;
+        }
+        updateProgress = 100;
+      });
       updateState = "ready";
+      updateDetail = tr("Update installed. Restarting Lume…", "Atualização instalada. Reiniciando o Lume…");
       await relaunch();
     } catch {
       updateState = "error";
       updateDetail = tr("The update could not be installed.", "A atualização não pôde ser instalada.");
+      updateProgress = null;
     }
   }
 
@@ -3105,9 +3125,51 @@
             {#if settingsSections.about}
             {#if settingsLoadingSections.includes("about")}<p class="settings-loading-hint" role="status">{tr("Loading app information…", "Carregando informações do aplicativo…")}</p>{/if}
             <section class="about-settings">
-              <span><strong>Lume</strong><small>{tr("Version", "Versão")} {appVersion}</small></span>
-              {#if updateState === "available"}<button class="primary" type="button" onclick={() => void installUpdate()}>{tr("Update to", "Atualizar para")} {availableVersion}</button>{:else}<button type="button" disabled={["checking", "downloading", "ready"].includes(updateState)} onclick={() => void checkForUpdates()}>{updateState === "checking" ? "…" : tr("Check updates", "Verificar atualizações")}</button>{/if}
-              {#if updateDetail}<p>{updateDetail}</p>{/if}
+              <div class="about-update-card" data-update-card>
+                <div class="about-update-header">
+                  <LumeLogo size={38} />
+                  <div class="about-update-identity">
+                    <strong>Lume</strong>
+                    <span><small>{tr("Current version", "Versão atual")}</small><b>{appVersion}</b></span>
+                  </div>
+                  {#if updateState === "available"}
+                    <button class="about-update-action primary" type="button" onclick={() => void installUpdate()}>
+                      {tr("Install", "Instalar")} {availableVersion}
+                    </button>
+                  {:else}
+                    <button class="about-update-action" type="button" disabled={["checking", "downloading", "ready"].includes(updateState)} onclick={() => void checkForUpdates()}>
+                      {updateState === "checking"
+                        ? tr("Checking…", "Verificando…")
+                        : updateState === "downloading"
+                          ? tr("Downloading…", "Baixando…")
+                          : updateState === "ready"
+                            ? tr("Restarting…", "Reiniciando…")
+                            : updateState === "error"
+                              ? tr("Try again", "Tentar novamente")
+                              : tr("Check updates", "Verificar atualizações")}
+                    </button>
+                  {/if}
+                </div>
+                {#if updateDetail}<p role="status">{updateDetail}</p>{/if}
+                {#if updateState === "downloading" || updateState === "ready"}
+                  <div class="about-update-progress-copy">
+                    <span>{updateState === "ready" ? tr("Ready to restart", "Pronto para reiniciar") : tr("Download progress", "Progresso do download")}</span>
+                    <b>{updateProgress === null ? "" : `${updateProgress}%`}</b>
+                  </div>
+                  <div
+                    class:indeterminate={updateProgress === null}
+                    class="about-update-progress"
+                    role="progressbar"
+                    aria-label={tr("Update download progress", "Progresso do download da atualização")}
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    aria-valuenow={updateProgress ?? undefined}
+                    aria-valuetext={updateProgress === null ? tr("Downloading", "Baixando") : `${updateProgress}%`}
+                  >
+                    <span style:width={`${updateProgress ?? 24}%`}></span>
+                  </div>
+                {/if}
+              </div>
             </section>
             {/if}
             </div>
@@ -3536,7 +3598,29 @@
   .mobile-pairing-action { padding: 10px 0 3px; }
   .pairing-qr { padding: 10px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.pairing-qr img { width: 96px; height: 96px; border-radius: 7px; }.pairing-qr span { display: grid; gap: 3px; }.pairing-qr strong { color: var(--workspace-strong); font: 750 12px var(--lume-font-code, ui-monospace, monospace); }.pairing-qr small { color: var(--workspace-muted); font-size: 7px; }
   .device-card { margin-top: 9px; padding: 9px 10px 3px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.device-card header { display: flex; align-items: center; gap: 8px; }.device-card header span { min-width: 0; display: grid; gap: 2px; flex: 1; }.device-card header button { border: 0; color: #b7605c; background: transparent; font-size: 7px; cursor: pointer; }
-  .about-settings { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; }.about-settings > span { display: grid; gap: 2px; }.about-settings p { grid-column: 1 / -1; }
+  .about-settings { display: grid; gap: 0; }
+  .about-update-card { min-width: 0; padding: 13px; display: grid; gap: 9px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 15%, var(--workspace-line)); border-radius: 14px; background: linear-gradient(132deg, color-mix(in srgb, var(--workspace-accent) 6%, var(--workspace-raised)), var(--workspace-subtle)); }
+  .about-update-header { min-width: 0; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+  .about-update-identity { min-width: 0; display: grid; gap: 3px; }
+  .about-update-identity > strong { color: var(--workspace-strong); font-size: 13px; font-weight: 790; letter-spacing: -.025em; }
+  .about-update-identity > span { display: grid; gap: 1px; }
+  .about-update-identity small { color: var(--workspace-muted); font-size: 7px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+  .about-update-identity b { color: var(--workspace-text); font-size: 13px; font-weight: 780; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+  .about-settings .about-update-action { min-height: 32px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 25%, var(--workspace-line)); border-radius: 9px; color: var(--workspace-text); background: color-mix(in srgb, var(--workspace-raised) 72%, transparent); font-size: 8px; font-weight: 760; white-space: nowrap; transition: border-color 140ms ease, color 140ms ease, background 140ms ease, transform 140ms ease; }
+  .about-settings .about-update-action:hover:not(:disabled) { transform: translateY(-1px); color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 44%, var(--workspace-line)); background: var(--workspace-raised); }
+  .about-settings .about-update-action.primary { color: var(--workspace-raised); border-color: transparent; background: var(--workspace-accent); }
+  .about-settings .about-update-action.primary:hover:not(:disabled) { color: var(--workspace-raised); background: color-mix(in srgb, var(--workspace-accent) 84%, var(--workspace-strong)); }
+  .about-settings .about-update-action:disabled { opacity: .58; cursor: default; }
+  .about-update-card > p { margin: 0; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }
+  .about-update-progress-copy { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--workspace-muted); font-size: 7px; font-weight: 720; letter-spacing: .06em; text-transform: uppercase; }
+  .about-update-progress-copy b { color: var(--workspace-accent); font-size: 9px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: 0; }
+  .about-update-progress { height: 8px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--workspace-accent) 12%, var(--workspace-line)); border-radius: 999px; background: color-mix(in srgb, var(--workspace-accent) 8%, var(--workspace-raised)); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .08); }
+  .about-update-progress > span { position: relative; height: 100%; min-width: 0; display: block; overflow: hidden; border-radius: inherit; background: linear-gradient(90deg, color-mix(in srgb, var(--workspace-accent) 72%, #5598c6), var(--workspace-accent), color-mix(in srgb, var(--workspace-accent) 68%, #c2dfb7)); box-shadow: 0 0 12px color-mix(in srgb, var(--workspace-accent) 28%, transparent); transition: width 220ms cubic-bezier(.16, 1, .3, 1); }
+  .about-update-progress > span::after { position: absolute; inset: 0; background: linear-gradient(105deg, transparent 20%, rgba(255, 255, 255, .42) 50%, transparent 80%); content: ""; animation: about-progress-shimmer 1.4s linear infinite; }
+  .about-update-progress.indeterminate > span { animation: about-progress-sweep 1.2s cubic-bezier(.4, 0, .2, 1) infinite alternate; }
+  @keyframes about-progress-shimmer { from { transform: translateX(-110%); } to { transform: translateX(110%); } }
+  @keyframes about-progress-sweep { from { transform: translateX(-85%); } to { transform: translateX(330%); } }
+  @media (prefers-reduced-motion: reduce) { .about-update-progress > span, .about-update-progress > span::after { animation: none; transition: none; } }
   .reset-control { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }.reset-control > span { margin-right: auto; color: var(--workspace-muted); font-size: 8px; }.reset-control .danger { color: #b65d59; border-color: rgba(182, 93, 89, .28); }
   .shortcut-scrim { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; background: rgba(5, 11, 8, .45); backdrop-filter: blur(4px); }
   .shortcut-dialog { width: min(310px, calc(100vw - 36px)); padding: 20px; display: grid; justify-items: center; gap: 15px; border: 1px solid var(--workspace-line); border-radius: 15px; outline: none; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(0, 0, 0, .25); }.shortcut-dialog > strong { color: var(--workspace-strong); font-size: 12px; }.shortcut-dialog > kbd { min-width: 160px; padding: 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-accent); background: var(--workspace-subtle); font: 750 10px var(--lume-font-code, ui-monospace, monospace); text-align: center; }.shortcut-dialog > span { display: flex; gap: 7px; }.shortcut-dialog button { min-height: 30px; padding: 0 11px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 730; cursor: pointer; }.shortcut-dialog button.primary { color: var(--workspace-raised); background: var(--workspace-accent); }

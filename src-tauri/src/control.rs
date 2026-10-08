@@ -1,6 +1,7 @@
 use std::{fs, path::Path};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
@@ -419,6 +420,7 @@ pub fn submit_prompt(
                 approval_policy: None,
                 model: None,
                 reasoning_effort: None,
+                fast_mode: None,
             };
             launcher::launch(request, &executable, &app_data_dir, None)
         }
@@ -832,26 +834,106 @@ fn validate_model_selection(
 }
 
 pub fn set_session_fast_mode(
+    app: &AppHandle,
     state: &AppState,
     bridge: &CodexBridge,
     session_id: &str,
     enabled: bool,
 ) -> Result<bool, String> {
     let session = state.connected_session(session_id)?;
-    if session.agent != AgentKind::Codex || session.control_origin != SessionControlOrigin::Lume {
-        return Err("Fast mode requires a Codex session controlled by Lume".into());
-    }
     if matches!(
         session.status,
         SessionStatus::Running | SessionStatus::PermissionRequired
     ) {
         return Err("Wait for the current task to finish before changing Fast mode".into());
     }
-    let thread_id = session
-        .native_session_id
-        .as_deref()
-        .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
-    bridge.set_thread_fast_mode(thread_id, enabled)
+    match session.agent {
+        AgentKind::Codex => {
+            if session.control_origin != SessionControlOrigin::Lume {
+                return Err("Fast mode requires a Codex session controlled by Lume".into());
+            }
+            let thread_id = session
+                .native_session_id
+                .as_deref()
+                .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
+            bridge.set_thread_fast_mode(thread_id, enabled)
+        }
+        AgentKind::ClaudeCode => {
+            if session.control_origin != SessionControlOrigin::Lume {
+                return Err(
+                    "Take control of this Claude Code session before changing Fast mode".into(),
+                );
+            }
+            if enabled {
+                let mut selected = state.session_model_override(session_id)?;
+                let settings = effective_claude_model_settings(state, &session)?;
+                let current_model_supports_fast = settings
+                    .models
+                    .iter()
+                    .any(|option| option.model == settings.model && option.supports_fast_mode);
+                if !current_model_supports_fast {
+                    let model = settings
+                        .models
+                        .iter()
+                        .find(|option| option.supports_fast_mode)
+                        .ok_or_else(|| {
+                            "Fast mode needs Claude Opus 5.5, Opus 5, or Opus 4.8 in the Claude Code model list".to_string()
+                        })?;
+                    let effort = selected
+                        .reasoning_effort
+                        .as_deref()
+                        .filter(|effort| {
+                            model
+                                .supported_reasoning_efforts
+                                .iter()
+                                .any(|option| option.value == *effort)
+                        })
+                        .map(str::to_string)
+                        .or_else(|| Some(model.default_reasoning_effort.clone()));
+                    selected.model = Some(model.model.clone());
+                    selected.reasoning_effort = effort;
+                    state.set_session_model_override(session_id, selected)?;
+                }
+            }
+            state.set_session_fast_mode_override(session_id, enabled)?;
+            protocol::emit_sessions_changed(app);
+            Ok(enabled)
+        }
+        _ => Err("Fast mode is unavailable for this agent".into()),
+    }
+}
+
+pub fn session_fast_mode(
+    state: &AppState,
+    bridge: &CodexBridge,
+    session_id: &str,
+) -> Result<bool, String> {
+    let session = state.connected_session(session_id)?;
+    match session.agent {
+        AgentKind::Codex => {
+            let thread_id = session
+                .native_session_id
+                .as_deref()
+                .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
+            let settings = bridge.thread_model_settings(thread_id)?;
+            Ok(matches!(
+                settings.service_tier.as_deref(),
+                Some("fast" | "priority")
+            ))
+        }
+        AgentKind::ClaudeCode => {
+            if let Some(enabled) = state.session_fast_mode_override(session_id)? {
+                return Ok(enabled);
+            }
+            Ok(
+                integrations::claude_settings(session.working_directory.as_deref())
+                    .get("fastMode")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+        }
+        _ => Err("Fast mode is unavailable for this agent".into()),
+    }
 }
 
 pub fn claude_session_model_settings(
@@ -1076,6 +1158,7 @@ pub(crate) fn claude_launch_request(
         approval_policy: Some(session.permission_profile.approval_policy.clone()),
         model: model_settings.model,
         reasoning_effort: model_settings.reasoning_effort,
+        fast_mode: Some(claude_session_fast_mode(state, session)?),
     };
     Ok((request, effective_claude_permission_mode(state, session)?))
 }
@@ -1091,6 +1174,18 @@ fn claude_prompt_model_settings(state: &AppState, session: &AgentSession) -> Ses
         })
         .or_else(|| state.session_model_override(&session.id).ok())
         .unwrap_or_default()
+}
+
+fn claude_session_fast_mode(state: &AppState, session: &AgentSession) -> Result<bool, String> {
+    if let Some(enabled) = state.session_fast_mode_override(&session.id)? {
+        return Ok(enabled);
+    }
+    Ok(
+        integrations::claude_settings(session.working_directory.as_deref())
+            .get("fastMode")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
 }
 
 pub fn set_claude_session_model_settings(
@@ -1145,6 +1240,14 @@ pub fn set_claude_session_model_settings(
             ));
         }
     }
+    let current_fast_mode = state
+        .session_fast_mode_override(session_id)?
+        .unwrap_or_else(|| {
+            integrations::claude_settings(session.working_directory.as_deref())
+                .get("fastMode")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
     state.set_session_model_override(
         session_id,
         SessionModelOverride {
@@ -1152,8 +1255,16 @@ pub fn set_claude_session_model_settings(
             reasoning_effort: effort,
         },
     )?;
+    let effective = effective_claude_model_settings(state, &session)?;
+    let effective_model_supports_fast = effective
+        .models
+        .iter()
+        .any(|option| option.model == effective.model && option.supports_fast_mode);
+    if current_fast_mode && !effective_model_supports_fast {
+        state.set_session_fast_mode_override(session_id, false)?;
+    }
     protocol::emit_sessions_changed(app);
-    effective_claude_model_settings(state, &session)
+    Ok(effective)
 }
 
 pub fn steer_queued_prompt(
@@ -1786,6 +1897,7 @@ fn takeover_launch_request(
         approval_policy: Some(session.permission_profile.approval_policy.clone()),
         model: model_settings.model,
         reasoning_effort: model_settings.reasoning_effort,
+        fast_mode: None,
     })
 }
 

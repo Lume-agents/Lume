@@ -623,7 +623,7 @@ impl CodexBridge {
         self.update_thread_settings(
             thread_id,
             CachedCodexThreadSettings {
-                service_tier: Some(if enabled { "fast" } else { "default" }.into()),
+                service_tier: Some(if enabled { "priority" } else { "default" }.into()),
                 ..CachedCodexThreadSettings::default()
             },
         )?;
@@ -2221,7 +2221,7 @@ fn thread_fast_mode_request(thread_id: &str, enabled: bool) -> Value {
     json!({
         "method": "thread/resume",
         "id": 2,
-        "params": { "threadId": thread_id, "excludeTurns": true, "serviceTier": if enabled { "fast" } else { "default" } }
+        "params": { "threadId": thread_id, "excludeTurns": true, "serviceTier": if enabled { "priority" } else { "default" } }
     })
 }
 
@@ -2230,8 +2230,8 @@ fn confirmed_fast_mode(response: &Value, enabled: bool) -> Result<bool, String> 
         .pointer("/result/serviceTier")
         .and_then(Value::as_str);
     match actual {
-        Some("fast") if enabled => Ok(true),
-        Some("default" | "standard") if !enabled => Ok(false),
+        Some("fast" | "priority") if enabled => Ok(true),
+        Some("default" | "standard" | "auto") if !enabled => Ok(false),
         None if !enabled => Ok(false),
         _ => Err("Codex did not confirm the requested Fast mode".into()),
     }
@@ -4685,7 +4685,7 @@ mod tests {
                 "result": {
                     "model": "gpt-test",
                     "reasoningEffort": "high",
-                    "serviceTier": "fast"
+                    "serviceTier": "priority"
                 }
             }),
             &json!({
@@ -4708,7 +4708,7 @@ mod tests {
 
         assert_eq!(settings.model, "gpt-test");
         assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
-        assert_eq!(settings.service_tier.as_deref(), Some("fast"));
+        assert_eq!(settings.service_tier.as_deref(), Some("priority"));
         assert_eq!(settings.models[0].supported_reasoning_efforts.len(), 2);
         assert_eq!(
             settings.models[0].supported_reasoning_efforts[1].value,
@@ -4821,13 +4821,13 @@ mod tests {
             "result": {
                 "model": "previous-turn-model",
                 "reasoningEffort": "low",
-                "serviceTier": "fast"
+                "serviceTier": "priority"
             }
         }))
         .expect("one acknowledged update");
         assert_eq!(settings.model, "gpt-test");
         assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
-        assert_eq!(settings.service_tier.as_deref(), Some("fast"));
+        assert_eq!(settings.service_tier.as_deref(), Some("priority"));
         assert_eq!(settings.models.len(), 1);
         assert_eq!(settings.models[0].supported_reasoning_efforts.len(), 2);
     }
@@ -4861,10 +4861,14 @@ mod tests {
     }
 
     #[test]
-    fn fast_mode_is_a_service_tier_not_a_reasoning_effort() {
+    fn fast_mode_uses_codex_priority_service_tier_not_a_reasoning_effort() {
         assert_eq!(
             thread_fast_mode_request("thread-1", true),
-            json!({"method": "thread/resume", "id": 2, "params": {"threadId": "thread-1", "excludeTurns": true, "serviceTier": "fast"}})
+            json!({"method": "thread/resume", "id": 2, "params": {"threadId": "thread-1", "excludeTurns": true, "serviceTier": "priority"}})
+        );
+        assert_eq!(
+            confirmed_fast_mode(&json!({"result": {"serviceTier": "priority"}}), true),
+            Ok(true)
         );
         assert_eq!(
             confirmed_fast_mode(&json!({"result": {"serviceTier": "fast"}}), true),

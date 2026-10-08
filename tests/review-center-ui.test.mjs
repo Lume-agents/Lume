@@ -82,7 +82,7 @@ const server = createServer((request, response) => {
 });
 server.listen(0, "127.0.0.1");
 await once(server, "listening");
-const browser = spawn(executable, ["--no-sandbox", "--disable-dev-shm-usage", "--remote-debugging-port=0", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+const browser = spawn(executable, ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--disable-background-networking", `--user-data-dir=${mkdtempSync(join(tmpdir(), "lume-ui-profile-"))}`, "--remote-debugging-port=0", "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
 let socket;
 try {
   const endpoint = await new Promise((resolve, reject) => {

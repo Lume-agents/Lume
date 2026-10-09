@@ -143,6 +143,14 @@ impl SessionCapabilities {
                     PromptDelivery::Steer,
                     PromptDelivery::Queue,
                 ]
+            } else if claude_queues_in_lume(session) {
+                // Each message to a Lume-owned Claude conversation is its own run, so they queue; "steer"
+                // means send now: stop the running message and run the queued one.
+                vec![
+                    PromptDelivery::NewTurn,
+                    PromptDelivery::Queue,
+                    PromptDelivery::Steer,
+                ]
             } else {
                 vec![PromptDelivery::NewTurn]
             },
@@ -160,11 +168,18 @@ pub(crate) fn is_unbound_codex_cli_monitor(session: &AgentSession) -> bool {
 
 fn can_interrupt_session(session: &AgentSession) -> bool {
     session.source != SessionSource::Web
-        && matches!(
+        && (matches!(
             session.agent,
             AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
-        )
+        ) || claude_queues_in_lume(session))
         && has_nonempty_value(session.native_session_id.as_deref())
+}
+
+/// A Claude Code conversation Lume owns runs each message as its own `claude --print` process.
+fn claude_queues_in_lume(session: &AgentSession) -> bool {
+    session.agent == AgentKind::ClaudeCode
+        && session.control_origin == SessionControlOrigin::Lume
+        && matches!(session.source, SessionSource::Cli | SessionSource::Desktop)
 }
 
 fn has_nonempty_value(value: Option<&str>) -> bool {
@@ -1905,6 +1920,31 @@ mod tests {
         assert!(SessionCapabilities::for_session(&headless).can_terminate);
         headless.control_origin = SessionControlOrigin::External;
         assert!(!SessionCapabilities::for_session(&headless).can_terminate);
+    }
+
+    #[test]
+    fn claude_opened_by_lume_can_queue_and_be_interrupted_while_running() {
+        let mut claude = session();
+        claude.agent = AgentKind::ClaudeCode;
+        claude.source = SessionSource::Cli;
+        claude.process_id = None;
+        claude.control_origin = SessionControlOrigin::Lume;
+        claude.native_session_id = Some("claude-session".into());
+        claude.status = SessionStatus::Running;
+        let capabilities = SessionCapabilities::for_session(&claude);
+        assert!(capabilities.can_interrupt);
+        assert_eq!(
+            capabilities.prompt_deliveries,
+            vec![
+                PromptDelivery::NewTurn,
+                PromptDelivery::Queue,
+                PromptDelivery::Steer
+            ]
+        );
+        claude.control_origin = SessionControlOrigin::External;
+        let external = SessionCapabilities::for_session(&claude);
+        assert!(!external.can_interrupt);
+        assert_eq!(external.prompt_deliveries, vec![PromptDelivery::NewTurn]);
     }
 
     #[test]

@@ -2621,6 +2621,19 @@ impl AppState {
         };
 
         let permission_id = match event.event {
+            HookEventKind::SessionStarted
+                if event.agent == AgentKind::ClaudeCode
+                    && event.control_origin == SessionControlOrigin::Lume
+                    && matches!(
+                        session.status,
+                        SessionStatus::Running | SessionStatus::PermissionRequired
+                    ) =>
+            {
+                // Lume marks the prompt as running before it spawns `claude --print --resume`, and
+                // that process announces itself with SessionStart. Taking that for an idle session
+                // dropped the chat out of "running" until the prompt hook arrived a moment later.
+                None
+            }
             HookEventKind::SessionStarted => {
                 session.status = SessionStatus::WaitingForInput;
                 session.status_label = "Esperando ação".into();

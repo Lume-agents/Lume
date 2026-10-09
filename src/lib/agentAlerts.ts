@@ -95,7 +95,9 @@ export function collectAgentAlerts(
       const exhausted = remaining === 0;
       const windowLabel = limit.label.trim() || tr(language, "current window", "janela atual");
       add({
-        id: `usage:${session.agent}:${limit.id}:${limit.resetsAt ?? "current"}:${exhausted ? "exhausted" : "low"}`,
+        // The reset time drifts by seconds between reads, so it is rounded to the hour; otherwise every
+        // refresh looked like a new alert and brought back a banner and chime the user had already dismissed.
+        id: `usage:${session.agent}:${limit.id}:${limit.resetsAt == null ? "current" : Math.round(limit.resetsAt / 3_600_000)}:${exhausted ? "exhausted" : "low"}`,
         message: exhausted
           ? tr(language, `${session.agentLabel} reached the ${windowLabel} usage limit.`, `${session.agentLabel} atingiu o limite de uso de ${windowLabel}.`)
           : tr(language, `Only ${remaining}% of ${session.agentLabel}'s ${windowLabel} usage remains.`, `Restam apenas ${remaining}% do uso de ${windowLabel} do ${session.agentLabel}.`),

@@ -597,7 +597,7 @@ fn explicit_message_todo(detail: &str) -> Option<Vec<WorkItem>> {
                 || heading == "to do"
                 || heading.starts_with("todo ")
                 || heading.starts_with("to do ")
-                || (line.ends_with(':') && (heading.contains("todo") || heading.contains("to do")));
+                || (line.ends_with(':') && is_short_todo_label(&heading));
             continue;
         }
         if let Some(item) = message_task_line(line, true) {
@@ -613,6 +613,18 @@ fn explicit_message_todo(detail: &str) -> Option<Vec<WorkItem>> {
         }
     }
     (!items.is_empty()).then_some(items)
+}
+
+/// A short label such as "Current todo:" or "Next to do:". The words must stand alone: a plain
+/// substring match took "bruto do erro … para:" ("bru**to do**") for a to-do heading, and the bullets
+/// after any such sentence became tasks.
+fn is_short_todo_label(heading: &str) -> bool {
+    let words = heading
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    words.len() <= 5
+        && (words.contains(&"todo") || words.windows(2).any(|pair| pair == ["to", "do"]))
 }
 
 fn message_task_line(line: &str, allow_plain_bullet: bool) -> Option<WorkItem> {
@@ -2112,6 +2124,15 @@ mod tests {
         let snapshot = HubSnapshot::new(vec![session]);
         assert!(snapshot.sessions[0].work_summary.todo.is_none());
         assert!(snapshot.sessions[0].work_summary.plan.is_none());
+    }
+
+    #[test]
+    fn a_sentence_that_merely_contains_to_do_is_not_a_todo_heading() {
+        let sentence = "Erros mais claros: o painel mostrava o código bruto do erro. Agora aparecem mensagens para:\n\n- identidade do Git não configurada;\n- nada para commitar;";
+        assert!(explicit_message_todo(sentence).is_none());
+        assert!(!is_work_tracking_message(sentence));
+        let heading = "Próximo to do:\n\n- Conferir estados\n- Rodar checks";
+        assert_eq!(explicit_message_todo(heading).map(|items| items.len()), Some(2));
     }
 
     #[test]

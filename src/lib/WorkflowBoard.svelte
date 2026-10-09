@@ -115,6 +115,8 @@
   });
   const run = $derived(demoRun ?? runs[activeId] ?? null);
   const finished = $derived(Boolean(run && ["draft", "completed", "cancelled"].includes(run.status)));
+  // Cards only react to their agent while a workflow is running; otherwise they stay still.
+  const reactive = $derived(Boolean(run && !finished));
   const locked = $derived(!demo && (actionLoading || runLoading || Boolean(run && !finished)));
   function applyFrame(index: number, manual: DemoState[] | null = null) {
     if (!demo || !group) return;
@@ -942,9 +944,9 @@
         {@const state = stepVisualState(run, step.id)}
         {@const order = chain?.order.indexOf(step.id) ?? -1}
         {@const shown = demoCells ? demoSession(session, demoCells[group?.steps.indexOf(step) ?? 0], now) : session}
-        {@const live = stepActivity(shown, run?.steps.find((item) => item.stepId === step.id), language, now)}
-        {@const trail = state === "running" || shown?.status === "running" ? activityFeed(shown, language, 3) : []}
-        <article class="board-card" class:working={state === "running" || (state === "idle" && shown?.status === "running")} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? session?.status : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
+        {@const live = stepActivity(reactive ? shown : undefined, run?.steps.find((item) => item.stepId === step.id), language, now)}
+        {@const trail = reactive && (state === "running" || shown?.status === "running") ? activityFeed(shown, language, 3) : []}
+        <article class="board-card" class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
           <button class="card-body" type="button" onpointerdown={(event) => beginCard(event, step.id)} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleName(step.role)}>
             <span class="card-role-fab" title={step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role)} aria-hidden="true">
               <i class="role-symbol"><WorkflowRoleIcon role={step.role} /></i>
@@ -1031,10 +1033,10 @@
         {:else if selectedStep}
           {@const session = sessionFor(selectedStep)}
           {@const shown = demoCells ? demoSession(session, demoCells[group?.steps.indexOf(selectedStep) ?? 0], now) : session}
-          {@const feed = activityFeed(shown, language)}
+          {@const feed = reactive ? activityFeed(shown, language) : []}
           {@const answer = lastResponse(shown)}
           {@const stepRun = run?.steps.find((item) => item.stepId === selectedStep.id)}
-          {@const info = stepActivity(shown, stepRun, language, now)}
+          {@const info = stepActivity(reactive ? shown : undefined, stepRun, language, now)}
           <div class="selected-identity"><ThreadAvatar seed={selectedStep.sessionNativeId} label={name(session)} size={36} /><span><strong>{name(session)}</strong><small>{session?.agentLabel} · {session?.project}</small></span></div>
           {#if !session || !session.capabilities.canPrompt}<p class="session-warning"><LumeIcon name="warning" size={15} />{session?.controlOrigin === "external" ? tr("Take control in the chat before running this workflow.", "Assuma o controle no chat antes de executar este workflow.") : tr("Connect this session before running the workflow.", "Conecte esta sessão antes de executar o workflow.")}</p>{/if}
           <div class="panel-tabs" role="tablist" aria-label={tr("Step", "Etapa")}>

@@ -5,6 +5,7 @@ mod agent_plugins;
 mod antigravity_stream;
 mod browser_server;
 mod claude_control;
+mod cli_installer;
 mod codex_bridge;
 mod codex_cli_identity;
 mod codex_daemon_observer;
@@ -525,6 +526,23 @@ async fn get_session_repository_diff(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn cli_install_plans() -> Result<Vec<cli_installer::InstallPlan>, String> {
+    tauri::async_runtime::spawn_blocking(cli_installer::plans)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn start_cli_install(app: AppHandle, kind: String, method: String) -> Result<String, String> {
+    cli_installer::start(&app, &kind, &method)
+}
+
+#[tauri::command]
+fn cancel_cli_install(id: String) -> bool {
+    cli_installer::cancel(&id)
 }
 
 #[tauri::command]
@@ -3045,6 +3063,9 @@ pub fn run() {
             get_session_repository,
             get_session_repository_diff,
             commit_session_repository,
+            cli_install_plans,
+            start_cli_install,
+            cancel_cli_install,
             search_session_paths,
             get_session_github,
             get_github_account,

@@ -220,6 +220,8 @@ export interface HistoryEntry {
 export interface Preferences {
   language: "en" | "pt-BR";
   startupMode: "ask" | "orb" | "workspace";
+  /** The first-run guide has been seen once. */
+  onboardingCompleted: boolean;
   darkMode?: boolean;
   appearanceTheme: "lume" | "forest" | "ocean" | "violet" | "ember";
   accentColor?: string;

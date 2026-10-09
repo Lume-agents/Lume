@@ -51,6 +51,7 @@ const inDesktop = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" i
 export const defaultPreferences: Preferences = {
   language: "en",
   startupMode: "ask",
+  onboardingCompleted: false,
   darkMode: undefined,
   appearanceTheme: "lume",
   accentColor: undefined,
@@ -1015,4 +1016,51 @@ export async function removeExternalPlugin(id: string): Promise<void> {
 
 export async function revealPluginDirectory(): Promise<string> {
   return invoke<string>("reveal_plugin_directory");
+}
+
+export interface CliInstallMethod {
+  id: string;
+  label: string;
+  /** The exact command Lume runs. */
+  command: string;
+  available: boolean;
+  /** The tool this method needs when it is not installed, for example `npm`. */
+  missing?: string | null;
+}
+
+export interface CliInstallPlan {
+  /** `claude`, `codex`, `gemini`, `opencode`, `antigravity` or `github`. */
+  kind: string;
+  label: string;
+  installed: boolean;
+  methods: CliInstallMethod[];
+  /** Where to install it by hand when no method works here. */
+  manualUrl?: string | null;
+  /** What to type in a terminal to sign in once it is installed. */
+  loginCommand: string;
+}
+
+export interface CliInstallFinished {
+  id: string;
+  kind: string;
+  success: boolean;
+  cancelled: boolean;
+  timedOut: boolean;
+  code?: number | null;
+  /** Whether the CLI can be found now. */
+  installed: boolean;
+}
+
+export async function loadCliInstallPlans(): Promise<CliInstallPlan[]> {
+  if (!inDesktop()) return [];
+  return invoke<CliInstallPlan[]>("cli_install_plans");
+}
+
+/** Starts an install; progress arrives as `lume://cli-install-output` and the end as `lume://cli-install-finished`. */
+export async function startCliInstall(kind: string, method: string): Promise<string> {
+  return invoke<string>("start_cli_install", { kind, method });
+}
+
+export async function cancelCliInstall(id: string): Promise<boolean> {
+  return invoke<boolean>("cancel_cli_install", { id });
 }

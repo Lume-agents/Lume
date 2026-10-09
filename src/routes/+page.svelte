@@ -58,6 +58,9 @@
   import { TerminalOpeningTimeoutError, waitForTerminalWindow } from "$lib/terminalOpening";
   import { createSurfaceSizeQueue, settleSurfaceSize } from "$lib/surfaceSizing";
   import StartupModeChooser from "$lib/StartupModeChooser.svelte";
+  import AgentSetupCards from "$lib/AgentSetupCards.svelte";
+  import CliInstallDialog from "$lib/CliInstallDialog.svelte";
+  import OnboardingGuide from "$lib/OnboardingGuide.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import WorkspaceInspector from "$lib/WorkspaceInspector.svelte";
@@ -106,6 +109,7 @@
     loadDisplayBackend,
     loadResumableSessions,
     loadIntegrationStatuses,
+    loadCliInstallPlans,
     loadMobileGatewayStatus,
     loadOverlayPosition,
     loadPairedDevices,
@@ -147,6 +151,7 @@
     setPairedDeviceScopes,
     revealPluginDirectory,
     type DisplayBackend,
+    type CliInstallPlan,
   } from "$lib/lume";
 
   type View = "sessions" | "board" | "history" | "settings";
@@ -201,6 +206,9 @@
   let preferences = $state<Preferences>({ ...defaultPreferences });
   let monitors = $state<MonitorOption[]>([]);
   let integrations = $state<IntegrationStatus[]>([]);
+  let cliPlans = $state<CliInstallPlan[]>([]);
+  let installingPlan = $state<CliInstallPlan | null>(null);
+  let onboardingOpen = $state(false);
   let vscodeStatus = $state<CompanionStatus>({
     installed: false,
     configured: false,
@@ -423,9 +431,54 @@
     }
   }
 
+  async function refreshCliPlans() {
+    if (!isTauri) return;
+    try { cliPlans = await loadCliInstallPlans(); } catch { cliPlans = []; }
+  }
+
+  /** First run: the guide opens once, unless an agent is already connected (then it counts as seen). */
+  async function openOnboardingIfNeeded() {
+    if (preferences.onboardingCompleted) return false;
+    const statuses = await loadIntegrationStatuses().catch(() => [] as IntegrationStatus[]);
+    integrations = statuses;
+    if (statuses.some((integration) => integration.configured)) {
+      void updatePreference("onboardingCompleted", true);
+      return false;
+    }
+    onboardingOpen = true;
+    void refreshCliPlans();
+    if (!expanded) await toggleExpanded();
+    return true;
+  }
+
+  async function reopenOnboarding() {
+    onboardingOpen = true;
+    void refreshCliPlans();
+    if (!expanded) await toggleExpanded();
+  }
+
+  async function finishOnboarding() {
+    onboardingOpen = false;
+    if (!preferences.onboardingCompleted) await updatePreference("onboardingCompleted", true);
+    await applyStartupMode();
+    if (preferences.startupMode === "orb" && expanded) await toggleExpanded();
+  }
+
+  /** After an install attempt the CLI may be new: look for it again. */
+  async function finishCliInstall() {
+    installingPlan = null;
+    integrations = await loadIntegrationStatuses().catch(() => integrations);
+    await refreshCliPlans();
+  }
+
   async function routeStartupMode() {
     if (!isTauri || sessionStorage.getItem(startupRouteKey)) return;
     sessionStorage.setItem(startupRouteKey, "true");
+    if (await openOnboardingIfNeeded()) return;
+    await applyStartupMode();
+  }
+
+  async function applyStartupMode() {
     if (preferences.startupMode === "workspace") {
       await showWorkspaceWindow();
       return;
@@ -2330,6 +2383,7 @@
   }
 
   async function openView(nextView: View) {
+    if (nextView === "settings") void refreshCliPlans();
     if (
       (nextView === "settings" || nextView === "history") &&
       isTauri &&
@@ -3099,8 +3153,24 @@
       {/if}
     </button>
   {:else}
-    <section use:observePanelSize class:content-visible={contentVisible} class:morphing class:measuring={measuringPanel} class:palette-open={paletteOpen} class:launcher-open={launcherOpen} class:workflow-settings-open={workflowSettingsOpen} class:onboarding={startupChooserOpen} class="panel">
-      {#if startupChooserOpen}
+    <section use:observePanelSize class:content-visible={contentVisible} class:morphing class:measuring={measuringPanel} class:palette-open={paletteOpen} class:launcher-open={launcherOpen} class:workflow-settings-open={workflowSettingsOpen} class:onboarding={startupChooserOpen || onboardingOpen} class:guide={onboardingOpen} class="panel">
+      {#if onboardingOpen}
+        <div class="startup-chooser-layer">
+          <OnboardingGuide
+            language={preferences.language}
+            {integrations}
+            plans={cliPlans}
+            diagnostics={integrationDiagnostics}
+            configuring={configuringIntegration}
+            diagnosing={diagnosingIntegration}
+            onInstall={(plan) => (installingPlan = plan)}
+            onConnect={(integration) => void toggleIntegration(integration)}
+            onDisconnect={(integration) => void toggleIntegration(integration)}
+            onTest={(integration) => void runIntegrationDiagnostic(integration)}
+            onFinish={finishOnboarding}
+          />
+        </div>
+      {:else if startupChooserOpen}
         <div class="startup-chooser-layer">
           <StartupModeChooser language={preferences.language} onChoose={chooseStartupMode} />
         </div>
@@ -3861,54 +3931,21 @@
             <details use:animatedDisclosure class="settings-section" data-agent-integrations>
               <summary class="settings-section-label">{tr("Agents", "Agentes")}</summary>
               <div class="settings-section-content">
-                {#each [
-                  { key: "available", label: null, items: integrations.filter((integration) => integration.canLaunch) },
-                  { key: "monitoring", label: tr("Monitoring only", "Somente monitoramento"), items: integrations.filter((integration) => !integration.canLaunch) },
-                ] as group (group.key)}
-                  {#if group.label}<div class="integration-group-label">{group.label}</div>{/if}
-                  {#each group.items as integration (integration.kind)}
-                    {@const diagnostic = integrationDiagnostics[integration.kind]}
-                    <div class="integration-row">
-                      <span class="agent-avatar agent-{integration.kind}"><BrandIcon name={integration.kind} size={18} /></span>
-                      <div>
-                        <strong>{integration.label}</strong>
-                        <span>{shown(integration.detail)}</span>
-                      </div>
-                      <div class="integration-actions">
-                        <button
-                          class="diagnose-button"
-                          disabled={diagnosingIntegration !== null}
-                          type="button"
-                          onclick={() => runIntegrationDiagnostic(integration)}
-                        >{diagnosingIntegration === integration.kind ? "…" : tr("Test", "Testar")}</button>
-                        {#if integration.canConfigure}
-                          <button
-                            class:connected={integration.configured}
-                            disabled={!integration.installed || configuringIntegration === integration.kind}
-                            type="button"
-                            onclick={() => toggleIntegration(integration)}
-                          >
-                            {configuringIntegration === integration.kind
-                              ? "…"
-                              : integration.configured
-                                ? tr("Connected", "Conectado")
-                                : tr("Connect", "Conectar")}
-                          </button>
-                        {/if}
-                      </div>
-                    </div>
-                    {#if diagnostic}
-                      <div class:healthy={diagnostic.healthy} class="diagnostic-card" transition:slide={{ duration: 150, easing: cubicOut }}>
-                        {#each diagnostic.checks as check (check.id)}
-                          <div class="diagnostic-check status-{check.status}">
-                            <i aria-hidden="true"></i>
-                            <span><strong>{shown(check.label)}</strong><small>{check.id === "activity" && diagnostic.lastEventAt ? relativeTime(diagnostic.lastEventAt) : shown(check.detail)}</small></span>
-                          </div>
-                        {/each}
-                      </div>
-                    {/if}
-                  {/each}
-                {/each}
+                <button class="setup-guide-link" type="button" onclick={() => void reopenOnboarding()}>{tr("Open the setup guide", "Abrir o guia de configuração")}</button>
+                <div class="agent-setup-host">
+                  <AgentSetupCards
+                    language={preferences.language}
+                    {integrations}
+                    plans={cliPlans}
+                    diagnostics={integrationDiagnostics}
+                    configuring={configuringIntegration}
+                    diagnosing={diagnosingIntegration}
+                    onInstall={(plan) => (installingPlan = plan)}
+                    onConnect={(integration) => void toggleIntegration(integration)}
+                    onDisconnect={(integration) => void toggleIntegration(integration)}
+                    onTest={(integration) => void runIntegrationDiagnostic(integration)}
+                  />
+                </div>
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
@@ -4509,6 +4546,9 @@
       </footer>
     </section>
   {/if}
+  {#if installingPlan}
+    <CliInstallDialog plan={installingPlan} language={preferences.language} onClose={() => void finishCliInstall()} />
+  {/if}
   {#if connectionAgent}
     <AgentConnectionDialog agent={connectionAgent} message={connectionMessage} language={preferences.language} onClose={() => { connectionAgent = null; }} />
   {/if}
@@ -4633,6 +4673,9 @@
   }
 
   .panel.onboarding { min-height: 320px; }
+  .panel.guide { min-height: 520px; }
+  .agent-setup-host { --agent-setup-font: 10px; color: inherit; --workspace-accent: #3f9b69; }
+  .setup-guide-link { margin: 0 0 8px; padding: 0; border: 0; color: #3f9b69; background: transparent; font: inherit; font-size: 9px; font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
   .panel.onboarding > :not(.startup-chooser-layer) { display: none; }
   .startup-chooser-layer { position: absolute; z-index: 45; inset: 0; }
 
@@ -5241,7 +5284,6 @@
   .integration-row button.connected { border-color: transparent; color: #6d7e76; }
   .integration-row button:disabled { cursor: default; opacity: 0.5; }
   .integration-actions { display: flex; align-items: center; gap: 4px; }
-  .integration-actions .diagnose-button { min-width: 42px; padding: 0 6px; border-color: transparent; color: #78877f; }
   .diagnostic-card { margin: -1px 0 7px 38px; padding: 7px 8px; display: grid; gap: 6px; border: 1px solid rgba(93, 113, 104, 0.1); border-radius: 9px; background: rgba(75, 103, 90, 0.03); }
   .diagnostic-check { min-width: 0; display: flex; align-items: flex-start; gap: 7px; }
   .diagnostic-check > i { width: 6px; height: 6px; margin-top: 3px; flex: 0 0 auto; border-radius: 50%; background: #789487; }
@@ -5249,7 +5291,6 @@
   .diagnostic-check.status-error > i { background: #bd5c59; }
   .diagnostic-check > span { min-width: 0; display: grid; gap: 1px; }
   .diagnostic-check strong { color: #4c5c55; font-size: 8px; }
-  .diagnostic-check small { overflow: hidden; color: #89958f; font-size: 8px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
   .browser-row button { min-width: 68px; }
   .browser-path { margin: 7px 2px 0; overflow-wrap: anywhere; color: #89938f; font-size: 9px; line-height: 1.4; }
   .plugin-actions { padding-top: 8px; display: flex; gap: 5px; }
@@ -5534,7 +5575,6 @@
   .overlay-shell.dark .paired-devices .revoke-device { color: #d19a9a; border-color: rgba(209, 131, 131, 0.16); }
   .overlay-shell.dark .diagnostic-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .diagnostic-check strong { color: #dce7e1; }
-  .overlay-shell.dark .diagnostic-check small { color: #aebdb5; }
   .overlay-shell.dark .empty-state strong { color: #c5d0cb; }
   .overlay-shell.dark code,
   .overlay-shell.dark .segmented { color: #bdc8c3; background: rgba(216, 229, 223, 0.06); }

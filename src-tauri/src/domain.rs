@@ -717,6 +717,8 @@ pub struct WorkflowHistoryRecord {
 pub struct Preferences {
     pub language: String,
     pub startup_mode: String,
+    /// The first-run guide has been seen once; it is not shown again.
+    pub onboarding_completed: bool,
     pub dark_mode: Option<bool>,
     pub appearance_theme: String,
     pub accent_color: Option<String>,
@@ -764,6 +766,7 @@ impl Default for Preferences {
         Self {
             language: "en".into(),
             startup_mode: "ask".into(),
+            onboarding_completed: false,
             dark_mode: None,
             appearance_theme: "lume".into(),
             accent_color: None,

@@ -1027,11 +1027,14 @@ fn is_claude_headless_resume(command: &str) -> bool {
             .iter()
             .any(|token| matches!(*token, "--resume" | "--session-id"))
         && tokens.iter().any(|token| {
-            token
+            let file = token
                 .trim_matches(['"', '\''])
                 .split(['/', '\\'])
                 .next_back()
-                == Some("claude")
+                .unwrap_or_default();
+            // Windows launches `claude.exe` (or `claude.cmd`); without the extension every headless
+            // resume Lume starts for a prompt would be listed as a new Claude Code session.
+            matches!(file, "claude" | "claude.exe" | "claude.cmd" | "claude.bat")
         })
 }
 
@@ -2085,6 +2088,9 @@ mod tests {
         ));
         assert!(!is_claude_headless_resume(
             "/home/user/.local/bin/claude --resume session-id"
+        ));
+        assert!(is_claude_headless_resume(
+            "\"c:\\users\\joão pedro\\.local\\bin\\claude.exe\" --print --resume session-id prompt"
         ));
     }
 

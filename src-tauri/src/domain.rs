@@ -231,6 +231,10 @@ pub struct PromptTokenUsage {
     pub total_tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// What the conversation held when this prompt ended (the last response's input plus its output);
+    /// 0 when the agent does not report it.
+    #[serde(default)]
+    pub context_tokens: u64,
     pub created_at: i64,
 }
 

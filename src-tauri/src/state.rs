@@ -1917,6 +1917,7 @@ impl AppState {
                 total_tokens,
                 input_tokens,
                 output_tokens,
+                context_tokens: 0,
                 created_at: now_millis(),
             },
         );

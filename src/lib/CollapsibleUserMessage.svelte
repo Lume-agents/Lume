@@ -3,7 +3,15 @@
   import { slide } from "svelte/transition";
   import type { Language } from "$lib/i18n";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { splitLinks } from "$lib/links";
   import { parseWorkflowPrompt, userMessagePresentation } from "$lib/userMessagePresentation";
+
+  /** The webview does not follow links on its own, so the system browser opens them. */
+  function openLink(event: MouseEvent, href: string) {
+    event.preventDefault();
+    void openUrl(href).catch(() => window.open(href, "_blank", "noopener,noreferrer"));
+  }
 
   let { text, language = "en" } = $props<{ text: string; language?: Language }>();
   let expanded = $state(false);
@@ -54,7 +62,7 @@
       <div class="pasted-summary" transition:slide={{ duration: 220, easing: cubicOut }}>[{tr("Pasted content", "Conteúdo colado")} {formattedCharacterCount()} {tr("chars", "caracteres")}]</div>
     {:else}
       <div class="message-text-frame" transition:slide={{ duration: 220, easing: cubicOut }}>
-        <pre>{visibleText}</pre>
+        <pre>{#each splitLinks(visibleText) as segment}{#if segment.href}<a href={segment.href} target="_blank" rel="noopener noreferrer" onclick={(event) => openLink(event, segment.href!)}>{segment.text}</a>{:else}{segment.text}{/if}{/each}</pre>
         {#if !expanded && presentation.kind === "clamped"}
           <span class="message-fade" aria-hidden="true"></span>
         {/if}
@@ -89,5 +97,6 @@
   .expanded button :global(.lume-icon) { transform: rotate(180deg); }
 
   @keyframes message-reveal { from { opacity: .55; filter: blur(2px); } to { opacity: 1; filter: blur(0); } }
+  pre a { color: var(--user-message-accent, inherit); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   @media (prefers-reduced-motion: reduce) { pre { animation: none; } button :global(.lume-icon) { transition: none; } }
 </style>

@@ -3,7 +3,7 @@
   import { fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { openPath } from "@tauri-apps/plugin-opener";
+  import { openPath, openUrl } from "@tauri-apps/plugin-opener";
   import type { InteractiveQuestion, PendingQuestion, PermissionAction, QuestionAnswer, SessionActivity, SessionResult } from "$lib/domain";
   import type { PromptAttachmentInput } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
@@ -29,7 +29,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import LumeSelect from "$lib/LumeSelect.svelte";
   import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
   import { caretOnEdgeLine, dedupePromptEntries, emptyPromptHistory, historyEntries, stepPromptHistory } from "$lib/promptHistory";
-  import { applyMention, mentionAtCaret, type MentionQuery } from "$lib/promptMentions";
+  import { applyMention, mentionAtCaret, parentMention, type MentionQuery } from "$lib/promptMentions";
+  import { linkAtIndex, splitLinks } from "$lib/links";
   import { claudeEffortForModel, claudeEffortValues, claudeModelOptions } from "$lib/claudeModels";
   import { permissionDescription, permissionLabel, permissionTone } from "$lib/sessionPermissions";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
@@ -169,6 +170,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let slashMenuDismissed = $state(false);
   let slashCommandMenu = $state<HTMLDivElement | null>(null);
   let permissionBusy = $state(false);
+  let permissionAction = $state<PermissionAction | null>(null);
   let sessionPermission = $state<PermissionSettings | null>(null);
   let permissionMenuOpen = $state(false);
   let permissionMenuLoading = $state(false);
@@ -188,6 +190,28 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let promptHistoryLoaded = false;
   let promptHistoryHasMore = $state(false);
   let activeMention = $state<MentionQuery | null>(null);
+
+  // Web links typed in the box are underlined by a mirror layer behind the text; Ctrl/Cmd+click opens one.
+  let promptMirror = $state<HTMLDivElement | null>(null);
+  let promptScrollTop = $state(0);
+  const promptSegments = $derived(splitLinks(prompt));
+  const promptHasLinks = $derived(promptSegments.some((segment) => segment.href));
+  $effect(() => {
+    const input = promptInput;
+    const mirror = promptMirror;
+    if (!input || !mirror) return;
+    const copyMetrics = () => {
+      const style = getComputedStyle(input);
+      for (const property of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "lineHeight", "wordSpacing", "textIndent", "tabSize", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"] as const) {
+        mirror.style[property] = style[property];
+      }
+      mirror.style.width = `${input.clientWidth}px`;
+    };
+    copyMetrics();
+    const observer = new ResizeObserver(copyMetrics);
+    observer.observe(input);
+    return () => observer.disconnect();
+  });
   let mentionResults = $state<PathMention[]>([]);
   let mentionIndex = $state(0);
   let mentionMenu = $state<HTMLDivElement | null>(null);
@@ -581,9 +605,48 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     session.capabilities.canPrompt || session.capabilities.canTakeControl
   ));
   const canAttach = $derived(Boolean(canCompose && session.capabilities.canAttachImages));
+
+  // The "+" menu: attach a file, compact the context, MCP servers (plugins to come).
+  let plusMenuOpen = $state(false);
+  let plusMenuElement = $state<HTMLElement | null>(null);
+  const supportsMcp = $derived(["codex", "claude_code", "opencode"].includes(session.agent) && session.source !== "web");
+  // Claude reports what the conversation held after each prompt; a window above 200k means the 1M model.
+  const contextTokens = $derived(
+    session.agent === "claude_code"
+      ? [...(session.promptTokenUsage ?? [])].reverse().find((usage) => (usage.contextTokens ?? 0) > 0)?.contextTokens ?? 0
+      : 0,
+  );
+  const contextWindow = $derived(contextTokens > 200_000 ? 1_000_000 : 200_000);
+  const contextPercent = $derived(contextTokens ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0);
+  const contextLevel = $derived(contextPercent >= 92 ? "danger" : contextPercent >= 75 ? "warn" : "ok");
+  function compactTokens(value: number) {
+    return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value >= 1_000 ? `${Math.round(value / 1_000)}k` : String(value);
+  }
+  const contextLabel = $derived(contextTokens
+    ? tr(`Context: ${compactTokens(contextTokens)} of ${compactTokens(contextWindow)} (${contextPercent}%)`, `Contexto: ${compactTokens(contextTokens)} de ${compactTokens(contextWindow)} (${contextPercent}%)`)
+    : "");
+  $effect(() => {
+    if (!plusMenuOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!plusMenuElement?.contains(event.target as Node)) plusMenuOpen = false;
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") plusMenuOpen = false;
+    };
+    window.addEventListener("pointerdown", closeOutside, true);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeOutside, true);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  });
+  $effect(() => { session.id; untrack(() => { plusMenuOpen = false; }); });
   const canSend = $derived(Boolean(
     canCompose
     && (session.capabilities.canTakeControl || !promptIsRunning || canQueue)
+  ));
+  const canCompact = $derived(Boolean(
+    session.agent === "claude_code" && session.controlOrigin === "lume" && canSend && !promptIsRunning && !sending && !takingControl,
   ));
   const queuedPrompts = $derived(
     session.activities
@@ -1175,6 +1238,22 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     }
   }
 
+  /** Sends Claude's own `/compact`, keeping whatever was being typed. */
+  async function compactContext() {
+    if (!canCompact) return;
+    plusMenuOpen = false;
+    const draft = prompt;
+    const draftAttachments = promptAttachments;
+    prompt = "/compact";
+    promptAttachments = [];
+    try {
+      await sendPrompt();
+    } finally {
+      prompt = draft;
+      promptAttachments = draftAttachments;
+    }
+  }
+
   async function interruptAgentPrompt() {
     if (!session.capabilities.canInterrupt || interrupting) return;
     interrupting = true;
@@ -1687,6 +1766,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     const request = pendingPermission;
     if (!request || permissionBusy) return;
     permissionBusy = true;
+    permissionAction = action;
     sendError = "";
     try {
       if (action === "open_source") await openSessionSource(session.id);
@@ -1695,6 +1775,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       sendError = String(error).replace(/^Error:\s*/, "");
     } finally {
       permissionBusy = false;
+      permissionAction = null;
     }
   }
 
@@ -1817,7 +1898,45 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     mentionMenu?.querySelector<HTMLElement>(`[data-mention-index="${mentionIndex}"]`)?.scrollIntoView({ block: "nearest" });
   }
 
+  function handlePromptClick(event: MouseEvent) {
+    const input = promptInput;
+    if (input && (event.ctrlKey || event.metaKey) && input.selectionStart === input.selectionEnd) {
+      const href = linkAtIndex(prompt, input.selectionStart);
+      if (href) {
+        event.preventDefault();
+        void openUrl(href).catch(() => window.open(href, "_blank", "noopener,noreferrer"));
+        return;
+      }
+    }
+    void refreshMention();
+  }
+
+  /** In an `@` mention the left arrow goes up a folder, the way the right arrow's Enter went into one. */
+  async function leaveMentionFolder() {
+    const input = promptInput;
+    if (!input || !activeMention) return false;
+    const up = parentMention(prompt, input.selectionStart ?? prompt.length, activeMention);
+    if (!up) return false;
+    prompt = up.text;
+    closeMention();
+    await tick();
+    input.focus();
+    input.setSelectionRange(up.caret, up.caret);
+    void refreshMention();
+    return true;
+  }
+
   function handleComposerKeydown(event: KeyboardEvent) {
+    if (
+      activeMention && event.key === "ArrowLeft"
+      && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey && !event.isComposing
+      && promptInput?.selectionStart === promptInput?.selectionEnd
+      && parentMention(prompt, promptInput?.selectionStart ?? prompt.length, activeMention)
+    ) {
+      event.preventDefault();
+      void leaveMentionFolder();
+      return;
+    }
     if (activeMention && mentionResults.length) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
@@ -2735,7 +2854,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       </div>
     {/if}
     {#if pendingPermission}
-      <section class="agent-permission risk-{pendingPermission.risk}" role="group" aria-label={tr("Permission request", "Pedido de permissão")}>
+      <section class="agent-permission risk-{pendingPermission.risk}" role="group" aria-busy={permissionBusy} aria-label={tr("Permission request", "Pedido de permissão")}>
         <header>
           <LumeIcon name="warning" size={14} />
           <strong>{displayText(language, pendingPermission.summary)}</strong>
@@ -2743,7 +2862,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         {#if pendingPermission.resource}<code title={pendingPermission.resource}>{pendingPermission.resource}</code>{/if}
         <div class="permission-actions">
           {#each session.permissionProfile.availableActions as action (action)}
-            <button class:allow={action === "allow_once"} class:danger={action === "deny"} type="button" disabled={permissionBusy} onclick={() => void resolvePermission(action)}>
+            <button class:allow={action === "allow_once"} class:danger={action === "deny"} class:loading={permissionAction === action} type="button" disabled={permissionBusy} onclick={() => void resolvePermission(action)}>
+              {#if permissionAction === action}<i class="permission-spinner" aria-hidden="true"></i>{/if}
               {permissionActionLabel(action)}
             </button>
           {/each}
@@ -2781,17 +2901,49 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     {/if}
     <div class:beam={composerInIntroPosition && canCompose} class="composer-field">
       <div class="composer-input-row">
-      {#if canAttach}
-        <button
-          class="attach-button"
-          type="button"
-          disabled={sending || takingControl || promptAttachments.length >= 4}
-          aria-label={tr("Attach file", "Anexar arquivo")}
-          title={tr("Attach file", "Anexar arquivo")}
-          onclick={() => void chooseAttachments()}
-        >
-          <LumeIcon name="attachment" size={16} />
-        </button>
+      {#if canAttach || supportsMcp || canCompact}
+        <div class="composer-plus" bind:this={plusMenuElement}>
+          <button
+            class="attach-button plus-button"
+            class:active={plusMenuOpen}
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={plusMenuOpen}
+            aria-label={tr("More actions", "Mais ações")}
+            title={tr("More actions", "Mais ações")}
+            onclick={() => (plusMenuOpen = !plusMenuOpen)}
+          >
+            <LumeIcon name="plus" size={17} />
+          </button>
+          {#if plusMenuOpen}
+            <div class="plus-menu" role="menu" transition:fly={{ y: 6, duration: 130, easing: cubicOut }}>
+              {#if canAttach}
+                <button type="button" role="menuitem" disabled={sending || takingControl || promptAttachments.length >= 4} onclick={() => { plusMenuOpen = false; void chooseAttachments(); }}>
+                  <LumeIcon name="attachment" size={15} />
+                  <span><strong>{tr("Attach file", "Anexar arquivo")}</strong><small>{promptAttachments.length}/4</small></span>
+                </button>
+              {/if}
+              {#if session.agent === "claude_code"}
+                <button type="button" role="menuitem" disabled={!canCompact} onclick={() => void compactContext()}>
+                  <LumeIcon name="compact" size={15} />
+                  <span><strong>{tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
+                </button>
+              {/if}
+              {#if supportsMcp}
+                <button type="button" role="menuitem" onclick={() => { plusMenuOpen = false; openMcpPanel(); }}>
+                  <LumeIcon name="server" size={15} />
+                  <span><strong>MCP</strong><small>{tr("Servers and tools", "Servidores e ferramentas")}</small></span>
+                </button>
+              {/if}
+            </div>
+          {/if}
+        </div>
+        {#if contextTokens}
+          <span class="context-meter {contextLevel}" role="img" aria-label={contextLabel} title={contextLabel} style:--context={contextPercent}>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="7.5" /><circle class="fill" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="{contextPercent} 100" /></svg>
+            <b>{contextPercent}%</b>
+          </span>
+        {/if}
       {/if}
       {#if mcpOpen}
         <section class="slash-command-menu mcp-panel" aria-label="MCP" transition:slide={{ duration: 140, easing: cubicOut }}>
@@ -2873,18 +3025,25 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       {#if promptHistory.index >= 0}
         <span class="history-indicator" aria-live="polite">{tr("History", "Histórico")} {promptHistory.index + 1}/{promptHistory.entries.length}{promptHistoryHasMore ? "+" : ""}</span>
       {/if}
-      <textarea
-        bind:this={promptInput}
-        bind:value={prompt}
-        oninput={handlePromptInput}
-        onclick={() => void refreshMention()}
-        onkeyup={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) void refreshMention(); }}
-        rows="1"
-        placeholder={composerPlaceholder()}
-        disabled={!canCompose || sending || takingControl}
-        aria-label={composerPlaceholder()}
-        onkeydown={handleComposerKeydown}
-      ></textarea>
+      <div class="composer-text">
+        {#if promptHasLinks}
+          <div class="prompt-mirror" bind:this={promptMirror} aria-hidden="true"><div style:transform={`translateY(${-promptScrollTop}px)`}>{#each promptSegments as segment}{#if segment.href}<span class="prompt-link">{segment.text}</span>{:else}{segment.text}{/if}{/each}{"\n"}</div></div>
+        {/if}
+        <textarea
+          bind:this={promptInput}
+          bind:value={prompt}
+          oninput={handlePromptInput}
+          onclick={handlePromptClick}
+          onscroll={() => (promptScrollTop = promptInput?.scrollTop ?? 0)}
+          onkeyup={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) void refreshMention(); }}
+          rows="1"
+          placeholder={composerPlaceholder()}
+          title={promptHasLinks ? tr("Ctrl+click a link to open it", "Ctrl+clique em um link para abri-lo") : undefined}
+          disabled={!canCompose || sending || takingControl}
+          aria-label={composerPlaceholder()}
+          onkeydown={handleComposerKeydown}
+        ></textarea>
+      </div>
       {#if promptIsRunning && canQueue}<span class="queue-label">{tr("Next", "Próximo")}</span>{/if}
       {#if promptIsRunning && session.capabilities.canInterrupt && !planeLaunching}
         <button class="stop-button" type="button" disabled={interrupting} onclick={() => void interruptAgentPrompt()} aria-label={tr("Interrupt prompt", "Interromper prompt")} title={tr("Interrupt prompt · Enter queues", "Interromper prompt · Enter adiciona à fila")}>
@@ -3426,10 +3585,31 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer button { width: 33px; height: 33px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: var(--field-button-radius, 11px); color: #f5fbf7; background: var(--workspace-accent); cursor: pointer; transition: transform 180ms cubic-bezier(.16, 1, .3, 1), opacity 120ms ease; }
   .composer .send-button { position: relative; overflow: hidden; isolation: isolate; }
   .composer .attach-button { color: var(--workspace-muted); background: transparent; }
-  .composer .attach-button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .composer .attach-button:hover:not(:disabled), .composer .attach-button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .composer-plus { position: relative; flex: 0 0 auto; }
+  .plus-menu { position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 30; min-width: 214px; padding: 5px; display: grid; gap: 2px; border: 1px solid var(--workspace-line); border-radius: 12px; background: var(--workspace-raised, var(--workspace-pane)); box-shadow: 0 14px 34px rgba(8, 18, 13, .2); }
+  .composer .plus-menu > button { width: 100%; height: auto; min-height: 36px; padding: 6px 9px; display: flex; align-items: center; justify-content: flex-start; gap: 10px; border-radius: 8px; color: var(--workspace-text); background: transparent; text-align: left; }
+  .composer .plus-menu > button:hover:not(:disabled) { background: var(--workspace-subtle); }
+  .composer .plus-menu > button:disabled { opacity: .45; cursor: default; }
+  .plus-menu > button > span { min-width: 0; display: grid; gap: 1px; }
+  .plus-menu strong { color: var(--workspace-strong); font-size: 11px; font-weight: 700; }
+  .plus-menu small { color: var(--workspace-muted); font-size: 10px; }
+  .context-meter { height: 33px; padding: 0 4px; display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; align-self: flex-end; color: var(--workspace-muted); font-size: 9.5px; font-variant-numeric: tabular-nums; cursor: default; }
+  .context-meter svg { width: 17px; height: 17px; transform: rotate(-90deg); }
+  .context-meter circle { fill: none; stroke-width: 2.4; }
+  .context-meter .track { stroke: var(--workspace-line); }
+  .context-meter .fill { stroke: var(--workspace-accent); stroke-linecap: round; transition: stroke-dasharray 240ms ease; }
+  .context-meter.warn { color: #c98a2d; }
+  .context-meter.warn .fill { stroke: #c98a2d; }
+  .context-meter.danger { color: #d85c64; }
+  .context-meter.danger .fill { stroke: #d85c64; }
   .composer .stop-button { color: #fff7f6; background: #b96862; }
   .composer-input-row { min-width: 0; display: flex; align-items: flex-end; gap: 7px; }
-  .composer-field .composer-input-row > textarea { padding-left: 5px; }
+  .composer-field .composer-input-row .composer-text > textarea { padding-left: 5px; }
+  .composer-text { position: relative; min-width: 0; display: flex; flex: 1; }
+  .composer-text > textarea { position: relative; z-index: 1; }
+  .prompt-mirror { position: absolute; top: 0; bottom: 0; left: 0; overflow: hidden; box-sizing: border-box; color: transparent; white-space: pre-wrap; overflow-wrap: break-word; pointer-events: none; }
+  .prompt-link { border-radius: 3px; background: color-mix(in srgb, var(--workspace-accent) 15%, transparent); text-decoration: underline; text-decoration-color: var(--workspace-accent); text-underline-offset: 2px; }
   .composer-tools { min-height: 30px; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 3px; }
   .composer-tools .model-trigger { width: auto; min-width: 30px; height: 28px; padding: 0 9px 0 8px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border-radius: var(--field-button-radius); color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 680; }
   .composer-tools .model-trigger { max-width: min(180px, 42cqw); }
@@ -3461,6 +3641,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer .permission-actions > button.allow { border-color: transparent; color: #f5fbf7; background: var(--workspace-accent); }
   .composer .permission-actions > button.danger { color: #d85c64; }
   .composer .permission-actions > button:hover:not(:disabled) { transform: none; border-color: var(--workspace-accent); }
+  .composer .permission-actions > button { display: inline-flex; align-items: center; gap: 7px; }
+  .composer .permission-actions > button:disabled:not(.loading) { opacity: .5; }
+  .composer .permission-actions > button.loading { cursor: progress; }
+  .permission-spinner { width: 11px; height: 11px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
   .composer .agent-question { max-width: 760px; margin: 0 auto 8px; padding: 11px 12px; display: grid; gap: 10px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 34%, var(--workspace-line)); border-radius: 13px; color: var(--workspace-text); background: color-mix(in srgb, var(--workspace-accent-soft) 70%, var(--workspace-raised)); }
   .agent-question-item { min-width: 0; display: grid; gap: 6px; }
   .agent-question-item > small { color: var(--workspace-accent); font-size: var(--workspace-chat-tiny-size); font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }

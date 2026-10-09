@@ -50,6 +50,7 @@
     | "trash"
     | "server"
     | "database"
+    | "compact"
     | "warning";
 </script>
 
@@ -84,7 +85,9 @@
   focusable="false"
 >
   {#if label}<title>{label}</title>{/if}
-  {#if name === "server"}
+  {#if name === "compact"}
+    <path d="M12 3v6m0 0L9 6m3 3 3-3M12 21v-6m0 0-3 3m3-3 3 3M4 12h16" />
+  {:else if name === "server"}
     <rect x="4" y="4" width="16" height="6" rx="2" />
     <rect x="4" y="14" width="16" height="6" rx="2" />
     <path d="M8 7h4m-4 10h4M7 10v4m10-4v4" />

@@ -111,6 +111,8 @@ export interface PromptTokenUsage {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
+  /** What the conversation held when the prompt ended; 0 when the agent does not report it. */
+  contextTokens?: number;
   createdAt: number;
 }
 

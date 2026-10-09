@@ -1708,6 +1708,8 @@ struct ClaudeTurnTokens {
     // same usage, so each message id is counted once.
     responses: HashMap<String, (u64, u64)>,
     last_at: i64,
+    /// The newest response's input plus output with its time: what the conversation holds after it.
+    context: Option<(i64, u64)>,
 }
 
 impl ClaudeTurnTokens {
@@ -1726,6 +1728,7 @@ impl ClaudeTurnTokens {
             "totalTokens": input + output,
             "inputTokens": input,
             "outputTokens": output,
+            "contextTokens": self.context.map_or(0, |(_, tokens)| tokens),
             "createdAt": self.last_at,
         });
         Some(SessionActivity {
@@ -1766,6 +1769,7 @@ fn track_claude_turn_tokens(
             turn_id,
             responses: HashMap::new(),
             last_at: created_at.unwrap_or_else(now_millis),
+            context: None,
         });
         return;
     }
@@ -1784,6 +1788,10 @@ fn track_claude_turn_tokens(
         + tokens("cache_read_input_tokens");
     turn.responses
         .insert(id.to_string(), (input, tokens("output_tokens")));
+    let at = created_at.unwrap_or(0);
+    if turn.context.map_or(true, |(newest, _)| at >= newest) {
+        turn.context = Some((at, input + tokens("output_tokens")));
+    }
     if let Some(created_at) = created_at {
         turn.last_at = turn.last_at.max(created_at);
     }
@@ -2572,14 +2580,16 @@ mod tests {
                     usage.input_tokens,
                     usage.output_tokens,
                     usage.total_tokens,
+                    usage.context_tokens,
                 )
             })
             .collect::<Vec<_>>();
+        // The context after a prompt is its last response: msg-2 read 5 + 130 and wrote 7.
         assert_eq!(
             usage,
             [
-                ("prompt-1".to_string(), 245, 27, 272),
-                ("prompt-2".to_string(), 3, 4, 7),
+                ("prompt-1".to_string(), 245, 27, 272, 142),
+                ("prompt-2".to_string(), 3, 4, 7, 7),
             ]
         );
     }

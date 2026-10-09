@@ -2116,10 +2116,21 @@
     );
   }
 
+  let permissionPending = $state<{ sessionId: string; action: PermissionAction } | null>(null);
+
   async function handlePermission(session: AgentSession, action: PermissionAction) {
     const permission = session.pendingPermission;
-    if (!permission) return;
+    if (!permission || permissionPending) return;
     permissionError = null;
+    permissionPending = { sessionId: session.id, action };
+    try {
+      await resolvePermissionAction(session, permission, action);
+    } finally {
+      permissionPending = null;
+    }
+  }
+
+  async function resolvePermissionAction(session: AgentSession, permission: NonNullable<AgentSession["pendingPermission"]>, action: PermissionAction) {
 
     if (action === "open_source") {
       try {
@@ -3451,12 +3462,16 @@
                           <code>{session.pendingPermission.resource}</code>
                           <div class="permission-actions">
                             {#each session.permissionProfile.availableActions as action}
+                              {@const deciding = permissionPending?.sessionId === session.id && permissionPending.action === action}
                               <button
                                 class:primary={action === "allow_once"}
                                 class:danger={action === "deny"}
+                                class:loading={deciding}
                                 type="button"
+                                disabled={permissionPending !== null}
                                 onclick={() => handlePermission(session, action)}
                               >
+                                {#if deciding}<i class="permission-spinner" aria-hidden="true"></i>{/if}
                                 {actionLabel(action)}
                               </button>
                             {/each}
@@ -5006,6 +5021,11 @@
   }
   .permission-actions button:hover { transform: translateY(-1px); background: white; }
   .permission-actions button:active { transform: scale(0.97); }
+  .permission-actions button { display: inline-flex; align-items: center; gap: 6px; }
+  .permission-actions button:disabled:not(.loading) { opacity: .5; }
+  .permission-actions button.loading { cursor: progress; }
+  .permission-spinner { width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: permission-spin .7s linear infinite; }
+  @keyframes permission-spin { to { transform: rotate(360deg); } }
   .permission-actions button.primary { border-color: #456d5d; color: white; background: #456d5d; }
   .permission-actions button.danger { color: #a54c4c; }
   .integration-note { margin: 0; color: #7c8983; font-size: 10px; line-height: 1.45; }

@@ -1872,7 +1872,9 @@ fn set_preferences(
         app.autolaunch()
             .enable()
             .map_err(|error| error.to_string())?;
-    } else {
+    } else if app.autolaunch().is_enabled().unwrap_or(false) {
+        // Disabling an entry that was never registered fails with "os error 2" on Windows,
+        // which would block every unrelated preference change.
         app.autolaunch()
             .disable()
             .map_err(|error| error.to_string())?;

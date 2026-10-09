@@ -21,11 +21,17 @@ function cleanPath(value: string, workingDirectory?: string): string | null {
   path = path.split(/\s@@\s/, 1)[0].split(/\s\*\*\*\s/, 1)[0].trim();
   if (/[\r\n]/.test(path)) return null;
   if (path === "/dev/null") return null;
-  path = path.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+  path = path.replace(/\\/g, "/").replace(/^\/\/\?\//, "").replace(/^(?:\.\/)+/, "");
   if (path.startsWith("a/") || path.startsWith("b/")) path = path.slice(2);
-  const root = workingDirectory?.replace(/\\/g, "/").replace(/\/+$/, "");
-  if (root && (path === root || path.startsWith(`${root}/`) || path.startsWith(`${root}\\`))) {
-    path = path.slice(root.length).replace(/^[\\/]+/, "");
+  const root = workingDirectory?.replace(/\\/g, "/").replace(/^\/\/\?\//, "").replace(/\/+$/, "");
+  if (root) {
+    // Windows paths ignore case, and the agent and the shell often disagree on the drive letter or folder
+    // casing, which left the same file listed twice (once relative, once absolute).
+    const windowsRoot = /^(?:[a-z]:|\/\/)/i.test(root);
+    const [candidate, base] = windowsRoot ? [path.toLowerCase(), root.toLowerCase()] : [path, root];
+    if (candidate === base || candidate.startsWith(`${base}/`)) {
+      path = path.slice(root.length).replace(/^[\\/]+/, "");
+    }
   }
   return path || null;
 }

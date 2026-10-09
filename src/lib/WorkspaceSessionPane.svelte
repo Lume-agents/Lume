@@ -28,7 +28,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
   import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
-  import { caretOnEdgeLine, emptyPromptHistory, historyEntries, stepPromptHistory } from "$lib/promptHistory";
+  import { caretOnEdgeLine, dedupePromptEntries, emptyPromptHistory, historyEntries, stepPromptHistory } from "$lib/promptHistory";
   import { applyMention, mentionAtCaret, type MentionQuery } from "$lib/promptMentions";
   import { claudeEffortForModel, claudeEffortValues, claudeModelOptions } from "$lib/claudeModels";
   import { permissionDescription, permissionLabel, permissionTone } from "$lib/sessionPermissions";
@@ -534,9 +534,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         detail: entry.activity.detail ?? "",
       });
     }
-    return [...byId.values()].sort((left, right) =>
+    return dedupePromptEntries([...byId.values()].sort((left, right) =>
       right.createdAt - left.createdAt || right.id.localeCompare(left.id)
-    );
+    ));
   });
   const normalizedPromptSearch = $derived(promptSearchQuery.trim());
   const visiblePromptIndexItems = $derived.by(() => {
@@ -548,9 +548,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         byId.set(item.id, item);
       }
     }
-    return [...byId.values()].sort((left, right) =>
+    return dedupePromptEntries([...byId.values()].sort((left, right) =>
       right.createdAt - left.createdAt || right.id.localeCompare(left.id)
-    );
+    ));
   });
   const canLoadEarlier = $derived(Boolean(
     hiddenCount > 0 || (historyHasMore ?? (session.nativeSessionId && session.activities.length >= 60))

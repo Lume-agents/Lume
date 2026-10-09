@@ -11,6 +11,7 @@
   import type { AgentSession, SessionActivity } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
+  import { dedupePromptEntries } from "$lib/promptHistory";
   import { listSessionMcpServers, loadWorkspacePromptIndexPage, refreshAgentRateLimits, type McpServer, type WorkspacePromptIndexEntry } from "$lib/lume";
   import { buildLatestReviewTurn } from "$lib/reviewDiffs";
   import { subagentsForSession } from "$lib/workspaceAgents";
@@ -145,7 +146,7 @@
     if (!key) return;
     let active = true;
     void loadWorkspacePromptIndexPage(sessionId)
-      .then((page) => { if (active) indexedPrompts = page.prompts.slice(0, 5); })
+      .then((page) => { if (active) indexedPrompts = dedupePromptEntries(page.prompts).slice(0, 5); })
       .catch(() => { if (active) promptIndexFailed = true; })
       .finally(() => { if (active) promptIndexLoading = false; });
     return () => { active = false; };

@@ -1,4 +1,4 @@
-//! Read-only repository context. Commands are fixed, bounded and never invoke a shell.
+//! Repository context, plus committing the files the user ticked. Commands are fixed, bounded and never invoke a shell.
 use std::{
     collections::{BTreeMap, HashMap},
     io::Read,
@@ -159,6 +159,15 @@ fn run(mut command: Command, timeout: Duration) -> Result<Vec<u8>, String> {
             "auth_required"
         } else if message.contains("403") || message.contains("rate limit") {
             "access_limited"
+        } else if message.contains("tell me who you are")
+            || message.contains("author identity unknown")
+            || message.contains("empty ident name")
+        {
+            "identity_missing"
+        } else if message.contains("nothing to commit") || message.contains("no changes added") {
+            "nothing_to_commit"
+        } else if message.contains("hook") {
+            "hook_failed"
         } else {
             "command_failed"
         }
@@ -168,6 +177,10 @@ fn run(mut command: Command, timeout: Duration) -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    git_within(root, args, Duration::from_secs(5))
+}
+
+fn git_within(root: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>, String> {
     let mut command = crate::executables::command("git").map_err(|_| "git_missing")?;
     command
         .current_dir(root)
@@ -185,7 +198,7 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
             "color.ui=false",
         ])
         .args(args);
-    run(command, Duration::from_secs(5))
+    run(command, timeout)
 }
 
 fn git_text(root: &Path, args: &[&str]) -> Result<String, String> {
@@ -427,6 +440,50 @@ pub fn snapshot(directory: &str, refresh: bool) -> Result<RepositorySnapshot, St
         at: Instant::now(),
     });
     Ok(value)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitOutcome {
+    pub hash: String,
+    pub summary: String,
+}
+
+/// Commits exactly the given changed files. Every path must be a current change of the repository, so the
+/// webview cannot make Git touch anything else.
+pub fn commit(directory: &str, paths: &[String], message: &str) -> Result<CommitOutcome, String> {
+    let message = message.trim();
+    if message.is_empty() || paths.is_empty() {
+        return Err("nothing_to_commit".into());
+    }
+    let value = snapshot(directory, true)?;
+    for path in paths {
+        let known = value
+            .files
+            .iter()
+            .any(|file| file.path == *path && !file.conflict);
+        if !known {
+            return Err("file_no_longer_changed".into());
+        }
+        if Path::new(path).is_absolute()
+            || Path::new(path)
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err("invalid_path".into());
+        }
+    }
+    let root = Path::new(&value.root);
+    let timeout = Duration::from_secs(60);
+    let mut add = vec!["add", "--"];
+    add.extend(paths.iter().map(String::as_str));
+    git_within(root, &add, timeout)?;
+    let mut commit = vec!["commit", "--only", "-m", message, "--"];
+    commit.extend(paths.iter().map(String::as_str));
+    git_within(root, &commit, timeout)?;
+    let hash = git_text(root, &["rev-parse", "--short", "HEAD"])?;
+    let summary = git_text(root, &["log", "-1", "--format=%s"])?;
+    Ok(CommitOutcome { hash, summary })
 }
 
 pub fn diff(directory: &str, path: &str) -> Result<RepositoryDiff, String> {

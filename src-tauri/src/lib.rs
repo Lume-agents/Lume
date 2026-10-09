@@ -528,6 +528,22 @@ async fn get_session_repository_diff(
 }
 
 #[tauri::command]
+async fn commit_session_repository(
+    state: State<'_, AppState>,
+    session_id: String,
+    paths: Vec<String>,
+    message: String,
+) -> Result<repository::CommitOutcome, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = repository_directory(&state, &session_id)?;
+        repository::commit(&directory, &paths, &message)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_session_github(
     state: State<'_, AppState>,
     session_id: String,
@@ -3028,6 +3044,7 @@ pub fn run() {
             stop_session_environment,
             get_session_repository,
             get_session_repository_diff,
+            commit_session_repository,
             search_session_paths,
             get_session_github,
             get_github_account,

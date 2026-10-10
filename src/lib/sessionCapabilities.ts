@@ -33,8 +33,13 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
   let promptUnavailableReason: PromptUnavailableReason | undefined;
   const promptIsRunning = ["running", "permission_required"].includes(session.status);
   const legacyGeminiCli = session.source !== "web" && session.agent === "gemini";
-  if (legacyGeminiCli) {
+  const controlledOmp = session.agent === "omp" && session.controlOrigin === "lume";
+  const monitoredOmp = session.agent === "omp" && !controlledOmp;
+  if (legacyGeminiCli || monitoredOmp) {
     promptUnavailableReason = "monitoring_only";
+  } else if (controlledOmp) {
+    if (!session.nativeSessionId?.trim()) promptUnavailableReason = "session_not_connected";
+    else if (!session.workingDirectory?.trim()) promptUnavailableReason = "working_directory_missing";
   } else if (
     session.source === "web"
     && promptIsRunning
@@ -66,38 +71,40 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
   return {
     canPrompt: !promptUnavailableReason,
     promptUnavailableReason,
-    canApprove: Boolean(
+    canApprove: !monitoredOmp && Boolean(
       session.pendingPermission && session.permissionProfile.canRespondFromLume,
     ),
-    canAnswerQuestion: Boolean(session.pendingQuestion),
+    canAnswerQuestion: !monitoredOmp && Boolean(session.pendingQuestion),
     canTerminate:
       (!legacyGeminiCli && session.source === "cli" && Boolean(session.processId))
       || (
-        ["codex", "opencode", "antigravity", "claude_code"].includes(session.agent)
+        ["codex", "opencode", "antigravity", "claude_code", "omp"].includes(session.agent)
         && (session.source === "desktop" || (session.source === "cli" && !session.processId))
         && session.controlOrigin === "lume"
         && Boolean(session.nativeSessionId?.trim())
       ),
     canOpenSource: session.source === "web" || session.source === "vscode",
     canReadResults: session.results.length > 0 || Boolean(session.lastResponse),
-    canAttachImages: session.source !== "web" && session.agent !== "unknown",
+    canAttachImages: session.source !== "web" && session.agent !== "unknown" && !monitoredOmp,
     canInterrupt:
       ["running", "permission_required"].includes(session.status)
       && session.controlOrigin === "lume"
-      && ["codex", "claude_code"].includes(session.agent)
+      && (controlledOmp || ["codex", "claude_code"].includes(session.agent))
       && (session.agent === "codex" ? session.source !== "web" : ["cli", "desktop"].includes(session.source))
       && Boolean(session.nativeSessionId?.trim()),
     canTakeControl:
       session.controlOrigin === "external"
       && session.source === "cli"
-      && session.agent === "codex"
+      && ["codex", "omp"].includes(session.agent)
       && Boolean(session.nativeSessionId?.trim())
       && Boolean(session.workingDirectory?.trim())
-      && Boolean(session.processId),
+      && (session.agent === "omp" || Boolean(session.processId)),
     promptDeliveries:
-      legacyGeminiCli
+      legacyGeminiCli || monitoredOmp
         ? []
-        : session.agent === "codex"
+        : controlledOmp
+          ? ["new_turn", "steer", "queue"]
+          : session.agent === "codex"
       && session.source !== "web"
       && session.controlOrigin === "lume"
         ? ["new_turn", "steer", "queue"]

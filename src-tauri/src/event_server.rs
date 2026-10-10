@@ -168,6 +168,7 @@ fn notification_for(
             crate::domain::AgentKind::OpenCode => "OpenCode".into(),
             crate::domain::AgentKind::DeepSeek => "DeepSeek".into(),
             crate::domain::AgentKind::Gemini => "Gemini".into(),
+            crate::domain::AgentKind::Omp => "Oh My Pi".into(),
             crate::domain::AgentKind::Unknown => "Agente".into(),
         });
     let project = event.project.as_deref().unwrap_or("sessão local");

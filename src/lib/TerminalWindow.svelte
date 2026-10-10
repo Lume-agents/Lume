@@ -83,6 +83,8 @@
     closeTerminalWindow,
     decidePermission,
     finishLayeredTerminalResize,
+    terminateSession,
+    takeControlSession,
     getSessionCollaborationMode,
     getClaudeSessionModelSettings,
     getSessionPermissionMode,
@@ -125,8 +127,8 @@
     submitPrompt,
     syncTerminalWindowPosition,
     terminalGroupFullscreenActive,
-    takeControlSession,
-    terminateSession,
+    compactSession,
+    launchAgentSession,
     deleteSessionNote,
     toggleTerminalGroupFullscreen,
     undockTerminalWindow,
@@ -1072,7 +1074,9 @@
     ? tr(`Context: ${compactTokens(contextTokens)} of ${compactTokens(contextWindow)} (${contextPercent}%)`, `Contexto: ${compactTokens(contextTokens)} de ${compactTokens(contextWindow)} (${contextPercent}%)`)
     : "");
   const canCompact = $derived(Boolean(
-    session?.agent === "claude_code" && session.controlOrigin === "lume" && canSubmit && !promptIsRunning && readyForPrompt && !sending,
+    session?.controlOrigin === "lume"
+    && (session.agent === "omp" ? session.status === "completed" && canSubmit && queuedPrompts.length === 0 : session.agent === "claude_code")
+    && (session.agent === "omp" || (canSubmit && !promptIsRunning && readyForPrompt && !sending)),
   ));
 
   $effect(() => {
@@ -1299,6 +1303,9 @@
   }
 
   function promptUnavailableText() {
+    if (session?.agent === "omp" && capabilities?.promptUnavailableReason === "monitoring_only") {
+      return tr("Oh My Pi sessions are read-only until the terminal session is closed.", "As sessões do Oh My Pi ficam somente para leitura até fechar a sessão no terminal.");
+    }
     if (capabilities?.promptUnavailableReason === "session_not_connected") {
       return tr(
         "Waiting for this session to connect to Lume",
@@ -2606,6 +2613,7 @@
   }
 
   function effortValues() {
+    if (session?.agent === "omp") return ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
     if (session?.agent === "claude_code") return claudeEffortValues(claudeModels, claudeModel);
     return currentModelOption()?.supportedReasoningEfforts.map((effort) => effort.value) ?? [];
   }
@@ -2643,7 +2651,7 @@
   }
 
   async function openModelDialog() {
-    if (!session || !["codex", "claude_code", "opencode", "antigravity"].includes(session.agent)) return false;
+    if (!session || !["codex", "claude_code", "opencode", "antigravity", "omp"].includes(session.agent)) return false;
     if (modelLoading || modelSaving) return true;
     composerToolsOpen = false;
     if (session.controlOrigin !== "lume") {
@@ -2670,9 +2678,9 @@
         modelSettings = await getSessionModelSettings(session.id);
         selectedModel = modelSettings.model;
         selectedEffort = modelSettings.reasoningEffort ?? "";
-      } else if (session.agent === "codex" || session.agent === "opencode") {
+      } else if (["codex", "opencode", "omp"].includes(session.agent)) {
         modelSettings = await getSessionModelSettings(session.id);
-        if (session.agent === "codex") sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
+        if (["codex", "omp"].includes(session.agent)) sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
         selectedModel = modelSettings.model;
         if (session.agent === "codex") fastMode = isFastServiceTier(modelSettings.serviceTier);
         const option = currentModelOption();
@@ -2745,7 +2753,7 @@
     modelError = null;
     const deferredUntilPromptEnds = (session.agent === "codex" || session.agent === "antigravity") && promptIsRunning;
     try {
-      if (session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity") {
+      if (["codex", "opencode", "antigravity", "omp"].includes(session.agent)) {
         modelSettings = await setSessionModelSettings(
           session.id,
           selectedModel,
@@ -2895,22 +2903,47 @@
 
   async function confirmTakeover() {
     if (!session || !capabilities?.canTakeControl || takingControl) return;
+    const currentSession = session;
     const pendingPrompt = prompt.trim();
     const pendingAttachments = [...promptAttachments];
     takingControl = true;
     message = null;
-    try {
-      await takeControlSession(session.id, pendingPrompt, pendingAttachments);
+    const finishTakeover = async (force = false) => {
+      await takeControlSession(currentSession.id, pendingPrompt, pendingAttachments, force);
       takeoverConfirm = false;
       if (prompt.trim() === pendingPrompt) prompt = "";
       promptAttachments = [];
       await refresh();
+    };
+    try {
+      await finishTakeover();
     } catch (error) {
-      message = String(error).replace(/^Error:\s*/, "");
+      const detail = String(error).replace(/^Error:\s*/, "");
+      if (session.agent === "omp" && detail.includes("omp_session_maybe_live")) {
+        const confirmed = window.confirm(tr(
+          "Lume cannot confirm whether the terminal session is still live. Continue anyway? Close omp in the terminal first if it is open.",
+          "O Lume não consegue confirmar se a sessão do terminal ainda está ativa. Continuar mesmo assim? Feche o omp no terminal antes, se estiver aberto.",
+        ));
+        if (confirmed) await finishTakeover(true).catch((retryError) => { message = String(retryError).replace(/^Error:\s*/, ""); });
+      } else {
+        message = session.agent === "omp" && detail.includes("omp_session_live")
+          ? tr("Close omp in the terminal to take control.", "Feche o omp no terminal para assumir o controle.")
+          : detail;
+      }
       await refresh().catch(() => undefined);
     } finally {
       sending = false;
       takingControl = false;
+    }
+  }
+  async function setupOmp() {
+    const workingDirectory = session?.workingDirectory?.trim();
+    if (!workingDirectory) return;
+    try {
+      await launchAgentSession("omp", workingDirectory, false, undefined, "terminal");
+      dismissedConnectionError = session?.statusLabel ?? "";
+    } catch (error) {
+      message = String(error).replace(/^Error:\s*/, "");
     }
   }
 
@@ -3107,10 +3140,17 @@
     void sendPrompt();
   }
 
-  /** Sends Claude's own `/compact`, keeping whatever was being typed. */
   async function compactContext() {
-    if (!canCompact) return;
+    if (!canCompact || !session) return;
     composerToolsOpen = false;
+    if (session.agent === "omp") {
+      try {
+        await compactSession(session.id);
+      } catch (error) {
+        message = String(error).replace(/^Error:\s*/, "");
+      }
+      return;
+    }
     const draft = prompt;
     const draftAttachments = promptAttachments;
     prompt = "/compact";
@@ -3191,6 +3231,7 @@
   }
 
   function actionLabel(action: PermissionAction) {
+    if (session?.agent === "omp" && action === "allow_once") return tr("Allow once", "Permitir uma vez");
     return {
       allow_once: tr("Allow", "Permitir"),
       allow_session: tr("For session", "Na sessão"),
@@ -3864,7 +3905,7 @@
                 <strong>{displayText(language, session.pendingPermission.summary)}</strong>
                 <code>{session.pendingPermission.resource}</code>
                 <div>
-                  {#each session.permissionProfile.availableActions as action}
+                  {#each (session.agent === "omp" ? session.permissionProfile.availableActions.filter((action) => action === "allow_once" || action === "deny") : session.permissionProfile.availableActions) as action}
                     <button class:danger={action === "deny"} class:loading={permissionPending === action} type="button" disabled={permissionPending !== null} onclick={() => permission(action)}>
                       {#if permissionPending === action}<i class="permission-spinner" aria-hidden="true"></i>{/if}
                       {actionLabel(action)}
@@ -4069,9 +4110,11 @@
           <div class="terminate-dialog takeover-dialog" role="alertdialog" aria-modal="true" aria-labelledby="takeover-title" tabindex="-1" use:dialogFocus={{ onDismiss: () => { if (!takingControl) takeoverConfirm = false; }, fallbackFocus: () => document.querySelector<HTMLTextAreaElement>(".terminal-composer textarea") }} onpointerdown={(event) => event.stopPropagation()}>
             <div>
               <strong id="takeover-title">{tr("Continue this session in Lume?", "Continuar esta sessão no Lume?")}</strong>
-              <p>{session.status === "running"
-                ? tr("The external CLI is running a task. Taking control will stop that task, close only the agent process, and resume the same thread in Lume.", "A CLI externa está executando uma tarefa. Assumir o controle interromperá essa tarefa, fechará somente o processo do agente e retomará a mesma thread no Lume.")
-                : tr("Lume will close only the external agent process and resume the same thread here. The terminal and chat history will be preserved.", "O Lume fechará somente o processo externo do agente e retomará a mesma thread aqui. O terminal e o histórico do chat serão preservados.")}</p>
+              <p>{session.agent === "omp"
+                ? tr("Close omp in the terminal before taking control. Lume will then resume this session without the external process.", "Feche o omp no terminal antes de assumir o controle. Depois, o Lume retomará esta sessão sem o processo externo.")
+                : session.status === "running"
+                  ? tr("The external CLI is running a task. Taking control will stop that task, close only the agent process, and resume the same thread in Lume.", "A CLI externa está executando uma tarefa. Assumir o controle interromperá essa tarefa, fechará somente o processo do agente e retomará a mesma thread no Lume.")
+                  : tr("Lume will close only the external agent process and resume the same thread here. The terminal and chat history will be preserved.", "O Lume fechará somente o processo externo do agente e retomará a mesma thread aqui. O terminal e o histórico do chat serão preservados.")}</p>
             </div>
             <footer>
               <button disabled={takingControl} type="button" onclick={() => (takeoverConfirm = false)}>{tr("Cancel", "Cancelar")}</button>
@@ -4136,7 +4179,7 @@
                   <label>
                     <span class="model-settings-label">{tr("Permissions", "Permissões")}</span>
                     <LumeSelect value={sessionPermission.mode} disabled={permissionSaving || session?.controlOrigin !== "lume"}
-                      options={sessionPermission.modes.map((mode) => ({ value: mode, label: permissionLabel(mode, tr), description: permissionDescription(mode, tr) }))}
+                      options={(session?.agent === "omp" ? ["full_access", "workspace_write", "custom"].filter((mode) => sessionPermission?.modes.includes(mode)) : sessionPermission.modes).map((mode) => ({ value: mode, label: permissionLabel(mode, tr, session?.agent), description: permissionDescription(mode, tr, session?.agent) }))}
                       ariaLabel={tr("Permissions", "Permissões")} minWidth={250} onValueChange={(value) => void chooseSessionPermission(value)} />
                   </label>
                   <small>{tr("Applies to the messages you send from Lume.", "Vale para as mensagens enviadas pelo Lume.")}</small>
@@ -4144,7 +4187,7 @@
               {/if}
             {/snippet}
             {#if modelLoading}
-              {#if session.agent === "antigravity"}{@render permissionSection()}{/if}
+              {#if session.agent === "antigravity" || session.agent === "omp"}{@render permissionSection()}{/if}
               <div class="model-settings-loading"><span></span>{tr("Loading available models…", "Carregando modelos disponíveis…")}</div>
             {:else if session.agent === "claude_code"}
               <section class="model-settings-section claude-model-settings">
@@ -4201,7 +4244,7 @@
                   {/each}
                 </div>
               </section>
-              {#if session.agent === "codex"}{@render permissionSection()}{/if}
+              {#if session.agent === "codex" || session.agent === "omp"}{@render permissionSection()}{/if}
               {#if session.agent === "codex"}{@render fastModeSection()}{/if}
 
               {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
@@ -4404,7 +4447,7 @@
                       <span><strong>{tr("Attach file", "Anexar arquivo")}</strong><small>{promptAttachments.length}/4</small></span>
                     </button>
                   {/if}
-                  {#if session.agent === "claude_code"}
+                  {#if session.agent === "claude_code" || session.agent === "omp"}
                     <button disabled={!canCompact} type="button" role="menuitem" onclick={() => void compactContext()}>
                       <span class="tool-icon"><LumeIcon name="compact" size={15} /></span>
                       <span><strong>{tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
@@ -4537,9 +4580,10 @@
       <span>{tr("Connecting to session…", "Conectando à sessão…")}</span>
     </section>
   {/if}
-  {#if session && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini"].includes(session.agent) && (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)))}
+  {#if session && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini", "omp"].includes(session.agent) && (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)) || (session.agent === "omp" && session.status === "failed" && /no models available/i.test(session.statusLabel)))}
     <AgentConnectionDialog agent={(session.agent === "claude_code" ? "claude" : session.agent) as ConnectableAgent}
-      message={connectionRequired ?? agentConnectionMessage(session.statusLabel) ?? ""} {language}
+      message={connectionRequired ?? (session.agent === "omp" && /no models available/i.test(session.statusLabel) ? tr("No models are available. Configure omp, then retry this session.", "Nenhum modelo está disponível. Configure o omp e tente esta sessão novamente.") : agentConnectionMessage(session.statusLabel) ?? "")} {language}
+      onSetup={session.agent === "omp" && /no models available/i.test(session.statusLabel) ? () => void setupOmp() : undefined}
       onClose={() => { dismissedConnectionError = session?.statusLabel ?? ""; connectionRequired = null; }} />
   {/if}
 </main>

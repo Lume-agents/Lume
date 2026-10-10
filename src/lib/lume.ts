@@ -71,6 +71,8 @@ export const defaultPreferences: Preferences = {
   popupNotificationsEnabled: true,
   autostart: true,
   mobileGatewayEnabled: false,
+  monitorId: undefined,
+  ompIdleTimeoutMinutes: 30,
   overlayX: undefined,
   overlayY: undefined,
   showOverFullscreen: false,
@@ -346,8 +348,16 @@ export async function takeControlSession(
   sessionId: string,
   prompt = "",
   attachments: PromptAttachmentInput[] = [],
+  force = false,
 ): Promise<void> {
-  await invoke("take_control_session", { sessionId, prompt, attachments });
+  await invoke("take_control_session", { sessionId, prompt, attachments, force });
+}
+
+export async function compactSession(sessionId: string): Promise<void> {
+  await invoke("compact_session", { sessionId });
+}
+export async function steerOmpSubagent(sessionId: string, subagentId: string, message: string): Promise<void> {
+  await invoke("steer_omp_subagent", { sessionId, subagentId, message });
 }
 
 export async function listExternalWriterConflicts(): Promise<ExternalWriterConflict[]> {
@@ -932,6 +942,7 @@ export async function loadIntegrationStatuses(): Promise<IntegrationStatus[]> {
       { kind: "codex", label: "Codex", installed: true, configured: false, canConfigure: true, canLaunch: true, directPermissions: true, detail: "Ready to connect" },
       { kind: "claude", label: "Claude Code", installed: true, configured: true, canConfigure: true, canLaunch: true, directPermissions: true, detail: "Monitoring and decisions connected" },
       { kind: "antigravity", label: "Antigravity CLI", installed: true, configured: false, canConfigure: true, canLaunch: true, directPermissions: false, detail: "CLI only; VS Code Gemini Code Assist is separate" },
+      { kind: "omp", label: "Oh My Pi", installed: true, configured: false, canConfigure: true, canLaunch: true, directPermissions: false, detail: "Optional extension; passive monitoring works without it" },
       { kind: "deepseek", label: "DeepSeek Harness", installed: false, configured: false, canConfigure: false, canLaunch: true, directPermissions: false, detail: "CLI not found" },
       { kind: "gemini", label: "Gemini CLI (legacy)", installed: true, configured: false, canConfigure: false, canLaunch: false, directPermissions: false, detail: "Process monitoring only; shared Gemini settings are untouched" },
     ];
@@ -967,6 +978,7 @@ export async function launchAgentSession(
   target: Preferences["launchTarget"],
   permissionMode?: Preferences["projectProfiles"][string]["permissionMode"],
   approvalPolicy?: Preferences["projectProfiles"][string]["approvalPolicy"],
+  profile?: string,
 ): Promise<void> {
   await invoke("launch_session", {
     request: {
@@ -978,6 +990,7 @@ export async function launchAgentSession(
       initialPrompt: undefined,
       permissionMode,
       approvalPolicy,
+      profile,
     },
   });
 }

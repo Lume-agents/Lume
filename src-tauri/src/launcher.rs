@@ -34,6 +34,8 @@ pub struct LaunchRequest {
     pub resume_id: Option<String>,
     pub target: String,
     #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
     pub initial_prompt: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<AccessMode>,
@@ -170,7 +172,17 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
         IntegrationKind::DeepSeek => ("dsh".to_string(), vec!["--profile".into(), "tui".into()]),
         IntegrationKind::Gemini => ("gemini".to_string(), Vec::new()),
         IntegrationKind::OpenCode => ("opencode".to_string(), Vec::new()),
+        IntegrationKind::Omp => ("omp".to_string(), Vec::new()),
     };
+    if request.agent == IntegrationKind::Omp {
+        if let Some(profile) = request
+            .profile
+            .as_deref()
+            .filter(|profile| !profile.is_empty())
+        {
+            arguments.extend(["--profile".into(), profile.into()]);
+        }
+    }
     if request.agent == IntegrationKind::Claude
         && request
             .initial_prompt
@@ -225,6 +237,12 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
             }
             IntegrationKind::DeepSeek => {}
             IntegrationKind::OpenCode => {}
+            IntegrationKind::Omp => {
+                arguments.push("--resume".into());
+                if let Some(id) = &request.resume_id {
+                    arguments.push(id.clone());
+                }
+            }
         }
     }
     if let Some(prompt) = request
@@ -721,7 +739,8 @@ fn apply_permission_profile(request: &LaunchRequest, arguments: &mut Vec<String>
         IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
         | IntegrationKind::DeepSeek
-        | IntegrationKind::Gemini => {}
+        | IntegrationKind::Gemini
+        | IntegrationKind::Omp => {}
     }
 }
 
@@ -927,6 +946,7 @@ fn launch_vscode(payload: &TerminalPayload, agent: &IntegrationKind) -> Result<(
             IntegrationKind::DeepSeek => "deepseek",
             IntegrationKind::Gemini => "gemini",
             IntegrationKind::OpenCode => "opencode",
+            IntegrationKind::Omp => "omp",
         },
         "cwd": payload.working_directory,
         "args": payload.arguments,
@@ -1016,6 +1036,7 @@ mod tests {
             resume,
             resume_id: resume_id.map(str::to_string),
             target: "auto".into(),
+            profile: None,
             initial_prompt: None,
             permission_mode: None,
             approval_policy: None,

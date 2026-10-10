@@ -2719,6 +2719,9 @@
         true,
         stored.id,
         profile?.launchTarget ?? preferences.launchTarget,
+        undefined,
+        undefined,
+        stored.profile,
       );
       launcherOpen = false;
       resumeAgent = null;
@@ -2750,8 +2753,12 @@
               "Codex connected. Open /hooks in Codex and trust the Lume hook once.",
               "Codex conectado. Abra /hooks no Codex e confie no hook Lume uma vez.",
             )
-          : tr(`${integration.label} connected to Lume.`, `${integration.label} conectado ao Lume.`)
-        : tr(`${integration.label} disconnected.`, `${integration.label} desconectado.`);
+          : integration.kind === "omp"
+            ? tr("Lume's optional extension was installed in Oh My Pi.", "A extensão opcional do Lume foi instalada no Oh My Pi.")
+            : tr(`${integration.label} connected to Lume.`, `${integration.label} conectado ao Lume.`)
+        : integration.kind === "omp"
+          ? tr("Lume's extension was removed from Oh My Pi.", "A extensão do Lume foi removida do Oh My Pi.")
+          : tr(`${integration.label} disconnected.`, `${integration.label} desconectado.`);
     } catch (error) {
       settingsMessageIsError = true;
       settingsMessage = String(error).replace(/^Error:\s*/, "");
@@ -4972,6 +4979,7 @@
   .agent-claude,
   .agent-claude_code { color: #d97757; background: #f7ece6; }
   .agent-antigravity { color: #476c5b; background: #e8f1ec; }
+  .agent-omp { color: #8540a6; background: #f5e9f7; }
   .agent-deepseek { color: #5786fe; background: #edf2ff; }
   .agent-gemini { color: #6e73ca; background: #eef0fb; }
   .agent-vscode { color: #287aa9; background: #edf6fb; }

@@ -60,7 +60,12 @@
     const agents = integrations.map((integration): Entry => ({
       kind: integration.kind,
       label: integration.label,
-      detail: integration.detail,
+      detail: integration.kind === "omp"
+        ? tr(
+            "Optional extension for live status; Lume observes approvals but cannot approve external omp tool calls. Passive monitoring works without it.",
+            "Extensão opcional para status ao vivo; o Lume observa aprovações, mas não pode aprovar chamadas externas de ferramentas do omp. O monitoramento passivo funciona sem ela.",
+          )
+        : integration.detail,
       integration,
       plan: planFor(integration.kind),
       step: stepOf(integration, planFor(integration.kind)),
@@ -136,7 +141,9 @@
           {/if}
         </span>
         {#if entry.step === "installed" && !compact && entry.plan}
-          <small class="hint">{tr("Connect it so Lume can follow its sessions and answer permission requests.", "Conecte para o Lume acompanhar as sessões e responder pedidos de permissão.")}</small>
+          <small class="hint">{entry.kind === "omp"
+            ? tr("Connect to install Lume's optional observe-only extension. It cannot approve external omp tool calls; passive monitoring works without it.", "Conecte para instalar a extensão opcional do Lume, somente observável. Ela não pode aprovar chamadas externas de ferramentas do omp; o monitoramento passivo funciona sem ela.")
+            : tr("Connect it so Lume can follow its sessions and answer permission requests.", "Conecte para o Lume acompanhar as sessões e responder pedidos de permissão.")}</small>
         {/if}
         {#if entry.integration && diagnostics[entry.integration.kind]}
           <div class="diagnostic-list">

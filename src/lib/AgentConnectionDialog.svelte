@@ -3,15 +3,16 @@
   import { dialogFocus } from "$lib/dialogFocus";
   import type { Language } from "$lib/i18n";
 
-  let { agent, message, language, onClose }: {
+  let { agent, message, language, onClose, onSetup }: {
     agent: ConnectableAgent;
     message: string;
     language: Language;
     onClose: () => void;
+    onSetup?: () => void;
   } = $props();
   let copied = $state(false);
   const command = $derived(agentLoginCommand(agent));
-  const label = $derived(agent === "claude" ? "Claude Code" : agent === "opencode" ? "OpenCode" : agent);
+  const label = $derived(agent === "claude" ? "Claude Code" : agent === "opencode" ? "OpenCode" : agent === "omp" ? "Oh My Pi" : agent);
   const pt = $derived(language === "pt-BR");
 
   async function copyCommand() {
@@ -36,6 +37,9 @@
       <small>{pt ? "Faça login na CLI e tente novamente. O Lume não acessa nem armazena sua senha." : "Sign in through the CLI and try again. Lume does not access or store your password."}</small>
     {:else}
       <small>{pt ? "Conecte sua conta no aplicativo original e tente novamente pelo Lume." : "Connect your account in the original app, then try again in Lume."}</small>
+    {/if}
+    {#if agent === "omp" && onSetup}
+      <button class="close" type="button" onclick={onSetup}>{pt ? "Configurar omp" : "Set up omp"}</button>
     {/if}
     <button class="close" type="button" onclick={onClose}>{pt ? "Entendi" : "Got it"}</button>
   </div>

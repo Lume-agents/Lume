@@ -21,6 +21,306 @@ use crate::{
     state::AppState,
 };
 
+fn omp_config_root() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".omp")
+}
+
+pub(crate) fn omp_native_session_ids(
+    pid: Option<u32>,
+    command: &[std::ffi::OsString],
+    tty_name: Option<&str>,
+    root: &std::path::Path,
+) -> Option<String> {
+    let args = command
+        .iter()
+        .map(|part| part.to_string_lossy())
+        .collect::<Vec<_>>();
+    if let Some(id) = args.windows(2).find_map(|pair| {
+        matches!(pair[0].as_ref(), "--resume" | "-r")
+            .then(|| pair[1].to_string())
+            .filter(|id| !id.is_empty())
+    }) {
+        return Some(id);
+    }
+    if let Some(tty_name) = tty_name {
+        for directory in omp_terminal_session_dirs(root) {
+            let breadcrumb = directory.join(std::path::Path::new(tty_name).file_name()?);
+            if let Some(path) = session_path_from_breadcrumb(&breadcrumb) {
+                if let Some(id) = omp_session_header(&path).map(|(id, _)| id) {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    if let Some(pid) = pid {
+        if let Some(id) = omp_process_lease_id(pid, root) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+pub(crate) fn omp_native_session_ids_for_pid(
+    pid: u32,
+    command: &[std::ffi::OsString],
+    root: &std::path::Path,
+) -> Option<String> {
+    let tty_name = omp_process_tty_name(pid, root);
+    omp_native_session_ids(Some(pid), command, tty_name.as_deref(), root)
+}
+
+fn session_path_from_breadcrumb(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents
+        .lines()
+        .find(|line| {
+            line.ends_with(".jsonl")
+                && (line.contains("/sessions/") || line.contains("\\sessions\\"))
+        })
+        .map(std::path::PathBuf::from)
+}
+
+fn omp_agent_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![root.join("agent")];
+    if let Ok(profiles) = std::fs::read_dir(root.join("profiles")) {
+        dirs.extend(
+            profiles
+                .flatten()
+                .map(|entry| entry.path().join("agent"))
+                .filter(|dir| dir.is_dir()),
+        );
+    }
+    dirs
+}
+
+fn omp_terminal_session_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    omp_agent_dirs(root)
+        .into_iter()
+        .map(|dir| dir.join("terminal-sessions"))
+        .collect()
+}
+
+fn omp_session_header(path: &std::path::Path) -> Option<(String, String)> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    let mut lines = std::io::BufReader::new(file).lines();
+    lines.next()?.ok()?;
+    let header: serde_json::Value = serde_json::from_str(&lines.next()?.ok()?).ok()?;
+    (header["type"] == "session").then(|| {
+        Some((
+            header["id"].as_str()?.to_string(),
+            header["cwd"].as_str()?.to_string(),
+        ))
+    })?
+}
+#[cfg(target_os = "linux")]
+fn omp_process_tty_name(pid: u32, root: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat
+        .rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let device = fields.get(4)?.parse::<i64>().ok()? as u64;
+    if device == 0 {
+        return None;
+    }
+    for directory in omp_terminal_session_dirs(root) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let terminals = [
+                std::path::Path::new("/dev").join(&name),
+                std::path::Path::new("/dev/pts").join(&name),
+            ];
+            if terminals.iter().any(|terminal| {
+                std::fs::metadata(terminal)
+                    .ok()
+                    .is_some_and(|metadata| metadata.rdev() == device)
+            }) {
+                return name.into_string().ok();
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn omp_process_tty_name(_pid: u32, _root: &std::path::Path) -> Option<String> {
+    None
+}
+#[cfg(target_os = "macos")]
+fn omp_process_tty_name(pid: u32, root: &std::path::Path) -> Option<String> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+        )
+    };
+    if read != std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int {
+        return None;
+    }
+    let device = unsafe { info.assume_init() }.e_tdev as u64;
+    if device == 0 {
+        return None;
+    }
+    for directory in omp_terminal_session_dirs(root) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let terminal = std::path::Path::new("/dev").join(&name);
+            if std::fs::metadata(terminal).ok().is_some_and(|metadata| {
+                use std::os::unix::fs::MetadataExt;
+                metadata.rdev() == device
+            }) {
+                return name.into_string().ok();
+            }
+        }
+    }
+    None
+}
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct ProcFileInfo {
+    open_flags: u32,
+    status: u32,
+    offset: libc::off_t,
+    file_type: i32,
+    guard_flags: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct VnodeFdInfoWithPath {
+    file: ProcFileInfo,
+    vnode: libc::vnode_info_path,
+}
+
+#[cfg(target_os = "macos")]
+const PROX_FDTYPE_VNODE: u32 = 1;
+#[cfg(target_os = "macos")]
+const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+#[cfg(target_os = "macos")]
+const MAX_DESCRIPTORS: usize = 4096;
+
+#[cfg(target_os = "macos")]
+fn omp_process_lease_id(pid: u32, root: &std::path::Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let native_pid = libc::pid_t::try_from(pid).ok()?;
+    let descriptor_size = std::mem::size_of::<libc::proc_fdinfo>();
+    let required = unsafe {
+        libc::proc_pidinfo(
+            native_pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if required <= 0 || required as usize > MAX_DESCRIPTORS * descriptor_size {
+        return None;
+    }
+    let count = ((required as usize).div_ceil(descriptor_size) + 32).min(MAX_DESCRIPTORS);
+    let mut descriptors = vec![unsafe { std::mem::zeroed::<libc::proc_fdinfo>() }; count];
+    let buffer_size = descriptors.len() * descriptor_size;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            native_pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            descriptors.as_mut_ptr().cast(),
+            buffer_size as libc::c_int,
+        )
+    };
+    if written <= 0 || written as usize > buffer_size || written as usize % descriptor_size != 0 {
+        return None;
+    }
+    descriptors.truncate(written as usize / descriptor_size);
+
+    let session_owners_dir = root.join("run/session-owners");
+
+    for descriptor in descriptors {
+        if descriptor.proc_fdtype != PROX_FDTYPE_VNODE || descriptor.proc_fd < 0 {
+            continue;
+        }
+        let mut info = std::mem::MaybeUninit::<VnodeFdInfoWithPath>::zeroed();
+        let size = std::mem::size_of::<VnodeFdInfoWithPath>();
+        let written = unsafe {
+            libc::proc_pidfdinfo(
+                native_pid,
+                descriptor.proc_fd,
+                PROC_PIDFDVNODEPATHINFO,
+                info.as_mut_ptr().cast(),
+                size as libc::c_int,
+            )
+        };
+        if written != size as libc::c_int {
+            continue;
+        }
+        let info = unsafe { info.assume_init() };
+        let bytes = info
+            .vnode
+            .vip_path
+            .iter()
+            .flatten()
+            .take_while(|&&b| b != 0)
+            .map(|&b| b as u8)
+            .collect::<Vec<_>>();
+        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&bytes));
+        if path.parent() == Some(&session_owners_dir) {
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if let Some(id) = file_name.strip_suffix(".lock") {
+                    if !id.is_empty() {
+                        return Some(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn omp_process_lease_id(pid: u32, root: &std::path::Path) -> Option<String> {
+    let session_owners_dir = root.join("run/session-owners");
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let Ok(target) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        if target.parent() == Some(&session_owners_dir) {
+            if let Some(file_name) = target.file_name().and_then(|n| n.to_str()) {
+                if let Some(id) = file_name.strip_suffix(".lock") {
+                    if !id.is_empty() {
+                        return Some(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn omp_process_lease_id(_pid: u32, _root: &std::path::Path) -> Option<String> {
+    None
+}
+
 #[derive(Clone, Debug)]
 pub struct DiscoveredProcess {
     pub agent: AgentKind,
@@ -189,7 +489,9 @@ fn scan(
                 .collect::<Vec<_>>();
             let command = arguments.join(" ");
             let name = process.name().to_string_lossy().to_lowercase();
-            if is_codex_infrastructure_arguments(&name, &arguments) {
+            if is_codex_infrastructure_arguments(&name, &arguments)
+                || is_omp_helper_arguments(&arguments)
+            {
                 return None;
             }
             if is_claude_headless_resume(&command)
@@ -214,6 +516,7 @@ fn scan(
                         AgentKind::OpenCode => "OpenCode",
                         AgentKind::DeepSeek => "DeepSeek",
                         AgentKind::Gemini => "Gemini",
+                        AgentKind::Omp => "Oh My Pi",
                         AgentKind::Unknown => "Agent",
                     };
                     (agent, label.to_string())
@@ -330,6 +633,17 @@ fn scan(
             let native_session_ids = match &agent {
                 AgentKind::Codex => native_session_ids_for_process_tree(&system, pid),
                 AgentKind::Antigravity => antigravity_session_ids_for_process_tree(&system, pid),
+                AgentKind::Omp => {
+                    let root = omp_config_root();
+                    omp_native_session_ids(
+                        Some(pid.as_u32()),
+                        process.cmd(),
+                        omp_process_tty_name(pid.as_u32(), &root).as_deref(),
+                        &root,
+                    )
+                    .into_iter()
+                    .collect()
+                }
                 _ => Vec::new(),
             };
             Some(DiscoveredProcess {
@@ -654,23 +968,6 @@ fn macos_native_session_ids_for_process(process: &sysinfo::Process) -> Option<Ve
 
     // These public libproc ABI definitions are absent from libc's Apple module.
     // Layouts/constants: apple-oss-distributions/xnu, bsd/sys/proc_info.h.
-    #[repr(C)]
-    struct ProcFileInfo {
-        open_flags: u32,
-        status: u32,
-        offset: libc::off_t,
-        file_type: i32,
-        guard_flags: u32,
-    }
-    #[repr(C)]
-    struct VnodeFdInfoWithPath {
-        file: ProcFileInfo,
-        vnode: libc::vnode_info_path,
-    }
-    const PROX_FDTYPE_VNODE: u32 = 1;
-    const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
-    const MAX_DESCRIPTORS: usize = 4096;
-    const MAX_METADATA_BYTES: u64 = 64 * 1024;
 
     let pid = process.pid().as_u32();
     let start = crate::codex_identity_probe::process_start_marker(pid)?;
@@ -765,7 +1062,7 @@ fn macos_native_session_ids_for_process(process: &sysinfo::Process) -> Option<Ve
             return None;
         }
         let mut line = String::new();
-        if BufReader::new(file.take(MAX_METADATA_BYTES))
+        if BufReader::new(file.take(16 * 1024))
             .read_line(&mut line)
             .is_err()
         {
@@ -1141,6 +1438,131 @@ fn launch_tokens<'a>(name: &str, arguments: &'a [String]) -> Vec<&'a str> {
     tokens
 }
 
+fn is_omp_helper_arguments(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        argument.contains("__omp_worker_")
+            || matches!(
+                argument.rsplit(['/', '\\']).next().unwrap_or(argument),
+                "daemon" | "--daemon" | "omp-daemon" | "omp_daemon"
+            )
+    })
+}
+pub(crate) fn paths_match(a: &str, b: &std::path::Path) -> bool {
+    let path_a = std::path::Path::new(a);
+    if path_a == b {
+        return true;
+    }
+    if let (Ok(canon_a), Ok(canon_b)) = (std::fs::canonicalize(path_a), std::fs::canonicalize(b)) {
+        return canon_a == canon_b;
+    }
+    path_a.to_string_lossy().trim_end_matches(['/', '\\'])
+        == b.to_string_lossy().trim_end_matches(['/', '\\'])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OmpLiveness {
+    Live,
+    MaybeLive,
+    NotLive,
+}
+
+pub fn check_omp_session_liveness(
+    native_session_id: &str,
+    cwd: &str,
+    profile: Option<&str>,
+) -> OmpLiveness {
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_cwd(UpdateKind::Always),
+    );
+
+    let root = omp_config_root();
+    let mut any_in_cwd = false;
+
+    for (pid, process) in system.processes() {
+        let name = process.name().to_string_lossy();
+        if name != "omp" && name != "omp.exe" {
+            continue;
+        }
+        let args = process
+            .cmd()
+            .iter()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        if is_omp_helper_arguments(&args) {
+            continue;
+        }
+
+        let pid_u32 = pid.as_u32();
+        let bound_id = omp_native_session_ids_for_pid(pid_u32, process.cmd(), &root);
+
+        if let Some(bound) = &bound_id {
+            if bound == native_session_id {
+                return OmpLiveness::Live;
+            }
+        }
+
+        let tty_name = omp_process_tty_name(pid_u32, &root);
+        if let Some(tty) = &tty_name {
+            let mut dirs = vec![root.join("agent/terminal-sessions")];
+            if let Some(prof) = profile {
+                dirs.push(
+                    root.join("profiles")
+                        .join(prof)
+                        .join("agent/terminal-sessions"),
+                );
+            }
+            for dir in dirs {
+                let breadcrumb =
+                    dir.join(std::path::Path::new(tty).file_name().unwrap_or_default());
+                if let Some(path) = session_path_from_breadcrumb(&breadcrumb) {
+                    if let Some((id, _)) = omp_session_header(&path) {
+                        if id == native_session_id {
+                            return OmpLiveness::Live;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(process_cwd) = process.cwd() {
+            if paths_match(cwd, process_cwd) {
+                // Windows has no inspectable lease file; another omp in the
+                // same cwd is still ambiguous even when its argv names a session.
+                if cfg!(target_os = "windows") || bound_id.is_none() {
+                    any_in_cwd = true;
+                }
+            }
+        }
+    }
+
+    if any_in_cwd {
+        OmpLiveness::MaybeLive
+    } else {
+        OmpLiveness::NotLive
+    }
+}
+
+pub fn check_omp_takeover_safety(
+    native_session_id: &str,
+    cwd: &str,
+    profile: Option<&str>,
+    force: bool,
+) -> Result<(), &'static str> {
+    match check_omp_session_liveness(native_session_id, cwd, profile) {
+        OmpLiveness::Live => Err("omp_session_live: Close omp in the terminal to take control."),
+        OmpLiveness::MaybeLive if !cfg!(target_os = "windows") => {
+            Err("omp_session_live: Close omp in the terminal to take control.")
+        }
+        OmpLiveness::MaybeLive if !force => Err("omp_session_maybe_live: Close omp in the terminal to take control, or confirm force takeover."),
+        OmpLiveness::MaybeLive | OmpLiveness::NotLive => Ok(()),
+    }
+}
+
 pub(crate) fn detect_agent_arguments(name: &str, arguments: &[String]) -> Option<AgentKind> {
     let raw_tokens = launch_tokens(name, arguments);
     let command_tokens = claude_command_tokens(arguments);
@@ -1179,7 +1601,9 @@ pub(crate) fn detect_agent_arguments(name: &str, arguments: &[String]) -> Option
                 }
             })
     };
-    if executable_matches("codex") {
+    if executable_matches("omp") {
+        (!is_omp_helper_arguments(arguments)).then_some(AgentKind::Omp)
+    } else if executable_matches("codex") {
         Some(AgentKind::Codex)
     } else if is_claude_infrastructure(&command_tokens) || is_claude_spare(&command_tokens) {
         None
@@ -1538,6 +1962,131 @@ fn process_depth(system: &System, mut pid: Pid) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn omp_native_id_uses_resume_and_breadcrumb_without_cwd_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-omp-discovery-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temporary omp root");
+        let resumed = ["omp", "--resume", "resume-id"].map(std::ffi::OsString::from);
+        assert_eq!(
+            omp_native_session_ids(None, &resumed, None, &root).as_deref(),
+            Some("resume-id")
+        );
+        let short_resume = ["omp", "-r", "short-id"].map(std::ffi::OsString::from);
+        assert_eq!(
+            omp_native_session_ids(None, &short_resume, None, &root).as_deref(),
+            Some("short-id")
+        );
+
+        let agent = root.join("agent");
+        let session_dir = agent.join("sessions/-work");
+        std::fs::create_dir_all(&session_dir).expect("session directory");
+        let session_file = session_dir.join("session.jsonl");
+        std::fs::write(
+            &session_file,
+            format!("\n{{\"type\":\"session\",\"id\":\"breadcrumb-id\",\"cwd\":\"/work\"}}\n"),
+        )
+        .expect("session file");
+        let terminal_dir = agent.join("terminal-sessions");
+        std::fs::create_dir_all(&terminal_dir).expect("terminal directory");
+        std::fs::write(
+            terminal_dir.join("ttys000"),
+            format!("/work\n{}\ncwdstat 1 2\n", session_file.display()),
+        )
+        .expect("breadcrumb");
+        let command = ["omp"].map(std::ffi::OsString::from);
+        assert_eq!(
+            omp_native_session_ids(None, &command, Some("ttys000"), &root).as_deref(),
+            Some("breadcrumb-id")
+        );
+
+        let newest = session_dir.join("newest.jsonl");
+        std::thread::sleep(Duration::from_millis(10));
+        std::fs::write(
+            &newest,
+            "\n{\"type\":\"session\",\"id\":\"newest-id\",\"cwd\":\"/work\"}\n",
+        )
+        .expect("newest session");
+        // Without resume or breadcrumb, an unbound omp process MUST NOT fall back to newest-id or cwd!
+        assert_eq!(
+            omp_native_session_ids(None, &command, None, &root).as_deref(),
+            None
+        );
+        std::fs::remove_dir_all(&root).expect("remove temporary omp root");
+    }
+
+    #[test]
+    fn omp_two_sessions_in_same_project_not_misbound() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-omp-two-sessions-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temporary omp root");
+        let agent = root.join("agent");
+        let session_dir = agent.join("sessions/-project");
+        std::fs::create_dir_all(&session_dir).expect("session directory");
+        let sess1_file = session_dir.join("sess1.jsonl");
+        let sess2_file = session_dir.join("sess2.jsonl");
+        std::fs::write(
+            &sess1_file,
+            "\n{\"type\":\"session\",\"id\":\"sess-1\",\"cwd\":\"/project\"}\n",
+        )
+        .expect("session 1");
+        std::fs::write(
+            &sess2_file,
+            "\n{\"type\":\"session\",\"id\":\"sess-2\",\"cwd\":\"/project\"}\n",
+        )
+        .expect("session 2");
+
+        let terminal_dir = agent.join("terminal-sessions");
+        std::fs::create_dir_all(&terminal_dir).expect("terminal directory");
+        std::fs::write(
+            terminal_dir.join("ttys001"),
+            format!("/project\n{}\n", sess1_file.display()),
+        )
+        .expect("breadcrumb 1");
+        std::fs::write(
+            terminal_dir.join("ttys002"),
+            format!("/project\n{}\n", sess2_file.display()),
+        )
+        .expect("breadcrumb 2");
+
+        let cmd = ["omp"].map(std::ffi::OsString::from);
+        // Each TTY breadcrumb cleanly maps to its own session
+        assert_eq!(
+            omp_native_session_ids(None, &cmd, Some("ttys001"), &root).as_deref(),
+            Some("sess-1")
+        );
+        assert_eq!(
+            omp_native_session_ids(None, &cmd, Some("ttys002"), &root).as_deref(),
+            Some("sess-2")
+        );
+
+        // Unbound process in same cwd does not misbind to either session
+        assert_eq!(
+            omp_native_session_ids(None, &cmd, None, &root).as_deref(),
+            None
+        );
+
+        // Resume command targets specific session
+        let resume_sess1 = ["omp", "--resume", "sess-1"].map(std::ffi::OsString::from);
+        assert_eq!(
+            omp_native_session_ids(None, &resume_sess1, None, &root).as_deref(),
+            Some("sess-1")
+        );
+
+        std::fs::remove_dir_all(&root).expect("remove temporary omp root");
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -2276,6 +2825,26 @@ mod tests {
                 ]
             ),
             Some(AgentKind::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn omp_detects_cli_but_excludes_worker_and_daemon_processes() {
+        assert_eq!(
+            detect_agent_arguments("omp", &["omp".into()]),
+            Some(AgentKind::Omp)
+        );
+        assert_eq!(
+            detect_agent_arguments("omp", &["omp".into(), "__omp_worker_2".into()]),
+            None
+        );
+        assert_eq!(
+            detect_agent_arguments("omp", &["omp".into(), "daemon".into()]),
+            None
+        );
+        assert_eq!(
+            detect_agent_arguments("omp.exe", &["C:\\omp.exe".into()]),
+            Some(AgentKind::Omp)
         );
     }
 

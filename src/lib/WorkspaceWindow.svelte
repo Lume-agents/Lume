@@ -1162,7 +1162,7 @@
     try {
       const profile = preferences.projectProfiles[projectKey(stored.workingDirectory)];
       pendingOpenedSession = { nativeId: stored.id, agent: stored.agent === "claude" ? "claude_code" : stored.agent, knownIds: new Set(sessions.map((session) => session.id)), startedAt: Date.now() };
-      await launchAgentSession(stored.agent, stored.workingDirectory, true, stored.id, profile?.launchTarget ?? preferences.launchTarget);
+      await launchAgentSession(stored.agent, stored.workingDirectory, true, stored.id, profile?.launchTarget ?? preferences.launchTarget, undefined, undefined, stored.profile);
       launcherOpen = false;
       resumeAgent = null;
       resumableSessions = [];
@@ -1799,7 +1799,26 @@
       sessionContextMenu = null;
       await refreshSessionsAfterContextAction();
     } catch (reason) {
-      sessionContextError = String(reason).replace(/^Error:\s*/, "");
+      const detail = String(reason).replace(/^Error:\s*/, "");
+      if (session.agent === "omp" && detail.includes("omp_session_maybe_live")) {
+        const confirmed = window.confirm(tr(
+          "Lume cannot confirm whether the terminal session is still live. Continue anyway? Close omp in the terminal first if it is open.",
+          "O Lume não consegue confirmar se a sessão do terminal ainda está ativa. Continuar mesmo assim? Feche o omp no terminal antes, se estiver aberto.",
+        ));
+        if (confirmed) {
+          try {
+            await takeControlSession(session.id, "", [], true);
+            sessionContextMenu = null;
+            await refreshSessionsAfterContextAction();
+          } catch (retryReason) {
+            sessionContextError = String(retryReason).replace(/^Error:\s*/, "");
+          }
+        }
+      } else if (session.agent === "omp" && detail.includes("omp_session_live")) {
+        sessionContextError = tr("Close omp in the terminal to take control.", "Feche o omp no terminal para assumir o controle.");
+      } else {
+        sessionContextError = detail;
+      }
     } finally {
       sessionContextBusy = false;
     }
@@ -3248,6 +3267,10 @@
                 onTest={(integration) => void runIntegrationDiagnostic(integration)}
               />
             </div>
+            <label class="workspace-setting-row" data-tooltip={tr("Close idle, completed Lume-controlled omp sessions after this interval. Use 0 to keep them open.", "Fecha sessões omp controladas pelo Lume que estejam concluídas e inativas após este intervalo. Use 0 para mantê-las abertas.")}>
+              <span><strong>{tr("Oh My Pi idle timeout", "Tempo limite de inatividade do Oh My Pi")}</strong><small>{preferences.ompIdleTimeoutMinutes === 0 ? tr("Never close", "Nunca fechar") : tr(`${preferences.ompIdleTimeoutMinutes} minutes`, `${preferences.ompIdleTimeoutMinutes} minutos`)}</small></span>
+              <LumeSelect ariaLabel={tr("Oh My Pi idle timeout", "Tempo limite de inatividade do Oh My Pi")} value={String(preferences.ompIdleTimeoutMinutes)} disabled={settingsSaving} options={[0, 5, 10, 15, 30, 60].map((minutes) => ({ value: String(minutes), label: minutes === 0 ? tr("Never", "Nunca") : `${minutes} ${tr("min", "min")}` }))} minWidth={104} onValueChange={(value) => void updatePreference("ompIdleTimeoutMinutes", Number(value))} />
+            </label>
             {/if}
             </div>
           </details>

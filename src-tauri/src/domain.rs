@@ -16,6 +16,7 @@ pub enum AgentKind {
     #[serde(rename = "deepseek")]
     DeepSeek,
     Gemini,
+    Omp,
     Unknown,
 }
 
@@ -749,6 +750,7 @@ pub struct Preferences {
     pub history_retention_days: u16,
     pub launch_target: String,
     pub project_profiles: HashMap<String, ProjectProfile>,
+    pub omp_idle_timeout_minutes: u32,
     pub session_aliases: HashMap<String, String>,
     pub whiteboard_layouts: Vec<WhiteboardLayout>,
     pub workflow_enabled: bool,
@@ -793,6 +795,7 @@ impl Default for Preferences {
             history_retention_days: 30,
             launch_target: "auto".into(),
             project_profiles: HashMap::new(),
+            omp_idle_timeout_minutes: 30,
             session_aliases: HashMap::new(),
             whiteboard_layouts: Vec::new(),
             workflow_enabled: false,
@@ -807,7 +810,7 @@ impl Default for Preferences {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEventKind {
     SessionStarted,

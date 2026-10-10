@@ -32,6 +32,7 @@ pub enum IntegrationKind {
     #[serde(rename = "deepseek")]
     DeepSeek,
     Gemini,
+    Omp,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,6 +58,8 @@ pub struct ResumableSession {
     pub working_directory: String,
     pub source: String,
     pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -169,17 +172,62 @@ pub fn managed_claude_hook_settings(
         .map_err(|error| error.to_string())
 }
 
+fn omp_extension_configured() -> bool {
+    let Some(home) = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    else {
+        return false;
+    };
+    omp_agent_dirs(&home.join(".omp"))
+        .into_iter()
+        .all(|(agent, _)| {
+            fs::read_to_string(agent.join("extensions/lume.ts"))
+                .ok()
+                .is_some_and(|content| content.starts_with(OMP_EXTENSION_MARKER))
+        })
+}
+
+fn omp_version_supported(version: &str) -> bool {
+    let Some(version) = version.split('/').next_back() else {
+        return false;
+    };
+    let mut parts = version
+        .split('.')
+        .filter_map(|part| part.parse::<u32>().ok());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(major), Some(minor), Some(patch)) => (major, minor, patch) >= (18, 8, 7),
+        _ => false,
+    }
+}
+fn omp_cli_version() -> Option<String> {
+    crate::executables::command("omp")
+        .ok()?
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|version| !version.is_empty())
+}
+
 pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
     crate::agent_plugins::catalog()
         .into_iter()
         .map(|plugin| {
             let kind = plugin.kind();
             let installed = crate::executables::available(plugin.executable());
-            let configured = !matches!(kind, IntegrationKind::Gemini | IntegrationKind::OpenCode)
-                && config_path(&kind)
-                    .and_then(|path| fs::read_to_string(path).ok())
-                    .is_some_and(|content| configured_content(&content, &kind, executable));
-            let can_configure = !matches!(kind, IntegrationKind::Gemini | IntegrationKind::OpenCode) && config_path(&kind).is_some();
+            let omp_version = (kind == IntegrationKind::Omp).then(omp_cli_version).flatten();
+            let configured = if kind == IntegrationKind::Omp {
+                omp_extension_configured()
+            } else {
+                !matches!(kind, IntegrationKind::Gemini | IntegrationKind::OpenCode)
+                    && config_path(&kind)
+                        .and_then(|path| fs::read_to_string(path).ok())
+                        .is_some_and(|content| configured_content(&content, &kind, executable))
+            };
+            let can_configure = kind == IntegrationKind::Omp
+                || (!matches!(kind, IntegrationKind::Gemini | IntegrationKind::OpenCode)
+                    && config_path(&kind).is_some());
             let can_launch = kind != IntegrationKind::Gemini;
             let antigravity_hook_warning = (kind == IntegrationKind::Antigravity)
                 .then(antigravity_hook_warning)
@@ -199,6 +247,12 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
                 "Controle direto via ACP local; sem hook ou gateway global".into()
             } else if kind == IntegrationKind::DeepSeek {
                 "CLI detectada; requer o perfil TUI do DeepSeek Harness".into()
+            } else if kind == IntegrationKind::Omp
+                && !omp_version.as_deref().is_some_and(omp_version_supported)
+            {
+                format!("Oh My Pi requires version 18.8.7 or newer; found {}", omp_version.as_deref().unwrap_or("unknown"))
+            } else if kind == IntegrationKind::Omp {
+                "Oh My Pi sessions are monitored; connect installs the Lume extension".into()
             } else if plugin.hook_events().is_empty() {
                 "Detecção local de processos disponível".into()
             } else if configured {
@@ -252,6 +306,7 @@ pub fn resumable_sessions(kind: &IntegrationKind) -> Result<Vec<ResumableSession
         IntegrationKind::OpenCode | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {
             Vec::new()
         }
+        IntegrationKind::Omp => omp_resumable_sessions(&home.join(".omp")),
     };
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     sessions.truncate(250);
@@ -284,7 +339,8 @@ pub(crate) fn indexed_session_names(
         | IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
         | IntegrationKind::DeepSeek
-        | IntegrationKind::Gemini => HashMap::new(),
+        | IntegrationKind::Gemini
+        | IntegrationKind::Omp => HashMap::new(),
     })
 }
 
@@ -305,7 +361,8 @@ pub(crate) fn native_session_title(kind: &IntegrationKind, session_id: &str) -> 
         | IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
         | IntegrationKind::DeepSeek
-        | IntegrationKind::Gemini => None,
+        | IntegrationKind::Gemini
+        | IntegrationKind::Omp => None,
     }
 }
 
@@ -380,6 +437,7 @@ pub fn resume_preview(kind: &IntegrationKind, session_id: &str) -> Option<Resume
         | IntegrationKind::OpenCode
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini => None,
+        IntegrationKind::Omp => omp_last_response(&recent),
     }?;
     Some(ResumePreview {
         response,
@@ -400,7 +458,8 @@ pub fn resume_work_activities(kind: &IntegrationKind, session_id: &str) -> Vec<S
         IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
         | IntegrationKind::DeepSeek
-        | IntegrationKind::Gemini => Vec::new(),
+        | IntegrationKind::Gemini
+        | IntegrationKind::Omp => Vec::new(),
     }
 }
 
@@ -825,12 +884,139 @@ fn resume_path(kind: &IntegrationKind, session_id: &str) -> Option<PathBuf> {
         IntegrationKind::OpenCode | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {
             return None
         }
+        IntegrationKind::Omp => return omp_session_path(&home.join(".omp"), session_id),
     };
     resume_files(&root).into_iter().find(|path| {
         path.file_stem()
             .and_then(|value| value.to_str())
             .is_some_and(|stem| stem == session_id || stem.ends_with(&filename_suffix))
     })
+}
+
+fn omp_last_response(bytes: &[u8]) -> Option<String> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .rev()
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .find_map(|entry| {
+            if entry["type"] != "message"
+                || entry["message"]["role"] != "assistant"
+                || !matches!(
+                    entry["message"]["stopReason"].as_str(),
+                    Some("stop" | "length")
+                )
+            {
+                return None;
+            }
+            entry["message"]["content"]
+                .as_array()
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter_map(|part| {
+                            (part["type"] == "text")
+                                .then(|| part["text"].as_str())
+                                .flatten()
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .filter(|text| !text.is_empty())
+        })
+}
+
+fn omp_agent_dirs(config_root: &Path) -> Vec<(PathBuf, Option<String>)> {
+    let mut dirs = vec![(config_root.join("agent"), None)];
+    let Ok(profiles) = fs::read_dir(config_root.join("profiles")) else {
+        return dirs;
+    };
+    dirs.extend(profiles.flatten().filter_map(|entry| {
+        let profile = entry.file_name().into_string().ok()?;
+        let agent = entry.path().join("agent");
+        agent.is_dir().then_some((agent, Some(profile)))
+    }));
+    dirs
+}
+
+fn omp_session_files(agent_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    fn visit(dir: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+                files.push(path);
+            }
+        }
+    }
+    visit(&agent_dir.join("sessions"), &mut files);
+    files
+}
+
+fn omp_session_metadata(path: &Path) -> Option<(String, String, String)> {
+    let file = fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut title = String::new();
+    reader.read_line(&mut title).ok()?;
+    let mut header = String::new();
+    reader.read_line(&mut header).ok()?;
+    let value = serde_json::from_str::<Value>(&header).ok()?;
+    if value.get("type")?.as_str()? != "session" {
+        return None;
+    }
+    let id = value.get("id")?.as_str()?.to_string();
+    let cwd = value.get("cwd")?.as_str()?.to_string();
+    let title = serde_json::from_str::<Value>(title.trim())
+        .ok()
+        .and_then(|slot| {
+            slot.get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            value
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| resume_project_name(&cwd));
+    Some((id, cwd, title))
+}
+
+fn omp_resumable_sessions(config_root: &Path) -> Vec<ResumableSession> {
+    omp_agent_dirs(config_root)
+        .into_iter()
+        .flat_map(|(agent_dir, profile)| {
+            omp_session_files(&agent_dir)
+                .into_iter()
+                .filter_map(move |path| {
+                    let (id, working_directory, name) = omp_session_metadata(&path)?;
+                    let project = resume_project_name(&working_directory);
+                    Some(ResumableSession {
+                        id,
+                        agent: IntegrationKind::Omp,
+                        name,
+                        project,
+                        working_directory,
+                        source: "CLI".into(),
+                        updated_at: file_updated_at(&path),
+                        profile: profile.clone(),
+                    })
+                })
+        })
+        .collect()
+}
+
+fn omp_session_path(config_root: &Path, session_id: &str) -> Option<PathBuf> {
+    omp_agent_dirs(config_root)
+        .into_iter()
+        .flat_map(|(agent_dir, _)| omp_session_files(&agent_dir))
+        .find(|path| omp_session_metadata(path).is_some_and(|(id, _, _)| id == session_id))
 }
 
 fn codex_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
@@ -1100,6 +1286,7 @@ fn codex_resume_metadata(value: &Value, updated_at: i64) -> Option<ResumableSess
         working_directory,
         source,
         updated_at,
+        profile: None,
     })
 }
 
@@ -1150,6 +1337,7 @@ fn claude_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
                 working_directory,
                 source: "CLI".into(),
                 updated_at: file_updated_at(&path),
+                profile: None,
             })
         })
         .collect()
@@ -1194,6 +1382,7 @@ fn antigravity_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
             working_directory,
             source: "CLI".into(),
             updated_at: file_updated_at(&transcript),
+            profile: None,
         };
         sessions_by_id.entry(id).or_insert(session);
     }
@@ -1698,11 +1887,25 @@ pub fn diagnose(
                     .then_some(stdout)
                     .or((!stderr.is_empty()).then_some(stderr))
             });
+        let supported =
+            kind != &IntegrationKind::Omp || version.as_deref().is_some_and(omp_version_supported);
         checks.push(DiagnosticCheck {
             id: "version".into(),
             label: "Versão".into(),
-            status: if version.is_some() { "ok" } else { "warning" }.into(),
-            detail: version.unwrap_or_else(|| "Não foi possível consultar a versão".into()),
+            status: if version.is_some() && supported {
+                "ok"
+            } else {
+                "error"
+            }
+            .into(),
+            detail: if kind == &IntegrationKind::Omp && !supported {
+                format!(
+                    "Versão mínima exigida: 18.8.7; encontrada {}",
+                    version.unwrap_or_else(|| "desconhecida".into())
+                )
+            } else {
+                version.unwrap_or_else(|| "Não foi possível consultar a versão".into())
+            },
         });
     }
 
@@ -1780,7 +1983,56 @@ pub fn diagnose(
     })
 }
 
+const OMP_EXTENSION: &str = include_str!("../resources/omp/lume.ts");
+const OMP_EXTENSION_MARKER: &str = "// LUME_OMP_EXTENSION_OWNER=lume version=1";
+
+fn configure_omp(executable: &str, enabled: bool) -> Result<(), String> {
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "Could not find the user home directory".to_string())?;
+    configure_omp_at(&home.join(".omp"), executable, enabled)
+}
+
+fn configure_omp_at(root: &Path, executable: &str, enabled: bool) -> Result<(), String> {
+    let source = OMP_EXTENSION.replace(
+        "\"__LUME_EXECUTABLE__\"",
+        &serde_json::to_string(executable).map_err(|error| error.to_string())?,
+    );
+    for (agent, _) in omp_agent_dirs(root) {
+        let path = agent.join("extensions/lume.ts");
+        if enabled {
+            if path.exists() {
+                let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+                if !content
+                    .lines()
+                    .next()
+                    .is_some_and(|line| line.starts_with("// LUME_OMP_EXTENSION_OWNER=lume"))
+                {
+                    continue;
+                }
+                if content == source {
+                    continue;
+                }
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::write(&path, &source).map_err(|error| error.to_string())?;
+        } else if path.exists() {
+            let content = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+            if content.lines().next() == Some(OMP_EXTENSION_MARKER) {
+                fs::remove_file(path).map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
 pub fn configure(kind: &IntegrationKind, executable: &str, enabled: bool) -> Result<(), String> {
+    if *kind == IntegrationKind::Omp {
+        return configure_omp(executable, enabled);
+    }
+
     if *kind == IntegrationKind::OpenCode {
         return Err("OpenCode uses the ACP bridge and has no hook to configure".into());
     }
@@ -2254,7 +2506,9 @@ fn add_handler(
             "timeout": timeout * 1_000,
             "description": "Envia o estado da sessão ao Lume"
         }),
-        IntegrationKind::OpenCode => return Err("OpenCode does not use hooks".into()),
+        IntegrationKind::OpenCode | IntegrationKind::Omp => {
+            return Err("Este agente não usa hooks JSON".into())
+        }
         IntegrationKind::Gemini => json!({
             "type": "command",
             "name": "Lume",
@@ -2343,8 +2597,9 @@ fn config_path(kind: &IntegrationKind) -> Option<PathBuf> {
         IntegrationKind::Antigravity => {
             return Some(antigravity_cli_settings_path_for(&PathBuf::from(user_home)))
         }
-        IntegrationKind::OpenCode => return None,
-        IntegrationKind::DeepSeek => return None,
+        IntegrationKind::OpenCode | IntegrationKind::DeepSeek | IntegrationKind::Omp => {
+            return None
+        }
         IntegrationKind::Gemini => ".gemini/settings.json",
     };
     Some(PathBuf::from(user_home).join(directory))
@@ -2423,6 +2678,7 @@ fn provider(kind: &IntegrationKind) -> &'static str {
         IntegrationKind::OpenCode => "opencode",
         IntegrationKind::DeepSeek => "deepseek",
         IntegrationKind::Gemini => "gemini",
+        IntegrationKind::Omp => "omp",
     }
 }
 
@@ -4530,5 +4786,67 @@ mod tests {
     fn respects_an_explicit_codex_hooks_disable() {
         let result = config_with_hooks_enabled("[features]\nhooks = false\n");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn omp_extension_install_is_idempotent_and_preserves_foreign_files() {
+        let root = std::env::temp_dir().join(format!(
+            "omp-install-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let foreign = root.join("agent/extensions/lume.ts");
+        fs::create_dir_all(foreign.parent().unwrap()).expect("create default extension directory");
+        fs::write(&foreign, "// owned by another tool\nexport default {};\n")
+            .expect("write foreign extension");
+        fs::create_dir_all(root.join("profiles/research/agent")).expect("create existing profile");
+
+        configure_omp_at(&root, "/tmp/lume", true).expect("install extension");
+        let profile_extension = root.join("profiles/research/agent/extensions/lume.ts");
+        let installed =
+            fs::read_to_string(&profile_extension).expect("read installed profile extension");
+        assert!(installed.starts_with(OMP_EXTENSION_MARKER));
+        configure_omp_at(&root, "/tmp/lume", true).expect("repeat extension install");
+        assert_eq!(
+            fs::read_to_string(&profile_extension).expect("read extension after repeat"),
+            installed
+        );
+        assert_eq!(
+            fs::read_to_string(&foreign).expect("foreign extension remains"),
+            "// owned by another tool\nexport default {};\n"
+        );
+
+        configure_omp_at(&root, "/tmp/lume", false).expect("remove extension");
+        assert!(!profile_extension.exists());
+        assert!(foreign.exists());
+        fs::remove_dir_all(root).expect("clean extension test directory");
+    }
+
+    #[test]
+    fn omp_cli_version_requires_18_8_7() {
+        assert!(omp_version_supported("18.8.7"));
+        assert!(omp_version_supported("19.0.0"));
+        assert!(!omp_version_supported("18.8.6"));
+        assert!(!omp_version_supported("not-an-omp-version"));
+    }
+
+    #[test]
+    fn omp_extension_approval_payload_is_an_observe_only_permission_event() {
+        // Captured from `omp --mode rpc-ui -e lume.ts` (v18.8.7) when a write needed approval.
+        let payload = r#"{"event":"permission_request","sessionId":"omp:01a1272e-98be-774f-bfa9-dc9e97883eb9","agent":"omp","agentLabel":"Oh My Pi","source":"cli","controlOrigin":"external","nativeSessionId":"01a1272e-98be-774f-bfa9-dc9e97883eb9","workingDirectory":"/tmp/project","project":"project","permissionProfile":{"mode":"custom","label":"Oh My Pi","approvalPolicy":"omp","canRespondFromLume":false,"availableActions":["open_source"]},"permission":{"id":"toolu_01HX85twSRdfWiD5qNdwdyhg","kind":"tool","summary":"write","resource":"write","risk":"unknown","requestedAt":"2026-10-10T18:58:49.612Z"}}"#;
+        let event: crate::domain::HookEvent =
+            serde_json::from_str(payload).expect("extension payload is a HookEvent");
+        assert_eq!(event.event, crate::domain::HookEventKind::PermissionRequest);
+        assert_eq!(event.agent, crate::domain::AgentKind::Omp);
+        let profile = event.permission_profile.expect("permission profile");
+        assert!(!profile.can_respond_from_lume);
+        assert_eq!(
+            profile.available_actions,
+            vec![crate::domain::PermissionAction::OpenSource]
+        );
+        assert_eq!(event.permission.expect("permission").summary, "write");
     }
 }

@@ -65,6 +65,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import { getGitHubReference, openGitHub, type GitHubReference } from "$lib/repositories";
   import { renderSafeMarkdown } from "$lib/markdown.js";
   import {
+    compactSession,
+    launchAgentSession,
     listSessionMcpServers,
     type McpServer,
     getClaudeSessionModelSettings,
@@ -645,15 +647,17 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     canCompose
     && (session.capabilities.canTakeControl || !promptIsRunning || canQueue)
   ));
-  const canCompact = $derived(Boolean(
-    session.agent === "claude_code" && session.controlOrigin === "lume" && canSend && !promptIsRunning && !sending && !takingControl,
-  ));
   const queuedPrompts = $derived(
     session.activities
       .filter((activity: SessionActivity) => ["queued_prompt", "codex_queued_prompt"].includes(activity.kind) && activity.status === "waiting")
       .sort((left: SessionActivity, right: SessionActivity) => left.createdAt - right.createdAt),
   );
   const nextQueuedPrompt = $derived(queuedPrompts[0] ?? null);
+  const canCompact = $derived(Boolean(
+    session.controlOrigin === "lume"
+    && (session.agent === "omp" ? session.status === "completed" && session.capabilities.canPrompt && queuedPrompts.length === 0 : session.agent === "claude_code")
+    && (session.agent === "omp" || (canSend && !promptIsRunning && !sending && !takingControl)),
+  ));
   const canSteer = $derived(Boolean(
     promptIsRunning
     && nextQueuedPrompt
@@ -669,8 +673,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     && session.capabilities.promptDeliveries.includes("steer")
   ));
   // Claude Code and Codex can change how they ask before acting, from Lume.
-  const supportsPermissionPicker = $derived(["claude_code", "codex", "antigravity"].includes(session.agent));
-  const supportsAgentControls = $derived(["codex", "claude_code", "opencode", "antigravity"].includes(session.agent));
+  const supportsPermissionPicker = $derived(["claude_code", "codex", "antigravity", "omp"].includes(session.agent));
+  const supportsAgentControls = $derived(["codex", "claude_code", "opencode", "antigravity", "omp"].includes(session.agent));
   let sourceEntryId = $state<string | null>(null);
   let actionNotice = $state("");
   let forkingEntryId = $state<string | null>(null);
@@ -928,6 +932,16 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   function sessionName() {
     return session.sessionName?.trim() || session.project || session.agentLabel;
   }
+  async function setupOmp() {
+    const workingDirectory = session.workingDirectory?.trim();
+    if (!workingDirectory) return;
+    try {
+      await launchAgentSession("omp", workingDirectory, false, undefined, "terminal");
+      dismissedConnectionError = session.statusLabel;
+    } catch (error) {
+      sendError = String(error).replace(/^Error:\s*/, "");
+    }
+  }
 
   function sourceLabel() {
     if (session.source === "vscode") return tr("Extension", "Extensão");
@@ -1061,16 +1075,16 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   function composerPlaceholder() {
     if (!session.capabilities.canPrompt) {
-      if (session.capabilities.promptUnavailableReason === "monitoring_only") {
-        return tr(
-          "Legacy Gemini CLI is monitoring-only in Lume",
-          "A CLI legada do Gemini é somente monitorada pelo Lume",
-        );
-      }
       if (session.capabilities.canTakeControl) {
         return tr(
           "Write a prompt to take control of this CLI…",
           "Escreva um prompt para assumir o controle desta CLI…",
+        );
+      }
+      if (session.agent === "omp") {
+        return tr(
+          "Oh My Pi sessions are read-only until the terminal session is closed.",
+          "As sessões do Oh My Pi ficam somente para leitura até fechar a sessão no terminal.",
         );
       }
       return tr("Open the source to respond", "Abra a origem para responder");
@@ -1238,10 +1252,17 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     }
   }
 
-  /** Sends Claude's own `/compact`, keeping whatever was being typed. */
   async function compactContext() {
     if (!canCompact) return;
     plusMenuOpen = false;
+    if (session.agent === "omp") {
+      try {
+        await compactSession(session.id);
+      } catch (error) {
+        sendError = String(error).replace(/^Error:\s*/, "");
+      }
+      return;
+    }
     const draft = prompt;
     const draftAttachments = promptAttachments;
     prompt = "/compact";
@@ -1285,6 +1306,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
 
   function effortValues() {
+    if (session.agent === "omp") return ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
     if (session.agent === "claude_code") return claudeEffortValues(claudeModels, claudeModel);
     return currentModelOption()?.supportedReasoningEfforts.map((effort) => effort.value) ?? [];
   }
@@ -1346,7 +1368,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
 
   async function fetchAgentControls() {
-      if (session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity") {
+      if (["codex", "opencode", "antigravity", "omp"].includes(session.agent)) {
         const [mode, settings] = await Promise.all([
           session.agent === "codex" ? getSessionCollaborationMode(session.id) : Promise.resolve("default" as CollaborationMode),
           getSessionModelSettings(session.id),
@@ -1481,7 +1503,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     controlsSaving = true;
     controlsError = "";
     try {
-      if (session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity") {
+      if (["codex", "opencode", "antigravity", "omp"].includes(session.agent)) {
         if ((session.agent !== "antigravity" && !selectedModel) || (session.agent === "codex" && !selectedEffort)) return;
         const savedSettings = await setSessionModelSettings(session.id, selectedModel, selectedEffort);
         modelSettings = savedSettings;
@@ -1545,7 +1567,27 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       promptAttachments = [];
       takeoverConfirm = false;
     } catch (error) {
-      sendError = String(error).replace(/^Error:\s*/, "");
+      const detail = String(error).replace(/^Error:\s*/, "");
+      if (session.agent === "omp" && detail.includes("omp_session_maybe_live")) {
+        const confirmed = window.confirm(tr(
+          "Lume cannot confirm whether the terminal session is still live. Continue anyway? Close omp in the terminal first if it is open.",
+          "O Lume não consegue confirmar se a sessão do terminal ainda está ativa. Continuar mesmo assim? Feche o omp no terminal antes, se estiver aberto.",
+        ));
+        if (confirmed) {
+          try {
+            await takeControlSession(session.id, value, promptAttachments, true);
+            prompt = "";
+            promptAttachments = [];
+            takeoverConfirm = false;
+          } catch (retryError) {
+            sendError = String(retryError).replace(/^Error:\s*/, "");
+          }
+        }
+      } else if (session.agent === "omp" && detail.includes("omp_session_live")) {
+        sendError = tr("Close omp in the terminal to take control.", "Feche o omp no terminal para assumir o controle.");
+      } else {
+        sendError = detail;
+      }
     } finally {
       takingControl = false;
     }
@@ -1754,6 +1796,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   });
 
   function permissionActionLabel(action: PermissionAction) {
+    if (session.agent === "omp" && action === "allow_once") return tr("Allow once", "Permitir uma vez");
     return {
       allow_once: tr("Allow", "Permitir"),
       allow_session: tr("For this session", "Nesta sessão"),
@@ -2800,10 +2843,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         </span>
         <div>
           <strong id={`workspace-takeover-${session.id}`}>{tr("Take control of this CLI?", "Assumir o controle desta CLI?")}</strong>
-          <p>{tr(
-            "Lume will close the external writer, resume the same thread and send this prompt.",
-            "O Lume fechará o processo externo, retomará a mesma thread e enviará este prompt.",
-          )}</p>
+          <p>{session.agent === "omp"
+            ? tr("Close omp in the terminal before taking control. Lume will then resume the session and send this prompt.", "Feche o omp no terminal antes de assumir o controle. Depois, o Lume retomará a sessão e enviará este prompt.")
+            : tr("Lume will close the external writer, resume the same thread and send this prompt.", "O Lume fechará o processo externo, retomará a mesma thread e enviará este prompt.")}</p>
         </div>
         <footer>
           <button type="button" disabled={takingControl} onclick={() => (takeoverConfirm = false)}>{tr("Cancel", "Cancelar")}</button>
@@ -2861,7 +2903,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         </header>
         {#if pendingPermission.resource}<code title={pendingPermission.resource}>{pendingPermission.resource}</code>{/if}
         <div class="permission-actions">
-          {#each session.permissionProfile.availableActions as action (action)}
+          {#each (session.agent === "omp" ? session.permissionProfile.availableActions.filter((action: PermissionAction) => action === "allow_once" || action === "deny") : session.permissionProfile.availableActions) as action (action)}
             <button class:allow={action === "allow_once"} class:danger={action === "deny"} class:loading={permissionAction === action} type="button" disabled={permissionBusy} onclick={() => void resolvePermission(action)}>
               {#if permissionAction === action}<i class="permission-spinner" aria-hidden="true"></i>{/if}
               {permissionActionLabel(action)}
@@ -2923,7 +2965,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                   <span><strong>{tr("Attach file", "Anexar arquivo")}</strong><small>{promptAttachments.length}/4</small></span>
                 </button>
               {/if}
-              {#if session.agent === "claude_code"}
+              {#if session.agent === "claude_code" || session.agent === "omp"}
                 <button type="button" role="menuitem" disabled={!canCompact} onclick={() => void compactContext()}>
                   <LumeIcon name="compact" size={15} />
                   <span><strong>{tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
@@ -3068,7 +3110,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             aria-label={tr("Choose model and effort", "Escolher modelo e esforço")}
             aria-haspopup="dialog" aria-expanded={controlsOpen}
             onclick={() => void toggleAgentControls()}>
-            <span>{session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity"
+            <span>{["codex", "opencode", "antigravity", "omp"].includes(session.agent)
               ? (modelSettings?.models.find((option) => option.model === selectedModel)?.displayName || selectedModel || "Model")
               : (claudeModels.find((option) => option.model === claudeModel)?.displayName || claudeModel || tr("Model", "Modelo"))}</span>
             {#if (session.agent === "codex" || session.agent === "claude_code") && fastMode}<span class="fast-indicator" title={tr("Fast mode is on", "Modo Fast ligado")}><WorkspaceChatIcon name="fast" size={13} active /></span>{/if}
@@ -3100,7 +3142,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                     </button>
                   {/if}
                 {/snippet}
-                {#if session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity"}
+                {#if ["codex", "opencode", "antigravity", "omp"].includes(session.agent)}
                   {#if modelSettings}
                     <div class="controls-model-row">
                       {@render modelResetButton()}
@@ -3156,17 +3198,17 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
               disabled={session.controlOrigin !== "lume" || permissionMenuSaving}
               aria-label={tr("Choose permissions", "Escolher permissões")}
               aria-haspopup="listbox" aria-expanded={permissionMenuOpen}
-              title={session.controlOrigin !== "lume" ? tr("Take control of this session to change permissions", "Assuma o controle desta sessão para mudar as permissões") : permissionDescription(sessionPermission.mode, tr)}
+              title={session.controlOrigin !== "lume" ? tr("Take control of this session to change permissions", "Assuma o controle desta sessão para mudar as permissões") : permissionDescription(sessionPermission.mode, tr, session.agent)}
               onclick={() => void toggleSessionPermissionMenu()}>
               <LumeIcon name="shield" size={14} />
-              <span>{permissionLabel(sessionPermission.mode, tr)}</span>
+              <span>{permissionLabel(sessionPermission.mode, tr, session.agent)}</span>
               <LumeIcon name="chevron-down" size={12} />
             </button>
             {#if permissionMenuOpen}
               <div class="permission-menu" role="listbox" aria-label={tr("Permissions", "Permissões")} transition:slide={{ duration: 140, easing: cubicOut }}>
-                {#each sessionPermission.modes as mode (mode)}
+                {#each (session.agent === "omp" ? ["full_access", "workspace_write", "custom"].filter((mode) => sessionPermission?.modes.includes(mode)) : sessionPermission.modes) as mode (mode)}
                   <button class:selected={mode === sessionPermission.mode} class="tone-{permissionTone(mode)}" role="option" aria-selected={mode === sessionPermission.mode} type="button" disabled={permissionMenuSaving || permissionMenuLoading} onclick={() => void chooseSessionPermission(mode)}>
-                    <span><strong>{permissionLabel(mode, tr)}</strong><small>{permissionDescription(mode, tr)}</small></span>
+                    <span><strong>{permissionLabel(mode, tr, session.agent)}</strong><small>{permissionDescription(mode, tr, session.agent)}</small></span>
                     {#if mode === sessionPermission.mode}<LumeIcon name="check" size={14} />{/if}
                   </button>
                 {/each}
@@ -3184,11 +3226,12 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   </form>
 </article>
 
-{#if (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel))) && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini"].includes(session.agent)}
+{#if (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)) || (session.agent === "omp" && session.status === "failed" && /no models available/i.test(session.statusLabel))) && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini", "omp"].includes(session.agent)}
   <AgentConnectionDialog
     agent={(session.agent === "claude_code" ? "claude" : session.agent) as ConnectableAgent}
-    message={connectionRequired ?? agentConnectionMessage(session.statusLabel) ?? ""}
+    message={connectionRequired ?? (session.agent === "omp" && /no models available/i.test(session.statusLabel) ? tr("No models are available. Configure omp, then retry this session.", "Nenhum modelo está disponível. Configure o omp e tente esta sessão novamente.") : agentConnectionMessage(session.statusLabel) ?? "")}
     {language}
+    onSetup={session.agent === "omp" && /no models available/i.test(session.statusLabel) ? () => void setupOmp() : undefined}
     onClose={() => { dismissedConnectionError = session.statusLabel; connectionRequired = null; }} />
 {/if}
 

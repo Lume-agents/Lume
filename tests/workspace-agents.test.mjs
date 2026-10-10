@@ -25,6 +25,15 @@ const codex = subagentsForSession({
 assert.deepEqual(codex.map(({ label, status }) => [label, status]), [["reviewer", "completed"], ["reviewer", "running"]]);
 assert.notEqual(codex[0].id, codex[1].id);
 
+const omp = subagentsForSession({
+  status: "running",
+  activities: [
+    activity("omp:parent-1:subagent:worker-1", "Subagente · reviewer", "running", 1),
+  ],
+});
+assert.deepEqual(omp.map(({ id, label, status }) => [id, label, status]), [
+  ["omp:parent-1:subagent:worker-1", "reviewer", "running"],
+]);
 const prompt = (id, createdAt) => ({ id, kind: "prompt", title: "Prompt enviado", status: "completed", createdAt, files: [] });
 const justCompleted = subagentsForSession({
   status: "completed",

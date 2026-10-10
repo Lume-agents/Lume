@@ -61,7 +61,7 @@ Lume builds a sanitized context package from the source result instead of copyin
 | Claude Code | Monitors CLI sessions; sessions opened by Lume can run without a terminal, with prompts, permissions, model and effort, Fast mode, task list and MCP status |
 | Codex | Monitors the CLI and VS Code; sessions controlled by Lume use the local App Server with prompts, queue, steer, approvals, model and effort |
 | Antigravity CLI | Hook activity and status, model and permission selection, resume of the latest conversation per workspace |
-| OpenCode | Prompts, cancellation and slash commands through its ACP server |
+| Oh My Pi | Monitors CLI sessions; Lume-controlled sessions run through omp's RPC mode with prompts, steer/queue, interrupt, model/thinking, approval decisions (allow once or deny), questions and compaction. External sessions can be taken over after the terminal omp is closed. No plan mode. |
 | DeepSeek Harness, Gemini CLI (legacy) | Process monitoring; Gemini is never controlled |
 | ChatGPT, Claude, DeepSeek and Gemini on the web | Status, final response and prompts through the Chromium Companion |
 

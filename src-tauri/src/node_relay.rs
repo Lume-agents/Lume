@@ -6,7 +6,7 @@
 //! authenticated end-to-end session of [`crate::relay_e2e`].
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -42,6 +42,7 @@ const PAIR_REQUEST: u8 = 0x10;
 const PAIR_RESPONSE: u8 = 0x11;
 const PAIR_AAD: &[u8] = b"lume-relay-pair-v1";
 const HEARTBEAT: Duration = Duration::from_secs(20);
+const AUTHORIZATION_SYNC: Duration = Duration::from_secs(3);
 
 fn io(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -182,11 +183,9 @@ fn serve(directory: &Path, relay_url: &str, identity: &NodeIdentity, stop: &Atom
     let mut link = RelayLink::connect(relay_url, &room, identity, Role::Node, None)?;
     link.set_read_timeout(Some(Duration::from_secs(1)))?;
     log(directory, "Relay: connected");
-    for client in node_pairing::clients(directory)? {
-        if let Some(key) = client_key(&client) {
-            link.authorize(&key)?;
-        }
-    }
+    let mut authorized: HashSet<String> = HashSet::new();
+    sync_authorized(directory, &mut link, &mut authorized)?;
+    let mut last_sync = Instant::now();
     let mut sessions: HashMap<String, Session> = HashMap::new();
     let mut opened_offer = String::new();
     let mut last_heartbeat = Instant::now();
@@ -203,6 +202,11 @@ fn serve(directory: &Path, relay_url: &str, identity: &NodeIdentity, stop: &Atom
                     opened_offer = offer.offer_id;
                 }
             }
+        }
+        // Devices approved (or revoked) while the Node runs take effect without a restart.
+        if last_sync.elapsed() >= AUTHORIZATION_SYNC {
+            sync_authorized(directory, &mut link, &mut authorized)?;
+            last_sync = Instant::now();
         }
         if last_heartbeat.elapsed() >= HEARTBEAT {
             link.heartbeat()?;
@@ -222,6 +226,26 @@ fn serve(directory: &Path, relay_url: &str, identity: &NodeIdentity, stop: &Atom
     }
 }
 
+/// Makes the Relay's allow-list match the paired devices: new ones are authorized, removed ones revoked.
+fn sync_authorized(directory: &Path, link: &mut RelayLink, authorized: &mut HashSet<String>) -> Result<(), String> {
+    let clients = node_pairing::clients(directory)?;
+    for client in &clients {
+        if !authorized.contains(&client.identity.fingerprint) {
+            if let Some(key) = client_key(client) {
+                link.authorize(&key)?;
+                authorized.insert(client.identity.fingerprint.clone());
+            }
+        }
+    }
+    let current: HashSet<&str> = clients.iter().map(|client| client.identity.fingerprint.as_str()).collect();
+    let removed: Vec<String> = authorized.iter().filter(|fingerprint| !current.contains(fingerprint.as_str())).cloned().collect();
+    for fingerprint in removed {
+        link.revoke(&fingerprint)?;
+        authorized.remove(&fingerprint);
+    }
+    Ok(())
+}
+
 fn handle_message(directory: &Path, identity: &NodeIdentity, link: &mut RelayLink, sessions: &mut HashMap<String, Session>, from: &str, payload: &[u8]) -> Result<(), String> {
     match payload.first().copied() {
         Some(PAIR_REQUEST) => pair_device(directory, identity, link, from, payload),
@@ -233,6 +257,10 @@ fn handle_message(directory: &Path, identity: &NodeIdentity, link: &mut RelayLin
             link.send(Some(from), "hs2", &reply)
         }
         Some(3) => {
+            if !node_pairing::clients(directory)?.iter().any(|client| client.identity.fingerprint == from && client.scopes.contains(&NodeScope::Observe)) {
+                sessions.remove(from);
+                return Err("the device is no longer paired".into());
+            }
             let session = sessions.get_mut(from).ok_or("no session: the device must start a handshake")?;
             let command: Value = serde_json::from_slice(&session.open(payload)?).map_err(io)?;
             let answer = answer_command(directory, &command);
@@ -322,7 +350,7 @@ pub fn remotes(directory: &Path) -> Result<Vec<RelayRemote>, String> {
     }
 }
 
-fn save_remote(directory: &Path, remote: RelayRemote) -> Result<(), String> {
+pub(crate) fn save_remote(directory: &Path, remote: RelayRemote) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(io)?;
     let mut all = remotes(directory)?;
     all.retain(|existing| existing.node_id != remote.node_id);
@@ -486,6 +514,28 @@ mod tests {
         assert!(both[1].as_ref().unwrap()["sessions"].is_array());
         assert!(both[2].is_err(), "an unknown command fails alone");
         assert!(query(&client_dir, &config.node_id, "launch-missiles").is_err());
+        // A device approved by code while the Node runs gets Relay access without a restart, and loses it when revoked.
+        let late_dir = std::env::temp_dir().join(format!("lume-relay-late-{unique}"));
+        let late = NodeIdentity::load_or_create(&late_dir.join(CLIENT_IDENTITY_DIRECTORY)).unwrap();
+        let (statement, _) = node_pairing::pair_request_statement(&late, &config.node_id, "Late phone", &[NodeScope::Observe]).unwrap();
+        let ticket = node_pairing::submit_request(&node_dir, &config.node_id, &statement, &[NodeScope::Observe], now_millis()).unwrap();
+        let approved = node_pairing::decide(&node_dir, &ticket.request_id, true, now_millis()).unwrap().unwrap();
+        save_remote(&late_dir, RelayRemote { node_id: config.node_id.clone(), relay_url: url.clone(), identity: identity.public().clone(), device_id: approved.device_id.clone(), paired_at: approved.paired_at }).unwrap();
+        let mut reached = Err(String::new());
+        for _ in 0..8 {
+            reached = query(&late_dir, &config.node_id, "health");
+            if reached.is_ok() { break; }
+            thread::sleep(Duration::from_secs(1));
+        }
+        assert!(reached.is_ok(), "the approved device must reach the Node: {reached:?}");
+        node_pairing::revoke(&node_dir, &approved.device_id).unwrap();
+        let mut refused = false;
+        for _ in 0..8 {
+            thread::sleep(Duration::from_secs(1));
+            if query(&late_dir, &config.node_id, "health").is_err() { refused = true; break; }
+        }
+        assert!(refused, "a revoked device must lose access");
+        let _ = fs::remove_dir_all(&late_dir);
         // The offer cannot be reused by another device.
         assert!(pair(&std::env::temp_dir().join(format!("lume-relay-other-{unique}")), &uri).is_err());
         drop(worker);

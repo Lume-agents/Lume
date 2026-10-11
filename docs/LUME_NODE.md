@@ -71,6 +71,17 @@ of the Lume app on the Node (agent, project folder name, status, whether it wait
 app's database read-only and never includes the conversation, the working directory or the permission details. `lume node revoke` removes a device from the Node; the
 Relay drops its access the next time the Node connects.
 
+### Pairing without a link (same network)
+
+On the same network a device can pair without any link: **Settings → Remote computers → Scan → Pair** (or
+`lume node requests` / `approve` / `deny` on the Node). The device asks the Node, both screens show the same six-digit
+code, and the person at the Node approves only when the codes match. The code is derived on each side from the two
+identities, a nonce and the request id, so a machine in the middle, which makes the sides see different identities,
+produces different codes. A request grants nothing until approved, expires in two minutes, at most three can wait at once,
+a refused device cannot ask again for two minutes, and it can only ask for the `observe` scope. When the Node has a Relay
+configured, the approval also hands the device the Relay address, so the same computer can be reached away from home.
+Devices approved or revoked while the Node runs reach (or lose) the Relay within a few seconds.
+
 ### In the app
 
 Settings → Remote computers accepts both `lume://pair-node?…` (same network) and `lume://pair-relay?…` (through the Relay) links.

@@ -424,6 +424,119 @@ fn validate_server_identity(
     Ok(())
 }
 
+fn validate_discovered_identity(discovered: &DiscoveredNode, server: &NodeServerIdentity) -> Result<(), String> {
+    verify(&server.binding_attestation)?;
+    let payload = &server.binding_attestation.payload;
+    if server.node_id != discovered.node_id
+        || server.identity.fingerprint != discovered.identity_fingerprint
+        || server.certificate_sha256 != discovered.certificate_sha256
+        || server.binding_attestation.identity != server.identity
+        || payload["nodeId"] != server.node_id
+        || payload["certificateSha256"] != server.certificate_sha256
+        || server.protocol_minimum > MAX_PROTOCOL_VERSION
+        || server.protocol_maximum < MIN_PROTOCOL_VERSION
+    {
+        return Err("the Node identity or TLS binding does not match what was announced on the network".into());
+    }
+    Ok(())
+}
+
+/// A pairing request waiting for the person at the Node to confirm the same code.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingRequestHandle {
+    pub request_id: String,
+    pub code: String,
+    pub expires_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingCheck {
+    /// `pending`, `approved`, `denied` or `expired`.
+    pub status: String,
+    pub node: Option<RemoteNode>,
+    /// Set when the Node also lets this device reach it through a Relay.
+    pub relay: Option<crate::node_relay::RelayRemote>,
+}
+
+fn fetch_identity(discovered: &DiscoveredNode) -> Result<NodeServerIdentity, String> {
+    let response = tls_json_request(discovered, "GET", "/v1/identity", None, &discovered.certificate_sha256)?;
+    let identity = serde_json::from_value::<NodeServerIdentity>(response).map_err(|_| "invalid Node identity response".to_string())?;
+    validate_discovered_identity(discovered, &identity)?;
+    Ok(identity)
+}
+
+/// Asks a Node found on the network to pair, with no secret. The person at the Node approves it after
+/// comparing the returned code with the one the Node shows.
+pub fn request_pairing(directory: &Path, discovered: &DiscoveredNode) -> Result<PairingRequestHandle, String> {
+    let server = fetch_identity(discovered)?;
+    let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
+    let display_name = sysinfo::System::host_name().unwrap_or_else(|| "Lume client".into());
+    let (statement, nonce) = node_pairing::pair_request_statement(&identity, &server.node_id, &display_name, &[NodeScope::Observe])?;
+    let response = tls_json_request(
+        discovered,
+        "POST",
+        "/v1/pair-request",
+        Some(serde_json::to_value(&statement).map_err(|error| error.to_string())?),
+        &server.certificate_sha256,
+    )
+    .map_err(|error| error.replace(" (HTTP 403)", ""))?;
+    let request_id = response["requestId"].as_str().ok_or("the Node did not accept the request")?.to_string();
+    let expires_at = response["expiresAt"].as_i64().ok_or("the Node did not accept the request")?;
+    // Derived here from what this device saw, never taken from the Node's answer.
+    let code = node_pairing::pair_code(&server.identity.fingerprint, &identity.public().fingerprint, &nonce, &request_id);
+    Ok(PairingRequestHandle { request_id, code, expires_at })
+}
+
+/// Asks the Node whether the request was answered; when approved, records the computer on this device.
+pub fn check_pairing(directory: &Path, discovered: &DiscoveredNode, request_id: &str) -> Result<PairingCheck, String> {
+    let server = fetch_identity(discovered)?;
+    let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
+    let statement = node_pairing::pair_status_statement(&identity, request_id)?;
+    let response = tls_json_request(
+        discovered,
+        "POST",
+        "/v1/pair-status",
+        Some(serde_json::to_value(&statement).map_err(|error| error.to_string())?),
+        &server.certificate_sha256,
+    )?;
+    let status = response["status"].as_str().unwrap_or("pending").to_string();
+    if status != "approved" {
+        return Ok(PairingCheck { status, node: None, relay: None });
+    }
+    let paired = serde_json::from_value::<PairedNodeClient>(response["client"].clone()).map_err(|_| "invalid paired client response".to_string())?;
+    if paired.identity != *identity.public() || !paired.scopes.contains(&NodeScope::Observe) {
+        return Err("the Node returned a different client identity or scope".into());
+    }
+    let remote = RemoteNode {
+        node_id: server.node_id.clone(),
+        address: discovered.address.clone(),
+        port: discovered.port,
+        identity: server.identity.clone(),
+        certificate_sha256: server.certificate_sha256.clone(),
+        device_id: paired.device_id.clone(),
+        paired_at: paired.paired_at,
+        last_seen_at: None,
+    };
+    upsert_remote(directory, remote.clone())?;
+    let relay = match response["relayUrl"].as_str() {
+        Some(url) if url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost") => {
+            let relay = crate::node_relay::RelayRemote {
+                node_id: server.node_id,
+                relay_url: url.trim_end_matches('/').to_string(),
+                identity: server.identity,
+                device_id: paired.device_id,
+                paired_at: paired.paired_at,
+            };
+            crate::node_relay::save_remote(directory, relay.clone())?;
+            Some(relay)
+        }
+        _ => None,
+    };
+    Ok(PairingCheck { status, node: Some(remote), relay })
+}
+
 fn parse_pairing_uri(uri: &str) -> Result<PairingUri, String> {
     let query = uri
         .trim()
@@ -780,6 +893,44 @@ mod tests {
             .expect("authenticated remote health");
         assert_eq!(health.node_id, remote.node_id);
         assert_eq!(health.identity_fingerprint, remote.identity.fingerprint);
+
+        drop(server);
+        let _ = fs::remove_dir_all(server_directory);
+        let _ = fs::remove_dir_all(client_directory);
+    }
+
+    #[test]
+    #[ignore = "requires a loopback socket"]
+    fn client_pairs_by_comparing_a_code() {
+        let server_directory = test_directory("code-server");
+        let client_directory = test_directory("code-client");
+        let initial_health = crate::node_service::health(&server_directory).expect("Node health");
+        let identity = NodeIdentity::load_or_create(&server_directory).expect("Node identity");
+        let server = NodeNetworkServer::start(&server_directory, &initial_health.node_id, std::net::Ipv4Addr::LOCALHOST.into(), 0, &identity).expect("Node server");
+        let discovered = DiscoveredNode {
+            node_id: server.identity.node_id.clone(),
+            address: "127.0.0.1".into(),
+            port: server.port,
+            identity_fingerprint: server.identity.identity.fingerprint.clone(),
+            certificate_sha256: server.identity.certificate_sha256.clone(),
+            protocol_minimum: server.identity.protocol_minimum,
+            protocol_maximum: server.identity.protocol_maximum,
+        };
+
+        let handle = request_pairing(&client_directory, &discovered).expect("request");
+        assert_eq!(check_pairing(&client_directory, &discovered, &handle.request_id).expect("pending").status, "pending");
+        assert!(remotes(&client_directory).unwrap().is_empty(), "nothing is paired before the approval");
+        // The person at the Node sees the same code the device shows.
+        let waiting = node_pairing::pending_requests(&server_directory, &identity.public().fingerprint, now_millis()).unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].code, handle.code);
+        node_pairing::decide(&server_directory, &handle.request_id, true, now_millis()).unwrap();
+        let check = check_pairing(&client_directory, &discovered, &handle.request_id).expect("approved");
+        assert_eq!(check.status, "approved");
+        assert!(check.relay.is_none(), "this Node has no Relay configured");
+        let remote = check.node.expect("remote recorded");
+        let health = remote_health(&client_directory, &remote.node_id, Duration::ZERO).expect("authenticated remote health");
+        assert_eq!(health.node_id, remote.node_id);
 
         drop(server);
         let _ = fs::remove_dir_all(server_directory);

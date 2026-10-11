@@ -53,6 +53,16 @@ function fixture() {
         };
       }
       if (command === "forget_relay_lume_node") { paired.length = 0; return true; }
+      if (command === "discover_lume_nodes") return [{ nodeId: "node-casa", address: "192.168.0.8", port: 4433, identityFingerprint: "f", certificateSha256: "c", protocolMinimum: 1, protocolMaximum: 1 }];
+      if (command === "request_lume_node_pairing") return { requestId: "req-1", code: "482913", expiresAt: now + 120000 };
+      if (command === "check_lume_node_pairing") {
+        window.__checks = (window.__checks || 0) + 1;
+        if (window.__checks < 2) return { status: "pending" };
+        paired.push(remote);
+        return { status: "approved", relay: remote };
+      }
+      if (command === "list_node_pair_requests") return window.__incoming || [];
+      if (command === "decide_node_pair_request") { window.__decision = args; window.__incoming = []; return args.approve; }
       return [];
     },
   };
@@ -136,6 +146,24 @@ try {
   await wait("document.querySelectorAll('.session-dot.idle').length === 1");
   await evaluate("Array.from(document.querySelectorAll('article button')).find((button) => /Esquecer/.test(button.textContent)).click()");
   await wait("document.querySelectorAll('article').length === 0");
+  // Pairing without a link: find the computer, compare the code, wait for the approval.
+  await evaluate("Array.from(document.querySelectorAll('.heading button')).find((button) => /Buscar/.test(button.textContent)).click()");
+  await wait("document.querySelector('.discovered button')");
+  await evaluate("document.querySelector('.discovered button').click()");
+  await wait("document.querySelector('.request-panel .code')");
+  assert.equal(await evaluate("document.querySelector('.request-panel .code').textContent"), "482 913");
+  assert.ok(await evaluate("window.__calls.some(([command]) => command === 'request_lume_node_pairing')"));
+  await screenshot("remote-code");
+  await wait("document.querySelectorAll('article').length === 1 && !document.querySelector('.request-panel')");
+  assert.match(await evaluate("document.body.textContent"), /fora desta rede/, "the Relay access arrives with the approval");
+  // The other way round: a device asks this computer, and the person approves after comparing.
+  await evaluate("window.__incoming = [{ requestId: 'in-1', displayName: 'Celular da Ana', clientFingerprint: 'x', code: '120045', createdAt: 1, expiresAt: Date.now() + 100000 }]; document.dispatchEvent(new Event('visibilitychange'))");
+  await wait("document.querySelector('.request-panel.attention .code')");
+  assert.equal(await evaluate("document.querySelector('.request-panel.attention .code').textContent"), "120 045");
+  await screenshot("incoming-request");
+  await evaluate("Array.from(document.querySelectorAll('.request-panel.attention button')).find((button) => /Aprovar/.test(button.textContent)).click()");
+  await wait("window.__decision && !document.querySelector('.request-panel.attention')");
+  assert.deepEqual(await evaluate("window.__decision"), { requestId: "in-1", approve: true });
   assert.deepEqual(failures, []);
   console.log("Remote computers UI passed. Screenshots: " + output);
 } finally {

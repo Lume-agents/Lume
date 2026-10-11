@@ -654,6 +654,40 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                 Err(error) => json_response(403, serde_json::json!({ "error": error })),
             }
         }
+        ("POST", "/v1/pair-request") => {
+            let Ok(statement) = serde_json::from_slice::<SignedDeviceStatement>(&request.body) else {
+                return json_response(400, serde_json::json!({ "error": "invalid pairing request" }));
+            };
+            match node_pairing::submit_request(
+                &state.directory,
+                &state.server_identity.node_id,
+                &statement,
+                &[NodeScope::Observe],
+                now_millis(),
+            ) {
+                Ok(ticket) => json_response(200, serde_json::to_value(ticket).unwrap_or(Value::Null)),
+                Err(error) => json_response(403, serde_json::json!({ "error": error })),
+            }
+        }
+        ("POST", "/v1/pair-status") => {
+            let Ok(statement) = serde_json::from_slice::<SignedDeviceStatement>(&request.body) else {
+                return json_response(400, serde_json::json!({ "error": "invalid pairing request" }));
+            };
+            match node_pairing::request_status(&state.directory, &statement, now_millis()) {
+                Ok(outcome) => {
+                    let mut value = serde_json::to_value(outcome).unwrap_or(Value::Null);
+                    // An approved device also learns where this Node can be reached away from the network.
+                    if value["status"] == "approved" {
+                        value["relayUrl"] = node_service::load_or_create_config(&state.directory)
+                            .ok()
+                            .and_then(|config| config.relay_url)
+                            .map_or(Value::Null, Value::String);
+                    }
+                    json_response(200, value)
+                }
+                Err(error) => json_response(403, serde_json::json!({ "error": error })),
+            }
+        }
         ("POST", "/v1/health" | "/v1/inventory") => {
             let authentication =
                 match serde_json::from_slice::<AuthenticatedNodeRequest>(&request.body) {

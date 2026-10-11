@@ -1467,6 +1467,46 @@ async fn get_remote_lume_node_inventory(
 }
 
 #[tauri::command]
+async fn request_lume_node_pairing(
+    node: node_client::DiscoveredNode,
+) -> Result<node_client::PairingRequestHandle, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_client::request_pairing(&node_service::default_state_directory()?, &node)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn check_lume_node_pairing(
+    node: node_client::DiscoveredNode,
+    request_id: String,
+) -> Result<node_client::PairingCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_client::check_pairing(&node_service::default_state_directory()?, &node, &request_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Devices on the network asking this computer's Node to pair, each with the code to compare.
+#[tauri::command]
+fn list_node_pair_requests() -> Result<Vec<node_pairing::PendingPairRequest>, String> {
+    let directory = node_service::default_state_directory()?;
+    if !directory.join("pairing.json").is_file() {
+        return Ok(Vec::new());
+    }
+    let identity = node_identity::NodeIdentity::load_or_create(&directory)?;
+    node_pairing::pending_requests(&directory, &identity.public().fingerprint, state::now_millis())
+}
+
+#[tauri::command]
+fn decide_node_pair_request(request_id: String, approve: bool) -> Result<bool, String> {
+    let directory = node_service::default_state_directory()?;
+    Ok(node_pairing::decide(&directory, &request_id, approve, state::now_millis())?.is_some())
+}
+
+#[tauri::command]
 async fn pair_lume_relay_node(pairing_uri: String) -> Result<node_relay::RelayRemote, String> {
     tauri::async_runtime::spawn_blocking(move || {
         node_relay::pair(&node_service::default_state_directory()?, &pairing_uri)
@@ -3164,6 +3204,10 @@ pub fn run() {
             discover_lume_nodes,
             pair_lume_node,
             list_remote_lume_nodes,
+            request_lume_node_pairing,
+            check_lume_node_pairing,
+            list_node_pair_requests,
+            decide_node_pair_request,
             pair_lume_relay_node,
             list_relay_lume_nodes,
             get_relay_lume_node_overview,

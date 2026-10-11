@@ -256,6 +256,22 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
         }
         "relay-remotes" => Ok(Some(json(&crate::node_relay::remotes(&state_directory)?)?)),
         "sessions" => Ok(Some(json(&crate::node_sessions::snapshot()?)?)),
+        "requests" => {
+            let fingerprint = NodeIdentity::load_or_create(&state_directory)?.public().fingerprint.clone();
+            Ok(Some(json(&node_pairing::pending_requests(&state_directory, &fingerprint, now_millis())?)?))
+        }
+        "approve" | "deny" => {
+            let wanted = positional_argument(arguments, 1).ok_or("a request ID or code is required (see `lume node requests`)")?;
+            let fingerprint = NodeIdentity::load_or_create(&state_directory)?.public().fingerprint.clone();
+            let pending = node_pairing::pending_requests(&state_directory, &fingerprint, now_millis())?;
+            let request = pending
+                .iter()
+                .find(|request| request.request_id == wanted || request.code == wanted)
+                .ok_or("no pairing request matches that ID or code")?;
+            let client = node_pairing::decide(&state_directory, &request.request_id, command == "approve", now_millis())?;
+            append_log(&state_directory, &format!("Pairing request {}: {}", command, request.display_name))?;
+            Ok(Some(json(&serde_json::json!({ "decision": command, "client": client }))?))
+        }
         "relay-health" | "relay-inventory" | "relay-sessions" => {
             let node = positional_argument(arguments, 1).ok_or("a Node ID is required")?;
             let what = match command {
@@ -326,7 +342,7 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lume node [menu|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|sessions|relay|relay-pair|relay-remotes|relay-health|relay-inventory|relay-sessions> [VALUE] [--state-dir PATH] [--once]"
+    "Usage: lume node [menu|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|sessions|requests|approve|deny|relay|relay-pair|relay-remotes|relay-health|relay-inventory|relay-sessions> [VALUE] [--state-dir PATH] [--once]"
 }
 
 fn positional_argument(arguments: &[String], index: usize) -> Option<&str> {

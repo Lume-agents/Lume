@@ -18,6 +18,9 @@ import type {
   MobilePairingOffer,
   MobileScope,
   PairedDevice,
+  PairingCheck,
+  PairingRequestHandle,
+  PendingPairRequest,
   RelayLumeNode,
   RelayLumeNodeOverview,
   RemoteLumeNode,
@@ -242,6 +245,22 @@ export async function loadRemoteLumeNodeHealth(nodeId: string): Promise<RemoteLu
 
 export async function loadRemoteLumeNodeInventory(nodeId: string): Promise<RemoteLumeNodeInventory> {
   return invoke<RemoteLumeNodeInventory>("get_remote_lume_node_inventory", { nodeId });
+}
+
+export async function requestLumeNodePairing(node: DiscoveredLumeNode): Promise<PairingRequestHandle> {
+  return invoke<PairingRequestHandle>("request_lume_node_pairing", { node });
+}
+
+export async function checkLumeNodePairing(node: DiscoveredLumeNode, requestId: string): Promise<PairingCheck> {
+  return invoke<PairingCheck>("check_lume_node_pairing", { node, requestId });
+}
+
+export async function loadNodePairRequests(): Promise<PendingPairRequest[]> {
+  return invoke<PendingPairRequest[]>("list_node_pair_requests");
+}
+
+export async function decideNodePairRequest(requestId: string, approve: boolean): Promise<boolean> {
+  return invoke<boolean>("decide_node_pair_request", { requestId, approve });
 }
 
 export async function pairLumeRelayNode(pairingUri: string): Promise<RelayLumeNode> {

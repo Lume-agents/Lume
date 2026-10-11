@@ -2,15 +2,19 @@
   import { getContext, onMount, untrack } from "svelte";
   import { createSystemBannerSource, SYSTEM_BANNER_CONTEXT, type SystemBannerReporter, type SystemBannerNotice } from "$lib/systemBannerContext";
   import BrandIcon from "$lib/BrandIcon.svelte";
-  import type { DiscoveredLumeNode, RelayLumeNode, RelayLumeNodeOverview, RemoteLumeNode, RemoteLumeNodeHealth, RemoteLumeNodeInventory } from "$lib/domain";
+  import type { DiscoveredLumeNode, PairingRequestHandle, PendingPairRequest, RelayLumeNode, RelayLumeNodeOverview, RemoteLumeNode, RemoteLumeNodeHealth, RemoteLumeNodeInventory } from "$lib/domain";
   import { localize, type Language } from "$lib/i18n";
   import {
+    checkLumeNodePairing,
+    decideNodePairRequest,
     discoverLumeNodes,
     forgetRelayLumeNode,
     forgetRemoteLumeNode,
+    loadNodePairRequests,
     loadRelayLumeNodeOverview,
     loadRelayLumeNodes,
     pairLumeRelayNode,
+    requestLumeNodePairing,
     loadRemoteLumeNodeHealth,
     loadRemoteLumeNodeInventory,
     loadRemoteLumeNodes,
@@ -31,6 +35,9 @@
   let relayCheckedAt = $state<Record<string, number>>({});
   const relayInFlight = new Set<string>();
   const RELAY_REFRESH_MS = 6000;
+  let requesting = $state<{ node: DiscoveredLumeNode; handle: PairingRequestHandle } | null>(null);
+  let requestTimer: ReturnType<typeof setInterval> | undefined;
+  let incoming = $state<PendingPairRequest[]>([]);
   let pairingUri = $state("");
   let busy = $state(false);
   let message = $state("");
@@ -181,6 +188,70 @@
     });
   }
 
+  function spacedCode(code: string) {
+    return code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
+  }
+
+  function stopRequest() {
+    clearInterval(requestTimer);
+    requestTimer = undefined;
+    requesting = null;
+  }
+
+  // Pairing without a link: the other computer approves after comparing the code both screens show.
+  function askToPair(node: DiscoveredLumeNode) {
+    return perform(async () => {
+      stopRequest();
+      const handle = await requestLumeNodePairing(node);
+      requesting = { node, handle };
+      requestTimer = setInterval(() => void pollRequest(), 2000);
+    });
+  }
+
+  async function pollRequest() {
+    const current = requesting;
+    if (!current) return;
+    try {
+      const check = await checkLumeNodePairing(current.node, current.handle.requestId);
+      if (requesting !== current || check.status === "pending") return;
+      stopRequest();
+      if (check.status === "approved") {
+        nodes = await loadRemoteLumeNodes();
+        relayNodes = await loadRelayLumeNodes();
+        failed = false;
+        message = check.relay
+          ? tr("Computer paired. It is also reachable away from this network.", "Computador pareado. Ele também fica acessível fora desta rede.")
+          : tr("Computer paired on this network.", "Computador pareado nesta rede.");
+        refreshAllRelay();
+        if (check.node) void inspect(check.node.nodeId).catch(() => undefined);
+      } else {
+        failed = true;
+        message = check.status === "denied"
+          ? tr("The other computer refused the pairing.", "O outro computador recusou o pareamento.")
+          : tr("The pairing request expired. Try again.", "O pedido de pareamento expirou. Tente de novo.");
+      }
+    } catch (error) {
+      stopRequest();
+      failed = true;
+      message = errorMessage(error);
+    }
+  }
+
+  async function refreshIncoming() {
+    if (!desktop || document.hidden) return;
+    try { incoming = await loadNodePairRequests(); } catch { incoming = []; }
+  }
+
+  function answer(request: PendingPairRequest, approve: boolean) {
+    return perform(async () => {
+      await decideNodePairRequest(request.requestId, approve);
+      incoming = await loadNodePairRequests();
+      message = approve
+        ? tr(`${request.displayName} can now see this computer's agents.`, `${request.displayName} já pode ver os agentes deste computador.`)
+        : tr("Request refused.", "Pedido recusado.");
+    });
+  }
+
   function scan() {
     return perform(async () => {
       discovered = await discoverLumeNodes();
@@ -243,13 +314,15 @@
       nodes = await loadRemoteLumeNodes();
       relayNodes = await loadRelayLumeNodes();
       refreshAllRelay();
+      await refreshIncoming();
     });
-    const timer = setInterval(refreshAllRelay, RELAY_REFRESH_MS);
-    const onVisible = () => { if (!document.hidden) refreshAllRelay(); };
+    const timer = setInterval(() => { refreshAllRelay(); void refreshIncoming(); }, RELAY_REFRESH_MS / 2);
+    const onVisible = () => { if (!document.hidden) { refreshAllRelay(); void refreshIncoming(); } };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       clearTimeout(scrollTimer);
       clearInterval(timer);
+      stopRequest();
       document.removeEventListener("visibilitychange", onVisible);
     };
   });
@@ -269,13 +342,37 @@
     />
     <button disabled={!desktop || busy || !pairingUri.trim()} type="button" onclick={() => void pair()}>{tr("Pair", "Parear")}</button>
   </div>
+  {#if requesting}
+    <div class="request-panel" role="status">
+      <small>{tr(`Approve on ${requesting.node.nodeId} after checking that it shows this code:`, `Aprove em ${requesting.node.nodeId} depois de conferir que ele mostra este código:`)}</small>
+      <strong class="code">{spacedCode(requesting.handle.code)}</strong>
+      <span class="request-actions"><small>{tr("Waiting for approval…", "Aguardando aprovação…")}</small><button type="button" onclick={stopRequest}>{tr("Cancel", "Cancelar")}</button></span>
+    </div>
+  {/if}
+  {#if incoming.length}
+    <div class="request-panel attention" role="alert">
+      {#each incoming as request (request.requestId)}
+        <small>{tr(`${request.displayName} wants to see this computer's agents. Approve only if the other screen shows this code:`, `${request.displayName} quer ver os agentes deste computador. Aprove só se a outra tela mostrar este código:`)}</small>
+        <strong class="code">{spacedCode(request.code)}</strong>
+        <span class="request-actions">
+          <button disabled={busy} type="button" onclick={() => void answer(request, true)}>{tr("Approve", "Aprovar")}</button>
+          <button disabled={busy} type="button" onclick={() => void answer(request, false)}>{tr("Refuse", "Recusar")}</button>
+        </span>
+      {/each}
+    </div>
+  {/if}
   {#if !desktop}
     <p class="empty">{tr("Open Lume Desktop to connect a computer.", "Abra o Lume Desktop para conectar um computador.")}</p>
   {/if}
   {#if discovered.length}
     <div class="discovered" aria-label={tr("Discovered computers", "Computadores encontrados")}>
       {#each discovered as node (`${node.nodeId}:${node.address}:${node.port}`)}
-        <span><strong>{node.nodeId}</strong><small>{node.address}:{node.port}</small></span>
+        {@const alreadyPaired = nodes.some((item) => item.nodeId === node.nodeId) || relayNodes.some((item) => item.nodeId === node.nodeId)}
+        <span>
+          <strong>{node.nodeId}</strong><small>{node.address}:{node.port}</small>
+          {#if alreadyPaired}<small>{tr("Paired", "Pareado")}</small>
+          {:else}<button disabled={busy || !!requesting} type="button" onclick={() => void askToPair(node)}>{tr("Pair", "Parear")}</button>{/if}
+        </span>
       {/each}
     </div>
   {/if}
@@ -398,6 +495,10 @@
   .inventory-row > strong { min-width: 0; flex: 1; }
   .inventory-row > small, .runtime-label > small { flex-shrink: 0; }
   .runtime-label { padding-top: 10px; padding-bottom: 5px; justify-content: space-between; }
+  .request-panel { display: grid; gap: 6px; padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+  .request-panel.attention { border-color: #d3a24b; }
+  .request-panel .code { font-size: 20px; letter-spacing: 3px; font-variant-numeric: tabular-nums; }
+  .request-actions { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
   .session-row { gap: 6px; }
   .session-title { display: grid; min-width: 0; flex: 1; }
   .session-title small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

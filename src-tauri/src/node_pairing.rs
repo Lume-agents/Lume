@@ -25,6 +25,12 @@ const MAX_PAIRING_ATTEMPTS: u8 = 5;
 const LOCK_RETRY_COUNT: usize = 25;
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 const SECRET_DOMAIN: &[u8] = b"lume-node-pairing-secret-v1\0";
+const REQUEST_KIND: &str = "pair-request-v1";
+const STATUS_KIND: &str = "pair-status-v1";
+const CODE_DOMAIN: &[u8] = b"lume-pair-code-v1\0";
+const REQUEST_TTL_MS: i64 = 2 * 60 * 1_000;
+const MAX_PENDING_REQUESTS: usize = 3;
+const STATEMENT_CLOCK_WINDOW_MS: i64 = 60_000;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +77,7 @@ struct PairingProofPayload {
 struct PairingState {
     active_offer: Option<StoredPairingOffer>,
     clients: Vec<PairedNodeClient>,
+    requests: Vec<StoredPairRequest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -202,6 +209,197 @@ pub fn revoke(directory: &Path, device_id: &str) -> Result<bool, String> {
         save_state(directory, &state)?;
     }
     Ok(removed)
+}
+
+// ── Pairing by confirmation code ─────────────────────────────────────────────
+//
+// A device on the same network asks to pair; nobody holds a secret. Both screens show a short code that
+// each side derives from what it saw (both identities, a nonce and the request id). Whoever sits at the
+// Node approves only when the codes match, so a machine in the middle, which makes the two sides see
+// different identities, produces different codes and gets refused.
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredPairRequest {
+    request_id: String,
+    identity: PublicDeviceIdentity,
+    display_name: String,
+    nonce: String,
+    scopes: Vec<NodeScope>,
+    created_at: i64,
+    expires_at: i64,
+    status: String,
+    client: Option<PairedNodeClient>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairRequestTicket {
+    pub request_id: String,
+    pub expires_at: i64,
+}
+
+/// A pairing request waiting for the person at the Node to confirm.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingPairRequest {
+    pub request_id: String,
+    pub display_name: String,
+    pub client_fingerprint: String,
+    pub code: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairRequestOutcome {
+    /// `pending`, `approved`, `denied` or `expired`.
+    pub status: String,
+    pub client: Option<PairedNodeClient>,
+}
+
+/// The six digits both sides show. Each side feeds in the identities it believes it is talking to.
+pub fn pair_code(node_fingerprint: &str, client_fingerprint: &str, nonce: &str, request_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(CODE_DOMAIN);
+    for part in [node_fingerprint, client_fingerprint, nonce, request_id] {
+        digest.update((part.len() as u32).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    let hash = digest.finalize();
+    let number = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) % 1_000_000;
+    format!("{number:06}")
+}
+
+/// What the device signs to ask for pairing (the nonce is also part of the code).
+pub fn pair_request_statement(identity: &NodeIdentity, node_id: &str, display_name: &str, scopes: &[NodeScope]) -> Result<(SignedDeviceStatement, String), String> {
+    let nonce = random_token(18)?;
+    let payload = serde_json::json!({ "kind": REQUEST_KIND, "nodeId": node_id, "displayName": display_name, "nonce": nonce, "scopes": scopes, "at": now_millis() });
+    Ok((identity.sign(payload)?, nonce))
+}
+
+pub fn pair_status_statement(identity: &NodeIdentity, request_id: &str) -> Result<SignedDeviceStatement, String> {
+    identity.sign(serde_json::json!({ "kind": STATUS_KIND, "requestId": request_id, "at": now_millis() }))
+}
+
+fn checked_statement(statement: &SignedDeviceStatement, kind: &str, now: i64) -> Result<serde_json::Value, String> {
+    verify(statement).map_err(|error| format!("invalid signature: {error}"))?;
+    let payload = &statement.payload;
+    if payload["kind"] != kind {
+        return Err("the statement is for something else".into());
+    }
+    let at = payload["at"].as_i64().ok_or("the statement has no time")?;
+    if (now - at).abs() > STATEMENT_CLOCK_WINDOW_MS {
+        return Err("the statement is too old or the clocks differ".into());
+    }
+    Ok(payload.clone())
+}
+
+/// Registers a request. It grants nothing until `decide` approves it.
+pub fn submit_request(directory: &Path, node_id: &str, statement: &SignedDeviceStatement, allowed_scopes: &[NodeScope], now: i64) -> Result<PairRequestTicket, String> {
+    let payload = checked_statement(statement, REQUEST_KIND, now)?;
+    if payload["nodeId"] != node_id {
+        return Err("the request is for a different Node".into());
+    }
+    let display_name = payload["displayName"].as_str().unwrap_or_default().to_string();
+    if display_name.trim().is_empty() || display_name.chars().count() > 80 || display_name.chars().any(char::is_control) {
+        return Err("invalid client display name".into());
+    }
+    let nonce = payload["nonce"].as_str().unwrap_or_default().to_string();
+    let decoded = URL_SAFE_NO_PAD.decode(&nonce).map_err(|_| "invalid client pairing nonce".to_string())?;
+    if decoded.len() < 16 || decoded.len() > 64 {
+        return Err("invalid client pairing nonce".into());
+    }
+    let scopes = normalized_scopes(serde_json::from_value(payload["scopes"].clone()).map_err(|_| "invalid scopes".to_string())?);
+    if scopes.is_empty() || scopes.iter().any(|scope| !allowed_scopes.contains(scope)) {
+        return Err("the client requested a scope unavailable on this Node".into());
+    }
+    let _lock = PairingLock::acquire(directory)?;
+    let mut state = load_state(directory)?;
+    state.requests.retain(|request| request.expires_at > now);
+    let fingerprint = &statement.identity.fingerprint;
+    if state.requests.iter().any(|request| request.identity.fingerprint == *fingerprint && request.status == "denied") {
+        return Err("this device was refused a moment ago; wait before asking again".into());
+    }
+    state.requests.retain(|request| request.identity.fingerprint != *fingerprint);
+    if state.requests.iter().filter(|request| request.status == "pending").count() >= MAX_PENDING_REQUESTS {
+        return Err("too many pairing requests are waiting; answer them first".into());
+    }
+    let request_id = random_token(16)?;
+    let expires_at = now.saturating_add(REQUEST_TTL_MS);
+    state.requests.push(StoredPairRequest { request_id: request_id.clone(), identity: statement.identity.clone(), display_name, nonce, scopes, created_at: now, expires_at, status: "pending".into(), client: None });
+    save_state(directory, &state)?;
+    Ok(PairRequestTicket { request_id, expires_at })
+}
+
+/// The requests the person at this Node can still answer, each with the code to compare.
+pub fn pending_requests(directory: &Path, node_fingerprint: &str, now: i64) -> Result<Vec<PendingPairRequest>, String> {
+    let _lock = PairingLock::acquire(directory)?;
+    Ok(load_state(directory)?
+        .requests
+        .into_iter()
+        .filter(|request| request.status == "pending" && request.expires_at > now)
+        .map(|request| PendingPairRequest {
+            code: pair_code(node_fingerprint, &request.identity.fingerprint, &request.nonce, &request.request_id),
+            request_id: request.request_id,
+            display_name: request.display_name,
+            client_fingerprint: request.identity.fingerprint,
+            created_at: request.created_at,
+            expires_at: request.expires_at,
+        })
+        .collect())
+}
+
+/// Approves or refuses a pending request. Approval adds the device with the scopes it asked for.
+pub fn decide(directory: &Path, request_id: &str, approve: bool, now: i64) -> Result<Option<PairedNodeClient>, String> {
+    let _lock = PairingLock::acquire(directory)?;
+    let mut state = load_state(directory)?;
+    let index = state
+        .requests
+        .iter()
+        .position(|request| request.request_id == request_id && request.status == "pending" && request.expires_at > now)
+        .ok_or("that pairing request is not waiting any more")?;
+    let request = state.requests[index].clone();
+    if !approve {
+        state.requests[index].status = "denied".into();
+        state.requests[index].expires_at = now.saturating_add(REQUEST_TTL_MS);
+        save_state(directory, &state)?;
+        return Ok(None);
+    }
+    let client = PairedNodeClient {
+        device_id: format!("device-{}", request.identity.fingerprint),
+        display_name: request.display_name,
+        identity: request.identity.clone(),
+        scopes: request.scopes,
+        paired_at: now,
+        last_seen_at: None,
+    };
+    state.clients.retain(|existing| existing.identity.fingerprint != client.identity.fingerprint);
+    state.clients.push(client.clone());
+    state.clients.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+    state.requests[index].status = "approved".into();
+    state.requests[index].client = Some(client.clone());
+    state.requests[index].expires_at = now.saturating_add(REQUEST_TTL_MS);
+    save_state(directory, &state)?;
+    Ok(Some(client))
+}
+
+/// Lets the device that asked learn the answer. Only that device can read it.
+pub fn request_status(directory: &Path, statement: &SignedDeviceStatement, now: i64) -> Result<PairRequestOutcome, String> {
+    let payload = checked_statement(statement, STATUS_KIND, now)?;
+    let request_id = payload["requestId"].as_str().unwrap_or_default();
+    let _lock = PairingLock::acquire(directory)?;
+    let state = load_state(directory)?;
+    let request = state
+        .requests
+        .iter()
+        .find(|request| request.request_id == request_id && request.identity.fingerprint == statement.identity.fingerprint)
+        .ok_or("unknown pairing request")?;
+    if request.expires_at <= now && request.status == "pending" {
+        return Ok(PairRequestOutcome { status: "expired".into(), client: None });
+    }
+    Ok(PairRequestOutcome { status: request.status.clone(), client: request.client.clone() })
 }
 
 fn validate_pairing_proof(
@@ -512,6 +710,80 @@ mod tests {
             .as_deref(),
             Some("the Node pairing offer expired")
         );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_request_waits_for_approval_and_both_sides_derive_the_same_code() {
+        let directory = test_directory("request");
+        let (node, device) = identities(&directory);
+        let node_fp = node.public().fingerprint.clone();
+        let (statement, nonce) = pair_request_statement(&device, "node-home", "Phone", &[NodeScope::Observe]).unwrap();
+        let ticket = submit_request(&directory, "node-home", &statement, &[NodeScope::Observe], now_millis()).unwrap();
+        assert!(clients(&directory).unwrap().is_empty(), "a request grants nothing");
+        let pending = pending_requests(&directory, &node_fp, now_millis()).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].code, pair_code(&node_fp, &device.public().fingerprint, &nonce, &ticket.request_id));
+        let poll = pair_status_statement(&device, &ticket.request_id).unwrap();
+        assert_eq!(request_status(&directory, &poll, now_millis()).unwrap().status, "pending");
+        let client = decide(&directory, &ticket.request_id, true, now_millis()).unwrap().unwrap();
+        assert_eq!(clients(&directory).unwrap(), vec![client.clone()]);
+        let outcome = request_status(&directory, &poll, now_millis()).unwrap();
+        assert_eq!((outcome.status.as_str(), outcome.client), ("approved", Some(client)));
+        assert!(decide(&directory, &ticket.request_id, true, now_millis()).is_err(), "an answered request cannot be answered again");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_machine_in_the_middle_gets_a_different_code() {
+        let directory = test_directory("code");
+        let (node, device) = identities(&directory);
+        let other = NodeIdentity::load_or_create(&directory.join("other")).unwrap();
+        let honest = pair_code(&node.public().fingerprint, &device.public().fingerprint, "n", "r");
+        assert_ne!(honest, pair_code(&other.public().fingerprint, &device.public().fingerprint, "n", "r"));
+        assert_ne!(honest, pair_code(&node.public().fingerprint, &other.public().fingerprint, "n", "r"));
+        assert_eq!(honest.len(), 6);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn refused_requests_cannot_be_repeated_at_once_and_expire() {
+        let directory = test_directory("denied");
+        let (_, device) = identities(&directory);
+        let (statement, _) = pair_request_statement(&device, "node-home", "Phone", &[NodeScope::Observe]).unwrap();
+        let ticket = submit_request(&directory, "node-home", &statement, &[NodeScope::Observe], now_millis()).unwrap();
+        assert!(decide(&directory, &ticket.request_id, false, now_millis()).unwrap().is_none());
+        assert!(clients(&directory).unwrap().is_empty());
+        let (again, _) = pair_request_statement(&device, "node-home", "Phone", &[NodeScope::Observe]).unwrap();
+        assert!(submit_request(&directory, "node-home", &again, &[NodeScope::Observe], now_millis()).is_err());
+        let late = now_millis() + REQUEST_TTL_MS + 1;
+        assert!(decide(&directory, &ticket.request_id, true, late).is_err(), "an expired request cannot be approved");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn requests_are_bound_to_the_node_scope_and_signer() {
+        let directory = test_directory("bound");
+        let (_, device) = identities(&directory);
+        let stranger = NodeIdentity::load_or_create(&directory.join("stranger")).unwrap();
+        let (wrong_node, _) = pair_request_statement(&device, "other-node", "Phone", &[NodeScope::Observe]).unwrap();
+        assert!(submit_request(&directory, "node-home", &wrong_node, &[NodeScope::Observe], now_millis()).is_err());
+        let (greedy, _) = pair_request_statement(&device, "node-home", "Phone", &[NodeScope::Prompt]).unwrap();
+        assert!(submit_request(&directory, "node-home", &greedy, &[NodeScope::Observe], now_millis()).is_err());
+        let (statement, _) = pair_request_statement(&device, "node-home", "Phone", &[NodeScope::Observe]).unwrap();
+        let ticket = submit_request(&directory, "node-home", &statement, &[NodeScope::Observe], now_millis()).unwrap();
+        decide(&directory, &ticket.request_id, true, now_millis()).unwrap();
+        let spy = pair_status_statement(&stranger, &ticket.request_id).unwrap();
+        assert!(request_status(&directory, &spy, now_millis()).is_err(), "only the requester reads the answer");
+        let mut stale = statement.clone();
+        stale.payload["at"] = serde_json::json!(1);
+        assert!(submit_request(&directory, "node-home", &stale, &[NodeScope::Observe], now_millis()).is_err());
+        for index in 0..=MAX_PENDING_REQUESTS {
+            let other = NodeIdentity::load_or_create(&directory.join(format!("crowd-{index}"))).unwrap();
+            let (crowd, _) = pair_request_statement(&other, "node-home", "Crowd", &[NodeScope::Observe]).unwrap();
+            let result = submit_request(&directory, "node-home", &crowd, &[NodeScope::Observe], now_millis());
+            assert_eq!(result.is_ok(), index < MAX_PENDING_REQUESTS, "at most {MAX_PENDING_REQUESTS} requests wait at once");
+        }
         let _ = fs::remove_dir_all(directory);
     }
 }

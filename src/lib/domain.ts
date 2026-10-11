@@ -596,6 +596,27 @@ export interface RemoteLumeNode {
   lastSeenAt?: number;
 }
 
+export interface PairingRequestHandle {
+  requestId: string;
+  code: string;
+  expiresAt: number;
+}
+
+export interface PairingCheck {
+  status: "pending" | "approved" | "denied" | "expired";
+  node?: RemoteLumeNode;
+  relay?: RelayLumeNode;
+}
+
+export interface PendingPairRequest {
+  requestId: string;
+  displayName: string;
+  clientFingerprint: string;
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
 export interface RelayLumeNode {
   nodeId: string;
   relayUrl: string;

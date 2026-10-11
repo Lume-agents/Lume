@@ -36,6 +36,7 @@ pub mod node_inventory;
 pub mod node_network;
 pub mod node_pairing;
 pub mod node_relay;
+pub mod node_sessions;
 pub mod node_service;
 #[allow(dead_code)]
 pub mod relay_e2e;
@@ -51,6 +52,7 @@ mod session_filters;
 mod state;
 mod store;
 mod terminal_windows;
+mod pair_watch;
 mod usage_monitor;
 mod workflow_runtime;
 mod workspace_windows;
@@ -1463,6 +1465,107 @@ async fn get_remote_lume_node_inventory(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn request_lume_node_pairing(
+    node: node_client::DiscoveredNode,
+) -> Result<node_client::PairingRequestHandle, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_client::request_pairing(&node_service::default_state_directory()?, &node)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn check_lume_node_pairing(
+    node: node_client::DiscoveredNode,
+    request_id: String,
+) -> Result<node_client::PairingCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_client::check_pairing(&node_service::default_state_directory()?, &node, &request_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Devices on the network asking this computer's Node to pair, each with the code to compare.
+#[tauri::command]
+fn list_node_pair_requests() -> Result<Vec<node_pairing::PendingPairRequest>, String> {
+    let directory = node_service::default_state_directory()?;
+    if !directory.join("pairing.json").is_file() {
+        return Ok(Vec::new());
+    }
+    let identity = node_identity::NodeIdentity::load_or_create(&directory)?;
+    node_pairing::pending_requests(&directory, &identity.public().fingerprint, state::now_millis())
+}
+
+#[tauri::command]
+fn decide_node_pair_request(request_id: String, approve: bool) -> Result<bool, String> {
+    let directory = node_service::default_state_directory()?;
+    Ok(node_pairing::decide(&directory, &request_id, approve, state::now_millis())?.is_some())
+}
+
+#[tauri::command]
+async fn pair_lume_relay_node(pairing_uri: String) -> Result<node_relay::RelayRemote, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_relay::pair(&node_service::default_state_directory()?, &pairing_uri)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn list_relay_lume_nodes() -> Result<Vec<node_relay::RelayRemote>, String> {
+    node_relay::remotes(&node_service::default_state_directory()?)
+}
+
+/// One connection through the Relay that returns the computer's health and its agent sessions.
+#[tauri::command]
+async fn get_relay_lume_node_overview(node_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = node_service::default_state_directory()?;
+        let mut answers = node_relay::query_many(&directory, &node_id, &["health", "sessions"])?.into_iter();
+        let health = answers.next().ok_or("the Node did not answer")??;
+        let sessions = answers.next().ok_or("the Node did not answer")?;
+        Ok(match sessions {
+            Ok(sessions) => serde_json::json!({ "health": health, "sessions": sessions }),
+            Err(error) => serde_json::json!({ "health": health, "sessionsError": error }),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// One session's conversation on a computer paired through the Relay, when its owner allows it.
+#[tauri::command]
+async fn get_relay_lume_session(node_id: String, session_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_relay::query_session(&node_service::default_state_directory()?, &node_id, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn get_node_share_conversations() -> Result<bool, String> {
+    Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.share_conversations)
+}
+
+/// The owner's switch: whether devices paired with this computer may read what was said in its sessions.
+#[tauri::command]
+fn set_node_share_conversations(enabled: bool) -> Result<bool, String> {
+    let directory = node_service::default_state_directory()?;
+    let mut config = node_service::load_or_create_config(&directory)?;
+    config.share_conversations = enabled;
+    node_service::save_config(&directory, &config)?;
+    Ok(config.share_conversations)
+}
+
+#[tauri::command]
+fn forget_relay_lume_node(node_id: String) -> Result<bool, String> {
+    node_relay::forget(&node_service::default_state_directory()?, &node_id)
 }
 
 #[tauri::command]
@@ -2980,6 +3083,7 @@ pub fn run() {
             codex_daemon_observer::start(state.clone(), app.handle().clone())?;
             overlay::start_fullscreen_guard(state.clone(), app.handle().clone())?;
             usage_monitor::start(state.clone(), app.handle().clone());
+            pair_watch::start(state.clone(), app.handle().clone());
 
             if let Some(window) = app.get_webview_window("main") {
                 overlay::neutralize_text_scaling(&window);
@@ -3127,6 +3231,17 @@ pub fn run() {
             discover_lume_nodes,
             pair_lume_node,
             list_remote_lume_nodes,
+            request_lume_node_pairing,
+            check_lume_node_pairing,
+            list_node_pair_requests,
+            decide_node_pair_request,
+            pair_lume_relay_node,
+            list_relay_lume_nodes,
+            get_relay_lume_node_overview,
+            forget_relay_lume_node,
+            get_relay_lume_session,
+            get_node_share_conversations,
+            set_node_share_conversations,
             get_remote_lume_node_health,
             get_remote_lume_node_inventory,
             forget_remote_lume_node,

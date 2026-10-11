@@ -377,7 +377,9 @@ fn hook_activity(
     if matches!(hook_name, "UserPromptSubmit" | "BeforeAgent") {
         let prompt = ["prompt", "user_prompt", "message"]
             .into_iter()
-            .find_map(|key| string(raw, key));
+            .find_map(|key| string(raw, key))
+            // The hook also fires for Claude's own notices; they are not something the user said.
+            .filter(|prompt| provider != "claude" || visible_claude_user_text(prompt));
         return prompt.map(|prompt| SessionActivity {
             id: format!("{provider}:{session_id}:prompt:{}", now_millis()),
             kind: "prompt".into(),
@@ -1863,7 +1865,9 @@ fn push_claude_user_text(
     }
 }
 
-fn visible_claude_user_text(value: &str) -> bool {
+/// Whether a user-role message is something the person wrote. Claude Code also records its own
+/// notices in that role, such as the one that tells it a background command finished.
+pub(crate) fn visible_claude_user_text(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
         && ![
@@ -1871,6 +1875,7 @@ fn visible_claude_user_text(value: &str) -> bool {
             "<local-command-",
             "<system-reminder>",
             "<available-deferred-tools>",
+            "<task-notification>",
         ]
         .iter()
         .any(|prefix| value.starts_with(prefix))
@@ -2592,6 +2597,30 @@ mod tests {
                 ("prompt-2".to_string(), 3, 4, 7, 7),
             ]
         );
+    }
+
+    #[test]
+    fn claude_own_notices_are_not_something_the_user_said() {
+        for notice in [
+            "<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>",
+            "<system-reminder>\nContext\n</system-reminder>",
+            "<command-name>/compact</command-name>",
+            "<local-command-stdout>ok</local-command-stdout>",
+        ] {
+            assert!(!visible_claude_user_text(notice), "{notice}");
+        }
+        assert!(visible_claude_user_text("Corrija o teste que falhou"));
+
+        // The prompt hook fires for the notice too, but it must not show up as a sent prompt.
+        let notice = json!({ "session_id": "s1", "prompt": "<task-notification>done</task-notification>" });
+        assert!(hook_activity("claude", "UserPromptSubmit", &notice, "s1", None).is_none());
+        let typed = json!({ "session_id": "s1", "prompt": "Rode os testes" });
+        assert_eq!(
+            hook_activity("claude", "UserPromptSubmit", &typed, "s1", None).and_then(|activity| activity.detail),
+            Some("Rode os testes".to_string())
+        );
+        // Other agents keep every prompt as before.
+        assert!(hook_activity("codex", "UserPromptSubmit", &notice, "s1", None).is_some());
     }
 
     #[test]

@@ -18,6 +18,12 @@ import type {
   MobilePairingOffer,
   MobileScope,
   PairedDevice,
+  PairingCheck,
+  PairingRequestHandle,
+  PendingPairRequest,
+  RelayLumeNode,
+  RelayLumeNodeOverview,
+  RemoteConversation,
   RemoteLumeNode,
   RemoteLumeNodeHealth,
   RemoteLumeNodeInventory,
@@ -244,6 +250,50 @@ export async function loadRemoteLumeNodeInventory(nodeId: string): Promise<Remot
   return invoke<RemoteLumeNodeInventory>("get_remote_lume_node_inventory", { nodeId });
 }
 
+export async function requestLumeNodePairing(node: DiscoveredLumeNode): Promise<PairingRequestHandle> {
+  return invoke<PairingRequestHandle>("request_lume_node_pairing", { node });
+}
+
+export async function checkLumeNodePairing(node: DiscoveredLumeNode, requestId: string): Promise<PairingCheck> {
+  return invoke<PairingCheck>("check_lume_node_pairing", { node, requestId });
+}
+
+export async function loadNodePairRequests(): Promise<PendingPairRequest[]> {
+  return invoke<PendingPairRequest[]>("list_node_pair_requests");
+}
+
+export async function decideNodePairRequest(requestId: string, approve: boolean): Promise<boolean> {
+  return invoke<boolean>("decide_node_pair_request", { requestId, approve });
+}
+
+export async function pairLumeRelayNode(pairingUri: string): Promise<RelayLumeNode> {
+  return invoke<RelayLumeNode>("pair_lume_relay_node", { pairingUri });
+}
+
+export async function loadRelayLumeNodes(): Promise<RelayLumeNode[]> {
+  return invoke<RelayLumeNode[]>("list_relay_lume_nodes");
+}
+
+export async function loadRelayLumeNodeOverview(nodeId: string): Promise<RelayLumeNodeOverview> {
+  return invoke<RelayLumeNodeOverview>("get_relay_lume_node_overview", { nodeId });
+}
+
+export async function loadRelayLumeSession(nodeId: string, sessionId: string): Promise<RemoteConversation> {
+  return invoke<RemoteConversation>("get_relay_lume_session", { nodeId, sessionId });
+}
+
+export async function loadNodeShareConversations(): Promise<boolean> {
+  return invoke<boolean>("get_node_share_conversations");
+}
+
+export async function saveNodeShareConversations(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_node_share_conversations", { enabled });
+}
+
+export async function forgetRelayLumeNode(nodeId: string): Promise<boolean> {
+  return invoke<boolean>("forget_relay_lume_node", { nodeId });
+}
+
 export async function forgetRemoteLumeNode(nodeId: string): Promise<boolean> {
   return invoke<boolean>("forget_remote_lume_node", { nodeId });
 }
@@ -315,6 +365,11 @@ export async function submitPrompt(
   delivery: PromptDelivery = "new_turn",
 ): Promise<void> {
   await invoke("submit_prompt", { sessionId, prompt, attachments, delivery });
+}
+
+/** Opens a file the agent cited; the Rust side only allows plain files inside the session's folder. */
+export async function openSessionFile(sessionId: string, path: string): Promise<void> {
+  return invoke<void>("open_session_file", { sessionId, path });
 }
 
 export async function readLocalImageDataUrl(path: string): Promise<string> {

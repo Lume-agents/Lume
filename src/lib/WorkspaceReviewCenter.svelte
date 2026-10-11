@@ -738,7 +738,7 @@
       <main class="review-deliverables" aria-label={tr("Explicit deliverables", "Entregáveis explícitos")}>
         {#if selectedTurn?.result && deliverableFiles.length}
           <header><span><LumeIcon name="download" size={15} /><strong>{tr("Offered for download", "Oferecidos para baixar")}</strong></span><small>{deliverableFiles.length}</small></header>
-          <ResponseAttachments text={selectedTurn.result.response} attachments={selectedTurn.responseAttachments} workingDirectory={session.workingDirectory} {language} />
+          <ResponseAttachments text={selectedTurn.result.response} attachments={selectedTurn.responseAttachments} workingDirectory={session.workingDirectory} sessionId={session.id} {language} />
         {:else}
           <div class="diff-empty"><LumeIcon name="download" size={25} /><strong>{tr("No explicit deliverables", "Nenhum entregável explícito")}</strong><p>{tr("Files changed during the task stay under Changes. Only files explicitly offered in the final response appear here.", "Arquivos alterados durante a tarefa ficam em Alterações. Aqui aparecem apenas arquivos oferecidos explicitamente na resposta final.")}</p></div>
         {/if}

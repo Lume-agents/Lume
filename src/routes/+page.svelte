@@ -51,6 +51,7 @@
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import { usageAlertDismissals } from "$lib/usageAlertDismissals";
   import { playTone as playNotificationTone, type ToneKind } from "$lib/notificationTones";
+  import { PAIR_REQUEST_EVENT, pairRequestBanner } from "$lib/pairRequests";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import { SYSTEM_BANNER_CONTEXT, type SystemBannerNotice, type SystemBannerReporter } from "$lib/systemBannerContext";
   import { animatedDisclosure } from "$lib/animatedDisclosure";
@@ -86,6 +87,7 @@
     MobilePairingOffer,
     MobileScope,
     PairedDevice,
+    PendingPairRequest,
     PermissionAction,
     Preferences,
     PromptAttachmentInput,
@@ -554,6 +556,14 @@
     return visibleItems;
   });
 
+  function announcePairRequest(request: PendingPairRequest) {
+    const item = pairRequestBanner(request, preferences.language, Date.now(), () => {
+      componentBanners = componentBanners.filter((banner) => banner.id !== `pair-request:${request.requestId}`);
+    });
+    componentBanners = [item, ...componentBanners.filter((banner) => banner.id !== item.id)].slice(0, 4);
+    if (preferences.soundEnabled) playTone("permission");
+  }
+
   function reportPanelBanner(notice: SystemBannerNotice) {
     componentBanners = [
       {
@@ -798,6 +808,7 @@
     let disposed = false;
     let stopListening: (() => void) | undefined;
     let stopTerminalListening: (() => void) | undefined;
+    let stopPairRequestListening: (() => void) | undefined;
     let stopShortcutListening: (() => void) | undefined;
     let stopPreferencesListening: (() => void) | undefined;
     let stopCompanionUpdateListening: (() => void) | undefined;
@@ -916,6 +927,7 @@
             void refreshSessions(true);
           }, 120);
         });
+        stopPairRequestListening = await listen<PendingPairRequest>(PAIR_REQUEST_EVENT, ({ payload }) => announcePairRequest(payload));
         stopTerminalListening = await listen("lume://terminal-windows-changed", () => {
           void refreshTerminalWindows();
         });
@@ -941,6 +953,7 @@
       disposed = true;
       stopListening?.();
       stopTerminalListening?.();
+      stopPairRequestListening?.();
       stopShortcutListening?.();
       stopPreferencesListening?.();
       stopCompanionUpdateListening?.();

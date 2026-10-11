@@ -579,8 +579,7 @@ fn claude_transcript_entry_is_conversation(entry: &Value) -> bool {
 }
 
 fn claude_user_text_is_conversation(text: &str) -> bool {
-    let text = text.trim();
-    !text.is_empty() && !text.starts_with("<command-name>") && !text.starts_with("<local-command")
+    crate::adapters::visible_claude_user_text(text)
 }
 
 // Claude registers each live process in ~/.claude/sessions/<pid>.json. Resuming

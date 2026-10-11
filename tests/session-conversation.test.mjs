@@ -208,3 +208,13 @@ test("a cancelled request is one notice in the chat, not a tool event and not tw
     "a later cancel is a new notice",
   );
 });
+
+test("Claude's own notices are not shown as something the user sent", () => {
+  const entries = entriesFor([
+    activity("typed", "prompt", 10, "Rode os testes"),
+    activity("notice", "prompt", 20, "<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>"),
+    activity("reminder", "prompt", 25, "<system-reminder>\nContext\n</system-reminder>"),
+    activity("answer", "message", 30, "Os testes passaram"),
+  ]);
+  assert.deepEqual(entries.map((entry) => entry.activity.id), ["typed", "answer"]);
+});

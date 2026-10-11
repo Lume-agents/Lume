@@ -314,6 +314,55 @@ fn pairing(value: &Value) -> String {
     out
 }
 
+fn sessions(value: &Value) -> String {
+    let items = value["sessions"].as_array().cloned().unwrap_or_default();
+    if value["appFound"] == false {
+        return format!("\n  {}\n", style(t("The Lume app has not been opened on that computer yet.", "O app do Lume ainda não foi aberto naquele computador.")).dim());
+    }
+    if items.is_empty() {
+        return format!("\n  {}\n", style(t("No agent sessions there.", "Nenhuma sessão de agente por lá.")).dim());
+    }
+    let mut out = String::from("\n");
+    for item in &items {
+        let status = item["status"].as_str().unwrap_or("");
+        let dot = match status {
+            "running" => style("●").green(),
+            "permission_required" | "waiting_for_input" => style("●").yellow(),
+            "failed" => style("●").red(),
+            _ => style("●").dim(),
+        };
+        let name = item["name"].as_str().filter(|name| !name.is_empty()).unwrap_or_else(|| item["project"].as_str().unwrap_or("?"));
+        out.push_str(&format!(
+            "  {dot} {}  {}\n{}{} · {}\n",
+            style(name).bold(),
+            style(format!("({})", item["agentLabel"].as_str().unwrap_or("?"))).dim(),
+            label(t("Status", "Estado")), item["statusLabel"].as_str().unwrap_or(status), ago(item["updatedAt"].as_i64()),
+        ));
+    }
+    out
+}
+
+fn request_id(request: &Value) -> String {
+    request["requestId"].as_str().unwrap_or_default().to_string()
+}
+
+fn requests(value: &Value) -> String {
+    list(value, t("No device is asking to pair.", "Nenhum dispositivo pedindo pareamento."), |request| {
+        format!(
+            "  {} {}\n{}{}\n{}{}",
+            style("●").yellow(), style(request["displayName"].as_str().unwrap_or("?")).bold(),
+            label(t("Code", "Código")), style(request["code"].as_str().unwrap_or("?")).bold().cyan(),
+            label(t("Expires", "Expira")), ago_until(request["expiresAt"].as_i64()),
+        )
+    })
+}
+
+fn ago_until(millis: Option<i64>) -> String {
+    let Some(millis) = millis else { return "?".into() };
+    let seconds = ((millis - now_millis()) / 1000).max(0);
+    if portuguese() { format!("em {} s", seconds) } else { format!("in {seconds} s") }
+}
+
 /// A readable version of a command's JSON result, or `None` to keep the JSON.
 pub fn pretty(command: &str, value: &Value) -> Option<String> {
     Some(match command {
@@ -337,6 +386,10 @@ pub fn pretty(command: &str, value: &Value) -> Option<String> {
                 label(t("Paired", "Pareado")), ago(remote["pairedAt"].as_i64()),
             )
         }),
+        "sessions" | "relay-sessions" => sessions(value),
+        "requests" => requests(value),
+        "approve" => format!("\n  {} {}\n", style("✔").green(), t("Device approved. It can now see this computer's agents.", "Dispositivo aprovado. Ele já pode ver os agentes deste computador.")),
+        "deny" => format!("\n  {} {}\n", style("✔").green(), t("Request refused.", "Pedido recusado.")),
         "relay" => {
             let url = value["relayUrl"].as_str();
             format!(
@@ -387,6 +440,7 @@ pub fn menu(state_arguments: &[String], run: CommandRunner, run_service: &dyn Fn
         t("Devices authorized on this Node", "Dispositivos autorizados neste Node"),
         t("Paired computers", "Computadores pareados"),
         t("Check a paired computer", "Verificar um computador pareado"),
+        t("Pairing requests from the network", "Pedidos de pareamento da rede"),
         t("Quit", "Sair"),
     ];
     loop {
@@ -421,6 +475,24 @@ pub fn menu(state_arguments: &[String], run: CommandRunner, run_service: &dyn Fn
                 let names = remotes.iter().map(|remote| remote["nodeId"].as_str().unwrap_or("?").to_string()).collect::<Vec<_>>();
                 let picked = Select::with_theme(&theme).with_prompt(t("Which one?", "Qual?")).items(&names).default(0).interact().map_err(|error| error.to_string())?;
                 show("relay-health", run(&command("relay-health", &[&names[picked]])));
+            }
+            9 => {
+                let requests = run(&command("requests", &[])).ok().flatten().and_then(|text| serde_json::from_str::<Value>(&text).ok()).and_then(|value| value.as_array().cloned()).unwrap_or_default();
+                if requests.is_empty() {
+                    println!("  {}\n", style(t("No device is asking to pair.", "Nenhum dispositivo pedindo pareamento.")).dim());
+                    continue;
+                }
+                show("requests", Ok(Some(Value::Array(requests.clone()).to_string())));
+                let names = requests.iter().map(|request| format!("{}  ({})", request["displayName"].as_str().unwrap_or("?"), request["code"].as_str().unwrap_or("?"))).collect::<Vec<_>>();
+                let picked = Select::with_theme(&theme).with_prompt(t("Which request?", "Qual pedido?")).items(&names).default(0).interact().map_err(|error| error.to_string())?;
+                let id = request_id(&requests[picked]);
+                let code = requests[picked]["code"].as_str().unwrap_or("?").to_string();
+                let question = format!("{} {}", t("Does the other device show the same code:", "O outro dispositivo mostra o mesmo código:"), style(&code).bold());
+                if Confirm::with_theme(&theme).with_prompt(question).default(false).interact().map_err(|error| error.to_string())? {
+                    show("approve", run(&command("approve", &[&id])));
+                } else {
+                    show("deny", run(&command("deny", &[&id])));
+                }
             }
             _ => return Ok(()),
         }

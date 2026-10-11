@@ -59,13 +59,44 @@ lume node relay-pair 'lume://pair-relay?...'
 lume node relay-remotes
 lume node relay-health NODE_ID
 lume node relay-inventory NODE_ID
+lume node relay-sessions NODE_ID            # the agent sessions of the other computer (read-only)
+lume node sessions                           # the same list for this computer
 ```
 
 The pairing secret travels only in the URI/QR code. The Relay learns a one-way derivative of it, and the pairing request
 is encrypted with a key derived separately, so the Relay can neither read nor forge it. After pairing, every message runs
 inside an Ed25519-authenticated X25519 session (ChaCha20-Poly1305, per-direction keys, increasing counters). Only the read-only
-`health` and `inventory` commands exist so far, with the `observe` scope. `lume node revoke` removes a device from the Node; the
+`health`, `inventory` and `sessions` commands exist so far, with the `observe` scope. `sessions` lists the agent sessions
+of the Lume app on the Node (agent, project folder name, status, whether it waits for a permission or an answer). It reads the
+app's database read-only and never includes the conversation, the working directory or the permission details. `lume node revoke` removes a device from the Node; the
 Relay drops its access the next time the Node connects.
+
+### Pairing without a link (same network)
+
+On the same network a device can pair without any link: **Settings → Remote computers → Scan → Pair** (or
+`lume node requests` / `approve` / `deny` on the Node). The device asks the Node, both screens show the same six-digit
+code, and the person at the Node approves only when the codes match. The code is derived on each side from the two
+identities, a nonce and the request id, so a machine in the middle, which makes the sides see different identities,
+produces different codes. A request grants nothing until approved, expires in two minutes, at most three can wait at once,
+a refused device cannot ask again for two minutes, and it can only ask for the `observe` scope. When the Node has a Relay
+configured, the approval also hands the device the Relay address, so the same computer can be reached away from home.
+Devices approved or revoked while the Node runs reach (or lose) the Relay within a few seconds.
+
+### Reading a conversation
+
+`lume node relay-session NODE_ID SESSION_ID` (or clicking a session in Settings → Remote computers) shows what was said in
+one session of the other computer: the person's prompts and the agent's messages, newest 80, each up to 6,000 characters
+and about 120 KB in total so it always fits a Relay frame. Commands, file diffs, tool output and attachments are never sent.
+It is read-only, and it needs two things: the device holds the `read_conversations` scope (devices paired before this existed
+must be paired again) and the owner turned the switch on (`lume node conversations on|off`, or the toggle in Settings →
+Remote computers). It is **off by default** and turning it off takes effect on the next request.
+
+### In the app
+
+Settings → Remote computers accepts both `lume://pair-node?…` (same network) and `lume://pair-relay?…` (through the Relay) links.
+A computer paired through the Relay shows its agent sessions (status dot, agent, project, "needs permission" / "needs an answer") and
+refreshes them every few seconds while the window is visible. The view is read-only: the card only offers *Forget*. Each refresh
+opens one encrypted session and asks `health` and `sessions` together.
 
 ## Friendlier terminal
 

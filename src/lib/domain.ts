@@ -599,6 +599,75 @@ export interface RemoteLumeNode {
   lastSeenAt?: number;
 }
 
+export interface PairingRequestHandle {
+  requestId: string;
+  code: string;
+  expiresAt: number;
+}
+
+export interface PairingCheck {
+  status: "pending" | "approved" | "denied" | "expired";
+  node?: RemoteLumeNode;
+  relay?: RelayLumeNode;
+}
+
+export interface PendingPairRequest {
+  requestId: string;
+  displayName: string;
+  clientFingerprint: string;
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface RelayLumeNode {
+  nodeId: string;
+  relayUrl: string;
+  identity: { algorithm: string; publicKey: string; fingerprint: string };
+  deviceId: string;
+  pairedAt: number;
+}
+
+export interface RemoteAgentSession {
+  id: string;
+  agent: AgentKind;
+  agentLabel: string;
+  name: string;
+  project: string;
+  status: "running" | "permission_required" | "waiting_for_input" | "completed" | "failed";
+  statusLabel: string;
+  startedAt: string;
+  updatedAt: number;
+  needsPermission: boolean;
+  needsAnswer: boolean;
+}
+
+export interface RemoteSessionsSnapshot {
+  generatedAt: number;
+  appFound: boolean;
+  sessions: RemoteAgentSession[];
+}
+
+export interface RemoteConversationMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  createdAt: number;
+}
+
+export interface RemoteConversation {
+  session: RemoteAgentSession;
+  generatedAt: number;
+  truncated: boolean;
+  messages: RemoteConversationMessage[];
+}
+
+export interface RelayLumeNodeOverview {
+  health: RemoteLumeNodeHealth;
+  sessions?: RemoteSessionsSnapshot;
+  sessionsError?: string;
+}
+
 export interface RemoteLumeNodeHealth {
   lifecycle: "disabled" | "offline" | "running";
   enabled: boolean;

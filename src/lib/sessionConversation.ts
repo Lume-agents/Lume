@@ -1,7 +1,7 @@
 import type { AgentSession, SessionActivity } from "$lib/domain";
 import type { FileChangeSummary } from "$lib/fileChanges";
 import { mergeFileChanges, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
-import { cleanPromptTransport, promptTextKey } from "$lib/chatAttachments";
+import { cleanPromptTransport, isSyntheticPromptText, promptTextKey } from "$lib/chatAttachments";
 import { activityCategory, isHiddenAgentActivity, isPresentableTraceActivity } from "$lib/activityPresentation";
 import { latestResponseText, sameResponseText } from "$lib/responseDedup.js";
 
@@ -103,6 +103,7 @@ export function buildConversationEntries(
   const entries: ConversationEntry[] = [];
   for (const activity of sortedActivities) {
     if (["queued_prompt", "codex_queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
+    if (activity.kind === "prompt" && isSyntheticPromptText(activity.detail)) continue;
     if (activity.kind === "prompt") {
       let duplicateIndex = -1;
       for (let index = entries.length - 1; index >= 0; index -= 1) {

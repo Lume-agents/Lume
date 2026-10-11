@@ -52,6 +52,7 @@ mod session_filters;
 mod state;
 mod store;
 mod terminal_windows;
+mod pair_watch;
 mod usage_monitor;
 mod workflow_runtime;
 mod workspace_windows;
@@ -3057,6 +3058,7 @@ pub fn run() {
             codex_daemon_observer::start(state.clone(), app.handle().clone())?;
             overlay::start_fullscreen_guard(state.clone(), app.handle().clone())?;
             usage_monitor::start(state.clone(), app.handle().clone());
+            pair_watch::start(state.clone(), app.handle().clone());
 
             if let Some(window) = app.get_webview_window("main") {
                 overlay::neutralize_text_scaling(&window);

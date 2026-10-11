@@ -32,6 +32,7 @@
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import { usageAlertDismissals } from "$lib/usageAlertDismissals";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
+  import { PAIR_REQUEST_EVENT, pairRequestBanner } from "$lib/pairRequests";
   import WorkspaceInspector from "$lib/WorkspaceInspector.svelte";
   import WorkspaceReviewCenter from "$lib/WorkspaceReviewCenter.svelte";
   import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
@@ -42,7 +43,7 @@
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
   import { sidebarGroupsKey } from "$lib/sidebarGroups";
-  import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, Preferences, ResumableSession, WorkflowGroupDefinition } from "$lib/domain";
+  import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, PendingPairRequest, Preferences, ResumableSession, WorkflowGroupDefinition } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
@@ -237,6 +238,7 @@
   let mobileBusy = $state(false);
   let appVersion = $state("0.15.0");
   let dismissedAgentAlertIds = $state<string[]>([]);
+  let pairRequestBanners = $state<SystemBannerItem[]>([]);
   let rateLimitRefreshRequested = false;
   let antigravityRateLimitRefreshRequested = false;
   let updateState = $state<"idle" | "checking" | "available" | "up_to_date" | "downloading" | "ready" | "error">("idle");
@@ -861,7 +863,7 @@
   }
 
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
-    const items: SystemBannerItem[] = [];
+    const items: SystemBannerItem[] = [...pairRequestBanners];
     if (settingsError) items.push({ id: "settings-error", message: settingsError, tone: "error", onDismiss: () => { settingsError = ""; } });
     if (shortcutRegistrationError) items.push({
       id: "shortcut-registration-error",
@@ -2630,6 +2632,12 @@
           externalWriterConflicts = Object.fromEntries(payload.map((conflict) => [conflict.sessionId, conflict]));
         })),
         startup.subscribe(() => listen("lume://sessions-changed", queueRefresh)),
+        startup.subscribe(() => listen<PendingPairRequest>(PAIR_REQUEST_EVENT, ({ payload }) => {
+          const item = pairRequestBanner(payload, language, Date.now(), () => {
+            pairRequestBanners = pairRequestBanners.filter((banner) => banner.id !== `pair-request:${payload.requestId}`);
+          });
+          pairRequestBanners = [item, ...pairRequestBanners.filter((banner) => banner.id !== item.id)].slice(0, 3);
+        })),
         startup.subscribe(() => listen<Preferences>("lume://preferences-changed", ({ payload }) => {
           preferenceEventRevision += 1;
           preferences = payload;

@@ -17,6 +17,8 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
+  import AgentSetupCards from "$lib/AgentSetupCards.svelte";
+  import CliInstallDialog from "$lib/CliInstallDialog.svelte";
   import MacosAutomationDialog from "$lib/MacosAutomationDialog.svelte";
   import { agentConnectionMessage } from "$lib/agentConnection";
   import { macosAutomationMessage } from "$lib/macosAutomation";
@@ -59,6 +61,7 @@
     loadHubSnapshot,
     listExternalWriterConflicts,
     loadIntegrationStatuses,
+    loadCliInstallPlans,
     loadResumableSessions,
     loadMobileGatewayStatus,
     loadOverlayPosition,
@@ -82,6 +85,7 @@
     cancelExternalWriterAttempt,
     forkCodexThread,
     terminateSession,
+    type CliInstallPlan,
   } from "$lib/lume";
 
   type WorkspaceNamedLayout = {
@@ -209,6 +213,8 @@
   let shortcutRegistrationError = $state<string | null>(null);
   let settingsMessage = $state("");
   let integrations = $state<IntegrationStatus[]>([]);
+  let cliPlans = $state<CliInstallPlan[]>([]);
+  let installingPlan = $state<CliInstallPlan | null>(null);
   let connectionAgent = $state<IntegrationStatus["kind"] | null>(null);
   let connectionMessage = $state("");
   let automationRequired = $state(false);
@@ -2071,7 +2077,10 @@
     const request = (async () => {
       try {
         switch (resource) {
-          case "integrations": integrations = await loadIntegrationStatuses(); break;
+          case "integrations":
+            integrations = await loadIntegrationStatuses();
+            cliPlans = await loadCliInstallPlans().catch(() => []);
+            break;
           case "vscode": vscodeStatus = await loadVscodeStatus(); break;
           case "externalPlugins": externalPlugins = await loadExternalPlugins(); break;
           case "mobileStatus": mobileStatus = await loadMobileGatewayStatus(); break;
@@ -2169,6 +2178,17 @@
     antigravityHookConfirmation = false;
     const integration = integrations.find((item) => item.kind === "antigravity");
     if (integration) await setIntegrationConfigured(integration, true);
+  }
+
+  /** After an install attempt the CLI may be new: look for it again. */
+  async function finishCliInstall() {
+    installingPlan = null;
+    try {
+      integrations = await loadIntegrationStatuses();
+      cliPlans = await loadCliInstallPlans();
+    } catch (reason) {
+      settingsError = String(reason).replace(/^Error:\s*/, "");
+    }
   }
 
   async function runIntegrationDiagnostic(integration: IntegrationStatus) {
@@ -3214,29 +3234,20 @@
             <div class="settings-section-content">
             {#if settingsSections.agents}
             {#if settingsLoadingSections.includes("agents")}<p class="settings-loading-hint" role="status">{tr("Loading agent integrations…", "Carregando integrações de agentes…")}</p>{/if}
-            {#each [
-              { label: "", items: integrations.filter((integration) => integration.canLaunch) },
-              { label: tr("Monitoring only", "Somente monitoramento"), items: integrations.filter((integration) => !integration.canLaunch) },
-            ] as group}
-              {#if group.label}<small class="group-label">{group.label}</small>{/if}
-              {#each group.items as integration (integration.kind)}
-                <div class="integration-row">
-                  <span class="integration-icon"><BrandIcon name={integrationAgentKind(integration.kind)} size={18} /></span>
-                  <span><strong>{integration.label}</strong><small>{integration.detail}</small></span>
-                  <button type="button" disabled={diagnosingIntegration !== null} onclick={() => void runIntegrationDiagnostic(integration)}>{diagnosingIntegration === integration.kind ? "…" : tr("Test", "Testar")}</button>
-                  {#if integration.canConfigure}
-                    <button class:active={integration.configured} type="button" disabled={!integration.installed || configuringIntegration !== null} onclick={() => void toggleIntegration(integration)}>{configuringIntegration === integration.kind ? "…" : integration.configured ? tr("Connected", "Conectado") : tr("Connect", "Conectar")}</button>
-                  {/if}
-                </div>
-                {#if integrationDiagnostics[integration.kind]}
-                  <div class="diagnostic-list">
-                    {#each integrationDiagnostics[integration.kind]?.checks ?? [] as item (item.id)}
-                      <span class="diagnostic-{item.status}"><i></i><b>{item.label}</b><small>{item.detail}</small></span>
-                    {/each}
-                  </div>
-                {/if}
-              {/each}
-            {/each}
+            <div class="agent-setup-host">
+              <AgentSetupCards
+                {language}
+                {integrations}
+                plans={cliPlans}
+                diagnostics={integrationDiagnostics}
+                configuring={configuringIntegration}
+                diagnosing={diagnosingIntegration}
+                onInstall={(plan) => (installingPlan = plan)}
+                onConnect={(integration) => void toggleIntegration(integration)}
+                onDisconnect={(integration) => void setIntegrationConfigured(integration, false)}
+                onTest={(integration) => void runIntegrationDiagnostic(integration)}
+              />
+            </div>
             {/if}
             </div>
           </details>
@@ -3695,6 +3706,9 @@
   {#if connectionAgent}
     <AgentConnectionDialog agent={connectionAgent} message={connectionMessage} {language} onClose={() => { connectionAgent = null; }} />
   {/if}
+  {#if installingPlan}
+    <CliInstallDialog plan={installingPlan} {language} onClose={() => void finishCliInstall()} />
+  {/if}
   {#if automationRequired}
     <MacosAutomationDialog {language} onClose={() => { automationRequired = false; }} />
   {/if}
@@ -3834,6 +3848,7 @@
   .workspace-switch:checked { border-color: transparent; background: var(--workspace-accent); }.workspace-switch:checked::after { background: #f7fbf8; transform: translateX(14px); }.workspace-switch:disabled { cursor: wait; opacity: .58; }
   .settings-range { width: 120px; accent-color: var(--workspace-accent); }
   .group-label { display: block; margin: 8px 0 5px; color: var(--workspace-faint); font-size: 7px; font-weight: 780; letter-spacing: .07em; text-transform: uppercase; }
+  .agent-setup-host { --agent-setup-font: 9px; padding: 2px 0 6px; color: var(--workspace-text); }
   .integration-row { min-height: 49px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 65%, transparent); }
   .integration-row > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; flex: 1; }
   .integration-row strong, .preferred-agents > strong, .about-settings strong, .device-card strong { color: var(--workspace-strong); font-size: 9px; }
@@ -3844,8 +3859,8 @@
   button.primary { color: var(--workspace-raised); border-color: transparent; background: var(--workspace-accent); }
   .diagnostic-list { padding: 6px 0 8px 35px; display: grid; gap: 5px; }
   .diagnostic-list > span { display: grid; grid-template-columns: 6px auto 1fr; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 7px; }
-  .diagnostic-list i { width: 5px; height: 5px; border-radius: 50%; background: #c38b3e; }.diagnostic-list .diagnostic-ok i { background: #50a677; }.diagnostic-list .diagnostic-error i { background: #bd615e; }
-  .diagnostic-list b { color: var(--workspace-text); font-weight: 700; }.diagnostic-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .diagnostic-list i { width: 5px; height: 5px; border-radius: 50%; background: #c38b3e; }
+  .diagnostic-list b { color: var(--workspace-text); font-weight: 700; }
   .inline-actions { padding-top: 10px; display: flex; justify-content: flex-end; gap: 6px; }
   .theme-label { margin: 6px 0 -2px; display: grid; gap: 2px; }
   .theme-label strong { color: var(--workspace-strong); font-size: 11px; }

@@ -24,6 +24,27 @@ export function historyEntries(prompts: Array<string | undefined>): string[] {
   return entries;
 }
 
+const DUPLICATE_WINDOW_MS = 120_000;
+
+/**
+ * Hooks and transcripts record one sent prompt under different ids, so the browse list would show it
+ * twice. Entries (newest first) with the same text recorded within moments of each other are one prompt;
+ * the same text sent again later is kept.
+ */
+export function dedupePromptEntries<T extends { createdAt: number; detail: string }>(entries: T[]): T[] {
+  const kept: T[] = [];
+  const recentByText = new Map<string, number[]>();
+  for (const entry of entries) {
+    const key = promptTextKey(entry.detail);
+    const times = recentByText.get(key) ?? [];
+    if (key && times.some((time) => Math.abs(time - entry.createdAt) <= DUPLICATE_WINDOW_MS)) continue;
+    times.push(entry.createdAt);
+    recentByText.set(key, times);
+    kept.push(entry);
+  }
+  return kept;
+}
+
 /** Moves one entry older (+1) or newer (-1); null when there is nowhere to go. */
 export function stepPromptHistory(
   history: PromptHistory,

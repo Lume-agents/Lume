@@ -65,8 +65,11 @@ assert.ok(get(workspaceDismissals).includes(exhausted[0].id), "closing usage in 
 assert.ok(get(createUsageAlertDismissals(host)).includes(exhausted[0].id), "closing usage must survive a remounted screen");
 assert.ok(!get(orbDismissals).includes(lowUsage[0].id), "low and exhausted notices have separate dismissal levels");
 orbDismissals.dismiss(collectAgentAlerts([claudeIdle], "pt-BR", now)[0].id);
-const nextCycle = collectAgentAlerts([{ ...claudeIdle, rateLimits: [{ ...claudeIdle.rateLimits[0], resetsAt: now + 120_000 }] }], "pt-BR", now)[0];
+const nextCycle = collectAgentAlerts([{ ...claudeIdle, rateLimits: [{ ...claudeIdle.rateLimits[0], resetsAt: now + 5 * 3_600_000 }] }], "pt-BR", now)[0];
 assert.ok(!get(orbDismissals).includes(nextCycle.id), "a new usage cycle must be allowed to notify");
+// The reset time drifts by seconds between reads; that must not look like a new cycle.
+const driftedReset = collectAgentAlerts([{ ...claudeIdle, rateLimits: [{ ...claudeIdle.rateLimits[0], resetsAt: now + 60_000 + 4_000 }] }], "pt-BR", now)[0];
+assert.ok(get(orbDismissals).includes(driftedReset.id), "a drifting reset time must keep a dismissed notice dismissed");
 workspaceDismissals.dismiss("permission:session:request");
 assert.ok(!get(workspaceDismissals).includes("permission:session:request"), "permission requests must remain outside account usage dismissals");
 const unavailableStorage = createUsageAlertDismissals({ localStorage: { getItem() { throw new Error("storage unavailable"); }, setItem() { throw new Error("storage unavailable"); } }, addEventListener() {} });

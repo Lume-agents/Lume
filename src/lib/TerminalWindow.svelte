@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { fade, fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { emit, emitTo, listen } from "@tauri-apps/api/event";
@@ -90,6 +90,9 @@
     getSessionModelSettings,
     getSessionFastMode,
     listSessionSlashCommands,
+    listSessionMcpServers,
+    loadWorkspacePromptIndexPage,
+    searchSessionPaths,
     interruptPrompt,
     loadDisplayBackend,
     loadPreferences,
@@ -132,7 +135,13 @@
     type CodexModelOption,
     type CodexThreadModelSettings,
     type DisplayBackend,
+    type McpServer,
+    type PathMention,
+    type WorkspacePromptIndexEntry,
   } from "$lib/lume";
+  import { applyMention, mentionAtCaret, parentMention, type MentionQuery } from "$lib/promptMentions";
+  import { caretOnEdgeLine, emptyPromptHistory, historyEntries, stepPromptHistory } from "$lib/promptHistory";
+  import { linkAtIndex, splitLinks } from "$lib/links";
 
   const currentWindow = getCurrentWindow();
   const label = currentWindow.label;
@@ -866,6 +875,217 @@
     ),
   );
 
+  // Composer tools shared with the Workspace chat: "@" files, prompt history, links, MCP and context.
+  let activeMention = $state<MentionQuery | null>(null);
+  let mentionResults = $state<PathMention[]>([]);
+  let mentionIndex = $state(0);
+  let mentionMenu = $state<HTMLDivElement | null>(null);
+  let mentionRequest = 0;
+
+  function closeMention() {
+    mentionRequest += 1;
+    activeMention = null;
+    mentionResults = [];
+    mentionIndex = 0;
+  }
+
+  async function refreshMention() {
+    const mention = promptInput && session ? mentionAtCaret(prompt, promptInput.selectionStart ?? prompt.length) : null;
+    if (!mention || !session) {
+      if (activeMention) closeMention();
+      return;
+    }
+    if (activeMention?.start === mention.start && activeMention.query === mention.query) return;
+    activeMention = mention;
+    const request = ++mentionRequest;
+    try {
+      const results = await searchSessionPaths(session.id, mention.query);
+      if (request !== mentionRequest) return;
+      mentionResults = results;
+      mentionIndex = 0;
+    } catch {
+      if (request === mentionRequest) mentionResults = [];
+    }
+  }
+
+  async function selectMention(result: PathMention) {
+    if (!activeMention || !promptInput) return;
+    const applied = applyMention(prompt, promptInput.selectionStart ?? prompt.length, activeMention, result.path, result.isDirectory);
+    prompt = applied.text;
+    closeMention();
+    await tick();
+    promptInput?.focus();
+    promptInput?.setSelectionRange(applied.caret, applied.caret);
+    // A folder keeps the menu open on its contents, like the CLI.
+    if (result.isDirectory) void refreshMention();
+  }
+
+  async function revealSelectedMention() {
+    await tick();
+    mentionMenu?.querySelector<HTMLElement>(`[data-mention-index="${mentionIndex}"]`)?.scrollIntoView({ block: "nearest" });
+  }
+
+  /** In an "@" mention the left arrow goes up a folder. */
+  async function leaveMentionFolder() {
+    const input = promptInput;
+    if (!input || !activeMention) return;
+    const up = parentMention(prompt, input.selectionStart ?? prompt.length, activeMention);
+    if (!up) return;
+    prompt = up.text;
+    closeMention();
+    await tick();
+    input.focus();
+    input.setSelectionRange(up.caret, up.caret);
+    void refreshMention();
+  }
+
+  // Arrow-key history of what was sent in this conversation.
+  let promptHistory = $state(emptyPromptHistory());
+  let promptHistoryLoaded = false;
+
+  function resetPromptHistory() {
+    promptHistory = emptyPromptHistory();
+    promptHistoryLoaded = false;
+  }
+
+  async function loadPromptHistory() {
+    if (promptHistoryLoaded || !session?.nativeSessionId) return;
+    promptHistoryLoaded = true;
+    const requestedSessionId = session.id;
+    const prompts: WorkspacePromptIndexEntry[] = [];
+    let cursor: WorkspacePromptIndexEntry | undefined;
+    let hasMore = true;
+    try {
+      // Ten pages (300 prompts) reach back further than anyone scrolls with the arrows.
+      for (let page = 0; page < 10 && hasMore; page += 1) {
+        const result = await loadWorkspacePromptIndexPage(requestedSessionId, cursor?.createdAt, cursor?.id);
+        prompts.push(...result.prompts);
+        cursor = result.prompts.at(-1);
+        hasMore = result.hasMore && Boolean(cursor);
+      }
+    } catch {
+      promptHistoryLoaded = false;
+      return;
+    }
+    if (session?.id !== requestedSessionId) return;
+    promptHistory = { ...promptHistory, entries: historyEntries(prompts.map((entry) => entry.detail)) };
+  }
+
+  async function browsePromptHistory(direction: 1 | -1) {
+    if (direction === 1) await loadPromptHistory();
+    const step = stepPromptHistory(promptHistory, direction, prompt);
+    if (!step) return;
+    promptHistory = step.history;
+    prompt = step.text;
+    closeMention();
+    slashMenuDismissed = true;
+    await tick();
+    promptInput?.setSelectionRange(prompt.length, prompt.length);
+  }
+
+  // Web links typed in the box are underlined by a layer over the text; Ctrl/Cmd+click opens one.
+  let promptMirror = $state<HTMLDivElement | null>(null);
+  let promptScrollTop = $state(0);
+  const promptSegments = $derived(splitLinks(prompt));
+  const promptHasLinks = $derived(promptSegments.some((segment) => segment.href));
+  $effect(() => {
+    const input = promptInput;
+    const mirror = promptMirror;
+    if (!input || !mirror) return;
+    const copyMetrics = () => {
+      const style = getComputedStyle(input);
+      for (const property of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "lineHeight", "wordSpacing", "textIndent", "tabSize", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth"] as const) {
+        mirror.style[property] = style[property];
+      }
+      mirror.style.width = `${input.clientWidth + parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth)}px`;
+    };
+    copyMetrics();
+    const observer = new ResizeObserver(copyMetrics);
+    observer.observe(input);
+    return () => observer.disconnect();
+  });
+
+  function handlePromptClick(event: MouseEvent) {
+    const input = promptInput;
+    if (input && (event.ctrlKey || event.metaKey) && input.selectionStart === input.selectionEnd) {
+      const href = linkAtIndex(prompt, input.selectionStart);
+      if (href) {
+        event.preventDefault();
+        void openUrl(href).catch(() => window.open(href, "_blank", "noopener,noreferrer"));
+        return;
+      }
+    }
+    void refreshMention();
+  }
+
+  // /mcp and the "+" menu: the agent's MCP servers and what they offer.
+  let mcpOpen = $state(false);
+  let mcpServers = $state<McpServer[]>([]);
+  let mcpLoading = $state(false);
+  let mcpExpanded = $state<string[]>([]);
+  let mcpRequest = 0;
+  const mcpStatusOrder = ["connected", "needs_auth", "failed", "unknown", "disabled"];
+  const sortedMcpServers = $derived([...mcpServers].sort((a, b) => mcpStatusOrder.indexOf(a.status) - mcpStatusOrder.indexOf(b.status)));
+  const supportsMcp = $derived(Boolean(session && ["codex", "claude_code", "opencode"].includes(session.agent) && session.source !== "web"));
+  async function loadMcpPanel() {
+    if (!session) return;
+    const request = ++mcpRequest;
+    const id = session.id;
+    mcpLoading = true;
+    try {
+      const configured = await listSessionMcpServers(id, false);
+      if (request !== mcpRequest) return;
+      mcpServers = configured;
+      const live = await listSessionMcpServers(id, true);
+      if (request === mcpRequest) mcpServers = live;
+    } catch (error) {
+      if (request === mcpRequest) message = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (request === mcpRequest) mcpLoading = false;
+    }
+  }
+  function openMcpPanel() {
+    mcpOpen = true;
+    mcpExpanded = [];
+    void loadMcpPanel();
+  }
+  function toggleMcpServer(key: string) {
+    mcpExpanded = mcpExpanded.includes(key) ? mcpExpanded.filter((item) => item !== key) : [...mcpExpanded, key];
+  }
+  function mcpStatusLabel(status: string) {
+    return ({ connected: tr("Connected", "Conectado"), needs_auth: tr("Needs sign-in", "Precisa de login"), failed: tr("Failed", "Falhou"), disabled: tr("Disabled", "Desativado") } as Record<string, string>)[status] ?? tr("Not checked", "Não verificado");
+  }
+
+  // Context held by a Claude conversation, as of its last prompt; a window above 200k means the 1M model.
+  const contextTokens = $derived(
+    session?.agent === "claude_code"
+      ? [...(session.promptTokenUsage ?? [])].reverse().find((usage) => (usage.contextTokens ?? 0) > 0)?.contextTokens ?? 0
+      : 0,
+  );
+  const contextWindow = $derived(contextTokens > 200_000 ? 1_000_000 : 200_000);
+  const contextPercent = $derived(contextTokens ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0);
+  const contextLevel = $derived(contextPercent >= 92 ? "danger" : contextPercent >= 75 ? "warn" : "ok");
+  function compactTokens(value: number) {
+    return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value >= 1_000 ? `${Math.round(value / 1_000)}k` : String(value);
+  }
+  const contextLabel = $derived(contextTokens
+    ? tr(`Context: ${compactTokens(contextTokens)} of ${compactTokens(contextWindow)} (${contextPercent}%)`, `Contexto: ${compactTokens(contextTokens)} de ${compactTokens(contextWindow)} (${contextPercent}%)`)
+    : "");
+  const canCompact = $derived(Boolean(
+    session?.agent === "claude_code" && session.controlOrigin === "lume" && canSubmit && !promptIsRunning && readyForPrompt && !sending,
+  ));
+
+  $effect(() => {
+    session?.id;
+    untrack(() => {
+      closeMention();
+      resetPromptHistory();
+      mcpOpen = false;
+      mcpServers = [];
+      mcpRequest += 1;
+    });
+  });
+
   let agentCommands = $state<AgentSlashCommand[]>([]);
   let agentCommandsLoading = $state(false);
   let agentCommandsSessionId = "";
@@ -943,6 +1163,8 @@
     prompt = (event.currentTarget as HTMLTextAreaElement).value;
     slashCommandIndex = 0;
     slashMenuDismissed = false;
+    if (promptHistory.index >= 0) promptHistory = { ...promptHistory, index: -1, draft: "" };
+    void refreshMention();
   }
 
   async function revealSelectedSlashCommand() {
@@ -2602,6 +2824,9 @@
       case "rename":
         beginSessionRename();
         break;
+      case "mcp":
+        openMcpPanel();
+        break;
       case "detach":
         await detach();
         break;
@@ -2640,6 +2865,8 @@
       return;
     }
     if (promptAttachments.length === 0 && await runSlashCommand(prompt)) return;
+    resetPromptHistory();
+    closeMention();
     sending = true;
     message = null;
     try {
@@ -2795,6 +3022,36 @@
   }
 
   function sendPromptOnEnter(event: KeyboardEvent) {
+    if (
+      activeMention && event.key === "ArrowLeft"
+      && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey && !event.isComposing
+      && promptInput?.selectionStart === promptInput?.selectionEnd
+      && parentMention(prompt, promptInput?.selectionStart ?? prompt.length, activeMention)
+    ) {
+      event.preventDefault();
+      void leaveMentionFolder();
+      return;
+    }
+    if (activeMention && mentionResults.length) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        mentionIndex = (mentionIndex + direction + mentionResults.length) % mentionResults.length;
+        void revealSelectedMention();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeMention();
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        void selectMention(mentionResults[Math.min(mentionIndex, mentionResults.length - 1)]);
+        return;
+      }
+    }
     const slashCommands = filteredSlashCommands();
     if (slashCommands.length) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -2834,19 +3091,53 @@
       void steerNextQueuedPrompt();
       return;
     }
+    if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey && !event.isComposing) {
+      const direction = event.key === "ArrowUp" ? 1 : -1;
+      const target = event.currentTarget as HTMLTextAreaElement;
+      const collapsed = target.selectionStart === target.selectionEnd;
+      const browsing = promptHistory.index >= 0;
+      if (collapsed && (direction === 1 || browsing) && caretOnEdgeLine(prompt, target.selectionStart, direction)) {
+        event.preventDefault();
+        void browsePromptHistory(direction);
+        return;
+      }
+    }
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
     event.preventDefault();
     void sendPrompt();
   }
 
-  async function permission(action: PermissionAction) {
-    if (!session?.pendingPermission) return;
-    if (action === "open_source") {
-      await openSessionSource(session.id);
-      return;
+  /** Sends Claude's own `/compact`, keeping whatever was being typed. */
+  async function compactContext() {
+    if (!canCompact) return;
+    composerToolsOpen = false;
+    const draft = prompt;
+    const draftAttachments = promptAttachments;
+    prompt = "/compact";
+    promptAttachments = [];
+    try {
+      await sendPrompt();
+    } finally {
+      prompt = draft;
+      promptAttachments = draftAttachments;
     }
-    await decidePermission(session.id, session.pendingPermission.id, action);
-    await refresh();
+  }
+
+  let permissionPending = $state<PermissionAction | null>(null);
+
+  async function permission(action: PermissionAction) {
+    if (!session?.pendingPermission || permissionPending) return;
+    permissionPending = action;
+    try {
+      if (action === "open_source") {
+        await openSessionSource(session.id);
+        return;
+      }
+      await decidePermission(session.id, session.pendingPermission.id, action);
+      await refresh();
+    } finally {
+      permissionPending = null;
+    }
   }
 
   async function selectQuestionOption(questionId: string, value: string) {
@@ -3569,12 +3860,13 @@
               </div>
             {/if}
             {#if session.pendingPermission}
-              <div class="permission">
+              <div class="permission" aria-busy={permissionPending !== null}>
                 <strong>{displayText(language, session.pendingPermission.summary)}</strong>
                 <code>{session.pendingPermission.resource}</code>
                 <div>
                   {#each session.permissionProfile.availableActions as action}
-                    <button class:danger={action === "deny"} type="button" onclick={() => permission(action)}>
+                    <button class:danger={action === "deny"} class:loading={permissionPending === action} type="button" disabled={permissionPending !== null} onclick={() => permission(action)}>
+                      {#if permissionPending === action}<i class="permission-spinner" aria-hidden="true"></i>{/if}
                       {actionLabel(action)}
                     </button>
                   {/each}
@@ -3968,7 +4260,60 @@
           onpointerup={endComposerResize}
           onpointercancel={endComposerResize}
         ><span></span></button>
-        {#if slashMenuVisible()}
+        {#if mcpOpen}
+          <section class="slash-command-menu mcp-panel" aria-label="MCP" in:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 70 : 160, easing: cubicOut }} out:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 60 : 110, easing: cubicOut }}>
+            <div class="slash-command-heading">
+              <strong>MCP</strong>
+              <small>{mcpLoading ? tr("Checking connections…", "Verificando conexões…") : tr(`${mcpServers.length} server${mcpServers.length === 1 ? "" : "s"}`, `${mcpServers.length} servidor${mcpServers.length === 1 ? "" : "es"}`)}</small>
+              <span class="mcp-actions">
+                <button type="button" disabled={mcpLoading} title={tr("Check again", "Verificar de novo")} aria-label={tr("Check again", "Verificar de novo")} onclick={() => void loadMcpPanel()}><LumeIcon name="refresh" size={13} /></button>
+                <button type="button" title={tr("Close", "Fechar")} aria-label={tr("Close", "Fechar")} onclick={() => (mcpOpen = false)}><LumeIcon name="close" size={13} /></button>
+              </span>
+            </div>
+            {#if !mcpServers.length && !mcpLoading}
+              <p class="slash-command-loading">{tr("No MCP servers are configured for this agent.", "Nenhum servidor MCP está configurado para este agente.")}</p>
+            {/if}
+            {#each sortedMcpServers as item (`${item.scope}:${item.name}`)}
+              {@const key = `${item.scope}:${item.name}`}
+              <div class:open={mcpExpanded.includes(key)} class="mcp-item">
+                <button class="mcp-row" type="button" aria-expanded={mcpExpanded.includes(key)} onclick={() => toggleMcpServer(key)}>
+                  <i class="mcp-dot status-{item.status}" class:checking={mcpLoading && item.status === "unknown"} title={mcpStatusLabel(item.status)}></i>
+                  <span class="mcp-main"><strong>{item.name}</strong><small title={item.target}>{item.target || item.transport}</small></span>
+                  <span class="mcp-side"><b>{item.tools.length ? tr(`${item.tools.length} tools`, `${item.tools.length} ferramentas`) : mcpStatusLabel(item.status)}</b><em>{item.transport === "stdio" ? "stdio" : "HTTP"} · {item.scope}</em></span>
+                  <LumeIcon name="chevron-down" size={12} />
+                </button>
+                {#if mcpExpanded.includes(key)}
+                  <ul class="mcp-tools">
+                    {#each item.tools as tool (tool.name)}
+                      <li><code>{tool.name}</code>{#if tool.description}<span>{tool.description}</span>{/if}</li>
+                    {:else}
+                      <li class="mcp-no-tools">{item.status === "connected" ? tr("This server did not list its tools.", "Este servidor não listou suas ferramentas.") : item.status === "needs_auth" ? tr("Sign in to this server in the agent's CLI to use it.", "Entre neste servidor pela CLI do agente para usá-lo.") : tr("Tools appear once the server is connected.", "As ferramentas aparecem quando o servidor estiver conectado.")}</li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            {/each}
+          </section>
+        {:else if activeMention && mentionResults.length}
+          <div bind:this={mentionMenu} class="slash-command-menu mention-menu" aria-label={tr("Files and folders", "Arquivos e pastas")} in:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 70 : 160, easing: cubicOut }} out:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 60 : 110, easing: cubicOut }}>
+            <div class="slash-command-heading">
+              <strong>{tr("Files and folders", "Arquivos e pastas")}</strong>
+              <small><kbd>↑↓</kbd> {tr("navigate", "navegar")} · <kbd>←</kbd> {tr("up a folder", "voltar pasta")} · <kbd>Enter</kbd> {tr("select", "selecionar")}</small>
+            </div>
+            {#each mentionResults as result, index (result.path)}
+              <button
+                class:active={mentionIndex === index}
+                data-mention-index={index}
+                type="button"
+                onmouseenter={() => (mentionIndex = index)}
+                onclick={() => void selectMention(result)}
+              >
+                {#if result.isDirectory}<LumeIcon name="folder" size={14} />{:else}<FileTypeIcon path={result.path} size={14} />{/if}
+                <span>{result.path}</span>
+              </button>
+            {/each}
+          </div>
+        {:else if slashMenuVisible()}
           <div bind:this={slashCommandMenu} class="slash-command-menu" aria-label={tr("Slash commands", "Comandos com barra")} in:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 70 : 160, easing: cubicOut }} out:fly={{ y: reducedMotion ? 0 : 6, duration: reducedMotion ? 60 : 110, easing: cubicOut }}>
             <div class="slash-command-heading">
               <strong>{tr("Commands", "Comandos")}</strong>
@@ -4059,6 +4404,18 @@
                       <span><strong>{tr("Attach file", "Anexar arquivo")}</strong><small>{promptAttachments.length}/4</small></span>
                     </button>
                   {/if}
+                  {#if session.agent === "claude_code"}
+                    <button disabled={!canCompact} type="button" role="menuitem" onclick={() => void compactContext()}>
+                      <span class="tool-icon"><LumeIcon name="compact" size={15} /></span>
+                      <span><strong>{tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
+                    </button>
+                  {/if}
+                  {#if supportsMcp}
+                    <button type="button" role="menuitem" onclick={() => { composerToolsOpen = false; openMcpPanel(); }}>
+                      <span class="tool-icon"><LumeIcon name="server" size={15} /></span>
+                      <span><strong>MCP</strong><small>{tr("Servers and tools", "Servidores e ferramentas")}</small></span>
+                    </button>
+                  {/if}
                   {#if session.agent === "codex" && session.controlOrigin === "lume"}
                     <button
                       class:active={collaborationMode === "plan"}
@@ -4088,6 +4445,12 @@
                   {/if}
                 </div>
               {/if}
+              {#if contextTokens}
+                <span class="context-meter {contextLevel}" role="img" aria-label={contextLabel} title={contextLabel}>
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="7.5" /><circle class="fill" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="{contextPercent} 100" /></svg>
+                  <b>{contextPercent}%</b>
+                </span>
+              {/if}
               {#if collaborationModeChanging && collaborationModeTarget}
                 <span class="mode-feedback" aria-live="polite">
                   {collaborationModeTarget === "plan"
@@ -4099,16 +4462,25 @@
               {/if}
             </div>
           {/if}
-          <textarea
-            bind:this={promptInput}
-            bind:value={prompt}
-            disabled={!canCompose || !readyForPrompt || sending}
-            oninput={handlePromptInput}
-            onkeydown={sendPromptOnEnter}
-            rows="2"
-            aria-label={tr(`Prompt for ${sessionDisplayName(session)}`, `Prompt para ${sessionDisplayName(session)}`)}
-            placeholder={sending ? tr("Sending prompt…", "Enviando prompt…") : !canSubmit ? promptUnavailableText() : canSendWhileRunning ? tr("Write the next prompt and press Enter to queue…", "Escreva o próximo prompt e pressione Enter para adicionar à fila…") : readyForPrompt ? tr(`Prompt for ${sessionDisplayName(session)}…`, `Prompt para ${sessionDisplayName(session)}…`) : tr("Agent is running…", "Agente em execução…")}
-          ></textarea>
+          <div class="composer-text">
+            <textarea
+              bind:this={promptInput}
+              bind:value={prompt}
+              disabled={!canCompose || !readyForPrompt || sending}
+              oninput={handlePromptInput}
+              onclick={handlePromptClick}
+              onscroll={() => (promptScrollTop = promptInput?.scrollTop ?? 0)}
+              onkeyup={(event) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) void refreshMention(); }}
+              onkeydown={sendPromptOnEnter}
+              rows="2"
+              title={promptHasLinks ? tr("Ctrl+click a link to open it", "Ctrl+clique em um link para abri-lo") : undefined}
+              aria-label={tr(`Prompt for ${sessionDisplayName(session)}`, `Prompt para ${sessionDisplayName(session)}`)}
+              placeholder={sending ? tr("Sending prompt…", "Enviando prompt…") : !canSubmit ? promptUnavailableText() : canSendWhileRunning ? tr("Write the next prompt and press Enter to queue…", "Escreva o próximo prompt e pressione Enter para adicionar à fila…") : readyForPrompt ? tr(`Prompt for ${sessionDisplayName(session)}…`, `Prompt para ${sessionDisplayName(session)}…`) : tr("Agent is running…", "Agente em execução…")}
+            ></textarea>
+            {#if promptHasLinks}
+              <div class="prompt-mirror" bind:this={promptMirror} aria-hidden="true"><div style:transform={`translateY(${-promptScrollTop}px)`}>{#each promptSegments as segment}{#if segment.href}<span class="prompt-link">{segment.text}</span>{:else}{segment.text}{/if}{/each}{"\n"}</div></div>
+            {/if}
+          </div>
           {#if promptIsRunning}
             <button
               class="interrupt-submit"
@@ -4650,6 +5022,11 @@
   .permission > div { display: flex; gap: 4px; }
   .permission button { min-height: 23px; padding: 0 7px; border: 1px solid rgba(82, 101, 93, 0.15); border-radius: 6px; color: #4b5d55; background: rgba(255, 255, 255, 0.58); font: 700 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .permission button.danger { color: #a64d4d; }
+  .permission button { display: inline-flex; align-items: center; gap: 5px; }
+  .permission button:disabled:not(.loading) { opacity: .5; cursor: default; }
+  .permission button.loading { cursor: progress; }
+  .permission-spinner { width: 9px; height: 9px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: permission-spin .7s linear infinite; }
+  @keyframes permission-spin { to { transform: rotate(360deg); } }
   .agent-question { margin: 8px 0 3px; padding: 9px; display: grid; gap: 9px; border: 1px solid rgba(48, 133, 176, 0.2); border-radius: 9px; background: rgba(48, 133, 176, 0.055); }
   .agent-question-item { min-width: 0; display: grid; gap: 5px; }
   .agent-question-item > small { color: #367b9c; font: 800 var(--chat-small-font-size)/1.2 var(--lume-font-ui, Inter, sans-serif); letter-spacing: 0.04em; text-transform: uppercase; }
@@ -4758,6 +5135,48 @@
   .terminal-output .fork-mark { margin-left: 7px; display: inline-flex; align-items: center; gap: 3px; color: #397d5d; font: 700 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); vertical-align: middle; }
   .terminal-window.dark .terminal-output .fork-mark { color: #8dceb0; }
   .terminal-window[data-appearance] .terminal-output .fork-mark { color: var(--dropdown-accent); }
+  .composer-text { position: relative; min-width: 0; display: flex; flex: 1; }
+  .composer-text > textarea { width: 100%; }
+  .prompt-mirror { position: absolute; top: 0; bottom: 0; left: 0; overflow: hidden; box-sizing: border-box; border-style: solid; border-color: transparent; color: transparent; white-space: pre-wrap; overflow-wrap: break-word; pointer-events: none; }
+  .prompt-link { border-radius: 3px; background: rgba(54, 143, 97, 0.16); text-decoration: underline; text-decoration-color: #2e7657; text-underline-offset: 2px; }
+  .terminal-window.dark .prompt-link { background: rgba(141, 206, 176, 0.18); text-decoration-color: #8dceb0; }
+  .terminal-composer .mention-menu > button { grid-template-columns: 16px minmax(0, 1fr); }
+  .mention-menu button > span { font-family: var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); }
+  .mcp-actions { margin-left: auto; display: flex; gap: 2px; }
+  .terminal-composer .mcp-actions button { width: 22px; height: 22px; min-height: 0; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: #7d8e85; background: transparent; cursor: pointer; }
+  .terminal-composer .mcp-actions button:hover:not(:disabled) { color: #2e7657; background: rgba(54, 143, 97, 0.08); }
+  .mcp-actions button:disabled { opacity: .4; }
+  .mcp-item + .mcp-item { border-top: 1px solid rgba(80, 105, 94, 0.08); }
+  .terminal-composer .slash-command-menu .mcp-row { width: 100%; min-height: 40px; height: auto; padding: 6px 8px; display: flex; align-items: center; gap: 9px; border-radius: 8px; color: #53665d; background: transparent; text-align: left; cursor: pointer; }
+  .terminal-composer .slash-command-menu .mcp-row:hover { background: rgba(54, 143, 97, 0.08); }
+  .mcp-row > :global(.lume-icon) { flex: 0 0 auto; color: #8b9892; transition: transform 160ms ease; }
+  .mcp-item.open .mcp-row > :global(.lume-icon) { transform: rotate(180deg); }
+  .mcp-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: #aab6b0; }
+  .mcp-dot.status-connected { background: #3f9b69; box-shadow: 0 0 0 3px rgba(63, 155, 105, 0.22); }
+  .mcp-dot.status-failed { background: #c0554f; }
+  .mcp-dot.status-needs_auth { background: #d0a142; }
+  .mcp-main { min-width: 0; flex: 1; display: grid; gap: 1px; }
+  .mcp-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #3f5249; font: 700 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); }
+  .mcp-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8b9892; font: 650 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); }
+  .mcp-side { flex: 0 0 auto; display: grid; justify-items: end; gap: 1px; }
+  .mcp-side b { color: #718079; font: 700 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); }
+  .mcp-side em { color: #8b9892; font: 650 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); font-style: normal; }
+  .mcp-tools { margin: 0 6px 6px 25px; padding: 0; display: grid; gap: 5px; list-style: none; }
+  .mcp-tools li { min-width: 0; display: grid; gap: 1px; }
+  .mcp-tools code { overflow: hidden; text-overflow: ellipsis; color: #397d5d; font: 700 var(--chat-tiny-font-size) "SFMono-Regular", Consolas, monospace; }
+  .mcp-tools span, .mcp-no-tools { color: #718079; font: 650 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); line-height: 1.4; }
+  .terminal-window.dark .mcp-main strong { color: #d3e0d9; }
+  .terminal-window.dark .terminal-composer .slash-command-menu .mcp-row { color: #b7c8bf; }
+  .terminal-window.dark .terminal-composer .slash-command-menu .mcp-row:hover { background: rgba(141, 206, 176, 0.09); }
+  .terminal-window.dark .mcp-tools code { color: #8dceb0; }
+  .context-meter { height: 27px; padding: 0 4px; display: inline-flex; align-items: center; gap: 4px; color: #718079; font: 700 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); font-variant-numeric: tabular-nums; cursor: default; }
+  .context-meter svg { width: 17px; height: 17px; transform: rotate(-90deg); }
+  .context-meter circle { fill: none; stroke-width: 2.4; }
+  .context-meter .track { stroke: rgba(80, 105, 94, 0.16); }
+  .context-meter .fill { stroke: #397d5d; stroke-linecap: round; transition: stroke-dasharray 240ms ease; }
+  .terminal-window.dark .context-meter .fill { stroke: #8dceb0; }
+  .context-meter.warn, .context-meter.warn .fill { color: #c98a2d; stroke: #c98a2d; }
+  .context-meter.danger, .context-meter.danger .fill { color: #d85c64; stroke: #d85c64; }
   .slash-command-loading { margin: 0; padding: 7px 8px; color: #8b9892; font: 650 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); }
   .slash-command-menu code { color: #397d5d; font: 750 var(--chat-small-font-size) var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); white-space: nowrap; }
   .slash-command-menu button > span { min-width: 0; display: grid; gap: 2px; overflow: hidden; font: 620 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }

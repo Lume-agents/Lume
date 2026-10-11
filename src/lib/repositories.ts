@@ -139,6 +139,10 @@ export function repositoryError(error: string, portuguese: boolean) {
     command_output_limit: ["This result exceeds the preview limit. Open it in your editor.", "Este resultado excede o limite de visualização. Abra no seu editor."],
     file_no_longer_changed: ["This file changed since the last refresh. Refresh the repository.", "Este arquivo mudou desde a última atualização. Atualize o repositório."],
     desktop_required: ["Repository tools are available in the Lume desktop app.", "As ferramentas de repositório estão disponíveis no aplicativo desktop do Lume."],
+    identity_missing: ["Git does not know who you are. Set user.name and user.email, then try again.", "O Git não sabe quem você é. Configure user.name e user.email e tente de novo."],
+    nothing_to_commit: ["There is nothing to commit.", "Não há nada para commitar."],
+    hook_failed: ["A Git hook rejected the commit.", "Um hook do Git rejeitou o commit."],
+    command_failed: ["Git could not complete the command.", "O Git não conseguiu concluir o comando."],
     no_github_remote: ["This repository has no GitHub remote.", "Este repositório não tem um remote do GitHub."],
   };
   return descriptions[error]?.[Number(portuguese)] ?? (portuguese ? "Não foi possível carregar os dados. Confira sua conexão e tente atualizar." : "Could not load the data. Check your connection and try refreshing.");

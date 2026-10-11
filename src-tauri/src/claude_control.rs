@@ -149,7 +149,7 @@ pub fn usage(working_directory: &str) -> Result<Vec<AgentRateLimit>, String> {
     let response = request(working_directory, &["initialize", "get_usage"])?
         .remove("get_usage")
         .ok_or("Claude did not answer the usage request")?;
-    Ok(rate_limits(&response))
+    rate_limits(&response)
 }
 
 /// The MCP servers of a Claude conversation started in this folder, with their tools. Servers
@@ -325,7 +325,10 @@ fn exchange(
         let remaining = deadline.saturating_duration_since(Instant::now());
         let line = receiver
             .recv_timeout(remaining)
-            .map_err(|_| "Claude did not answer in time".to_string())?;
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => "Claude did not answer in time",
+                mpsc::RecvTimeoutError::Disconnected => "Claude exited before answering",
+            })?;
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -512,13 +515,30 @@ pub fn effective_settings(
     }
 }
 
-pub fn rate_limits(usage: &Value) -> Vec<AgentRateLimit> {
-    let windows = usage
+/// The `/usage` windows, or why there are none: a CLI signed out or using an API key
+/// answers `get_usage` with `rate_limits: null`.
+pub fn rate_limits(usage: &Value) -> Result<Vec<AgentRateLimit>, String> {
+    let limits = match usage
         .pointer("/rate_limits/limits")
-        .and_then(Value::as_array);
-    let Some(windows) = windows else {
-        return legacy_rate_limits(usage);
+        .and_then(Value::as_array)
+    {
+        Some(windows) => current_rate_limits(windows),
+        None => legacy_rate_limits(usage),
     };
+    if !limits.is_empty() {
+        return Ok(limits);
+    }
+    let unavailable = usage.get("rate_limits_available").and_then(Value::as_bool) == Some(false)
+        || usage.get("rate_limits").is_none_or(Value::is_null);
+    Err(if unavailable {
+        "Claude Code has no subscription usage limits to show. Run `claude` in a terminal and sign in with a Claude Pro or Max account."
+    } else {
+        "Claude Code answered /usage in a format Lume does not recognise yet."
+    }
+    .into())
+}
+
+fn current_rate_limits(windows: &[Value]) -> Vec<AgentRateLimit> {
     windows
         .iter()
         .filter_map(|window| {
@@ -704,7 +724,7 @@ mod tests {
             { "kind": "session", "group": "session", "percent": 25, "resets_at": "2026-10-06T20:40:00+00:00" },
             { "kind": "weekly_all", "group": "weekly", "percent": 4.4, "resets_at": "2026-10-11T18:00:00+00:00" }
         ]}});
-        let limits = rate_limits(&usage);
+        let limits = rate_limits(&usage).expect("limits");
         assert_eq!(limits.len(), 2);
         assert_eq!(
             (
@@ -723,6 +743,43 @@ mod tests {
             ("7d", 4, Some(10080))
         );
         assert_eq!(limits[0].resets_at, Some(1_791_319_200_000));
+    }
+
+    #[test]
+    fn usage_maps_legacy_five_hour_and_seven_day_limits() {
+        let usage = json!({ "rate_limits": {
+            "five_hour": { "utilization": 61.6, "resets_at": "2026-10-06T20:40:00+00:00" },
+            "seven_day": { "utilization": 12, "resets_at": null },
+            "seven_day_opus": null
+        }});
+        let limits = rate_limits(&usage).expect("limits");
+        let summary = limits
+            .iter()
+            .map(|limit| (limit.label.as_str(), limit.used_percent))
+            .collect::<Vec<_>>();
+        assert_eq!(summary, [("5h", 62), ("7d", 12)]);
+    }
+
+    #[test]
+    fn usage_without_subscription_limits_is_an_error_not_empty_gauges() {
+        // What `get_usage` answers when the CLI is signed out or uses an API key.
+        let usage = json!({
+            "session": { "total_cost_usd": 0, "model_usage": {} },
+            "subscription_type": null,
+            "rate_limits_available": false,
+            "rate_limits": null,
+            "behaviors": null
+        });
+        let error = rate_limits(&usage).expect_err("no limits to show");
+        assert!(error.contains("sign in"), "{error}");
+    }
+
+    #[test]
+    fn usage_in_an_unknown_shape_is_reported_as_such() {
+        let usage = json!({ "rate_limits_available": true, "rate_limits": { "buckets": [] } });
+        let error = rate_limits(&usage).expect_err("unknown shape");
+        assert!(!error.contains("sign in"), "{error}");
+        assert!(error.contains("format"), "{error}");
     }
 }
 

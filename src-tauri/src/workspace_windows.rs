@@ -205,6 +205,9 @@ impl WorkspaceWindows {
                     .resizable(true)
                     .decorations(false)
                     .transparent(true)
+                    // On Windows Tauri's native drop handler swallows HTML5 drag and drop, which the
+                    // sidebar uses to move agents between sections and onto the board.
+                    .disable_drag_drop_handler()
                     .visible(false)
                     .initialization_script(format!("window.__LUME_WORKSPACE_BOOT_ID__ = {id};"))
                     .center()

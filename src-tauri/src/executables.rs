@@ -87,6 +87,8 @@ fn common_user_path(name: &str) -> Option<PathBuf> {
     })
     .map(PathBuf::from)?;
     let mut directories = vec![home.join(".local/bin"), home.join(".cargo/bin")];
+    #[cfg(not(target_os = "windows"))]
+    directories.extend(unix_install_directories(&home));
     #[cfg(target_os = "windows")]
     if let Some(app_data) = env::var_os("APPDATA") {
         directories.push(PathBuf::from(app_data).join("npm"));
@@ -99,6 +101,17 @@ fn common_user_path(name: &str) -> Option<PathBuf> {
         .into_iter()
         .flat_map(|directory| executable_candidates(&directory, name))
         .find(|path| path.is_file())
+}
+
+/// Install locations a GUI app's PATH leaves out: Claude's local installer (reached through a
+/// shell alias, which `command -v` does not print as a path) and Homebrew.
+#[cfg(not(target_os = "windows"))]
+fn unix_install_directories(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".claude/local"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]
 }
 
 fn executable_candidates(directory: &Path, name: &str) -> Vec<PathBuf> {
@@ -166,5 +179,13 @@ mod tests {
     fn executable_candidates_include_the_plain_unix_name() {
         let candidates = executable_candidates(Path::new("/tmp/bin"), "codex");
         assert!(candidates.iter().any(|path| path.ends_with("codex")));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn gui_lookup_covers_claude_local_installs_and_homebrew() {
+        let directories = unix_install_directories(Path::new("/Users/me"));
+        assert!(directories.contains(&PathBuf::from("/Users/me/.claude/local")));
+        assert!(directories.contains(&PathBuf::from("/opt/homebrew/bin")));
     }
 }

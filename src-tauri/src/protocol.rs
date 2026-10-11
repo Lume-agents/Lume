@@ -143,6 +143,14 @@ impl SessionCapabilities {
                     PromptDelivery::Steer,
                     PromptDelivery::Queue,
                 ]
+            } else if claude_queues_in_lume(session) {
+                // Each message to a Lume-owned Claude conversation is its own run, so they queue; "steer"
+                // means send now: stop the running message and run the queued one.
+                vec![
+                    PromptDelivery::NewTurn,
+                    PromptDelivery::Queue,
+                    PromptDelivery::Steer,
+                ]
             } else {
                 vec![PromptDelivery::NewTurn]
             },
@@ -160,11 +168,18 @@ pub(crate) fn is_unbound_codex_cli_monitor(session: &AgentSession) -> bool {
 
 fn can_interrupt_session(session: &AgentSession) -> bool {
     session.source != SessionSource::Web
-        && matches!(
+        && (matches!(
             session.agent,
             AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
-        )
+        ) || claude_queues_in_lume(session))
         && has_nonempty_value(session.native_session_id.as_deref())
+}
+
+/// A Claude Code conversation Lume owns runs each message as its own `claude --print` process.
+fn claude_queues_in_lume(session: &AgentSession) -> bool {
+    session.agent == AgentKind::ClaudeCode
+        && session.control_origin == SessionControlOrigin::Lume
+        && matches!(session.source, SessionSource::Cli | SessionSource::Desktop)
 }
 
 fn has_nonempty_value(value: Option<&str>) -> bool {
@@ -597,7 +612,7 @@ fn explicit_message_todo(detail: &str) -> Option<Vec<WorkItem>> {
                 || heading == "to do"
                 || heading.starts_with("todo ")
                 || heading.starts_with("to do ")
-                || (line.ends_with(':') && (heading.contains("todo") || heading.contains("to do")));
+                || (line.ends_with(':') && is_short_todo_label(&heading));
             continue;
         }
         if let Some(item) = message_task_line(line, true) {
@@ -613,6 +628,18 @@ fn explicit_message_todo(detail: &str) -> Option<Vec<WorkItem>> {
         }
     }
     (!items.is_empty()).then_some(items)
+}
+
+/// A short label such as "Current todo:" or "Next to do:". The words must stand alone: a plain
+/// substring match took "bruto do erro … para:" ("bru**to do**") for a to-do heading, and the bullets
+/// after any such sentence became tasks.
+fn is_short_todo_label(heading: &str) -> bool {
+    let words = heading
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    words.len() <= 5
+        && (words.contains(&"todo") || words.windows(2).any(|pair| pair == ["to", "do"]))
 }
 
 fn message_task_line(line: &str, allow_plain_bullet: bool) -> Option<WorkItem> {
@@ -1690,6 +1717,7 @@ mod tests {
             results: Vec::new(),
             activities: Vec::new(),
             rate_limits: Vec::new(),
+            rate_limits_error: None,
             prompt_token_usage: Vec::new(),
             forked_from: None,
         }
@@ -1892,6 +1920,31 @@ mod tests {
         assert!(SessionCapabilities::for_session(&headless).can_terminate);
         headless.control_origin = SessionControlOrigin::External;
         assert!(!SessionCapabilities::for_session(&headless).can_terminate);
+    }
+
+    #[test]
+    fn claude_opened_by_lume_can_queue_and_be_interrupted_while_running() {
+        let mut claude = session();
+        claude.agent = AgentKind::ClaudeCode;
+        claude.source = SessionSource::Cli;
+        claude.process_id = None;
+        claude.control_origin = SessionControlOrigin::Lume;
+        claude.native_session_id = Some("claude-session".into());
+        claude.status = SessionStatus::Running;
+        let capabilities = SessionCapabilities::for_session(&claude);
+        assert!(capabilities.can_interrupt);
+        assert_eq!(
+            capabilities.prompt_deliveries,
+            vec![
+                PromptDelivery::NewTurn,
+                PromptDelivery::Queue,
+                PromptDelivery::Steer
+            ]
+        );
+        claude.control_origin = SessionControlOrigin::External;
+        let external = SessionCapabilities::for_session(&claude);
+        assert!(!external.can_interrupt);
+        assert_eq!(external.prompt_deliveries, vec![PromptDelivery::NewTurn]);
     }
 
     #[test]
@@ -2111,6 +2164,15 @@ mod tests {
         let snapshot = HubSnapshot::new(vec![session]);
         assert!(snapshot.sessions[0].work_summary.todo.is_none());
         assert!(snapshot.sessions[0].work_summary.plan.is_none());
+    }
+
+    #[test]
+    fn a_sentence_that_merely_contains_to_do_is_not_a_todo_heading() {
+        let sentence = "Erros mais claros: o painel mostrava o código bruto do erro. Agora aparecem mensagens para:\n\n- identidade do Git não configurada;\n- nada para commitar;";
+        assert!(explicit_message_todo(sentence).is_none());
+        assert!(!is_work_tracking_message(sentence));
+        let heading = "Próximo to do:\n\n- Conferir estados\n- Rodar checks";
+        assert_eq!(explicit_message_todo(heading).map(|items| items.len()), Some(2));
     }
 
     #[test]

@@ -28,6 +28,40 @@ body {
   background: transparent;
 }
 
+/* Lume's slim rounded scrollbar. WebView2 (Chromium 121+) ignores every ::-webkit-scrollbar rule on an
+   element that also sets scrollbar-width or scrollbar-color and draws its own Windows bar instead, while
+   WebKitGTK keeps the custom one. The standard properties are reset so both engines use the same bar. */
+* {
+  scrollbar-width: auto !important;
+  scrollbar-color: auto !important;
+}
+
+*::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+  background: transparent;
+}
+
+*::-webkit-scrollbar-button {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--workspace-scroll-thumb, var(--lume-scroll-light, #cad2ce));
+}
+
+:root[data-theme="dark"] *::-webkit-scrollbar-thumb {
+  background: var(--workspace-scroll-thumb, var(--lume-scroll-dark, rgba(199, 218, 207, 0.32)));
+}
+
 button {
   font: inherit;
 }

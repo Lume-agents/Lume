@@ -52,7 +52,7 @@
       unticked = [];
       await observeRepository(session).refresh(true);
     } catch (error) {
-      commitError = String(error).replace(/^Error:\s*/, "");
+      commitError = repositoryError(String(error).replace(/^Error:\s*/, ""), language === "pt-BR");
     } finally {
       committing = false;
     }

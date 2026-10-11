@@ -99,6 +99,8 @@ export interface AgentSession {
   results: SessionResult[];
   activities: SessionActivity[];
   rateLimits?: AgentRateLimit[];
+  /** Why the last refresh could not read the agent's account limits. */
+  rateLimitsError?: string;
   promptTokenUsage?: PromptTokenUsage[];
   /** Native id of the conversation this one was forked from. */
   forkedFrom?: string;
@@ -109,6 +111,8 @@ export interface PromptTokenUsage {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
+  /** What the conversation held when the prompt ended; 0 when the agent does not report it. */
+  contextTokens?: number;
   createdAt: number;
 }
 
@@ -216,6 +220,8 @@ export interface HistoryEntry {
 export interface Preferences {
   language: "en" | "pt-BR";
   startupMode: "ask" | "orb" | "workspace";
+  /** The first-run guide has been seen once. */
+  onboardingCompleted: boolean;
   darkMode?: boolean;
   appearanceTheme: "lume" | "forest" | "ocean" | "violet" | "ember";
   accentColor?: string;

@@ -109,4 +109,20 @@ assert.deepEqual(buildLatestReviewTurn([
   result("final-result", 520, "Final"),
 ]), revisedResult[0]);
 
+// Windows paths ignore case: the same file reported absolute with another drive/folder casing is one file.
+const windowsFiles = collectReviewFiles([{
+  id: "win-1",
+  kind: "file",
+  title: "Files changed",
+  detail: "",
+  status: "completed",
+  createdAt: 30,
+  files: [
+    "src-tauri/src/workspace_windows.rs",
+    "C:\\Users\\Dev\\Lume\\src-tauri\\src\\workspace_windows.rs",
+    "\\\\?\\c:\\users\\dev\\lume\\src-tauri\\src\\workspace_windows.rs",
+  ],
+}], "c:\\Users\\Dev\\Lume");
+assert.deepEqual(windowsFiles.map((file) => file.path), ["src-tauri/src/workspace_windows.rs"]);
+
 console.log("review diff test suite passed");

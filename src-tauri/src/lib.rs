@@ -5,6 +5,7 @@ mod agent_plugins;
 mod antigravity_stream;
 mod browser_server;
 mod claude_control;
+mod cli_installer;
 mod codex_bridge;
 mod codex_cli_identity;
 mod codex_daemon_observer;
@@ -529,6 +530,39 @@ async fn get_session_repository_diff(
 }
 
 #[tauri::command]
+async fn cli_install_plans() -> Result<Vec<cli_installer::InstallPlan>, String> {
+    tauri::async_runtime::spawn_blocking(cli_installer::plans)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn start_cli_install(app: AppHandle, kind: String, method: String) -> Result<String, String> {
+    cli_installer::start(&app, &kind, &method)
+}
+
+#[tauri::command]
+fn cancel_cli_install(id: String) -> bool {
+    cli_installer::cancel(&id)
+}
+
+#[tauri::command]
+async fn commit_session_repository(
+    state: State<'_, AppState>,
+    session_id: String,
+    paths: Vec<String>,
+    message: String,
+) -> Result<repository::CommitOutcome, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = repository_directory(&state, &session_id)?;
+        repository::commit(&directory, &paths, &message)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_session_github(
     state: State<'_, AppState>,
     session_id: String,
@@ -932,11 +966,24 @@ fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
         return;
     }
     std::thread::spawn(move || {
-        let working_directory = std::env::temp_dir().to_string_lossy().into_owned();
-        if let Ok(limits) = claude_control::usage(&working_directory) {
-            let _ = usage_monitor::publish(&app, &state, AgentKind::ClaudeCode, limits);
+        // Released even if the probe panics, so later refreshes are not skipped forever.
+        struct Release;
+        impl Drop for Release {
+            fn drop(&mut self) {
+                REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
         }
-        REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _release = Release;
+        let working_directory = std::env::temp_dir().to_string_lossy().into_owned();
+        match claude_control::usage(&working_directory) {
+            Ok(limits) => {
+                let _ = usage_monitor::publish(&app, &state, AgentKind::ClaudeCode, limits);
+            }
+            Err(error) => {
+                eprintln!("Claude Code usage: {error}");
+                let _ = usage_monitor::publish_error(&app, &state, AgentKind::ClaudeCode, error);
+            }
+        }
     });
 }
 
@@ -1896,7 +1943,9 @@ fn set_preferences(
         app.autolaunch()
             .enable()
             .map_err(|error| error.to_string())?;
-    } else {
+    } else if app.autolaunch().is_enabled().unwrap_or(false) {
+        // Disabling an entry that was never registered fails with "os error 2" on Windows,
+        // which would block every unrelated preference change.
         app.autolaunch()
             .disable()
             .map_err(|error| error.to_string())?;
@@ -3050,6 +3099,10 @@ pub fn run() {
             stop_session_environment,
             get_session_repository,
             get_session_repository_diff,
+            commit_session_repository,
+            cli_install_plans,
+            start_cli_install,
+            cancel_cli_install,
             search_session_paths,
             get_session_github,
             get_github_account,

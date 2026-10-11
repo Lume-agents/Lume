@@ -13,7 +13,8 @@ registerHooks({
 });
 
 const { caretOnEdgeLine, emptyPromptHistory, historyEntries, stepPromptHistory } = await import("../src/lib/promptHistory.ts");
-const { applyMention, mentionAtCaret } = await import("../src/lib/promptMentions.ts");
+const { applyMention, mentionAtCaret, parentMention } = await import("../src/lib/promptMentions.ts");
+const { linkAtIndex, splitLinks } = await import("../src/lib/links.ts");
 
 test("history keeps the draft and walks from newest to oldest", () => {
   let history = { ...emptyPromptHistory(), entries: ["terceiro", "segundo", "primeiro"] };
@@ -51,4 +52,24 @@ test("@ completes paths at the caret like the CLI", () => {
   assert.deepEqual(file, { text: "veja @src/lib/lume.ts agora", caret: 21 });
   const folder = applyMention("@sr", 3, mentionAtCaret("@sr", 3), "src/", true);
   assert.deepEqual(folder, { text: "@src/", caret: 5 }, "folders keep completing");
+});
+
+test("the left arrow leaves a folder inside an @ mention", () => {
+  const up = (text, caret) => parentMention(text, caret, mentionAtCaret(text, caret));
+  assert.deepEqual(up("veja @src/lib/", 14), { text: "veja @src/", caret: 10 });
+  assert.deepEqual(up("@src/", 5), { text: "@", caret: 1 }, "the last folder returns to the top level");
+  assert.deepEqual(up("@src/li", 7), { text: "@src/", caret: 5 }, "a half-typed name is dropped too");
+  assert.equal(up("@src", 4), null, "with no folder to leave the arrow moves the caret");
+  assert.equal(up("@", 1), null);
+});
+
+test("web links are found in text without swallowing punctuation", () => {
+  const segments = splitLinks("veja https://exemplo.com/a?b=1, e (https://x.dev/y) ou http://");
+  assert.deepEqual(segments.filter((segment) => segment.href).map((segment) => segment.href), [
+    "https://exemplo.com/a?b=1",
+    "https://x.dev/y",
+  ]);
+  assert.equal(segments.map((segment) => segment.text).join(""), "veja https://exemplo.com/a?b=1, e (https://x.dev/y) ou http://", "every character is kept");
+  assert.equal(linkAtIndex("abre https://x.dev agora", 10), "https://x.dev");
+  assert.equal(linkAtIndex("abre https://x.dev agora", 2), null);
 });

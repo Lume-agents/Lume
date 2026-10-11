@@ -231,6 +231,10 @@ pub struct PromptTokenUsage {
     pub total_tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// What the conversation held when this prompt ended (the last response's input plus its output);
+    /// 0 when the agent does not report it.
+    #[serde(default)]
+    pub context_tokens: u64,
     pub created_at: i64,
 }
 
@@ -341,6 +345,9 @@ pub struct AgentSession {
     pub activities: Vec<SessionActivity>,
     #[serde(default)]
     pub rate_limits: Vec<AgentRateLimit>,
+    /// Why the last refresh could not read the agent's account limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits_error: Option<String>,
     #[serde(default)]
     pub prompt_token_usage: Vec<PromptTokenUsage>,
     /// Native id of the conversation this one was forked from.
@@ -710,6 +717,8 @@ pub struct WorkflowHistoryRecord {
 pub struct Preferences {
     pub language: String,
     pub startup_mode: String,
+    /// The first-run guide has been seen once; it is not shown again.
+    pub onboarding_completed: bool,
     pub dark_mode: Option<bool>,
     pub appearance_theme: String,
     pub accent_color: Option<String>,
@@ -757,6 +766,7 @@ impl Default for Preferences {
         Self {
             language: "en".into(),
             startup_mode: "ask".into(),
+            onboarding_completed: false,
             dark_mode: None,
             appearance_theme: "lume".into(),
             accent_color: None,

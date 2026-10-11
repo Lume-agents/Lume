@@ -5,6 +5,7 @@ export type AgentKind =
   | "claude_code"
   | "antigravity"
   | "opencode"
+  | "omp"
   | "deepseek"
   | "gemini"
   | "unknown";
@@ -245,6 +246,7 @@ export interface Preferences {
   autostart: boolean;
   mobileGatewayEnabled: boolean;
   monitorId?: string;
+  ompIdleTimeoutMinutes: number;
   overlayX?: number;
   overlayY?: number;
   showOverFullscreen: boolean;
@@ -506,7 +508,7 @@ export interface WorkflowContextPackage {
 }
 
 export interface IntegrationStatus {
-  kind: "codex" | "claude" | "antigravity" | "opencode" | "deepseek" | "gemini";
+  kind: "codex" | "claude" | "antigravity" | "opencode" | "omp" | "deepseek" | "gemini";
   label: string;
   installed: boolean;
   configured: boolean;
@@ -524,6 +526,7 @@ export interface ResumableSession {
   workingDirectory: string;
   source: string;
   updatedAt: number;
+  profile?: string;
 }
 
 export interface DiagnosticCheck {

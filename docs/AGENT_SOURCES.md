@@ -11,7 +11,7 @@ How Lume detects and controls each agent. The [README](../README.md) has the sho
 | Codex sessions controlled by Lume | Local App Server | Prompts, queue, steer, approvals, model, and reasoning effort |
 | Claude Code sessions controlled by Lume | Official Claude CLI and hooks | Prompts, supported permission actions, model, and reasoning effort |
 | Antigravity CLI | `agy` processes and CLI-only hooks | Hook activity/status and resume of the latest indexed conversation per workspace; the full transcript stays in the CLI; wildcard `PreToolUse` automatically allows all tools, including when Lume is unavailable; disable/remove the hook to restore native approvals; prompt interruption and queue/steer are not exposed |
-| DeepSeek Harness | Official `dsh` process | Opens the configured TUI profile; process monitoring |
+| Oh My Pi (`omp`) | CLI processes/session files; controlled sessions use omp RPC | Controlled prompts, steer/queue, interrupt, model/thinking, approval decisions (allow once/deny), questions and compaction; external sessions can be taken over only after the terminal omp is closed; no plan mode |
 | Gemini CLI (legacy enterprise/API use) | Process detection | Monitoring only; Lume does not send prompts, resume, terminate it, or install hooks in Gemini's shared settings |
 | ChatGPT, Claude, DeepSeek, and Gemini web | Chromium Companion | Prompts while the page is waiting for input, status, final response, and opening the matching tab; confirmed prompt delivery requires Companion protocol v2; queue/steer while running is not supported |
 
@@ -24,6 +24,9 @@ Process detection works independently of hooks. Antigravity hook delivery on Win
 ## Connect agent sources
 
 After connecting Codex for the first time, run `/hooks` inside Codex and trust the **Lume** hook. Codex requires this confirmation for new or modified local hooks.
+For Oh My Pi, process and session-file monitoring works without connecting the integration. **Settings → Oh My Pi → Connect** installs Lume's optional extension for live status. Sessions can be opened in Lume's controlled RPC mode or resumed in a terminal with `omp --resume`; profile sessions are preserved. Lume-controlled sessions support approvals with **Allow once** or **Deny**, never persistent approval, and have no plan mode. External sessions can be taken over only after the terminal omp is closed.
+Oh My Pi transcripts remain in omp's JSONL files. Lume reads them into memory while monitoring and does not store a second transcript copy in its database.
+
 
 To install the browser Companion:
 

@@ -136,6 +136,8 @@ impl Store {
                  );
                  CREATE INDEX IF NOT EXISTS idx_conversation_activities_thread
                     ON conversation_activities(thread_key, created_at ASC);
+                 -- omp JSONL is the conversation source; do not retain a second copy in Lume.
+                 DELETE FROM conversation_activities WHERE thread_key LIKE 'omp:%';
                  CREATE TABLE IF NOT EXISTS managed_sessions (
                     session_id TEXT PRIMARY KEY,
                     payload TEXT NOT NULL,
@@ -453,6 +455,11 @@ impl Store {
     }
 
     pub fn conversation_key(session: &AgentSession) -> Option<String> {
+        // The omp session file is authoritative. Its transcript stays in memory in Lume,
+        // including externally monitored and Lume-controlled sessions.
+        if session.agent == AgentKind::Omp {
+            return None;
+        }
         let native_id = session.native_session_id.as_deref()?.trim();
         if native_id.is_empty() {
             return None;
@@ -1405,6 +1412,20 @@ mod tests {
         assert_eq!(archived.len(), 1);
         assert_eq!(archived[0].detail.as_deref(), Some("resposta preservada"));
         assert!(archived[0].attachments[0].preview_data_url.is_empty());
+        let mut omp = threaded.clone();
+        omp.agent = AgentKind::Omp;
+        store
+            .save_session(&omp)
+            .expect("observes omp without archiving");
+        let omp_rows: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_activities WHERE thread_key = 'omp:thread-archive'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count omp transcript copies");
+        assert_eq!(omp_rows, 0);
 
         for index in 2..=4 {
             threaded.activities.push(SessionActivity {

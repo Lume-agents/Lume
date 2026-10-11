@@ -169,13 +169,30 @@ pub fn submit_prompt(
         && session.source != SessionSource::Web
         && matches!(
             session.agent,
-            AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::OpenCode
+            AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::OpenCode | AgentKind::Omp
         )
     {
         return Err(
             "This session is controlled by an external CLI. Transfer it to Lume before sending a prompt."
                 .into(),
         );
+    }
+    if session.agent == AgentKind::Omp && session.control_origin == SessionControlOrigin::Lume {
+        if !attachments.is_empty() {
+            return Err("Oh My Pi prompt attachments are not supported yet".into());
+        }
+        let bridge = app.state::<crate::omp_rpc::OmpRpc>();
+        let delivery = match delivery {
+            PromptDelivery::Steer => "steer",
+            PromptDelivery::Queue => "queue",
+            PromptDelivery::NewTurn => "new_turn",
+        };
+        bridge.prompt(session_id, prompt, delivery)?;
+        if delivery == "new_turn" {
+            state.record_prompt_activity(session_id, prompt, Vec::new())?;
+        }
+        protocol::emit_sessions_changed(app);
+        return Ok(());
     }
     let is_running = matches!(
         session.status,
@@ -366,6 +383,7 @@ pub fn submit_prompt(
             AgentKind::OpenCode => IntegrationKind::OpenCode,
             AgentKind::DeepSeek => IntegrationKind::DeepSeek,
             AgentKind::Gemini => IntegrationKind::Gemini,
+            AgentKind::Omp => return Err("Oh My Pi sessions are monitored only".into()),
             AgentKind::Codex => unreachable!(),
             AgentKind::ChatGpt | AgentKind::Claude | AgentKind::Unknown => {
                 return Err("Este agente não oferece retomada direta pelo Lume".into());
@@ -415,6 +433,7 @@ pub fn submit_prompt(
                 resume: true,
                 resume_id: Some(resume_id),
                 target,
+                profile: None,
                 initial_prompt: Some(prompt.clone()),
                 permission_mode: None,
                 approval_policy: None,
@@ -479,6 +498,12 @@ pub fn interrupt_prompt(
                 return Err(error);
             }
         }
+    } else if session.agent == AgentKind::Omp {
+        app.state::<crate::omp_rpc::OmpRpc>().command(
+            session_id,
+            "abort",
+            serde_json::json!({}),
+        )?;
     } else if session.agent == AgentKind::OpenCode {
         let native_id = session
             .native_session_id
@@ -519,6 +544,7 @@ fn supports_safe_prompt_interrupt(agent: &AgentKind, source: &SessionSource) -> 
         AgentKind::ClaudeCode => matches!(source, SessionSource::Cli | SessionSource::Desktop),
         AgentKind::OpenCode => source == &SessionSource::Desktop,
         AgentKind::Antigravity => source == &SessionSource::Desktop,
+        AgentKind::Omp => source == &SessionSource::Desktop,
         _ => false,
     }
 }
@@ -603,6 +629,20 @@ pub fn session_model_settings(
     session_id: &str,
 ) -> Result<CodexThreadModelSettings, String> {
     let session = state.connected_session(session_id)?;
+    if session.agent == AgentKind::Omp {
+        if session.control_origin != SessionControlOrigin::Lume {
+            return Err("Take control of this external CLI before changing its model".into());
+        }
+        let managed = app.state::<crate::omp_rpc::OmpRpc>();
+        let state_data = managed.command(session_id, "get_state", serde_json::json!({}))?;
+        let catalog = managed.command(session_id, "get_available_models", serde_json::json!({}))?;
+        let levels = managed.command(
+            session_id,
+            "get_available_thinking_levels",
+            serde_json::json!({}),
+        )?;
+        return omp_model_settings(&state_data, &catalog, &levels);
+    }
     if session.agent == AgentKind::OpenCode {
         if session.control_origin != SessionControlOrigin::Lume {
             return Err("Retome esta sessão OpenCode pelo Lume antes de alterar o modelo".into());
@@ -659,6 +699,68 @@ pub fn session_model_settings(
     apply_pending_model_override(state, session_id, &mut settings)?;
     Ok(settings)
 }
+fn omp_model_settings(
+    state: &serde_json::Value,
+    catalog: &serde_json::Value,
+    levels: &serde_json::Value,
+) -> Result<CodexThreadModelSettings, String> {
+    let current = state["model"].clone();
+    let selected_model = format!(
+        "{}/{}",
+        current["provider"].as_str().unwrap_or_default(),
+        current["id"].as_str().unwrap_or_default()
+    );
+    let supported = levels["levels"].as_array().cloned().unwrap_or_default();
+    let supported = supported
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|value| crate::codex_bridge::CodexReasoningEffortOption {
+            value: value.to_string(),
+            description: value.to_string(),
+        })
+        .collect::<Vec<_>>();
+    let models = catalog["models"]
+        .as_array()
+        .or_else(|| catalog.as_array())
+        .into_iter()
+        .flatten()
+        .map(|model| {
+            let name = model["name"]
+                .as_str()
+                .or(model["id"].as_str())
+                .unwrap_or("Model");
+            crate::codex_bridge::CodexModelOption {
+                model: format!(
+                    "{}/{}",
+                    model["provider"].as_str().unwrap_or_default(),
+                    model["id"].as_str().unwrap_or_default()
+                ),
+                display_name: name.to_string(),
+                description: model["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                is_default: format!(
+                    "{}/{}",
+                    model["provider"].as_str().unwrap_or_default(),
+                    model["id"].as_str().unwrap_or_default()
+                ) == selected_model,
+                default_reasoning_effort: model["reasoning"]
+                    .as_str()
+                    .unwrap_or("medium")
+                    .to_string(),
+                supported_reasoning_efforts: supported.clone(),
+            }
+        })
+        .collect();
+    Ok(CodexThreadModelSettings {
+        model: selected_model,
+        reasoning_effort: state["thinkingLevel"].as_str().map(str::to_string),
+        service_tier: None,
+        models,
+        session_modes: None,
+    })
+}
 
 pub fn set_session_model_settings(
     app: &AppHandle,
@@ -669,6 +771,58 @@ pub fn set_session_model_settings(
     effort: &str,
 ) -> Result<CodexThreadModelSettings, String> {
     let session = state.connected_session(session_id)?;
+    if session.agent == AgentKind::Omp {
+        if session.control_origin != SessionControlOrigin::Lume {
+            return Err("Take control of this external CLI before changing its model".into());
+        }
+        let (provider, model_id) = model
+            .split_once('/')
+            .ok_or("Choose an available provider/model pair")?;
+        if provider.trim().is_empty() || model_id.trim().is_empty() {
+            return Err("Choose an available provider/model pair".into());
+        }
+        let managed = app.state::<crate::omp_rpc::OmpRpc>();
+        let catalog = managed.command(session_id, "get_available_models", serde_json::json!({}))?;
+        let available = catalog["models"]
+            .as_array()
+            .or_else(|| catalog.as_array())
+            .is_some_and(|models| {
+                models.iter().any(|item| {
+                    item["provider"].as_str() == Some(provider)
+                        && item["id"].as_str() == Some(model_id)
+                })
+            });
+        if !available {
+            return Err(format!("Model not found: {provider}/{model_id}"));
+        }
+        managed.command(
+            session_id,
+            "set_model",
+            serde_json::json!({"provider":provider,"modelId":model_id}),
+        )?;
+        let effort = effort.trim();
+        let selected_effort = if effort.is_empty() { "inherit" } else { effort };
+        let levels = [
+            "inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+        ];
+        if !levels.contains(&selected_effort) {
+            return Err("Unsupported omp thinking level".into());
+        }
+        managed.command(
+            session_id,
+            "set_thinking_level",
+            serde_json::json!({"level":selected_effort}),
+        )?;
+        state.set_session_model_override(
+            session_id,
+            SessionModelOverride {
+                model: Some(model.to_string()),
+                reasoning_effort: Some(selected_effort.to_string()),
+            },
+        )?;
+        protocol::emit_sessions_changed(app);
+        return session_model_settings(app, state, bridge, session_id);
+    }
     if session.agent == AgentKind::OpenCode {
         if session.control_origin != SessionControlOrigin::Lume {
             return Err("Retome esta sessão OpenCode pelo Lume antes de alterar o modelo".into());
@@ -1006,6 +1160,23 @@ pub fn session_permission_settings(
     let session = state.connected_session(session_id)?;
     match session.agent {
         AgentKind::ClaudeCode => claude_permission_settings(state, &session),
+        AgentKind::Omp if session.control_origin == SessionControlOrigin::Lume => {
+            let mode = state
+                .permission_mode_override(session_id)?
+                .unwrap_or_else(|| match session.permission_profile.mode {
+                    crate::domain::AccessMode::FullAccess => "full_access".into(),
+                    crate::domain::AccessMode::WorkspaceWrite => "workspace_write".into(),
+                    _ => "custom".into(),
+                });
+            Ok(PermissionSettings {
+                mode,
+                modes: vec![
+                    "full_access".into(),
+                    "workspace_write".into(),
+                    "custom".into(),
+                ],
+            })
+        }
         AgentKind::Codex => Ok(codex_permissions::settings(
             &state
                 .permission_mode_override(session_id)?
@@ -1088,6 +1259,10 @@ pub fn set_session_permission_mode(
                 && crate::antigravity_stream::is_permission_mode(mode),
             None,
         ),
+        AgentKind::Omp => (
+            ["full_access", "workspace_write", "custom"].contains(&mode),
+            None,
+        ),
         _ => return Err("Permissions are unavailable for this session".into()),
     };
     if session.control_origin != SessionControlOrigin::Lume {
@@ -1098,6 +1273,22 @@ pub fn set_session_permission_mode(
             "{} does not offer the permission mode {mode}",
             session.agent_label
         ));
+    }
+    if session.agent == AgentKind::Omp {
+        let access_mode = match mode {
+            "full_access" => crate::domain::AccessMode::FullAccess,
+            "workspace_write" => crate::domain::AccessMode::WorkspaceWrite,
+            "custom" => crate::domain::AccessMode::Custom,
+            _ => unreachable!(),
+        };
+        let (approval_mode, _) = crate::omp_rpc::approval_mode(&access_mode);
+        let managed = app.state::<crate::omp_rpc::OmpRpc>();
+        managed.command(session_id, "get_state", serde_json::json!({}))?;
+        managed.restart_approval_mode(session_id, approval_mode)?;
+        state.set_permission_mode_override(session_id, mode)?;
+        state.set_permission_scope(session_id, omp_permission_profile(access_mode))?;
+        protocol::emit_sessions_changed(app);
+        return session_permission_settings(state, session_id);
     }
     state.set_permission_mode_override(session_id, mode)?;
     if let Some(scope) = scope {
@@ -1111,6 +1302,28 @@ pub fn set_session_permission_mode(
     }
     protocol::emit_sessions_changed(app);
     session_permission_settings(state, session_id)
+}
+/// What a Lume-controlled omp session really runs with. omp has no read-only tier, so those
+/// modes run (and are shown) as always-ask.
+pub(crate) fn omp_permission_profile(
+    mode: crate::domain::AccessMode,
+) -> crate::domain::PermissionProfile {
+    use crate::domain::{AccessMode, PermissionAction, PermissionProfile};
+    let (mode, label, approval_policy) = match mode {
+        AccessMode::FullAccess => (AccessMode::FullAccess, "Full access", "yolo"),
+        AccessMode::WorkspaceWrite => (AccessMode::WorkspaceWrite, "Asks before running", "write"),
+        AccessMode::Custom | AccessMode::ReadOnly | AccessMode::Plan => {
+            (AccessMode::Custom, "Asks before changing", "always-ask")
+        }
+    };
+    PermissionProfile {
+        mode,
+        label: label.into(),
+        approval_policy: approval_policy.into(),
+        approvals_reviewer: None,
+        can_respond_from_lume: true,
+        available_actions: vec![PermissionAction::AllowOnce, PermissionAction::Deny],
+    }
 }
 
 /// Everything a Lume-sent Claude prompt runs with. It is built when the prompt starts,
@@ -1153,6 +1366,7 @@ pub(crate) fn claude_launch_request(
         resume: can_resume,
         resume_id: Some(resume_id),
         target,
+        profile: None,
         initial_prompt: Some(prompt.to_string()),
         permission_mode: Some(session.permission_profile.mode.clone()),
         approval_policy: Some(session.permission_profile.approval_policy.clone()),
@@ -1611,6 +1825,12 @@ pub fn terminate_session(
         protocol::emit_sessions_changed(app);
         return Ok(());
     }
+    if session.agent == AgentKind::Omp && session.control_origin == SessionControlOrigin::Lume {
+        app.state::<crate::omp_rpc::OmpRpc>().close(session_id);
+        state.mark_session_terminated(session_id)?;
+        protocol::emit_sessions_changed(app);
+        return Ok(());
+    }
     if session.agent == AgentKind::OpenCode && is_managed_native_session(&session) {
         let native_id = session
             .native_session_id
@@ -1742,11 +1962,16 @@ pub fn fork_codex_thread(
     bridge.fork_thread_at_latest_turn(thread_id)
 }
 
+pub(crate) fn omp_profile_from_label(agent_label: &str) -> Option<&str> {
+    agent_label.strip_prefix("Oh My Pi · ")
+}
+
 pub fn take_control_session(
     app: &AppHandle,
     state: &AppState,
     bridge: &CodexBridge,
     session_id: &str,
+    force: bool,
 ) -> Result<String, String> {
     let session = state.connected_session(session_id)?;
     if session.control_origin == SessionControlOrigin::Lume {
@@ -1760,6 +1985,59 @@ pub fn take_control_session(
     }
     if session.source != SessionSource::Cli {
         return Err("Only external CLI sessions can transfer control to Lume".into());
+    }
+    if session.agent == AgentKind::Omp {
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                "This external omp CLI did not provide a resumable session id".to_string()
+            })?;
+        let cwd = session.working_directory.as_deref().filter(|directory| !directory.trim().is_empty())
+            .ok_or_else(|| "Lume cannot transfer this omp session safely because its project directory is unknown".to_string())?;
+        let cwd = std::fs::canonicalize(cwd).map_err(|error| error.to_string())?;
+        let profile = omp_profile_from_label(&session.agent_label);
+        let controlled_id = format!("omp-rpc:{native_id}");
+        if state
+            .sessions()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|s| {
+                s.agent == AgentKind::Omp
+                    && (s.control_origin == SessionControlOrigin::Lume || s.id == controlled_id)
+                    && s.native_session_id.as_deref() == Some(native_id)
+            })
+        {
+            return Err("A Lume-controlled session with this native id already exists".into());
+        }
+        discovery::check_omp_takeover_safety(native_id, &cwd.to_string_lossy(), profile, force)
+            .map_err(str::to_string)?;
+        let (approval_mode, _) = crate::omp_rpc::approval_mode(&session.permission_profile.mode);
+        let managed = app.state::<crate::omp_rpc::OmpRpc>();
+        managed.start(
+            session_id,
+            &cwd.to_string_lossy(),
+            Some(native_id),
+            profile,
+            Some(approval_mode),
+        )?;
+        let rebound_id = match state.rebind_omp_session(session_id, native_id, true) {
+            Ok(id) => id,
+            Err(error) => {
+                managed.close(session_id);
+                return Err(error);
+            }
+        };
+        if let Err(error) = managed.rekey(session_id, &rebound_id) {
+            managed.close(session_id);
+            managed.close(&rebound_id);
+            return Err(format!(
+                "Could not update Oh My Pi RPC session key: {error}"
+            ));
+        }
+        protocol::emit_sessions_changed(app);
+        return Ok(rebound_id);
     }
     if session.agent != AgentKind::Codex {
         return Err(
@@ -1929,6 +2207,7 @@ fn takeover_launch_request(
         } else {
             "terminal".into()
         },
+        profile: None,
         initial_prompt: None,
         permission_mode: Some(session.permission_profile.mode.clone()),
         approval_policy: Some(session.permission_profile.approval_policy.clone()),
@@ -1977,7 +2256,7 @@ pub fn execute_hub_command(
             session_id,
             prompt,
             attachments,
-        } => take_control_session(app, state, bridge, &session_id).and_then(|controlled_session_id| {
+        } => take_control_session(app, state, bridge, &session_id, false).and_then(|controlled_session_id| {
                 if !prompt.trim().is_empty() || !attachments.is_empty() {
                     if let Err(error) = submit_prompt(
                         app,
@@ -2282,6 +2561,10 @@ mod tests {
             &AgentKind::ClaudeCode,
             &SessionSource::Vscode
         ));
+        assert!(supports_safe_prompt_interrupt(
+            &AgentKind::Antigravity,
+            &SessionSource::Desktop
+        ));
         assert!(!supports_safe_prompt_interrupt(
             &AgentKind::Antigravity,
             &SessionSource::Cli
@@ -2452,6 +2735,18 @@ mod tests {
         };
         let answers = question_answers_from_prompt(&request, "2").expect("resposta");
         assert_eq!(answers[0].answers, vec!["Second"]);
+    }
+
+    #[test]
+    fn omp_profile_from_label_extracts_custom_profiles() {
+        assert_eq!(omp_profile_from_label("Oh My Pi · dev"), Some("dev"));
+        assert_eq!(
+            omp_profile_from_label("Oh My Pi · my-team"),
+            Some("my-team")
+        );
+        assert_eq!(omp_profile_from_label("Oh My Pi"), None);
+        assert_eq!(omp_profile_from_label("Codex"), None);
+        assert_eq!(omp_profile_from_label(""), None);
     }
 
     #[test]

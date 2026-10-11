@@ -53,7 +53,7 @@ test("/clear starts a new conversation instead of being sent, whatever the agent
     { name: "clear", description: "Clear conversation history", argumentHint: null, prefix: "/", kind: "command" },
     { name: "reset", description: "Alias of clear", argumentHint: null, prefix: "/", kind: "command" },
   ];
-  for (const agent of ["claude_code", "codex", "opencode", "antigravity"]) {
+  for (const agent of ["claude_code", "codex", "opencode", "antigravity", "omp"]) {
     const commands = agentSlashCommands(reported, agent);
     assert.equal(commands.filter((command) => command.name === "clear").length, 1);
     assert.equal(findSlashCommand(commands, "/clear").action, "clear");

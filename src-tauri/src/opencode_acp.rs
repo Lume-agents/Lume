@@ -415,6 +415,7 @@ impl OpenCodeBridge {
                         working_directory: cwd.to_string(),
                         source: "OpenCode ACP".into(),
                         updated_at,
+                        profile: None,
                     });
                     if sessions.len() == 250 {
                         break;

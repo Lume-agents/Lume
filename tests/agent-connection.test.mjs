@@ -12,6 +12,7 @@ assert.equal(agentConnectionMessage("Agente não conectado"), "Agente não conec
 assert.equal(agentConnectionMessage("Connection reset by peer"), null);
 assert.equal(agentLoginCommand("claude"), "claude auth login");
 assert.equal(agentLoginCommand("opencode"), "opencode auth login");
+assert.equal(agentLoginCommand("omp"), "omp");
 
 const efforts = (...values) => values.map((value) => ({ value, description: "" }));
 const models = [

@@ -714,6 +714,38 @@ impl AppState {
         Ok((parent_thread_id.to_string(), child_thread_id.to_string()))
     }
 
+    pub fn omp_subagent_thread(
+        &self,
+        session_id: &str,
+        activity_id: &str,
+    ) -> Result<(String, String), String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Could not access sessions".to_string())?;
+        let session = sessions
+            .iter()
+            .find(|session| session.id == session_id && session.agent == AgentKind::Omp)
+            .ok_or_else(|| "Oh My Pi session not found".to_string())?;
+        let parent_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or_else(|| "Oh My Pi session ID is unavailable".to_string())?;
+        if !session
+            .activities
+            .iter()
+            .any(|activity| activity.id == activity_id && activity.kind == "subagent")
+        {
+            return Err("Subagent does not belong to this session".into());
+        }
+        let prefix = format!("omp:{parent_id}:subagent:");
+        let child_id = activity_id
+            .strip_prefix(&prefix)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "Subagent ID is unavailable".to_string())?;
+        Ok((parent_id.to_string(), child_id.to_string()))
+    }
+
     pub fn terminal_sessions<F>(
         &self,
         activity_limit: usize,
@@ -908,6 +940,24 @@ impl AppState {
         limit: usize,
     ) -> Result<(Vec<SessionActivity>, bool), String> {
         let session = self.connected_session(session_id)?;
+        if session.agent == AgentKind::Omp {
+            let limit = limit.clamp(1, 60);
+            let mut activities = session
+                .activities
+                .iter()
+                .filter(|activity| {
+                    Store::is_archivable_conversation_activity(activity)
+                        && (activity.created_at, activity.id.as_str())
+                            < (before_created_at, before_activity_id)
+                })
+                .collect::<Vec<_>>();
+            activities.sort_unstable_by(|a, b| {
+                (b.created_at, b.id.as_str()).cmp(&(a.created_at, a.id.as_str()))
+            });
+            let has_more = activities.len() > limit;
+            let page = activities.into_iter().take(limit).rev().cloned().collect();
+            return Ok((page, has_more));
+        }
         self.store
             .lock()
             .map_err(|_| "Could not read the conversation history".to_string())?
@@ -922,6 +972,49 @@ impl AppState {
         limit: usize,
     ) -> Result<(Vec<crate::store::ConversationPromptIndexEntry>, bool), String> {
         let session = self.connected_session(session_id)?;
+        if session.agent == AgentKind::Omp {
+            let limit = limit.clamp(1, 40);
+            let query = query.map(str::trim).filter(|text| !text.is_empty());
+            let query = query.map(str::to_lowercase);
+            let mut prompts = session
+                .activities
+                .iter()
+                .filter(|activity| {
+                    activity.kind == "prompt"
+                        && before.is_none_or(|cursor| {
+                            (activity.created_at, activity.id.as_str()) < cursor
+                        })
+                        && query.as_ref().is_none_or(|query| {
+                            activity
+                                .detail
+                                .as_deref()
+                                .unwrap_or_default()
+                                .to_lowercase()
+                                .contains(query)
+                        })
+                })
+                .collect::<Vec<_>>();
+            prompts.sort_unstable_by(|a, b| {
+                (b.created_at, b.id.as_str()).cmp(&(a.created_at, a.id.as_str()))
+            });
+            let has_more = prompts.len() > limit;
+            let page = prompts
+                .into_iter()
+                .take(limit)
+                .map(|activity| crate::store::ConversationPromptIndexEntry {
+                    id: activity.id.clone(),
+                    created_at: activity.created_at,
+                    detail: activity
+                        .detail
+                        .as_deref()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(220)
+                        .collect(),
+                })
+                .collect();
+            return Ok((page, has_more));
+        }
         self.store
             .lock()
             .map_err(|_| "Could not read the prompt index".to_string())?
@@ -1355,6 +1448,83 @@ impl AppState {
         }
         Ok(old_native_session_id)
     }
+    pub fn rebind_omp_session(
+        &self,
+        session_id: &str,
+        native_session_id: &str,
+        take_control: bool,
+    ) -> Result<String, String> {
+        if native_session_id.trim().is_empty() {
+            return Err("Oh My Pi did not provide a native session id".into());
+        }
+        let next_id = format!("omp-rpc:{native_session_id}");
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Could not rebind the Oh My Pi session")?;
+        let index = sessions
+            .iter()
+            .position(|session| session.id == session_id)
+            .ok_or("Oh My Pi session not found")?;
+        if sessions[index].agent != AgentKind::Omp {
+            return Err("Only Oh My Pi sessions can be rebound".into());
+        }
+        if take_control
+            && sessions.iter().enumerate().any(|(candidate, s)| {
+                candidate != index
+                    && s.agent == AgentKind::Omp
+                    && (s.control_origin == SessionControlOrigin::Lume || s.id == next_id)
+                    && s.native_session_id.as_deref() == Some(native_session_id)
+            })
+        {
+            return Err("A Lume-controlled session with this native id already exists".into());
+        }
+        let duplicate_indices = sessions
+            .iter()
+            .enumerate()
+            .filter(|(candidate, session)| {
+                *candidate != index
+                    && session.agent == AgentKind::Omp
+                    && session.native_session_id.as_deref() == Some(native_session_id)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for duplicate_index in duplicate_indices.into_iter().rev() {
+            let duplicate = sessions.remove(duplicate_index);
+            let target_index = if duplicate_index < index {
+                index - 1
+            } else {
+                index
+            };
+            for activity in duplicate.activities {
+                if !sessions[target_index]
+                    .activities
+                    .iter()
+                    .any(|existing| existing.id == activity.id)
+                {
+                    sessions[target_index].activities.push(activity);
+                }
+            }
+        }
+        let target = sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or("Oh My Pi session disappeared during rebind")?;
+        target.id = next_id.clone();
+        target.native_session_id = Some(native_session_id.to_string());
+        if take_control {
+            target.source = SessionSource::Desktop;
+            target.control_origin = SessionControlOrigin::Lume;
+            target.process_id = None;
+            target.source_app = None;
+            target.status = SessionStatus::WaitingForInput;
+            target.status_label = "Ready in Lume".into();
+            target.pending_permission = None;
+            target.pending_question = None;
+        }
+        target.updated_at = now_millis();
+        Ok(next_id)
+    }
 
     pub fn mark_session_lume_controlled(
         &self,
@@ -1418,6 +1588,18 @@ impl AppState {
             store.save_session(&snapshot)?;
         }
         Ok(())
+    }
+    pub(crate) fn omp_native_owned_by_lume(&self, native_session_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions.iter().any(|session| {
+                    session.agent == AgentKind::Omp
+                        && session.control_origin == SessionControlOrigin::Lume
+                        && session.native_session_id.as_deref() == Some(native_session_id)
+                })
+            })
+            .unwrap_or(false)
     }
 
     pub fn set_session_takeover_active(
@@ -4886,6 +5068,7 @@ fn integration_kind_for_agent(agent: &AgentKind) -> Option<IntegrationKind> {
         AgentKind::OpenCode => Some(IntegrationKind::OpenCode),
         AgentKind::DeepSeek => Some(IntegrationKind::DeepSeek),
         AgentKind::Gemini => Some(IntegrationKind::Gemini),
+        AgentKind::Omp => Some(IntegrationKind::Omp),
         AgentKind::ChatGpt | AgentKind::Claude | AgentKind::Unknown => None,
     }
 }
@@ -5086,6 +5269,7 @@ fn agent_label(agent: &AgentKind) -> &'static str {
         AgentKind::OpenCode => "OpenCode",
         AgentKind::DeepSeek => "DeepSeek",
         AgentKind::Gemini => "Gemini",
+        AgentKind::Omp => "Oh My Pi",
         AgentKind::Unknown => "Agente",
     }
 }
@@ -5127,6 +5311,7 @@ fn persistent_session_alias_key(session: &AgentSession) -> Option<String> {
         AgentKind::OpenCode => "opencode".to_string(),
         AgentKind::DeepSeek => "deepseek".to_string(),
         AgentKind::Gemini => "gemini".to_string(),
+        AgentKind::Omp => "omp".to_string(),
         AgentKind::Unknown => format!("unknown:{}", session.agent_label.to_lowercase()),
     };
     Some(format!("{agent}:{native_id}"))
@@ -5228,6 +5413,76 @@ mod tests {
             activities: Vec::new(),
             wait_for_decision: false,
         }
+    }
+    #[test]
+    fn omp_process_binds_to_existing_watched_native_session() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut event = started_event("omp:native-123", 8123);
+        event.agent = AgentKind::Omp;
+        event.agent_label = Some("Oh My Pi".into());
+        event.native_session_id = Some("native-123".into());
+        event.working_directory = Some("/work/lume".into());
+        state.ingest(event).expect("watcher session");
+
+        let process = DiscoveredProcess {
+            agent: AgentKind::Omp,
+            agent_label: "Oh My Pi".into(),
+            process_id: 8123,
+            started_at: 0,
+            native_session_ids: vec!["native-123".into()],
+            working_directory: Some("/work/lume".into()),
+            source: SessionSource::Cli,
+        };
+        state
+            .reconcile_process_snapshot(vec![process], HashSet::from([8123]))
+            .expect("reconcile process");
+
+        let sessions = state.sessions().expect("sessions");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "omp:native-123");
+        assert_eq!(sessions[0].process_id, Some(8123));
+        assert_eq!(sessions[0].native_session_id.as_deref(), Some("native-123"));
+    }
+
+    #[test]
+    fn omp_conversation_pages_and_prompt_search_come_from_memory() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut event = started_event("omp:memory-page", 8123);
+        event.agent = AgentKind::Omp;
+        event.native_session_id = Some("memory-page".into());
+        event.activities = [("a", "first"), ("b", "second"), ("c", "third")]
+            .into_iter()
+            .map(|(id, detail)| SessionActivity {
+                id: id.into(),
+                kind: "prompt".into(),
+                title: "Prompt enviado".into(),
+                detail: Some(detail.into()),
+                status: "completed".into(),
+                created_at: 100,
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            })
+            .collect();
+        state.ingest(event).expect("observe transcript");
+        let (page, more) = state
+            .conversation_activities_before("omp:memory-page", 101, "", 2)
+            .expect("recent page");
+        assert!(more);
+        assert_eq!(
+            page.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["b", "c"]
+        );
+        let (previous, more) = state
+            .conversation_activities_before("omp:memory-page", 100, "b", 2)
+            .expect("older page");
+        assert!(!more);
+        assert_eq!(previous[0].detail.as_deref(), Some("first"));
+        let (prompts, more) = state
+            .conversation_prompts_before("omp:memory-page", None, Some("SECOND"), 2)
+            .expect("search memory");
+        assert!(!more);
+        assert_eq!(prompts[0].id, "b");
     }
 
     #[test]
@@ -5854,7 +6109,11 @@ mod tests {
         let mut event = started_event("claude:usage", 4242);
         event.agent = AgentKind::ClaudeCode;
         state.ingest(event).expect("session");
-        let error = || state.sessions().expect("sessions")[0].rate_limits_error.clone();
+        let error = || {
+            state.sessions().expect("sessions")[0]
+                .rate_limits_error
+                .clone()
+        };
         assert_eq!(error(), None);
 
         assert!(state

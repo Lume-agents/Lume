@@ -43,9 +43,9 @@ function nativeFixture() {
   const listeners = new Map();
   let nextId = 1;
   const contract = { instruction: "Trabalhe no papel definido.", expectedInput: "Objetivo e contexto.", producedOutput: "Resultado para a próxima etapa.", completionCondition: "Entregar o resultado revisado." };
-  const sessions = ["Pesquisa", "Implementação", "Revisão"].map((sessionName, index) => ({
-    id: "session-" + index, nativeSessionId: "native-" + index, sessionName, agent: ["codex", "claude_code", "opencode"][index],
-    agentLabel: ["Codex", "Claude Code", "OpenCode"][index], project: "Lume · teste", workingDirectory: "/fixture/lume",
+  const sessions = ["Pesquisa", "Implementação", "Revisão", "Monitoramento"].map((sessionName, index) => ({
+    id: "session-" + index, nativeSessionId: "native-" + index, sessionName, agent: ["codex", "claude_code", "opencode", "omp"][index],
+    agentLabel: ["Codex", "Claude Code", "OpenCode", "Oh My Pi"][index], project: "Lume · teste", workingDirectory: "/fixture/lume",
     source: "desktop", controlOrigin: "lume", status: "waiting_for_input", statusLabel: "Esperando ação",
     startedAt: new Date().toISOString(), updatedAt: Date.now(), results: [], activities: [], activityTotal: 0,
     permissionProfile: { canRespondFromLume: true, mode: "full_access" },

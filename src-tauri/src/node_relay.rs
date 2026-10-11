@@ -384,6 +384,12 @@ pub fn pair(directory: &Path, uri: &str) -> Result<RelayRemote, String> {
 
 /// Runs one read-only command on a paired Node through the Relay.
 pub fn query(directory: &Path, node_id: &str, command: &str) -> Result<Value, String> {
+    query_many(directory, node_id, &[command])?.into_iter().next().ok_or("the Node did not answer")?
+}
+
+/// Runs several read-only commands over one connection and one encrypted session.
+/// The outer error means the Node could not be reached; each item is that command's own result.
+pub fn query_many(directory: &Path, node_id: &str, commands: &[&str]) -> Result<Vec<Result<Value, String>>, String> {
     let remote = remotes(directory)?.into_iter().find(|remote| remote.node_id == node_id || remote.identity.fingerprint == node_id).ok_or("that Node is not paired through a Relay")?;
     let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
     let node_key: [u8; 32] = URL_SAFE_NO_PAD.decode(&remote.identity.public_key).map_err(io)?.try_into().map_err(|_| "invalid Node key".to_string())?;
@@ -392,15 +398,31 @@ pub fn query(directory: &Path, node_id: &str, command: &str) -> Result<Value, St
     link.send(None, "hs1", &hello)?;
     let reply = wait_for(&mut link, 15, |event| payload_of(event, 2))?;
     let mut session = state.finish(&reply, &node_key)?;
-    link.send(None, "cmd", &session.seal(&serde_json::to_vec(&json!({ "cmd": command })).map_err(io)?)?)?;
-    let frame = wait_for(&mut link, 15, |event| payload_of(event, 3))?;
-    let answer: Value = serde_json::from_slice(&session.open(&frame)?).map_err(io)?;
-    link.close();
-    if answer["ok"] == true {
-        Ok(answer["result"].clone())
-    } else {
-        Err(answer["error"].as_str().unwrap_or("the Node refused the command").to_string())
+    let mut results = Vec::new();
+    for command in commands {
+        link.send(None, "cmd", &session.seal(&serde_json::to_vec(&json!({ "cmd": command })).map_err(io)?)?)?;
+        let frame = wait_for(&mut link, 15, |event| payload_of(event, 3))?;
+        let answer: Value = serde_json::from_slice(&session.open(&frame)?).map_err(io)?;
+        results.push(if answer["ok"] == true {
+            Ok(answer["result"].clone())
+        } else {
+            Err(answer["error"].as_str().unwrap_or("the Node refused the command").to_string())
+        });
     }
+    link.close();
+    Ok(results)
+}
+
+/// Forgets a Node paired through a Relay on this device. The Node's authorization is revoked on the Node.
+pub fn forget(directory: &Path, node_id: &str) -> Result<bool, String> {
+    let mut all = remotes(directory)?;
+    let before = all.len();
+    all.retain(|remote| remote.node_id != node_id && remote.identity.fingerprint != node_id);
+    if all.len() == before {
+        return Ok(false);
+    }
+    write_private(&remotes_path(directory), &serde_json::to_vec_pretty(&all).map_err(io)?)?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -459,8 +481,10 @@ mod tests {
         assert!(!node_dir.join(OFFER_FILE).exists(), "the offer is single use");
         let health = query(&client_dir, &config.node_id, "health").expect("health through the Relay");
         assert_eq!(health["nodeId"], config.node_id.as_str());
-        let sessions = query(&client_dir, &config.node_id, "sessions").expect("sessions through the Relay");
-        assert!(sessions["sessions"].is_array());
+        let both = query_many(&client_dir, &config.node_id, &["health", "sessions", "launch-missiles"]).expect("several commands over one session");
+        assert_eq!(both[0].as_ref().unwrap()["nodeId"], config.node_id.as_str());
+        assert!(both[1].as_ref().unwrap()["sessions"].is_array());
+        assert!(both[2].is_err(), "an unknown command fails alone");
         assert!(query(&client_dir, &config.node_id, "launch-missiles").is_err());
         // The offer cannot be reused by another device.
         assert!(pair(&std::env::temp_dir().join(format!("lume-relay-other-{unique}")), &uri).is_err());

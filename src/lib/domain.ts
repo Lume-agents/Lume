@@ -590,6 +590,40 @@ export interface RemoteLumeNode {
   lastSeenAt?: number;
 }
 
+export interface RelayLumeNode {
+  nodeId: string;
+  relayUrl: string;
+  identity: { algorithm: string; publicKey: string; fingerprint: string };
+  deviceId: string;
+  pairedAt: number;
+}
+
+export interface RemoteAgentSession {
+  id: string;
+  agent: AgentKind;
+  agentLabel: string;
+  name: string;
+  project: string;
+  status: "running" | "permission_required" | "waiting_for_input" | "completed" | "failed";
+  statusLabel: string;
+  startedAt: string;
+  updatedAt: number;
+  needsPermission: boolean;
+  needsAnswer: boolean;
+}
+
+export interface RemoteSessionsSnapshot {
+  generatedAt: number;
+  appFound: boolean;
+  sessions: RemoteAgentSession[];
+}
+
+export interface RelayLumeNodeOverview {
+  health: RemoteLumeNodeHealth;
+  sessions?: RemoteSessionsSnapshot;
+  sessionsError?: string;
+}
+
 export interface RemoteLumeNodeHealth {
   lifecycle: "disabled" | "offline" | "running";
   enabled: boolean;

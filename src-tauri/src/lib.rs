@@ -1420,6 +1420,42 @@ async fn get_remote_lume_node_inventory(
 }
 
 #[tauri::command]
+async fn pair_lume_relay_node(pairing_uri: String) -> Result<node_relay::RelayRemote, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_relay::pair(&node_service::default_state_directory()?, &pairing_uri)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn list_relay_lume_nodes() -> Result<Vec<node_relay::RelayRemote>, String> {
+    node_relay::remotes(&node_service::default_state_directory()?)
+}
+
+/// One connection through the Relay that returns the computer's health and its agent sessions.
+#[tauri::command]
+async fn get_relay_lume_node_overview(node_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = node_service::default_state_directory()?;
+        let mut answers = node_relay::query_many(&directory, &node_id, &["health", "sessions"])?.into_iter();
+        let health = answers.next().ok_or("the Node did not answer")??;
+        let sessions = answers.next().ok_or("the Node did not answer")?;
+        Ok(match sessions {
+            Ok(sessions) => serde_json::json!({ "health": health, "sessions": sessions }),
+            Err(error) => serde_json::json!({ "health": health, "sessionsError": error }),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn forget_relay_lume_node(node_id: String) -> Result<bool, String> {
+    node_relay::forget(&node_service::default_state_directory()?, &node_id)
+}
+
+#[tauri::command]
 fn forget_remote_lume_node(node_id: String) -> Result<bool, String> {
     node_client::forget(&node_service::default_state_directory()?, &node_id)
 }
@@ -3075,6 +3111,10 @@ pub fn run() {
             discover_lume_nodes,
             pair_lume_node,
             list_remote_lume_nodes,
+            pair_lume_relay_node,
+            list_relay_lume_nodes,
+            get_relay_lume_node_overview,
+            forget_relay_lume_node,
             get_remote_lume_node_health,
             get_remote_lume_node_inventory,
             forget_remote_lume_node,

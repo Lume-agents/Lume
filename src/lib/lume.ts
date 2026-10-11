@@ -18,6 +18,8 @@ import type {
   MobilePairingOffer,
   MobileScope,
   PairedDevice,
+  RelayLumeNode,
+  RelayLumeNodeOverview,
   RemoteLumeNode,
   RemoteLumeNodeHealth,
   RemoteLumeNodeInventory,
@@ -239,6 +241,22 @@ export async function loadRemoteLumeNodeHealth(nodeId: string): Promise<RemoteLu
 
 export async function loadRemoteLumeNodeInventory(nodeId: string): Promise<RemoteLumeNodeInventory> {
   return invoke<RemoteLumeNodeInventory>("get_remote_lume_node_inventory", { nodeId });
+}
+
+export async function pairLumeRelayNode(pairingUri: string): Promise<RelayLumeNode> {
+  return invoke<RelayLumeNode>("pair_lume_relay_node", { pairingUri });
+}
+
+export async function loadRelayLumeNodes(): Promise<RelayLumeNode[]> {
+  return invoke<RelayLumeNode[]>("list_relay_lume_nodes");
+}
+
+export async function loadRelayLumeNodeOverview(nodeId: string): Promise<RelayLumeNodeOverview> {
+  return invoke<RelayLumeNodeOverview>("get_relay_lume_node_overview", { nodeId });
+}
+
+export async function forgetRelayLumeNode(nodeId: string): Promise<boolean> {
+  return invoke<boolean>("forget_relay_lume_node", { nodeId });
 }
 
 export async function forgetRemoteLumeNode(nodeId: string): Promise<boolean> {

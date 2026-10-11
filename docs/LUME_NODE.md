@@ -71,6 +71,13 @@ of the Lume app on the Node (agent, project folder name, status, whether it wait
 app's database read-only and never includes the conversation, the working directory or the permission details. `lume node revoke` removes a device from the Node; the
 Relay drops its access the next time the Node connects.
 
+### In the app
+
+Settings → Remote computers accepts both `lume://pair-node?…` (same network) and `lume://pair-relay?…` (through the Relay) links.
+A computer paired through the Relay shows its agent sessions (status dot, agent, project, "needs permission" / "needs an answer") and
+refreshes them every few seconds while the window is visible. The view is read-only: the card only offers *Forget*. Each refresh
+opens one encrypted session and asks `health` and `sessions` together.
+
 ## Friendlier terminal
 
 Run `lume node` with no command in a terminal to open an interactive menu (arrow keys): status, turn the Node on, connect to a

@@ -2,11 +2,15 @@
   import { getContext, onMount, untrack } from "svelte";
   import { createSystemBannerSource, SYSTEM_BANNER_CONTEXT, type SystemBannerReporter, type SystemBannerNotice } from "$lib/systemBannerContext";
   import BrandIcon from "$lib/BrandIcon.svelte";
-  import type { DiscoveredLumeNode, RemoteLumeNode, RemoteLumeNodeHealth, RemoteLumeNodeInventory } from "$lib/domain";
+  import type { DiscoveredLumeNode, RelayLumeNode, RelayLumeNodeOverview, RemoteLumeNode, RemoteLumeNodeHealth, RemoteLumeNodeInventory } from "$lib/domain";
   import { localize, type Language } from "$lib/i18n";
   import {
     discoverLumeNodes,
+    forgetRelayLumeNode,
     forgetRemoteLumeNode,
+    loadRelayLumeNodeOverview,
+    loadRelayLumeNodes,
+    pairLumeRelayNode,
     loadRemoteLumeNodeHealth,
     loadRemoteLumeNodeInventory,
     loadRemoteLumeNodes,
@@ -21,6 +25,12 @@
   let inventory = $state<Record<string, RemoteLumeNodeInventory>>({});
   let inventoryErrors = $state<Record<string, string>>({});
   let checkedAt = $state<Record<string, number>>({});
+  let relayNodes = $state<RelayLumeNode[]>([]);
+  let overviews = $state<Record<string, RelayLumeNodeOverview>>({});
+  let relayErrors = $state<Record<string, string>>({});
+  let relayCheckedAt = $state<Record<string, number>>({});
+  const relayInFlight = new Set<string>();
+  const RELAY_REFRESH_MS = 6000;
   let pairingUri = $state("");
   let busy = $state(false);
   let message = $state("");
@@ -43,6 +53,11 @@
     for (const [nodeId, error] of Object.entries(inventoryErrors)) notices.push({
       id: `remote-inventory:${nodeId}`,
       message: tr("Inventory unavailable: ", "Inventário indisponível: ") + error,
+      tone: "error",
+    });
+    for (const [nodeId, error] of Object.entries(relayErrors)) notices.push({
+      id: `relay-computer:${nodeId}`,
+      message: tr("Computer unreachable: ", "Computador inacessível: ") + error,
       tone: "error",
     });
     untrack(() => reportNotices(notices));
@@ -106,6 +121,66 @@
     nodes = await loadRemoteLumeNodes();
   }
 
+  // One connection through the Relay per computer; a computer is never asked again while the previous answer is pending.
+  async function refreshRelay(nodeId: string) {
+    if (relayInFlight.has(nodeId)) return;
+    relayInFlight.add(nodeId);
+    try {
+      overviews[nodeId] = await loadRelayLumeNodeOverview(nodeId);
+      delete relayErrors[nodeId];
+    } catch (error) {
+      delete overviews[nodeId];
+      relayErrors[nodeId] = errorMessage(error);
+    } finally {
+      relayCheckedAt[nodeId] = Date.now();
+      relayInFlight.delete(nodeId);
+    }
+  }
+
+  function refreshAllRelay() {
+    if (!desktop || document.hidden) return;
+    for (const node of relayNodes) void refreshRelay(node.nodeId);
+  }
+
+  function sessionDot(status: string) {
+    return status === "running" ? "running" : status === "permission_required" || status === "waiting_for_input" ? "attention" : status === "failed" ? "failed" : "idle";
+  }
+
+  function sessionState(session: { status: string; statusLabel: string; needsPermission: boolean; needsAnswer: boolean }) {
+    if (session.needsPermission) return tr("Needs permission", "Pede permissão");
+    if (session.needsAnswer) return tr("Needs an answer", "Pede uma resposta");
+    switch (session.status) {
+      case "running": return tr("Working", "Trabalhando");
+      case "waiting_for_input": return tr("Waiting for you", "Esperando você");
+      case "completed": return tr("Finished", "Finalizado");
+      case "failed": return tr("Failed", "Falhou");
+      default: return session.statusLabel;
+    }
+  }
+
+  function sessionTitle(session: { name: string; project: string }) {
+    return session.name || session.project || "—";
+  }
+
+  function agoLabel(timestamp: number) {
+    const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+    if (seconds < 60) return tr("now", "agora");
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} min`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} h`;
+    return `${Math.floor(seconds / 86400)} d`;
+  }
+
+  function forgetRelay(nodeId: string) {
+    return perform(async () => {
+      await forgetRelayLumeNode(nodeId);
+      relayNodes = await loadRelayLumeNodes();
+      delete overviews[nodeId];
+      delete relayErrors[nodeId];
+      delete relayCheckedAt[nodeId];
+      message = tr("Computer forgotten on this Lume client. Revoke the device on that computer to remove its access.", "Computador esquecido neste Lume. Revogue o dispositivo naquele computador para retirar o acesso dele.");
+    });
+  }
+
   function scan() {
     return perform(async () => {
       discovered = await discoverLumeNodes();
@@ -121,6 +196,15 @@
   function pair() {
     const uri = pairingUri.trim();
     if (!uri) return;
+    if (uri.startsWith("lume://pair-relay")) {
+      return perform(async () => {
+        const node = await pairLumeRelayNode(uri);
+        pairingUri = "";
+        relayNodes = await loadRelayLumeNodes();
+        message = tr("Computer paired through the Relay.", "Computador pareado pelo Relay.");
+        void refreshRelay(node.nodeId);
+      });
+    }
     return perform(async () => {
       const node = await pairLumeNode(uri);
       pairingUri = "";
@@ -155,8 +239,19 @@
   }
 
   onMount(() => {
-    void perform(async () => { nodes = await loadRemoteLumeNodes(); });
-    return () => clearTimeout(scrollTimer);
+    void perform(async () => {
+      nodes = await loadRemoteLumeNodes();
+      relayNodes = await loadRelayLumeNodes();
+      refreshAllRelay();
+    });
+    const timer = setInterval(refreshAllRelay, RELAY_REFRESH_MS);
+    const onVisible = () => { if (!document.hidden) refreshAllRelay(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearTimeout(scrollTimer);
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   });
 </script>
 
@@ -168,7 +263,7 @@
   <div class="pair-control">
     <input
       aria-label={tr("One-time Lume Node pairing link", "Link de pareamento de uso único do Lume Node")}
-      autocomplete="off" placeholder="lume://pair-node?…" spellcheck="false" type="password"
+      autocomplete="off" placeholder="lume://pair-node?… / lume://pair-relay?…" spellcheck="false" type="password"
       disabled={!desktop || busy} bind:value={pairingUri}
       onkeydown={(event) => { if (event.key === "Enter") void pair(); }}
     />
@@ -224,9 +319,49 @@
         {/if}
         {#if !bannerReporter && inventoryErrors[node.nodeId]}<p class="error inventory-error">{tr("Inventory unavailable: ", "Inventário indisponível: ")}{inventoryErrors[node.nodeId]}</p>{/if}
       </article>
-    {:else}
-      <p class="empty">{tr("No paired computers yet.", "Nenhum computador pareado ainda.")}</p>
     {/each}
+    {#each relayNodes as node (node.nodeId)}
+      {@const overview = overviews[node.nodeId]}
+      {@const snapshot = overview?.sessions}
+      <article>
+        <div class="computer-row">
+          <span class="computer-name">
+            <strong>{overview?.health.displayName ?? node.nodeId}</strong>
+            <small>{overview ? `${overview.health.machine.operatingSystem} · ${overview.health.machine.architecture} · Relay` : `Relay · ${new URL(node.relayUrl).host}`}</small>
+            {#if relayCheckedAt[node.nodeId]}
+              <small class:error={!overview}>{overview ? tr("Online · updates every few seconds", "Online · atualiza a cada poucos segundos") : tr("Unavailable", "Indisponível")}</small>
+            {/if}
+          </span>
+          <div class="actions">
+            <button disabled={busy} type="button" title={tr("Remove the record on this client. Revoke its key on the remote computer to remove authorization.", "Remove o registro neste cliente. Revogue a chave no computador remoto para retirar a autorização.")} onclick={() => void forgetRelay(node.nodeId)}>{tr("Forget", "Esquecer")}</button>
+          </div>
+        </div>
+        {#if snapshot}
+          <details class="inventory" open>
+            <summary>{snapshot.sessions.length} {tr("agent sessions", "sessões de agentes")}</summary>
+            <small class="snapshot-label">{tr("Read-only view", "Visão somente leitura")} · {snapshotTime(snapshot.generatedAt)}</small>
+            <div class="inventory-list" class:scrolling onscroll={showScrollbar}>
+              {#each snapshot.sessions as session (session.id)}
+                <div class="inventory-row session-row">
+                  <span class={`session-dot ${sessionDot(session.status)}`} aria-hidden="true"></span>
+                  <BrandIcon name={session.agent} size={13} />
+                  <span class="session-title"><strong>{sessionTitle(session)}</strong><small>{session.agentLabel}{session.name && session.project ? ` · ${session.project}` : ""}</small></span>
+                  <small>{sessionState(session)} · {agoLabel(session.updatedAt)}</small>
+                </div>
+              {/each}
+              {#if !snapshot.appFound}<p class="empty">{tr("The Lume app has not been opened on that computer yet.", "O app do Lume ainda não foi aberto naquele computador.")}</p>
+              {:else if !snapshot.sessions.length}<p class="empty">{tr("No agent sessions there.", "Nenhuma sessão de agente por lá.")}</p>{/if}
+            </div>
+          </details>
+        {:else if overview?.sessionsError}
+          <p class="error inventory-error">{tr("Sessions unavailable: ", "Sessões indisponíveis: ")}{overview.sessionsError}</p>
+        {/if}
+        {#if !bannerReporter && relayErrors[node.nodeId]}<p class="error inventory-error">{relayErrors[node.nodeId]}</p>{/if}
+      </article>
+    {/each}
+    {#if !nodes.length && !relayNodes.length}
+      <p class="empty">{tr("No paired computers yet.", "Nenhum computador pareado ainda.")}</p>
+    {/if}
   </div>
   {#if !bannerReporter && message}<p class="message" class:error={failed} role="status">{message}</p>{/if}
 </div>
@@ -263,6 +398,13 @@
   .inventory-row > strong { min-width: 0; flex: 1; }
   .inventory-row > small, .runtime-label > small { flex-shrink: 0; }
   .runtime-label { padding-top: 10px; padding-bottom: 5px; justify-content: space-between; }
+  .session-row { gap: 6px; }
+  .session-title { display: grid; min-width: 0; flex: 1; }
+  .session-title small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
+  .session-dot.running { background: var(--lume-accent-strong, #4d9d76); }
+  .session-dot.attention { background: #d3a24b; }
+  .session-dot.failed { background: var(--lume-error, #bb7168); }
   .empty, .message, .inventory-error { margin: 0; font-size: 9px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
   .inventory-error { margin-top: 7px; }
   .error { color: var(--lume-error, #bb7168); }

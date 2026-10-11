@@ -743,13 +743,20 @@ fn launch_terminal(
         desktop_escape(executable),
         desktop_escape(&payload_path)
     );
-    fs::write(&desktop_path, desktop).map_err(|error| error.to_string())?;
-    Command::new("gio")
-        .arg("launch")
-        .arg(&desktop_path)
-        .spawn()
-        .map_err(|error| format!("Não foi possível abrir o terminal: {error}"))?;
-    Ok(())
+    let launched = fs::write(&desktop_path, desktop)
+        .map_err(|error| error.to_string())
+        .and_then(|()| {
+            Command::new("gio")
+                .arg("launch")
+                .arg(&desktop_path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| format!("Não foi possível abrir o terminal: {error}"))
+        });
+    if launched.is_err() {
+        discard_launch_files(&[&payload_path, &desktop_path]);
+    }
+    launched
 }
 
 #[cfg(target_os = "windows")]
@@ -759,7 +766,7 @@ fn launch_terminal(
     app_data_dir: &Path,
 ) -> Result<(), String> {
     let payload_path = persist_terminal_payload(&payload, app_data_dir)?;
-    if command_available("wt.exe") {
+    let launched = if command_available("wt.exe") {
         Command::new("wt.exe")
             .args(windows_terminal_arguments(
                 executable,
@@ -767,7 +774,8 @@ fn launch_terminal(
                 &payload.working_directory,
             ))
             .spawn()
-            .map_err(|error| error.to_string())?;
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     } else {
         use std::os::windows::process::CommandExt;
 
@@ -780,9 +788,13 @@ fn launch_terminal(
             .current_dir(&payload.working_directory)
             .creation_flags(CREATE_NEW_CONSOLE)
             .spawn()
-            .map_err(|error| format!("Não foi possível abrir o Prompt de Comando: {error}"))?;
+            .map(|_| ())
+            .map_err(|error| format!("Não foi possível abrir o Prompt de Comando: {error}"))
+    };
+    if launched.is_err() {
+        discard_launch_files(&[&payload_path]);
     }
-    Ok(())
+    launched
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -823,7 +835,7 @@ fn launch_terminal(
             Err(terminal_app_error(&String::from_utf8_lossy(&output.stderr)))
         });
     if opened.is_err() {
-        let _ = fs::remove_file(&payload_path);
+        discard_launch_files(&[&payload_path]);
     }
     opened
 }
@@ -892,6 +904,42 @@ fn applescript_string(value: &str) -> String {
     )
 }
 
+/// A launch payload carries the first prompt and the session id, so one that nobody read must not stay.
+const LAUNCH_PAYLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// The Linux `.desktop` entry is only needed while `gio launch` starts the terminal.
+const LAUNCH_DESKTOP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+fn discard_launch_files(paths: &[&Path]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Removes launch files nobody consumed: payloads older than a day and `.desktop` entries older than an hour.
+pub fn sweep_stale_launches(app_data_dir: &Path) -> usize {
+    sweep_launches(app_data_dir, std::time::SystemTime::now())
+}
+
+fn sweep_launches(app_data_dir: &Path, now: std::time::SystemTime) -> usize {
+    let Ok(entries) = fs::read_dir(app_data_dir.join("launches")) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let max_age = match path.extension().and_then(|extension| extension.to_str()) {
+            Some("json") => LAUNCH_PAYLOAD_MAX_AGE,
+            Some("desktop") => LAUNCH_DESKTOP_MAX_AGE,
+            _ => continue,
+        };
+        let Ok(metadata) = entry.metadata() else { continue };
+        let Ok(modified) = metadata.modified() else { continue };
+        if metadata.is_file() && now.duration_since(modified).is_ok_and(|age| age > max_age) && fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn persist_terminal_payload(
     payload: &TerminalPayload,
@@ -899,6 +947,7 @@ fn persist_terminal_payload(
 ) -> Result<PathBuf, String> {
     let launches = app_data_dir.join("launches");
     fs::create_dir_all(&launches).map_err(|error| error.to_string())?;
+    sweep_stale_launches(app_data_dir);
     let sequence = LAUNCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let payload_path = launches.join(format!("{}-{sequence}.json", now_millis()));
     fs::write(
@@ -1400,5 +1449,31 @@ activate
 end tell
 end timeout"#
         );
+    }
+
+    #[test]
+    fn forgotten_launch_files_are_swept_by_age_and_the_rest_is_left_alone() {
+        let root = std::env::temp_dir().join(format!("lume-launch-sweep-{}", std::process::id()));
+        let launches = root.join("launches");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&launches).unwrap();
+        let now = std::time::SystemTime::now();
+        let make = |name: &str, age: Duration| {
+            let path = launches.join(name);
+            fs::write(&path, "x").unwrap();
+            fs::File::options().write(true).open(&path).unwrap().set_modified(now - age).unwrap();
+            path
+        };
+        let hour = Duration::from_secs(3600);
+        let old_payload = make("1-0.json", hour * 25);
+        let old_desktop = make("1-0.desktop", hour * 2);
+        let fresh_payload = make("2-0.json", hour * 2);
+        let fresh_desktop = make("2-0.desktop", Duration::from_secs(60));
+        let unrelated = make("notes.txt", hour * 100);
+        assert_eq!(sweep_launches(&root, now), 2);
+        assert!(!old_payload.exists() && !old_desktop.exists());
+        assert!(fresh_payload.exists() && fresh_desktop.exists() && unrelated.exists());
+        assert_eq!(sweep_launches(&root.join("missing"), now), 0, "no launches folder is not an error");
+        let _ = fs::remove_dir_all(&root);
     }
 }

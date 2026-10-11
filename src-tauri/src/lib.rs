@@ -3039,6 +3039,9 @@ pub fn run() {
             ) {
                 eprintln!("Could not finish the legacy CLI Gateway cleanup: {error}");
             }
+            if let Some(app_data_dir) = database_path.parent() {
+                launcher::sweep_stale_launches(app_data_dir);
+            }
             let state = AppState::new(&database_path)?;
             app.manage(PendingShortcutAction(Mutex::new(
                 startup_shortcut_action.clone(),

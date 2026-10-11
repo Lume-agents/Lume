@@ -77,10 +77,7 @@ fn session_path_from_breadcrumb(path: &std::path::Path) -> Option<std::path::Pat
     let contents = std::fs::read_to_string(path).ok()?;
     contents
         .lines()
-        .find(|line| {
-            line.ends_with(".jsonl")
-                && (line.contains("/sessions/") || line.contains("\\sessions\\"))
-        })
+        .find(|line| crate::omp_sessions::is_breadcrumb_session_path(line))
         .map(std::path::PathBuf::from)
 }
 

@@ -436,9 +436,7 @@ fn terminal_breadcrumbs(root: &Path) -> HashSet<PathBuf> {
                 continue;
             };
             for line in contents.lines() {
-                if line.ends_with(".jsonl")
-                    && (line.contains("/sessions/") || line.contains("\\sessions\\"))
-                {
+                if is_breadcrumb_session_path(line) {
                     paths.insert(PathBuf::from(line));
                 }
             }
@@ -641,6 +639,12 @@ fn activities_from_entry(entry: &Value) -> Vec<SessionActivity> {
 
 /// One transcript row per omp tool call, shared by the file watcher and the RPC bridge so a
 /// conversation keeps the same rows when Lume takes control of it.
+/// A line of a terminal breadcrumb that names a session transcript. Separators are compared after
+/// normalizing them: a path built from both (`...\\agent\\sessions/-work\\x.jsonl`) is still one path.
+pub(crate) fn is_breadcrumb_session_path(line: &str) -> bool {
+    line.ends_with(".jsonl") && line.replace('\\', "/").contains("/sessions/")
+}
+
 pub(crate) fn tool_activity(
     call_id: &str,
     name: &str,
@@ -1152,5 +1156,15 @@ mod tests {
         );
         // Completed session still terminal
         assert!(is_terminal(&sess_completed));
+    }
+
+    #[test]
+    fn breadcrumb_paths_match_with_either_separator_or_a_mix() {
+        for line in ["/home/a/.omp/agent/sessions/-work/x.jsonl", r"C:\Users\a\.omp\agent\sessions\-work\x.jsonl", r"C:\Users\a\.omp\agent\sessions/-work\x.jsonl"] {
+            assert!(is_breadcrumb_session_path(line), "{line}");
+        }
+        for line in ["/work", "/home/a/.omp/agent/sessions/-work/x.txt", "/home/a/notes/x.jsonl"] {
+            assert!(!is_breadcrumb_session_path(line), "{line}");
+        }
     }
 }

@@ -82,6 +82,15 @@ a refused device cannot ask again for two minutes, and it can only ask for the `
 configured, the approval also hands the device the Relay address, so the same computer can be reached away from home.
 Devices approved or revoked while the Node runs reach (or lose) the Relay within a few seconds.
 
+### Reading a conversation
+
+`lume node relay-session NODE_ID SESSION_ID` (or clicking a session in Settings → Remote computers) shows what was said in
+one session of the other computer: the person's prompts and the agent's messages, newest 80, each up to 6,000 characters
+and about 120 KB in total so it always fits a Relay frame. Commands, file diffs, tool output and attachments are never sent.
+It is read-only, and it needs two things: the device holds the `read_conversations` scope (devices paired before this existed
+must be paired again) and the owner turned the switch on (`lume node conversations on|off`, or the toggle in Settings →
+Remote computers). It is **off by default** and turning it off takes effect on the next request.
+
 ### In the app
 
 Settings → Remote computers accepts both `lume://pair-node?…` (same network) and `lume://pair-relay?…` (through the Relay) links.

@@ -645,6 +645,20 @@ export interface RemoteSessionsSnapshot {
   sessions: RemoteAgentSession[];
 }
 
+export interface RemoteConversationMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  createdAt: number;
+}
+
+export interface RemoteConversation {
+  session: RemoteAgentSession;
+  generatedAt: number;
+  truncated: boolean;
+  messages: RemoteConversationMessage[];
+}
+
 export interface RelayLumeNodeOverview {
   health: RemoteLumeNodeHealth;
   sessions?: RemoteSessionsSnapshot;

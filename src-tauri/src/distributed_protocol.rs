@@ -38,6 +38,8 @@ pub enum DeviceKind {
 #[serde(rename_all = "snake_case")]
 pub enum NodeScope {
     Observe,
+    /// Read what was said in a session (prompts and answers), not only that it exists.
+    ReadConversations,
     Prompt,
     Approve,
     Interrupt,

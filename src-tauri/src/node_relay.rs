@@ -257,13 +257,13 @@ fn handle_message(directory: &Path, identity: &NodeIdentity, link: &mut RelayLin
             link.send(Some(from), "hs2", &reply)
         }
         Some(3) => {
-            if !node_pairing::clients(directory)?.iter().any(|client| client.identity.fingerprint == from && client.scopes.contains(&NodeScope::Observe)) {
+            let Some(client) = node_pairing::clients(directory)?.into_iter().find(|client| client.identity.fingerprint == from && client.scopes.contains(&NodeScope::Observe)) else {
                 sessions.remove(from);
                 return Err("the device is no longer paired".into());
-            }
+            };
             let session = sessions.get_mut(from).ok_or("no session: the device must start a handshake")?;
             let command: Value = serde_json::from_slice(&session.open(payload)?).map_err(io)?;
-            let answer = answer_command(directory, &command);
+            let answer = answer_command(directory, &command, &client.scopes);
             let frame = session.seal(&serde_json::to_vec(&answer).map_err(io)?)?;
             link.send(Some(from), "reply", &frame)
         }
@@ -277,7 +277,7 @@ fn pair_device(directory: &Path, identity: &NodeIdentity, link: &mut RelayLink, 
     if request.proof.identity.fingerprint != from {
         return Err("the pairing request does not come from the connection that sent it".into());
     }
-    let client = node_pairing::accept_pairing(directory, &request, &[NodeScope::Observe], now_millis())?;
+    let client = node_pairing::accept_pairing(directory, &request, &[NodeScope::Observe, NodeScope::ReadConversations], now_millis())?;
     let _ = fs::remove_file(directory.join(OFFER_FILE));
     link.authorize(&client_key(&client).ok_or("the paired key is invalid")?)?;
     let answer = json!({ "client": client, "nodeIdentity": identity.public() });
@@ -286,11 +286,24 @@ fn pair_device(directory: &Path, identity: &NodeIdentity, link: &mut RelayLink, 
     Ok(())
 }
 
+/// What was said in one session: needs the owner's switch (off by default) and a device paired with the scope.
+fn conversation_for(directory: &Path, command: &Value, scopes: &[NodeScope]) -> Result<Value, String> {
+    if !scopes.contains(&NodeScope::ReadConversations) {
+        return Err("this device was paired before conversations could be shared; pair it again".into());
+    }
+    if !node_service::load_or_create_config(directory)?.share_conversations {
+        return Err("the owner of that computer has not allowed reading its conversations".into());
+    }
+    let id = command["id"].as_str().ok_or("a session id is required")?;
+    crate::node_sessions::conversation(id).and_then(|conversation| serde_json::to_value(conversation).map_err(io))
+}
+
 /// Read-only commands, the same observations the LAN transport offers.
-fn answer_command(directory: &Path, command: &Value) -> Value {
+fn answer_command(directory: &Path, command: &Value, scopes: &[NodeScope]) -> Value {
     let result = match command["cmd"].as_str() {
         Some("health") => node_service::health(directory).and_then(|health| serde_json::to_value(health).map_err(io)),
         Some("inventory") => crate::node_inventory::InventoryCache::default().snapshot(directory).and_then(|inventory| serde_json::to_value(inventory).map_err(io)),
+        Some("session") => conversation_for(directory, command, scopes),
         Some("sessions") => crate::node_sessions::snapshot().and_then(|snapshot| serde_json::to_value(snapshot).map_err(io)),
         _ => Err("unsupported command".into()),
     };
@@ -391,7 +404,7 @@ pub fn pair(directory: &Path, uri: &str) -> Result<RelayRemote, String> {
         qr_payload: String::new(),
     };
     let name = sysinfo::System::host_name().unwrap_or_else(|| "Lume client".into());
-    let request = node_pairing::pairing_request(&identity, &offer, &name, vec![NodeScope::Observe])?;
+    let request = node_pairing::pairing_request(&identity, &offer, &name, vec![NodeScope::Observe, NodeScope::ReadConversations])?;
     link.send(None, "pair", &seal_box(&pairing.secret, PAIR_REQUEST, &serde_json::to_vec(&request).map_err(io)?)?)?;
     let frame = wait_for(&mut link, 20, |event| payload_of(event, PAIR_RESPONSE))?;
     let answer: Value = serde_json::from_slice(&open_box(&pairing.secret, PAIR_RESPONSE, &frame)?).map_err(io)?;
@@ -418,6 +431,16 @@ pub fn query(directory: &Path, node_id: &str, command: &str) -> Result<Value, St
 /// Runs several read-only commands over one connection and one encrypted session.
 /// The outer error means the Node could not be reached; each item is that command's own result.
 pub fn query_many(directory: &Path, node_id: &str, commands: &[&str]) -> Result<Vec<Result<Value, String>>, String> {
+    let commands: Vec<Value> = commands.iter().map(|command| json!({ "cmd": command })).collect();
+    query_commands(directory, node_id, &commands)
+}
+
+/// One session's conversation, if the owner of the Node allows it.
+pub fn query_session(directory: &Path, node_id: &str, session_id: &str) -> Result<Value, String> {
+    query_commands(directory, node_id, &[json!({ "cmd": "session", "id": session_id })])?.into_iter().next().ok_or("the Node did not answer")?
+}
+
+fn query_commands(directory: &Path, node_id: &str, commands: &[Value]) -> Result<Vec<Result<Value, String>>, String> {
     let remote = remotes(directory)?.into_iter().find(|remote| remote.node_id == node_id || remote.identity.fingerprint == node_id).ok_or("that Node is not paired through a Relay")?;
     let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
     let node_key: [u8; 32] = URL_SAFE_NO_PAD.decode(&remote.identity.public_key).map_err(io)?.try_into().map_err(|_| "invalid Node key".to_string())?;
@@ -428,7 +451,7 @@ pub fn query_many(directory: &Path, node_id: &str, commands: &[&str]) -> Result<
     let mut session = state.finish(&reply, &node_key)?;
     let mut results = Vec::new();
     for command in commands {
-        link.send(None, "cmd", &session.seal(&serde_json::to_vec(&json!({ "cmd": command })).map_err(io)?)?)?;
+        link.send(None, "cmd", &session.seal(&serde_json::to_vec(command).map_err(io)?)?)?;
         let frame = wait_for(&mut link, 15, |event| payload_of(event, 3))?;
         let answer: Value = serde_json::from_slice(&session.open(&frame)?).map_err(io)?;
         results.push(if answer["ok"] == true {
@@ -509,6 +532,36 @@ mod tests {
         assert!(!node_dir.join(OFFER_FILE).exists(), "the offer is single use");
         let health = query(&client_dir, &config.node_id, "health").expect("health through the Relay");
         assert_eq!(health["nodeId"], config.node_id.as_str());
+        // Conversations stay private until the owner turns the switch on.
+        let refused = query_session(&client_dir, &config.node_id, "any").unwrap_err();
+        assert!(refused.contains("not allowed"), "off by default: {refused}");
+        let mut sharing = node_service::load_or_create_config(&node_dir).unwrap();
+        sharing.share_conversations = true;
+        node_service::save_config(&node_dir, &sharing).unwrap();
+        let unknown = query_session(&client_dir, &config.node_id, "no-such-session").unwrap_err();
+        assert!(!unknown.contains("not allowed") && !unknown.contains("pair it again"), "allowed now, the session just does not exist: {unknown}");
+        // With a real session in the app's database, the conversation arrives through the encrypted session.
+        let database = std::env::temp_dir().join(format!("lume-relay-app-{unique}.sqlite3"));
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.execute_batch("CREATE TABLE managed_sessions (session_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL);").unwrap();
+        let session = json!({
+            "id": "s1", "agent": "codex", "agentLabel": "Codex", "sessionName": "Cart", "project": "/p/app", "source": "cli", "status": "running", "statusLabel": "Running",
+            "startedAt": "1", "updatedAt": 5, "processId": null, "nativeSessionId": null, "workingDirectory": "/p/app",
+            "permissionProfile": { "mode": "read_only", "label": "Read only", "approvalPolicy": "on-request", "canRespondFromLume": true, "availableActions": [] },
+            "activities": [{ "id": "p1", "kind": "prompt", "title": "t", "detail": "Fix the total", "status": "completed", "createdAt": 1, "files": [] },
+                           { "id": "m1", "kind": "message", "title": "t", "detail": "Fixed.", "status": "completed", "createdAt": 2, "files": [] }]
+        });
+        connection.execute("INSERT INTO managed_sessions VALUES ('s1', ?1, 5)", [session.to_string()]).unwrap();
+        drop(connection);
+        std::env::set_var("LUME_APP_DB", &database);
+        let conversation = query_session(&client_dir, &config.node_id, "s1").expect("the conversation through the Relay");
+        std::env::remove_var("LUME_APP_DB");
+        let _ = fs::remove_file(&database);
+        assert_eq!(conversation["messages"][0]["text"], "Fix the total");
+        assert_eq!(conversation["messages"][1]["role"], "assistant");
+        sharing.share_conversations = false;
+        node_service::save_config(&node_dir, &sharing).unwrap();
+        assert!(query_session(&client_dir, &config.node_id, "s1").is_err(), "turning the switch off takes effect at once");
         let both = query_many(&client_dir, &config.node_id, &["health", "sessions", "launch-missiles"]).expect("several commands over one session");
         assert_eq!(both[0].as_ref().unwrap()["nodeId"], config.node_id.as_str());
         assert!(both[1].as_ref().unwrap()["sessions"].is_array());

@@ -52,6 +52,13 @@ function fixture() {
           sessions: { generatedAt: now, appFound: true, sessions: [session("a", "codex", window.__phone.running), session("b", "claude_code", "permission_required", { name: "Corrigir login", needsPermission: true })] },
         };
       }
+      if (command === "get_node_share_conversations") return window.__share ?? false;
+      if (command === "set_node_share_conversations") { window.__share = args.enabled; return args.enabled; }
+      if (command === "get_relay_lume_session") {
+        if (window.__denyChat) throw "the owner of that computer has not allowed reading its conversations";
+        return { session: { id: args.sessionId, agent: "codex", agentLabel: "Codex", name: "", project: "Lume", status: "running", statusLabel: "Running", startedAt: "1", updatedAt: now, needsPermission: false, needsAnswer: false }, generatedAt: now, truncated: false,
+          messages: [{ id: "u1", role: "user", text: "Corrija o total <b>do carrinho</b>", createdAt: 1 }, { id: "a1", role: "assistant", text: "Pronto, corrigi.", createdAt: 2 }] };
+      }
       if (command === "forget_relay_lume_node") { paired.length = 0; return true; }
       if (command === "discover_lume_nodes") return [{ nodeId: "node-casa", address: "192.168.0.8", port: 4433, identityFingerprint: "f", certificateSha256: "c", protocolMinimum: 1, protocolMaximum: 1 }];
       if (command === "request_lume_node_pairing") return { requestId: "req-1", code: "482913", expiresAt: now + 120000 };
@@ -139,8 +146,22 @@ try {
   assert.match(text, /Pede permissão/);
   assert.equal(await evaluate("document.querySelectorAll('.session-dot.attention').length"), 1);
   assert.equal(await evaluate("document.querySelectorAll('.session-dot.running').length"), 1);
-  assert.equal(await evaluate("document.querySelectorAll('article button').length"), 1, "the Relay computer only offers Forget: no way to control it yet");
+  assert.equal(await evaluate("document.querySelectorAll('article button:not(.session-button)').length"), 1, "the Relay computer only offers Forget: no way to control it yet");
   await screenshot("remote-sessions");
+  // Reading a conversation: plain text only, refused politely when the owner has not allowed it.
+  await evaluate("window.__denyChat = true; document.querySelector('.session-button').click()");
+  await wait("document.querySelector('.conversation .error')");
+  assert.match(await evaluate("document.querySelector('.conversation .error').textContent"), /não liberou/);
+  await evaluate("window.__denyChat = false; document.dispatchEvent(new Event('visibilitychange'))");
+  await wait("document.querySelectorAll('.bubble').length === 2");
+  assert.equal(await evaluate("document.querySelector('.bubble.user p').textContent"), "Corrija o total <b>do carrinho</b>");
+  assert.equal(await evaluate("document.querySelector('.bubble p b')"), null, "remote text is never interpreted as HTML");
+  await screenshot("remote-conversation");
+  await evaluate("Array.from(document.querySelectorAll('.conversation-head button')).find((button) => /Voltar/.test(button.textContent)).click()");
+  await wait("document.querySelectorAll('.session-row').length === 2");
+  // The owner's switch.
+  await evaluate("document.querySelector('.share-switch input').click()");
+  await wait("window.__share === true");
   await evaluate("window.__phone.running = 'completed'");
   await evaluate("document.dispatchEvent(new Event('visibilitychange'))");
   await wait("document.querySelectorAll('.session-dot.idle').length === 1");

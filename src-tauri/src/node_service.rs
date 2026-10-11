@@ -44,6 +44,8 @@ pub struct NodeConfig {
     pub allowed_project_roots: Vec<PathBuf>,
     /// Lume Relay the Node connects to for access from other networks; `None` keeps the Node LAN-only.
     pub relay_url: Option<String>,
+    /// Lets paired devices read what was said in this computer's sessions. Off until its owner turns it on.
+    pub share_conversations: bool,
 }
 
 impl Default for NodeConfig {
@@ -59,6 +61,7 @@ impl Default for NodeConfig {
             ollama_port: 11_434,
             allowed_project_roots: Vec::new(),
             relay_url: None,
+            share_conversations: false,
         }
     }
 }
@@ -238,6 +241,17 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             }
             Ok(Some(json(&offer)?))
         }
+        "conversations" => {
+            let value = positional_argument(arguments, 1).ok_or("conversations requires `on` or `off`")?;
+            let mut config = load_or_create_config(&state_directory)?;
+            config.share_conversations = match value {
+                "on" => true,
+                "off" => false,
+                _ => return Err("conversations requires `on` or `off`".into()),
+            };
+            save_config(&state_directory, &config)?;
+            Ok(Some(json(&serde_json::json!({ "shareConversations": config.share_conversations }))?))
+        }
         "relay" => {
             let value = positional_argument(arguments, 1).ok_or("relay requires a Relay address, or `off`")?;
             let mut config = load_or_create_config(&state_directory)?;
@@ -271,6 +285,11 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             let client = node_pairing::decide(&state_directory, &request.request_id, command == "approve", now_millis())?;
             append_log(&state_directory, &format!("Pairing request {}: {}", command, request.display_name))?;
             Ok(Some(json(&serde_json::json!({ "decision": command, "client": client }))?))
+        }
+        "relay-session" => {
+            let node = positional_argument(arguments, 1).ok_or("a Node ID is required")?;
+            let id = positional_argument(arguments, 2).ok_or("a session id is required (see `lume node relay-sessions`)")?;
+            Ok(Some(json(&crate::node_relay::query_session(&state_directory, node, id)?)?))
         }
         "relay-health" | "relay-inventory" | "relay-sessions" => {
             let node = positional_argument(arguments, 1).ok_or("a Node ID is required")?;
@@ -342,7 +361,7 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lume node [menu|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|sessions|requests|approve|deny|relay|relay-pair|relay-remotes|relay-health|relay-inventory|relay-sessions> [VALUE] [--state-dir PATH] [--once]"
+    "Usage: lume node [menu|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|sessions|requests|approve|deny|conversations|relay|relay-pair|relay-remotes|relay-health|relay-inventory|relay-sessions|relay-session> [VALUE] [--state-dir PATH] [--once]"
 }
 
 fn positional_argument(arguments: &[String], index: usize) -> Option<&str> {
@@ -437,7 +456,7 @@ fn validate_config(config: &NodeConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn save_config(directory: &Path, config: &NodeConfig) -> Result<(), String> {
+pub(crate) fn save_config(directory: &Path, config: &NodeConfig) -> Result<(), String> {
     validate_config(config)?;
     fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     restrict_directory(directory)?;

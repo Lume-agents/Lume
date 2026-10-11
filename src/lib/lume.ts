@@ -23,6 +23,7 @@ import type {
   PendingPairRequest,
   RelayLumeNode,
   RelayLumeNodeOverview,
+  RemoteConversation,
   RemoteLumeNode,
   RemoteLumeNodeHealth,
   RemoteLumeNodeInventory,
@@ -273,6 +274,18 @@ export async function loadRelayLumeNodes(): Promise<RelayLumeNode[]> {
 
 export async function loadRelayLumeNodeOverview(nodeId: string): Promise<RelayLumeNodeOverview> {
   return invoke<RelayLumeNodeOverview>("get_relay_lume_node_overview", { nodeId });
+}
+
+export async function loadRelayLumeSession(nodeId: string, sessionId: string): Promise<RemoteConversation> {
+  return invoke<RemoteConversation>("get_relay_lume_session", { nodeId, sessionId });
+}
+
+export async function loadNodeShareConversations(): Promise<boolean> {
+  return invoke<boolean>("get_node_share_conversations");
+}
+
+export async function saveNodeShareConversations(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_node_share_conversations", { enabled });
 }
 
 export async function forgetRelayLumeNode(nodeId: string): Promise<boolean> {

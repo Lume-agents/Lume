@@ -2,7 +2,7 @@
   import { getContext, onMount, untrack } from "svelte";
   import { createSystemBannerSource, SYSTEM_BANNER_CONTEXT, type SystemBannerReporter, type SystemBannerNotice } from "$lib/systemBannerContext";
   import BrandIcon from "$lib/BrandIcon.svelte";
-  import type { DiscoveredLumeNode, PairingRequestHandle, PendingPairRequest, RelayLumeNode, RelayLumeNodeOverview, RemoteLumeNode, RemoteLumeNodeHealth, RemoteLumeNodeInventory } from "$lib/domain";
+  import type { DiscoveredLumeNode, PairingRequestHandle, PendingPairRequest, RelayLumeNode, RelayLumeNodeOverview, RemoteAgentSession, RemoteConversation, RemoteLumeNode, RemoteLumeNodeHealth, RemoteLumeNodeInventory } from "$lib/domain";
   import { localize, type Language } from "$lib/i18n";
   import {
     checkLumeNodePairing,
@@ -11,10 +11,13 @@
     forgetRelayLumeNode,
     forgetRemoteLumeNode,
     loadNodePairRequests,
+    loadNodeShareConversations,
     loadRelayLumeNodeOverview,
+    loadRelayLumeSession,
     loadRelayLumeNodes,
     pairLumeRelayNode,
     requestLumeNodePairing,
+    saveNodeShareConversations,
     loadRemoteLumeNodeHealth,
     loadRemoteLumeNodeInventory,
     loadRemoteLumeNodes,
@@ -35,6 +38,11 @@
   let relayCheckedAt = $state<Record<string, number>>({});
   const relayInFlight = new Set<string>();
   const RELAY_REFRESH_MS = 6000;
+  let openChat = $state<{ nodeId: string; sessionId: string; title: string } | null>(null);
+  let conversation = $state<RemoteConversation | null>(null);
+  let conversationError = $state("");
+  let shareConversations = $state(false);
+  let chatScroller = $state<HTMLElement | undefined>();
   let requesting = $state<{ node: DiscoveredLumeNode; handle: PairingRequestHandle } | null>(null);
   let requestTimer: ReturnType<typeof setInterval> | undefined;
   let incoming = $state<PendingPairRequest[]>([]);
@@ -132,17 +140,64 @@
   async function refreshRelay(nodeId: string) {
     if (relayInFlight.has(nodeId)) return;
     relayInFlight.add(nodeId);
+    // While a conversation is open only it is refreshed: one connection per computer at a time.
+    const chat = openChat?.nodeId === nodeId ? openChat : null;
     try {
-      overviews[nodeId] = await loadRelayLumeNodeOverview(nodeId);
+      if (chat) {
+        const next = await loadRelayLumeSession(nodeId, chat.sessionId);
+        if (openChat === chat) { conversation = next; conversationError = ""; }
+      } else {
+        overviews[nodeId] = await loadRelayLumeNodeOverview(nodeId);
+      }
       delete relayErrors[nodeId];
     } catch (error) {
-      delete overviews[nodeId];
-      relayErrors[nodeId] = errorMessage(error);
+      if (chat) {
+        if (openChat === chat) conversationError = friendlyConversationError(errorMessage(error));
+      } else {
+        delete overviews[nodeId];
+        relayErrors[nodeId] = errorMessage(error);
+      }
     } finally {
       relayCheckedAt[nodeId] = Date.now();
       relayInFlight.delete(nodeId);
     }
   }
+
+  function friendlyConversationError(error: string) {
+    if (error.includes("not allowed")) return tr("The owner of that computer has not allowed reading its conversations. They can turn it on in Settings → Remote computers.", "O dono daquele computador não liberou a leitura das conversas. Ele pode ativar em Configurações → Computadores remotos.");
+    if (error.includes("pair it again")) return tr("This computer was paired before conversations could be shared. Forget it and pair it again.", "Este computador foi pareado antes de as conversas poderem ser compartilhadas. Esqueça e pareie de novo.");
+    return error;
+  }
+
+  function openConversation(nodeId: string, session: RemoteAgentSession) {
+    openChat = { nodeId, sessionId: session.id, title: sessionTitle(session) };
+    conversation = null;
+    conversationError = "";
+    void refreshRelay(nodeId);
+  }
+
+  function closeConversation() {
+    const nodeId = openChat?.nodeId;
+    openChat = null;
+    conversation = null;
+    conversationError = "";
+    if (nodeId) void refreshRelay(nodeId);
+  }
+
+  function setShareConversations(enabled: boolean) {
+    return perform(async () => {
+      shareConversations = await saveNodeShareConversations(enabled);
+      message = shareConversations
+        ? tr("Paired devices can now read this computer's conversations.", "Dispositivos pareados agora podem ler as conversas deste computador.")
+        : tr("Conversations are private again.", "As conversas voltaram a ser privadas.");
+    });
+  }
+
+  $effect(() => {
+    // Keep the newest message in view when a conversation opens or grows.
+    const count = conversation?.messages.length;
+    if (count && chatScroller) untrack(() => { chatScroller!.scrollTop = chatScroller!.scrollHeight; });
+  });
 
   function refreshAllRelay() {
     if (!desktop || document.hidden) return;
@@ -315,6 +370,7 @@
       relayNodes = await loadRelayLumeNodes();
       refreshAllRelay();
       await refreshIncoming();
+      shareConversations = await loadNodeShareConversations().catch(() => false);
     });
     const timer = setInterval(() => { refreshAllRelay(); void refreshIncoming(); }, RELAY_REFRESH_MS / 2);
     const onVisible = () => { if (!document.hidden) { refreshAllRelay(); void refreshIncoming(); } };
@@ -342,6 +398,11 @@
     />
     <button disabled={!desktop || busy || !pairingUri.trim()} type="button" onclick={() => void pair()}>{tr("Pair", "Parear")}</button>
   </div>
+  <label class="share-switch">
+    <input type="checkbox" checked={shareConversations} disabled={!desktop || busy} onchange={(event) => void setShareConversations(event.currentTarget.checked)} />
+    <i class="track" aria-hidden="true"></i>
+    <span><strong>{tr("Let paired devices read this computer's conversations", "Permitir que dispositivos pareados leiam as conversas deste computador")}</strong><small>{tr("Off by default. Only what was said, never commands or files. Takes effect at once.", "Desligado por padrão. Só o que foi dito, nunca comandos nem arquivos. Vale na hora.")}</small></span>
+  </label>
   {#if requesting}
     <div class="request-panel" role="status">
       <small>{tr(`Approve on ${requesting.node.nodeId} after checking that it shows this code:`, `Aprove em ${requesting.node.nodeId} depois de conferir que ele mostra este código:`)}</small>
@@ -433,18 +494,35 @@
             <button disabled={busy} type="button" title={tr("Remove the record on this client. Revoke its key on the remote computer to remove authorization.", "Remove o registro neste cliente. Revogue a chave no computador remoto para retirar a autorização.")} onclick={() => void forgetRelay(node.nodeId)}>{tr("Forget", "Esquecer")}</button>
           </div>
         </div>
-        {#if snapshot}
+        {#if openChat?.nodeId === node.nodeId}
+          <div class="conversation">
+            <div class="conversation-head">
+              <button type="button" onclick={closeConversation}>← {tr("Back", "Voltar")}</button>
+              <strong>{openChat.title}</strong>
+            </div>
+            <div class="conversation-body" class:scrolling bind:this={chatScroller} onscroll={showScrollbar}>
+              {#if conversation?.truncated}<p class="empty">{tr("Older messages are not shown.", "Mensagens mais antigas não aparecem.")}</p>{/if}
+              {#each conversation?.messages ?? [] as item (item.id)}
+                <div class={`bubble ${item.role}`}><small>{item.role === "user" ? tr("You asked", "Pedido") : conversation?.session.agentLabel}</small><p>{item.text}</p></div>
+              {/each}
+              {#if conversation && !conversation.messages.length}<p class="empty">{tr("Nothing was said in this session yet.", "Nada foi dito nesta sessão ainda.")}</p>{/if}
+              {#if !conversation && !conversationError}<p class="empty">{tr("Loading…", "Carregando…")}</p>{/if}
+              {#if conversationError}<p class="error inventory-error">{conversationError}</p>{/if}
+            </div>
+            <small class="snapshot-label">{tr("Read-only view · updates every few seconds", "Visão somente leitura · atualiza a cada poucos segundos")}</small>
+          </div>
+        {:else if snapshot}
           <details class="inventory" open>
             <summary>{snapshot.sessions.length} {tr("agent sessions", "sessões de agentes")}</summary>
             <small class="snapshot-label">{tr("Read-only view", "Visão somente leitura")} · {snapshotTime(snapshot.generatedAt)}</small>
             <div class="inventory-list" class:scrolling onscroll={showScrollbar}>
               {#each snapshot.sessions as session (session.id)}
-                <div class="inventory-row session-row">
+                <button type="button" class="inventory-row session-row session-button" onclick={() => openConversation(node.nodeId, session)} title={tr("Read this conversation", "Ler esta conversa")}>
                   <span class={`session-dot ${sessionDot(session.status)}`} aria-hidden="true"></span>
                   <BrandIcon name={session.agent} size={13} />
                   <span class="session-title"><strong>{sessionTitle(session)}</strong><small>{session.agentLabel}{session.name && session.project ? ` · ${session.project}` : ""}</small></span>
                   <small>{sessionState(session)} · {agoLabel(session.updatedAt)}</small>
-                </div>
+                </button>
               {/each}
               {#if !snapshot.appFound}<p class="empty">{tr("The Lume app has not been opened on that computer yet.", "O app do Lume ainda não foi aberto naquele computador.")}</p>
               {:else if !snapshot.sessions.length}<p class="empty">{tr("No agent sessions there.", "Nenhuma sessão de agente por lá.")}</p>{/if}
@@ -500,6 +578,25 @@
   .request-panel .code { font-size: 20px; letter-spacing: 3px; font-variant-numeric: tabular-nums; }
   .request-actions { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
   .session-row { gap: 6px; }
+  .session-button { width: 100%; padding: 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; text-align: left; }
+  .session-button:hover { background: var(--surface); }
+  .share-switch { position: relative; display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+  .share-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .track { position: relative; width: 26px; height: 15px; flex-shrink: 0; margin-top: 1px; border-radius: 8px; background: var(--line); transition: background 160ms ease; }
+  .track::after { position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; content: ""; background: var(--ink); transition: transform 160ms ease; }
+  .share-switch input:checked + .track { background: var(--lume-accent-strong, #4d9d76); }
+  .share-switch input:checked + .track::after { transform: translateX(11px); }
+  .share-switch input:focus-visible + .track { outline: 2px solid var(--lume-accent-strong, #4d9d76); outline-offset: 2px; }
+  .share-switch input:disabled + .track { opacity: 0.5; }
+  .share-switch > span { display: grid; gap: 2px; min-width: 0; }
+  .share-switch strong { white-space: normal; }
+  .conversation { margin-top: 9px; display: grid; gap: 6px; }
+  .conversation-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .conversation-body { display: grid; align-content: start; gap: 6px; max-height: 280px; overflow: auto; scrollbar-width: thin; scrollbar-color: transparent transparent; }
+  .conversation-body.scrolling { scrollbar-color: var(--line) transparent; }
+  .bubble { display: grid; gap: 2px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; }
+  .bubble.user { background: var(--surface); }
+  .bubble p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; line-height: 1.5; }
   .session-title { display: grid; min-width: 0; flex: 1; }
   .session-title small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }

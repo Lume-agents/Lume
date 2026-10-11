@@ -1538,6 +1538,31 @@ async fn get_relay_lume_node_overview(node_id: String) -> Result<serde_json::Val
     .map_err(|error| error.to_string())?
 }
 
+/// One session's conversation on a computer paired through the Relay, when its owner allows it.
+#[tauri::command]
+async fn get_relay_lume_session(node_id: String, session_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_relay::query_session(&node_service::default_state_directory()?, &node_id, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn get_node_share_conversations() -> Result<bool, String> {
+    Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.share_conversations)
+}
+
+/// The owner's switch: whether devices paired with this computer may read what was said in its sessions.
+#[tauri::command]
+fn set_node_share_conversations(enabled: bool) -> Result<bool, String> {
+    let directory = node_service::default_state_directory()?;
+    let mut config = node_service::load_or_create_config(&directory)?;
+    config.share_conversations = enabled;
+    node_service::save_config(&directory, &config)?;
+    Ok(config.share_conversations)
+}
+
 #[tauri::command]
 fn forget_relay_lume_node(node_id: String) -> Result<bool, String> {
     node_relay::forget(&node_service::default_state_directory()?, &node_id)
@@ -3214,6 +3239,9 @@ pub fn run() {
             list_relay_lume_nodes,
             get_relay_lume_node_overview,
             forget_relay_lume_node,
+            get_relay_lume_session,
+            get_node_share_conversations,
+            set_node_share_conversations,
             get_remote_lume_node_health,
             get_remote_lume_node_inventory,
             forget_remote_lume_node,

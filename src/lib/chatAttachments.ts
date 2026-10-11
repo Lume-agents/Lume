@@ -21,6 +21,14 @@ export function cleanPromptTransport(value?: string): string {
   return (marker >= 0 ? normalized.slice(0, marker) : normalized).trim();
 }
 
+const syntheticPromptPrefixes = ["<task-notification>", "<system-reminder>", "<command-", "<local-command-"];
+
+/** Claude Code records its own notices (a finished background command, a reminder) as user messages. */
+export function isSyntheticPromptText(value?: string): boolean {
+  const text = String(value ?? "").trimStart();
+  return syntheticPromptPrefixes.some((prefix) => text.startsWith(prefix));
+}
+
 export function promptTextKey(value?: string): string {
   return cleanPromptTransport(value)
     .replace(/[ \t]+$/gm, "")

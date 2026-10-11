@@ -85,11 +85,49 @@ const filenameIcons: Record<string, IconifyIcon> = {
   "settings.gradle": gradleIcon, "chart.yaml": yamlIcon,
 };
 
+// Lume's own glyphs for files with no brand of their own: 20x20 outlines drawn like the plain page icon.
+const GLYPHS = {
+  flask: "M8 3h4M9 3v5.2L4.6 15.6A1.4 1.4 0 0 0 5.8 17.7h8.4a1.4 1.4 0 0 0 1.2-2.1L11 8.2V3M6.6 12.4h6.8",
+  sliders: "M4 6h7M14 6h2M4 14h2M9 14h7M11 4v4M6 12v4",
+  lock: "M5.5 9h9v7.5h-9zM7.5 9V6.5a2.5 2.5 0 0 1 5 0V9M10 12v1.6",
+  key: "M8 6.5a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4ZM10.4 11 16.5 17M13.6 14l1.8-1.8",
+  table: "M3.5 5h13v10h-13zM3.5 9h13M3.5 12h13M8.5 5v10",
+  database: "M4 5.5c0-1.1 2.7-2 6-2s6 .9 6 2-2.7 2-6 2-6-.9-6-2ZM4 5.5v9c0 1.1 2.7 2 6 2s6-.9 6-2v-9M4 10c0 1.1 2.7 2 6 2s6-.9 6-2",
+  text: "M4.5 5h11M4.5 8.5h11M4.5 12h11M4.5 15.5h6.5",
+  terminal: "M3.5 4.5h13v11h-13zM6.5 8.5l2.5 2-2.5 2M10.5 12.5h3.2",
+  markup: "M7.5 6 3.5 10l4 4M12.5 6l4 4-4 4",
+  git: "M6 4.2a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2ZM6 12.6a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2ZM14 6.4a1.6 1.6 0 1 0 0 3.2 1.6 1.6 0 0 0 0-3.2ZM6 7.4v5.2M14 9.6c0 2.6-3.4 2.6-6.4 3.2",
+  archive: "M3.5 4.5h13v3h-13zM4.5 7.5v8h11v-8M8 11h4",
+  diff: "M6 3.5v13M14 3.5v13M3.5 7h5M11.5 13h5",
+  image: "M3.5 4.5h13v11h-13zM3.5 13l4-4 3.5 3.5 2-2 3.5 3.5M12.5 8.2h.01",
+  braces: "M8 4.5c-1.8 0-2 1-2 2.2v1.4c0 1-.7 1.9-2 1.9 1.3 0 2 .9 2 1.9v1.4c0 1.2.2 2.2 2 2.2M12 4.5c1.8 0 2 1 2 2.2v1.4c0 1 .7 1.9 2 1.9-1.3 0-2 .9-2 1.9v1.4c0 1.2-.2 2.2-2 2.2",
+} as const;
+type Glyph = keyof typeof GLYPHS;
+
+// These win over a language logo: .mjs and .toml are scripts and settings more than "JavaScript" and "TOML".
+const extensionGlyphs: Record<string, Glyph> = {
+  mjs: "flask", ipynb: "flask",
+  toml: "sliders", ini: "sliders", cfg: "sliders", conf: "sliders", properties: "sliders", editorconfig: "sliders",
+  lock: "lock",
+  env: "key", pem: "key", key: "key", crt: "key", cer: "key",
+  csv: "table", tsv: "table", xls: "table", xlsx: "table",
+  sql: "database", db: "database", sqlite: "database", sqlite3: "database",
+  txt: "text", log: "text", rtf: "text",
+  bat: "terminal", cmd: "terminal", ps1: "terminal", psm1: "terminal", fish: "terminal", zsh: "terminal",
+  xml: "markup", xsd: "markup", xsl: "markup", xslt: "markup", plist: "markup",
+  gitignore: "git", gitattributes: "git", gitmodules: "git", gitkeep: "git",
+  zip: "archive", tar: "archive", gz: "archive", tgz: "archive", bz2: "archive", xz: "archive", rar: "archive", "7z": "archive",
+  patch: "diff", diff: "diff",
+  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image", bmp: "image", ico: "image", svg: "image", avif: "image",
+  proto: "braces", jsonl: "braces", ndjson: "braces", json5: "braces",
+};
+
 function fileType(value: string): string {
   const name = value.replaceAll("\\", "/").split("/").pop()?.toLowerCase() ?? "";
   if (name === "dockerfile" || name === "containerfile") return "docker";
   if (name === "pom.xml") return "java";
   if (filenameIcons[name]) return name;
+  if (name === ".env" || name.startsWith(".env.")) return "env";
   if (name.startsWith("vite.config.")) return "vite-config";
   if (name.startsWith("webpack.config.")) return "webpack-config";
   if (name.startsWith("eslint.config.") || name.startsWith(".eslintrc")) return "eslint-config";
@@ -110,12 +148,14 @@ function isMonochromeIcon(icon: IconifyIcon | null): boolean {
   return new Set(explicitColors).size <= 1;
 }
 
-export function fileTypeIconForPath(path: string): { icon: IconifyIcon | null; maintainedPath: string | null; sizeOffset: number; monochrome: boolean } {
+export function fileTypeIconForPath(path: string): { icon: IconifyIcon | null; maintainedPath: string | null; glyph: string | null; sizeOffset: number; monochrome: boolean } {
   const type = fileType(path);
-  const icon = type === "docker" ? dockerIcon : filenameIcons[type] ?? extensionIcons[type] ?? null;
+  const glyph = extensionGlyphs[type] ? GLYPHS[extensionGlyphs[type]] : null;
+  const icon = glyph ? null : type === "docker" ? dockerIcon : filenameIcons[type] ?? extensionIcons[type] ?? null;
   return {
     icon,
     maintainedPath: type === "cs" ? CSHARP_PATH : type === "java" ? JAVA_PATH : null,
+    glyph,
     sizeOffset: type === "go" || type === "php" ? 2 : 0,
     monochrome: isMonochromeIcon(icon),
   };
@@ -123,7 +163,8 @@ export function fileTypeIconForPath(path: string): { icon: IconifyIcon | null; m
 
 /** Trusted local icon data rendered into the safe Markdown output. */
 export function renderFileTypeIconHtml(path: string): string {
-  const { icon, maintainedPath, sizeOffset, monochrome } = fileTypeIconForPath(path);
+  const { icon, maintainedPath, glyph, sizeOffset, monochrome } = fileTypeIconForPath(path);
+  if (glyph) return `<svg class="inline-file-icon" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="${glyph}"/></svg>`;
   if (maintainedPath) return `<svg class="inline-file-icon maintained" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${maintainedPath}"/></svg>`;
   if (icon) {
     const left = icon.left ?? 0;

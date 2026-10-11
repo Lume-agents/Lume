@@ -1,7 +1,6 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-  import { openPath } from "@tauri-apps/plugin-opener";
   import type { PromptAttachment } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import {
@@ -9,12 +8,13 @@
     extractResponseFiles,
     type ResponseFileCard,
   } from "$lib/chatAttachments";
-  import { exportLocalFile, readLocalImageDataUrl, setTerminalFileDialogActive } from "$lib/lume";
+  import { exportLocalFile, openSessionFile, readLocalImageDataUrl, setTerminalFileDialogActive } from "$lib/lume";
 
   let {
     text = "",
     attachments = [],
     workingDirectory,
+    sessionId,
     language = "en",
     includeCitations = false,
     onError = () => undefined,
@@ -22,6 +22,7 @@
     text?: string;
     attachments?: PromptAttachment[];
     workingDirectory?: string;
+    sessionId?: string;
     language?: Language;
     includeCitations?: boolean;
     onError?: (message: string) => void;
@@ -55,7 +56,8 @@
 
   async function openResource(resource: ResponseFileCard) {
     try {
-      await openPath(resource.path);
+      if (!sessionId) throw new Error(tr("This file cannot be opened from here.", "Este arquivo não pode ser aberto daqui."));
+      await openSessionFile(sessionId, resource.path);
     } catch (error) {
       onError(String(error).replace(/^Error:\s*/, ""));
     }

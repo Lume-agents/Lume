@@ -3796,6 +3796,7 @@
                       text={item.detail}
                       attachments={item.attachments ?? []}
                       workingDirectory={session.workingDirectory}
+                      sessionId={session.id}
                       {language}
                       onError={(error) => (message = error)}
                     />

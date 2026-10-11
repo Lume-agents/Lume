@@ -3,7 +3,7 @@
   import { fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import type { InteractiveQuestion, PendingQuestion, PermissionAction, QuestionAnswer, SessionActivity, SessionResult } from "$lib/domain";
   import type { PromptAttachmentInput } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
@@ -82,6 +82,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     loadWorkspacePromptIndexPage,
     openSessionSource,
     searchSessionPaths,
+    openSessionFile,
     readLocalImageDataUrl,
     setNativeFileDialogActive,
     setClaudeSessionModelSettings,
@@ -801,7 +802,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         : null;
       if (!badge || !paneRoot?.contains(badge)) return;
       const path = badge.dataset.localFile;
-      if (path) void openPath(path).catch((error) => (sendError = String(error).replace(/^Error:\s*/, "")));
+      if (path) void openSessionFile(session.id, path).catch((error) => (sendError = String(error).replace(/^Error:\s*/, "")));
     };
     const openGitHubLink = (event: MouseEvent) => {
       if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -2574,6 +2575,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                   text={item.detail}
                   attachments={item.attachments ?? []}
                   workingDirectory={session.workingDirectory}
+                  sessionId={session.id}
                   {language}
                   onError={(error) => (sendError = error)}
                 />

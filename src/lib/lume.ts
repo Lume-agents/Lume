@@ -365,6 +365,11 @@ export async function submitPrompt(
   await invoke("submit_prompt", { sessionId, prompt, attachments, delivery });
 }
 
+/** Opens a file the agent cited; the Rust side only allows plain files inside the session's folder. */
+export async function openSessionFile(sessionId: string, path: string): Promise<void> {
+  return invoke<void>("open_session_file", { sessionId, path });
+}
+
 export async function readLocalImageDataUrl(path: string): Promise<string> {
   return invoke<string>("read_local_image_data_url", { path });
 }

@@ -53,6 +53,7 @@ mod state;
 mod store;
 mod terminal_windows;
 mod pair_watch;
+mod session_files;
 mod usage_monitor;
 mod workflow_runtime;
 mod workspace_windows;
@@ -848,6 +849,23 @@ async fn submit_prompt(
 #[tauri::command]
 fn read_local_image_data_url(path: String) -> Result<String, String> {
     control::local_image_data_url(&path)
+}
+
+/// Opens a file the agent cited, in the default app, if it is a plain file inside the session's folder.
+#[tauri::command]
+fn open_session_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    let session = state.connected_session(&session_id)?;
+    let file = session_files::openable_file(session.working_directory.as_deref().unwrap_or_default(), &path)?;
+    // Windows canonical paths carry a `\\?\` prefix that the shell does not always accept.
+    let file = file.to_string_lossy();
+    app.opener()
+        .open_path(file.strip_prefix(r"\\?\").unwrap_or(&file), None::<String>)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -3190,6 +3208,7 @@ pub fn run() {
             open_session_source,
             submit_prompt,
             read_local_image_data_url,
+            open_session_file,
             export_local_file,
             set_terminal_file_dialog_active,
             set_native_file_dialog_active,

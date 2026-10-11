@@ -23,7 +23,6 @@
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "https://*" }, { "url": "http://*" }, { "url": "mailto:*" }]
     },
-    "opener:allow-open-path",
     "process:allow-restart",
     "updater:default"
   ]

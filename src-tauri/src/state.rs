@@ -3809,6 +3809,14 @@ impl AppState {
             changed = true;
         }
 
+        // A conversation Claude's daemon hosts outlives the CLI that was open on it: when that CLI closes,
+        // the session follows the worker that still holds it instead of closing with the CLI.
+        for session in sessions.iter_mut() {
+            if rebind_to_registered_worker(session, &live_pids, &integrations::claude_registered_pids) {
+                snapshots.push(session.clone());
+                changed = true;
+            }
+        }
         let process_is_present = |session: &AgentSession| {
             session.process_id.is_some_and(|pid| {
                 if (session.agent == AgentKind::Codex && session.source == SessionSource::Cli)
@@ -4962,6 +4970,27 @@ fn history_for_event(
         summary: summary.into(),
         created_at: now,
     })
+}
+
+/// Points a Claude session whose process is gone at the live process Claude's registry names for its
+/// conversation. Returns whether it changed.
+fn rebind_to_registered_worker(
+    session: &mut AgentSession,
+    live_pids: &HashSet<u32>,
+    registered: &dyn Fn(&str) -> Vec<u32>,
+) -> bool {
+    if session.agent != AgentKind::ClaudeCode || session.process_id.is_none_or(|pid| live_pids.contains(&pid)) {
+        return false;
+    }
+    let Some(worker) = session
+        .native_session_id
+        .as_deref()
+        .and_then(|id| registered(id).into_iter().find(|pid| live_pids.contains(pid)))
+    else {
+        return false;
+    };
+    session.process_id = Some(worker);
+    true
 }
 
 fn recover_process_identities(
@@ -9129,5 +9158,23 @@ mod tests {
         assert_eq!(cache_copy_original_name("1791581411129-0-image.jpg"), Some("image.jpg"));
         assert_eq!(cache_copy_original_name("2026-10-12-notes.txt"), None, "a date is not a cache stamp");
         assert_eq!(cache_copy_original_name("image.jpg"), None);
+    }
+
+    #[test]
+    fn a_session_follows_the_worker_that_holds_it_when_its_cli_closes() {
+        let mut event = started_event("claude:thread", 500);
+        event.agent = AgentKind::ClaudeCode;
+        let mut session = session_from_event(&event, 1);
+        session.native_session_id = Some("thread".into());
+        let live: HashSet<u32> = [900, 901].into_iter().collect();
+        let registry = |id: &str| if id == "thread" { vec![500, 900] } else { Vec::new() };
+        assert!(rebind_to_registered_worker(&mut session, &live, &registry));
+        assert_eq!(session.process_id, Some(900), "the CLI (500) closed; the worker (900) still holds the thread");
+        assert!(!rebind_to_registered_worker(&mut session, &live, &registry), "nothing to do while its process is alive");
+        let mut orphan = session_from_event(&started_event("claude:orphan", 777), 1);
+        orphan.agent = AgentKind::ClaudeCode;
+        orphan.native_session_id = Some("orphan".into());
+        assert!(!rebind_to_registered_worker(&mut orphan, &live, &registry), "no worker holds it: it closes as before");
+        assert_eq!(orphan.process_id, Some(777));
     }
 }

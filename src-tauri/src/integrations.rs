@@ -700,6 +700,27 @@ pub(crate) fn claude_background_pid_unused(pid: u32) -> bool {
         .is_some_and(|record| unused_background_record(&record, claude_transcript_can_resume))
 }
 
+/// An interactive CLI that has not held a conversation yet: a fresh `claude`, or the CLI's agent view,
+/// which only lists the background sessions and attaches to one of them.
+fn unused_interactive_record(record: &Value, has_transcript: impl Fn(&str) -> bool) -> bool {
+    record.get("kind").and_then(Value::as_str) == Some("interactive")
+        && record
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .is_some_and(|session_id| !has_transcript(session_id))
+}
+
+/// Whether this process is an interactive Claude CLI in the bare home folder with nothing said yet.
+/// There it is almost always the agent view, which is not an agent until a thread is open in it;
+/// a conversation you start there becomes a session as soon as it has a prompt.
+pub(crate) fn claude_unused_home_cli(pid: u32, working_directory: Option<&str>) -> bool {
+    working_directory.is_some_and(crate::session_filters::is_home_workspace)
+        && claude_sessions_directory()
+            .and_then(|directory| fs::read_to_string(directory.join(format!("{pid}.json"))).ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .is_some_and(|record| unused_interactive_record(&record, claude_transcript_can_resume))
+}
+
 fn interactive_claude_pid(record: &Value, session_id: &str) -> Option<u32> {
     (record.get("sessionId").and_then(Value::as_str) == Some(session_id)
         && record.get("kind").and_then(Value::as_str) == Some("interactive"))
@@ -4887,5 +4908,15 @@ mod tests {
         let listed = claude_resumable_sessions(&root).into_iter().map(|session| session.id).collect::<Vec<_>>();
         assert_eq!(listed, vec!["real".to_string()], "only a conversation somebody can continue is offered");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_interactive_cli_without_a_conversation_is_unused() {
+        let fresh = serde_json::json!({ "kind": "interactive", "sessionId": "new", "entrypoint": "cli" });
+        assert!(unused_interactive_record(&fresh, |_| false));
+        assert!(!unused_interactive_record(&fresh, |id| id == "new"), "a conversation makes it a session");
+        let background = serde_json::json!({ "kind": "bg", "sessionId": "job" });
+        assert!(!unused_interactive_record(&background, |_| false), "daemon sessions have their own rule");
+        assert!(!unused_interactive_record(&serde_json::json!({ "kind": "interactive" }), |_| false));
     }
 }

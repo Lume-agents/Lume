@@ -627,6 +627,12 @@ fn scan(
             if agent == AgentKind::Codex && internal_pids.contains(&pid) {
                 return None;
             }
+            // The agent view of the CLI, open in the home folder, is not an agent of its own.
+            if agent == AgentKind::ClaudeCode
+                && crate::integrations::claude_unused_home_cli(pid.as_u32(), working_directory.as_deref())
+            {
+                return None;
+            }
             let native_session_ids = match &agent {
                 AgentKind::Codex => native_session_ids_for_process_tree(&system, pid),
                 AgentKind::Antigravity => antigravity_session_ids_for_process_tree(&system, pid),

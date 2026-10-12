@@ -57,6 +57,7 @@ mod terminal_windows;
 mod pair_watch;
 mod session_files;
 mod startup_trace;
+mod windows_launcher;
 mod usage_monitor;
 mod workflow_runtime;
 mod workspace_windows;
@@ -3220,6 +3221,8 @@ pub fn run() {
                 .spawn(move || {
                     if let Ok(executable) = integrations::lume_executable() {
                         integrations::refresh_connected(&executable.to_string_lossy());
+                        #[cfg(target_os = "windows")]
+                        windows_launcher::refresh(&executable);
                     }
                     if let Some(directory) = housekeeping_data_dir {
                         if let Err(error) = legacy_cli_gateway_cleanup::cleanup(&directory) {

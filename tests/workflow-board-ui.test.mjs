@@ -285,8 +285,12 @@ try {
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
   await evaluate("window.__fixture.status('waiting_for_approval', { pendingConnectionId: 'connection-fixture' })");
   await wait("document.querySelector('.edge-hub.waiting')");
-  await click(".board-run .primary");
+  assert.equal(await evaluate("document.querySelectorAll('.board-card:not(.ghost) .card-orb').length === document.querySelectorAll('.board-card:not(.ghost)').length"), true, "every card carries a status orb");
+  assert.equal(await evaluate("document.querySelectorAll('.card-orb.orb-approval').length"), 1, "the step whose result waits for a decision says so");
+  await wait("document.querySelector('.edge-approve')");
+  await click(".edge-approve"); // the arrow itself lets the handoff through
   await wait("document.querySelector('.board-run').dataset.status === 'ready'");
+  assert.equal(await evaluate("document.querySelector('.edge-approve')"), null, "nothing left to approve on the arrow");
   await click(".board-run .primary");
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
   await evaluate("window.__fixture.status('failed', { error: 'Falha simulada' })");

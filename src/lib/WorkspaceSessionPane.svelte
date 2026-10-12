@@ -3467,7 +3467,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .markdown-content :global(.align-right) { text-align: right; }
   .markdown-content :global(img) { max-width: 100%; height: auto; border-radius: 9px; }
   .markdown-content :global(hr) { margin: 1em 0; border: 0; border-top: 1px solid var(--workspace-line); }
-  .response-duration { width: max-content; display: block; color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); font-variant-numeric: tabular-nums; }
+  .response-duration { width: max-content; display: block; color: var(--workspace-muted); font-size: var(--workspace-chat-small-size); font-weight: 600; font-variant-numeric: tabular-nums; }
   .interrupt-notice { margin: 2px 0 4px; padding: 3px 9px 3px 7px; width: fit-content; max-width: 100%; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 999px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: var(--workspace-chat-tiny-size); font-weight: 680; }
   .interrupt-notice :global(.lume-icon) { color: #d85c64; }
   .analysis-message { min-width: 0; padding: 5px 0 7px; color: var(--workspace-muted); }

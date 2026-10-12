@@ -259,6 +259,10 @@
   function handoffMode(connection: WorkflowConnectionDefinition) {
     return connection.advanceMode === "automatic" && !connection.requiresApproval ? "automatic" : "approval";
   }
+  // The step whose result is waiting for the person to let it through to the next one.
+  function stepAwaitsApproval(stepId: string) {
+    return Boolean(group?.connections.some((connection) => connection.fromStepId === stepId && connectionWaitsForApproval(run, connection.id)));
+  }
   function stepStatus(step: WorkflowStepDefinition) {
     const state = stepVisualState(run, step.id);
     if (state === "idle") return sessionFor(step)?.statusLabel ?? tr("Unavailable", "Indisponível");
@@ -935,6 +939,9 @@
             {:else if connection.advanceMode === "automatic"}<LumeIcon name="bolt" size={13} />
             {:else}<LumeIcon name="arrow-right" size={13} />{/if}
           </button>
+          {#if waiting && run?.status === "waiting_for_approval"}
+            <button class="edge-approve" type="button" disabled={actionLoading || run.recovering} title={tr("Approve this handoff", "Aprovar esta passagem")} aria-label={tr("Approve this handoff", "Aprovar esta passagem")} onpointerdown={(event) => event.stopPropagation()} onclick={() => void perform(() => approveWorkflowHandoff(activeId))}><LumeIcon name="check" size={13} /></button>
+          {/if}
           {#if cargo.length}<span class="edge-cargo" class:waiting class:traveling aria-hidden="true">{#each cargo as item (item)}<b>{item}</b>{/each}</span>{/if}
         </div>
       {/each}
@@ -945,6 +952,7 @@
         {@const order = chain?.order.indexOf(step.id) ?? -1}
         {@const shown = demoCells ? demoSession(session, demoCells[group?.steps.indexOf(step) ?? 0], now) : session}
         {@const live = stepActivity(reactive ? shown : undefined, run?.steps.find((item) => item.stepId === step.id), language, now)}
+        {@const awaiting = stepAwaitsApproval(step.id)}
         {@const trail = reactive && (state === "running" || shown?.status === "running") ? activityFeed(shown, language, 3) : []}
         <article class="board-card" class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
           <button class="card-body" type="button" onpointerdown={(event) => beginCard(event, step.id)} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleName(step.role)}>
@@ -980,6 +988,14 @@
           {#if live.attention && session}
             <button class="card-attention" type="button" title={live.attention.text} aria-label={tr("Needs you: ", "Precisa de você: ") + live.attention.text} onpointerdown={(event) => event.stopPropagation()} onclick={() => onOpenChat(session)}><LumeIcon name="warning" size={11} />{live.attention.kind === "permission" ? tr("Approve", "Aprovar") : tr("Answer", "Responder")}</button>
           {/if}
+          <span class="card-orb orb-{awaiting ? "approval" : state}" title={awaiting ? tr("Waiting for your approval", "Esperando sua aprovação") : stepStatus(step)} aria-hidden="true">
+            {#if awaiting}<LumeIcon name="shield" size={12} />
+            {:else if state === "running"}<WorkflowRoleIcon role={step.role} />
+            {:else if state === "completed"}<LumeIcon name="check" size={12} />
+            {:else if state === "failed"}<LumeIcon name="close" size={12} />
+            {:else if state === "skipped"}<LumeIcon name="arrow-right" size={12} />
+            {:else}<i></i>{/if}
+          </span>
           <button class="card-port port-in" type="button" disabled={locked} aria-label={tr("Connect to ", "Conectar a ") + name(session)} title={tr("Connection input", "Entrada da conexão")} onclick={() => connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id })}><i></i></button>
           <button class="card-port port-out" type="button" disabled={locked} aria-label={tr("Connect from ", "Conectar de ") + name(session)} title={tr("Drag to connect", "Arraste para conectar")} onpointerdown={(event) => beginConnection(event, step.id)} onclick={(event) => { if (event.detail === 0) keyboardConnect(step.id); }}><i></i></button>
         </article>
@@ -1190,10 +1206,10 @@
 </section>
 
 <style>
-  .workflow-board { position: absolute; z-index: 30; inset: 0; overflow: hidden; opacity: 0; transform: scale(.985); transition: opacity 220ms ease, transform 280ms cubic-bezier(.16, 1, .3, 1); color: var(--workspace-text); background: var(--workspace-bg); isolation: isolate; --board-danger: #a83e3a; --board-warning: #91640f; --select-surface: var(--workspace-raised); --select-text: var(--workspace-strong); --select-muted: var(--workspace-muted); --select-line: var(--workspace-line); --select-accent: var(--workspace-accent); --select-hover: var(--workspace-subtle); --select-active: var(--workspace-accent-soft);
+  .workflow-board { position: absolute; z-index: 30; inset: 0; overflow: hidden; opacity: 0; transform: scale(.985); transition: opacity 220ms ease, transform 280ms cubic-bezier(.16, 1, .3, 1); color: var(--workspace-text); background: var(--workspace-bg); isolation: isolate; --board-danger: #a83e3a; --board-warning: #91640f; --board-ok: #2f8f5b; --select-surface: var(--workspace-raised); --select-text: var(--workspace-strong); --select-muted: var(--workspace-muted); --select-line: var(--workspace-line); --select-accent: var(--workspace-accent); --select-hover: var(--workspace-subtle); --select-active: var(--workspace-accent-soft);
     --role-planner: #4f86bd; --role-implementer: #3d9a6c; --role-reviewer: #c28a3c; --role-tester: #8460bd; --role-researcher: #3c97a6; --role-custom: #7b8a83;
     --hud-surface: var(--workspace-raised); --hud-shadow: 0 10px 28px rgba(20, 38, 30, .12), 0 1px 3px rgba(20, 38, 30, .1); }
-  :global(.workspace.dark) .workflow-board { --board-danger: #ec9894; --board-warning: #e0b75b; --role-planner: #6aa0d6; --role-implementer: #56bd8a; --role-reviewer: #dba653; --role-tester: #a583d8; --role-researcher: #58b6c5; --role-custom: #93a39b; --hud-shadow: 0 12px 30px rgba(0, 0, 0, .38), 0 1px 3px rgba(0, 0, 0, .4); }
+  :global(.workspace.dark) .workflow-board { --board-danger: #ec9894; --board-warning: #e0b75b; --board-ok: #56bd8a; --role-planner: #6aa0d6; --role-implementer: #56bd8a; --role-reviewer: #dba653; --role-tester: #a583d8; --role-researcher: #58b6c5; --role-custom: #93a39b; --hud-shadow: 0 12px 30px rgba(0, 0, 0, .38), 0 1px 3px rgba(0, 0, 0, .4); }
   .workflow-board[hidden] { display: none; }
   .board-viewport { position: absolute; inset: 0; overflow: hidden; outline: none; touch-action: none; background-image: radial-gradient(circle, color-mix(in srgb, var(--workspace-muted) 28%, transparent) 1px, transparent 1px); cursor: grab; }
   .board-viewport.panning { cursor: grabbing; }
@@ -1239,6 +1255,18 @@
   .feeding .pipe-energy-glow { opacity: .35; }
   .feeding .pipe-core { animation: pipe-breathe 3.2s ease-in-out infinite; }
   .edge-hub.waiting { color: var(--board-warning); border-color: var(--board-warning); }
+  .edge-approve { position: absolute; left: calc(100% + 7px); top: 50%; width: 26px; height: 26px; padding: 0; display: grid; place-items: center; border: 1px solid var(--board-ok); border-radius: 50%; color: #fff; background: var(--board-ok); transform: translateY(-50%); animation: orb-ping 1.6s ease-out infinite; }
+  .edge-approve:hover:not(:disabled) { filter: brightness(1.1); }
+  .card-orb { position: absolute; z-index: 2; top: -10px; right: -10px; width: 24px; height: 24px; display: grid; place-items: center; border: 2px solid var(--workspace-bg); border-radius: 50%; color: #fff; pointer-events: none; }
+  .card-orb > i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .85; }
+  .card-orb :global(.workflow-role-icon) { width: 14px; height: 14px; }
+  .orb-pending, .orb-idle { color: var(--workspace-muted); background: color-mix(in srgb, var(--workspace-muted) 22%, var(--workspace-raised)); }
+  .orb-running { background: var(--workspace-accent); animation: orb-ping 1.5s ease-out infinite; }
+  .orb-completed { background: var(--board-ok); }
+  .orb-failed { background: var(--board-danger); }
+  .orb-skipped { background: var(--workspace-muted); }
+  .orb-approval { background: var(--board-warning); animation: orb-ping 1.6s ease-out infinite; }
+  @keyframes orb-ping { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--workspace-accent) 45%, transparent); } 100% { box-shadow: 0 0 0 8px transparent; } }
   .edge-popover { position: absolute; z-index: 7; box-sizing: border-box; display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--workspace-line); border-radius: 16px; background: var(--workspace-raised); box-shadow: var(--hud-shadow), 0 18px 40px rgba(20, 38, 30, .16); outline: none; }
   .edge-popover::before { content: ""; position: absolute; top: -6px; left: calc(var(--caret) - 6px); width: 10px; height: 10px; border: 1px solid var(--workspace-line); border-right: 0; border-bottom: 0; background: var(--workspace-raised); transform: rotate(45deg); }
   .edge-popover.detached::before { display: none; }
@@ -1559,5 +1587,6 @@
     .board-card.moving { transform: none; }
     .board-card.ghost { animation: none; }
     .edge-hub { transition: none; }
+    .card-orb, .edge-approve { animation: none !important; }
   }
 </style>

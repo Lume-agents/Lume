@@ -50,3 +50,12 @@ Android releases also require `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSW
 Use **Settings → External detectors** to install a JSON manifest for another CLI. See [`external-plugin.example.json`](external-plugin.example.json) for the format.
 
 Manifests only declare process names and matching tokens. They do not load libraries or execute commands inside Lume. Detector changes take effect on the next scan without restarting the application.
+
+## Startup
+
+The Orb's window is 78×44 and transparent, so `src/app.html` paints the same capsule (a sleeping Lume with a loading badge) before any script runs. The Orb removes it once it is positioned and wakes the mascot once (`src/lib/launchSplash.ts`). Only the desktop Orb window shows it; the last theme is remembered in `localStorage` (`lume:launch-theme`).
+
+On the Rust side `setup` must stay short, because the webview does not load until it returns. Work that nothing in the first frame depends on (agent hook refresh, legacy cleanup, the search for a Codex App Server left behind by a crash) runs in background threads; the Codex server waits for that search before it starts.
+
+To see where the time goes, run with `LUME_STARTUP_TRACE=1`: one line per phase of `setup` is printed to stderr.
+

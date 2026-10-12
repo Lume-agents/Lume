@@ -56,6 +56,7 @@ mod store;
 mod terminal_windows;
 mod pair_watch;
 mod session_files;
+mod startup_trace;
 mod usage_monitor;
 mod workflow_runtime;
 mod workspace_windows;
@@ -3206,23 +3207,30 @@ pub fn run() {
             }
         })
         .setup(move |app| {
-            if let Ok(executable) = integrations::lume_executable() {
-                integrations::refresh_connected(&executable.to_string_lossy());
-            }
+            let mut trace = startup_trace::StartupTrace::new();
             let database_path = app
                 .path()
                 .app_data_dir()
                 .map_err(|error| error.to_string())?
                 .join("lume.sqlite3");
-            if let Err(error) = legacy_cli_gateway_cleanup::cleanup(
-                database_path.parent().unwrap_or(&database_path),
-            ) {
-                eprintln!("Could not finish the legacy CLI Gateway cleanup: {error}");
-            }
-            if let Some(app_data_dir) = database_path.parent() {
-                launcher::sweep_stale_launches(app_data_dir);
-            }
+            // File housekeeping that nothing in the first frame depends on runs beside the launch.
+            let housekeeping_data_dir = database_path.parent().map(std::path::Path::to_path_buf);
+            let _ = std::thread::Builder::new()
+                .name("lume-startup-housekeeping".into())
+                .spawn(move || {
+                    if let Ok(executable) = integrations::lume_executable() {
+                        integrations::refresh_connected(&executable.to_string_lossy());
+                    }
+                    if let Some(directory) = housekeeping_data_dir {
+                        if let Err(error) = legacy_cli_gateway_cleanup::cleanup(&directory) {
+                            eprintln!("Could not finish the legacy CLI Gateway cleanup: {error}");
+                        }
+                        launcher::sweep_stale_launches(&directory);
+                    }
+                });
+            trace.mark("housekeeping started");
             let state = AppState::new(&database_path)?;
+            trace.mark("state opened");
             app.manage(PendingShortcutAction(Mutex::new(
                 startup_shortcut_action.clone(),
             )));
@@ -3231,6 +3239,7 @@ pub fn run() {
             if let Err(error) = apply_global_shortcuts(app.handle(), &state.preferences()?) {
                 eprintln!("Could not register global shortcuts: {error}");
             }
+            trace.mark("global shortcuts");
             app.manage(state.clone());
             app.manage(omp_rpc::OmpRpc::new(state.clone(), app.handle().clone()));
             app.manage(session_environments::EnvironmentMonitor::default());
@@ -3246,12 +3255,17 @@ pub fn run() {
                 codex_bridge::CodexBridge::start(state.clone(), app.handle().clone())?;
             let workflow_codex_bridge = codex_bridge.clone();
             app.manage(codex_bridge);
+            trace.mark("codex bridge");
             codex_sessions::start(state.clone(), app.handle().clone())?;
+            trace.mark("codex sessions");
             omp_sessions::start(state.clone(), app.handle().clone())?;
+            trace.mark("omp sessions");
             event_server::start(state.clone(), app.handle().clone())?;
+            trace.mark("hook server");
             let browser_control = browser_server::BrowserControl::default();
             browser_server::start(state.clone(), app.handle().clone(), browser_control.clone())?;
             app.manage(browser_control.clone());
+            trace.mark("browser server");
             let mobile_gateway = mobile_gateway::MobileGateway::default();
             let mobile_server = mobile_server::MobileServer::start_loopback(
                 state.clone(),
@@ -3268,6 +3282,7 @@ pub fn run() {
                     eprintln!("Could not restore mobile network access: {error}");
                 }
             }
+            trace.mark("mobile server");
             app.manage(mobile_gateway);
             app.manage(mobile_server);
             app.manage(terminal_windows::TerminalWindows::default());
@@ -3282,11 +3297,13 @@ pub fn run() {
                 browser_control,
             );
             app.manage(workflow_runtime);
+            trace.mark("workflow runtime");
             discovery::start(state.clone(), app.handle().clone())?;
             codex_daemon_observer::start(state.clone(), app.handle().clone())?;
             overlay::start_fullscreen_guard(state.clone(), app.handle().clone())?;
             usage_monitor::start(state.clone(), app.handle().clone());
             pair_watch::start(state.clone(), app.handle().clone());
+            trace.mark("watchers started");
 
             if let Some(window) = app.get_webview_window("main") {
                 overlay::neutralize_text_scaling(&window);
@@ -3313,6 +3330,7 @@ pub fn run() {
                 }
                 window.show()?;
             }
+            trace.mark("orb window shown");
 
             let show = MenuItem::with_id(app, "show", "Mostrar Lume", true, None::<&str>)?;
             let workspace =

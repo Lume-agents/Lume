@@ -5,7 +5,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc, Condvar, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -337,7 +337,9 @@ impl Clone for CodexBridge {
 
 impl CodexBridge {
     pub fn start(state: AppState, app: AppHandle) -> Result<Self, String> {
-        cleanup_orphaned_server()?;
+        // Looking for a server left behind by a crash scans every process, so it runs beside the
+        // launch instead of before the Orb; no server is started until it has finished.
+        start_orphan_cleanup();
         let _ = server_url();
         let proxy_token = random_secret(32)?;
         let proxy_url: Arc<str> = format!("{PROXY_BASE_URL}?token={proxy_token}").into();
@@ -1032,6 +1034,7 @@ fn ensure_server_process(process_slot: &Mutex<Option<ManagedChild>>) -> Result<(
     if server_available() {
         return Ok(());
     }
+    wait_for_orphan_cleanup();
     if let Some(process) = stored_process.as_mut() {
         match probe_existing_server(process, server_available, Duration::from_secs(2))? {
             ExistingServer::Ready => return Ok(()),
@@ -1095,6 +1098,41 @@ fn probe_existing_server(
         thread::sleep(
             Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
         );
+    }
+}
+
+/// Set once the search for servers left behind by an earlier run is over.
+static ORPHAN_CLEANUP: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+fn finish_orphan_cleanup() {
+    if let Ok(mut done) = ORPHAN_CLEANUP.0.lock() {
+        *done = true;
+        ORPHAN_CLEANUP.1.notify_all();
+    }
+}
+
+fn start_orphan_cleanup() {
+    let spawned = thread::Builder::new().name("lume-codex-orphan-cleanup".into()).spawn(|| {
+        if let Err(error) = cleanup_orphaned_server() {
+            eprintln!("Could not clean up an old Codex App Server: {error}");
+        }
+        finish_orphan_cleanup();
+    });
+    if spawned.is_err() {
+        finish_orphan_cleanup();
+    }
+}
+
+/// A new server must not start while an old one is still being stopped (they would share the machine's port).
+fn wait_for_orphan_cleanup() {
+    let Ok(mut done) = ORPHAN_CLEANUP.0.lock() else { return };
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !*done {
+        let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else { return };
+        match ORPHAN_CLEANUP.1.wait_timeout(done, left) {
+            Ok((next, _)) => done = next,
+            Err(_) => return,
+        }
     }
 }
 

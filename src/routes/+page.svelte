@@ -51,6 +51,7 @@
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import { usageAlertDismissals } from "$lib/usageAlertDismissals";
   import { playTone as playNotificationTone, type ToneKind } from "$lib/notificationTones";
+  import { dismissLaunchSplash, rememberLaunchTheme } from "$lib/launchSplash";
   import { PAIR_REQUEST_EVENT, pairRequestBanner } from "$lib/pairRequests";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import { SYSTEM_BANNER_CONTEXT, type SystemBannerNotice, type SystemBannerReporter } from "$lib/systemBannerContext";
@@ -719,6 +720,7 @@
   });
 
   const effectiveDark = $derived(preferences.darkMode ?? systemDark);
+  $effect(() => rememberLaunchTheme(effectiveDark));
   const appearance = $derived(appearanceAttributes(preferences));
   $effect(() => { void ensureCustomFonts(preferences); });
   const darkWorkspaceOpacity = $derived(
@@ -869,6 +871,8 @@
       await positionWindow();
       overlayReady = true;
       await routeStartupMode();
+      // The launch capsule hands over to the Orb, which wakes up once to say it is ready.
+      if (dismissLaunchSplash()) wakeMascot();
 
       const [nextSessions, nextIntegrations, nextVscodeStatus, nextPlugins, nextTerminals] = await Promise.all([
         loadSessions(),

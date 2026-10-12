@@ -29,6 +29,36 @@ export function isSyntheticPromptText(value?: string): boolean {
   return syntheticPromptPrefixes.some((prefix) => text.startsWith(prefix));
 }
 
+/** Lume stores a copy of each attachment as `<millis>-<index>-<name>`; the name it keeps for the copy. */
+export function cacheAttachmentName(name: string): string {
+  const value = name.replace(/[^A-Za-z0-9._-]/g, "_");
+  return value || "attachment";
+}
+
+/** The original name behind a cache copy such as `1791581411129-0-image.jpg`, if it is one. */
+export function cacheCopyOriginalName(name: string): string | undefined {
+  const match = /^(\d{10,})-(\d+)-(.+)$/.exec(name);
+  return match?.[3];
+}
+
+type AttachmentIdentity = { name: string; path?: string | null };
+
+function normalizedPath(path: string) {
+  return path.replace(/\\/g, "/").toLowerCase();
+}
+
+/**
+ * Whether two attachments are the same file. The prompt Lume shows right after sending names the
+ * original file; the conversation the agent records later names Lume's cache copy of it.
+ */
+export function sameAttachment(left: AttachmentIdentity, right: AttachmentIdentity): boolean {
+  if (left.path && right.path && normalizedPath(left.path) === normalizedPath(right.path)) return true;
+  if (!left.path && !right.path && left.name === right.name) return true;
+  const copyOf = (copy: AttachmentIdentity, original: AttachmentIdentity) =>
+    cacheCopyOriginalName(copy.name) === cacheAttachmentName(original.name);
+  return copyOf(left, right) || copyOf(right, left);
+}
+
 export function promptTextKey(value?: string): string {
   return cleanPromptTransport(value)
     .replace(/[ \t]+$/gm, "")

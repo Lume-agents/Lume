@@ -218,3 +218,45 @@ test("Claude's own notices are not shown as something the user sent", () => {
   ]);
   assert.deepEqual(entries.map((entry) => entry.activity.id), ["typed", "answer"]);
 });
+
+test("the resume filler the CLI writes does not split a prompt from its own copy", () => {
+  // Sent once from Lume, then read back from the transcript after the CLI wrote its own answer in between.
+  const entries = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "commit everything"),
+    activity("claude:chat:transcript:filler:0", "message", 2_000, "No response requested."),
+    activity("claude:chat:transcript:user:0", "prompt", 3_000, "commit everything"),
+    activity("claude:chat:transcript:error:0", "message", 4_000, "Failed to refresh OAuth token: retry in a minute"),
+  ]);
+  assert.deepEqual(entries.map((entry) => `${entry.activity.kind}:${entry.activity.detail}`), [
+    "prompt:commit everything",
+    "message:Failed to refresh OAuth token: retry in a minute",
+  ]);
+  // Sending the same text again after a real answer is a new prompt.
+  const resent = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "commit everything"),
+    activity("claude:chat:transcript:error:0", "message", 4_000, "Failed to refresh OAuth token: retry in a minute"),
+    activity("local:chat:2", "prompt", 9_000, "commit everything"),
+  ]);
+  assert.equal(resent.filter((entry) => entry.activity.kind === "prompt").length, 2);
+});
+
+test("an image shown at send time and its cache copy from the transcript are one attachment", () => {
+  const shown = { id: "attachment:1:0", name: "image.jpg", mimeType: "image/jpeg", previewDataUrl: "data:image/jpeg;base64,AAAA" };
+  const copy = { id: "response-file:abc", name: "1791581411129-0-image.jpg", mimeType: "image/jpeg", previewDataUrl: "", path: "/cache/prompt-attachments/1791581411129-0-image.jpg" };
+  const entries = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "what is this?", { attachments: [shown] }),
+    activity("claude:chat:transcript:user:0", "prompt", 2_000, "what is this?", { attachments: [copy] }),
+  ]);
+  assert.equal(entries.length, 1);
+  const [attachment] = entries[0].activity.attachments;
+  assert.equal(entries[0].activity.attachments.length, 1, "no second chip without a photo");
+  assert.equal(attachment.name, "image.jpg");
+  assert.ok(attachment.previewDataUrl, "the photo is kept");
+  assert.equal(attachment.path, copy.path, "and it knows where the file is");
+  const other = { ...copy, id: "response-file:def", name: "1791581411130-1-other.png", path: "/cache/prompt-attachments/1791581411130-1-other.png" };
+  const two = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "two files", { attachments: [shown] }),
+    activity("claude:chat:transcript:user:0", "prompt", 2_000, "two files", { attachments: [copy, other] }),
+  ]);
+  assert.equal(two[0].activity.attachments.length, 2);
+});

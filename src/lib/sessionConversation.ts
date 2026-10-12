@@ -1,7 +1,7 @@
 import type { AgentSession, SessionActivity } from "$lib/domain";
 import type { FileChangeSummary } from "$lib/fileChanges";
 import { mergeFileChanges, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
-import { cleanPromptTransport, isSyntheticPromptText, promptTextKey } from "$lib/chatAttachments";
+import { cleanPromptTransport, isSyntheticPromptText, promptTextKey, sameAttachment } from "$lib/chatAttachments";
 import { activityCategory, isHiddenAgentActivity, isPresentableTraceActivity } from "$lib/activityPresentation";
 import { latestResponseText, sameResponseText } from "$lib/responseDedup.js";
 
@@ -18,6 +18,11 @@ export type ConversationFeedItem =
   | { kind: "entry"; id: string; entry: ConversationEntry }
   | { kind: "trace"; id: string; entries: ConversationEntry[]; files: FileChangeSummary[] };
 
+/** What the CLI answers by itself when a conversation is resumed; it is not part of the conversation. */
+function isResumeFiller(text?: string): boolean {
+  return (text ?? "").trim() === "No response requested.";
+}
+
 function textKey(value?: string): string {
   return (value ?? "")
     .replace(/\r\n?/g, "\n")
@@ -33,14 +38,16 @@ function fileChangesKey(files: FileChangeSummary[], workingDirectory?: string): 
 }
 
 function mergeAttachments(target: SessionActivity, source: SessionActivity) {
-  const attachments = [...(target.attachments ?? [])];
+  const attachments = (target.attachments ?? []).map((attachment) => ({ ...attachment }));
   for (const attachment of source.attachments ?? []) {
-    const duplicate = attachments.some((existing) =>
-      existing.path && attachment.path
-        ? existing.path.replace(/\\/g, "/").toLowerCase() === attachment.path.replace(/\\/g, "/").toLowerCase()
-        : existing.name === attachment.name
-    );
-    if (!duplicate) attachments.push(attachment);
+    const existing = attachments.find((candidate) => sameAttachment(candidate, attachment));
+    if (!existing) {
+      attachments.push(attachment);
+      continue;
+    }
+    // The same file seen twice: keep what was shown first and learn where it lives.
+    if (!existing.path && attachment.path) existing.path = attachment.path;
+    if (!existing.previewDataUrl && attachment.previewDataUrl) existing.previewDataUrl = attachment.previewDataUrl;
   }
   if (attachments.length) target.attachments = attachments;
 }
@@ -65,7 +72,7 @@ export function buildConversationEntries(
   const uniquePrompts: SessionActivity[] = [];
   let messageSinceLastPrompt = false;
   for (const activity of sortedActivities) {
-    if (activity.kind === "message") messageSinceLastPrompt = true;
+    if (activity.kind === "message" && !isResumeFiller(activity.detail)) messageSinceLastPrompt = true;
     if (activity.kind !== "prompt") continue;
     const existing = uniquePrompts.at(-1);
     const duplicate = existing
@@ -104,6 +111,7 @@ export function buildConversationEntries(
   for (const activity of sortedActivities) {
     if (["queued_prompt", "codex_queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
     if (activity.kind === "prompt" && isSyntheticPromptText(activity.detail)) continue;
+    if (activity.kind === "message" && isResumeFiller(activity.detail)) continue;
     if (activity.kind === "prompt") {
       let duplicateIndex = -1;
       for (let index = entries.length - 1; index >= 0; index -= 1) {

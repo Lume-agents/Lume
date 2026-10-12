@@ -1627,6 +1627,9 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
         {
             continue;
         }
+        if is_claude_resume_filler(&entry) {
+            continue;
+        }
         let entry_id = string(&entry, "uuid")
             .unwrap_or_else(|| format!("{:x}", Sha256::digest(line.as_bytes())));
         let created_at = string(&entry, "timestamp")
@@ -1797,6 +1800,25 @@ fn track_claude_turn_tokens(
     if let Some(created_at) = created_at {
         turn.last_at = turn.last_at.max(created_at);
     }
+}
+
+/// Resuming a conversation makes the CLI write `Continue from where you left off.` and answer it
+/// itself with a synthetic "No response requested.". Neither is something the person or the agent said,
+/// and the answer would otherwise sit between a prompt and its own copy from the transcript.
+fn is_claude_resume_filler(entry: &Value) -> bool {
+    entry.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
+        && entry.pointer("/message/model").and_then(Value::as_str) == Some("<synthetic>")
+        && match entry.pointer("/message/content") {
+            Some(Value::String(text)) => text.trim() == "No response requested.",
+            Some(Value::Array(blocks)) => {
+                !blocks.is_empty()
+                    && blocks.iter().all(|block| {
+                        string(block, "type").as_deref() == Some("text")
+                            && string(block, "text").is_some_and(|text| text.trim() == "No response requested.")
+                    })
+            }
+            _ => false,
+        }
 }
 
 fn is_claude_user_prompt(entry: &Value) -> bool {
@@ -2916,5 +2938,15 @@ mod tests {
         )
         .expect("evento que informa só o cwd");
         assert_eq!(cwd_event.working_directory.as_deref(), Some("/work/second"));
+    }
+
+    #[test]
+    fn the_resume_filler_the_cli_writes_is_not_part_of_the_conversation() {
+        let filler = json!({ "type": "assistant", "message": { "role": "assistant", "model": "<synthetic>", "content": [{ "type": "text", "text": "No response requested." }] } });
+        assert!(is_claude_resume_filler(&filler));
+        let error = json!({ "type": "assistant", "message": { "role": "assistant", "model": "<synthetic>", "content": [{ "type": "text", "text": "Failed to refresh OAuth token: retry in a minute" }] } });
+        assert!(!is_claude_resume_filler(&error), "a synthetic error is information the person needs");
+        let real = json!({ "type": "assistant", "message": { "role": "assistant", "model": "claude-opus-4", "content": [{ "type": "text", "text": "No response requested." }] } });
+        assert!(!is_claude_resume_filler(&real), "only the CLI's own synthetic answer is dropped");
     }
 }

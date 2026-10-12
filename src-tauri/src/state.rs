@@ -4249,23 +4249,48 @@ fn normalize_lume_prompt_activity(activity: &mut SessionActivity) {
     activity.detail = (!visible.trim().is_empty()).then(|| visible.trim().to_string());
 }
 
+/// Lume keeps a copy of each attached file as `<millis>-<index>-<name>` in its cache folder. The
+/// conversation the agent records names that copy, while the prompt Lume showed names the original.
+fn cache_copy_original_name(name: &str) -> Option<&str> {
+    let (stamp, rest) = name.split_once('-')?;
+    let (index, original) = rest.split_once('-')?;
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    (stamp.len() >= 10 && digits(stamp) && digits(index) && !original.is_empty()).then_some(original)
+}
+
+/// Whether `copy` is the cache copy Lume made of the file `original` was attached as.
+fn is_cache_copy_of(copy: &PromptAttachment, original: &PromptAttachment) -> bool {
+    cache_copy_original_name(&copy.name)
+        .is_some_and(|name| name == crate::control::cache_attachment_name(&original.name))
+}
+
+fn same_attachment(existing: &PromptAttachment, incoming: &PromptAttachment) -> bool {
+    existing
+        .path
+        .as_deref()
+        .zip(incoming.path.as_deref())
+        .is_some_and(|(left, right)| same_directory(Some(left), Some(right)))
+        || (existing.path.is_none() && incoming.path.is_none() && existing.name == incoming.name)
+        || is_cache_copy_of(incoming, existing)
+        || is_cache_copy_of(existing, incoming)
+}
+
 fn merge_attachments(
     current: &mut Vec<PromptAttachment>,
     incoming: impl IntoIterator<Item = PromptAttachment>,
 ) {
     for attachment in incoming {
-        let duplicate = current.iter().any(|existing| {
-            existing
-                .path
-                .as_deref()
-                .zip(attachment.path.as_deref())
-                .is_some_and(|(left, right)| same_directory(Some(left), Some(right)))
-                || (existing.path.is_none()
-                    && attachment.path.is_none()
-                    && existing.name == attachment.name)
-        });
-        if !duplicate {
-            current.push(attachment);
+        match current.iter_mut().find(|existing| same_attachment(existing, &attachment)) {
+            Some(existing) => {
+                // The same file seen twice: keep what was shown first and learn where it lives.
+                if existing.path.is_none() {
+                    existing.path = attachment.path;
+                }
+                if existing.preview_data_url.is_empty() {
+                    existing.preview_data_url = attachment.preview_data_url;
+                }
+            }
+            None => current.push(attachment),
         }
     }
 }
@@ -4408,7 +4433,13 @@ fn response_attachment(
     if !canonical.is_file() || sensitive_response_path(&canonical) {
         return None;
     }
-    let name = canonical.file_name()?.to_string_lossy().to_string();
+    let mut name = canonical.file_name()?.to_string_lossy().to_string();
+    // A file Lume itself attached is shown under the name it had when it was attached.
+    if canonical.parent().and_then(Path::file_name).is_some_and(|folder| folder == "prompt-attachments") {
+        if let Some(original) = cache_copy_original_name(&name) {
+            name = original.to_string();
+        }
+    }
     let path = canonical.to_string_lossy().to_string();
     let mime_type = response_file_mime(&canonical).to_string();
     let mut hasher = DefaultHasher::new();
@@ -9069,5 +9100,34 @@ mod tests {
         for id in ["goal", "todo", "plan"] {
             assert!(activities.iter().any(|activity| activity.id == id));
         }
+    }
+
+    fn attachment(name: &str, path: Option<&str>, preview: &str) -> PromptAttachment {
+        PromptAttachment { id: name.into(), name: name.into(), mime_type: "image/jpeg".into(), preview_data_url: preview.into(), path: path.map(str::to_string) }
+    }
+
+    #[test]
+    fn the_cache_copy_of_an_attached_image_is_the_same_attachment() {
+        // Shown at send time under the original name, later read back from the transcript as the cache copy.
+        let mut shown = vec![attachment("image.jpg", None, "data:image/jpeg;base64,AAAA")];
+        merge_attachments(&mut shown, [attachment("1791581411129-0-image.jpg", Some("/cache/prompt-attachments/1791581411129-0-image.jpg"), "")]);
+        assert_eq!(shown.len(), 1, "no second, preview-less copy");
+        assert_eq!(shown[0].name, "image.jpg");
+        assert!(!shown[0].preview_data_url.is_empty());
+        assert_eq!(shown[0].path.as_deref(), Some("/cache/prompt-attachments/1791581411129-0-image.jpg"), "and it now knows where the file is");
+        // Names with characters the cache replaces still match.
+        let mut odd = vec![attachment("my photo (1).jpg", None, "data:x")];
+        merge_attachments(&mut odd, [attachment("1791581411129-0-my_photo__1_.jpg", Some("/c/prompt-attachments/1791581411129-0-my_photo__1_.jpg"), "")]);
+        assert_eq!(odd.len(), 1);
+        // A different file is still a different attachment.
+        merge_attachments(&mut shown, [attachment("1791581411130-1-other.png", Some("/c/prompt-attachments/1791581411130-1-other.png"), "")]);
+        assert_eq!(shown.len(), 2);
+    }
+
+    #[test]
+    fn only_lume_cache_names_are_recognized() {
+        assert_eq!(cache_copy_original_name("1791581411129-0-image.jpg"), Some("image.jpg"));
+        assert_eq!(cache_copy_original_name("2026-10-12-notes.txt"), None, "a date is not a cache stamp");
+        assert_eq!(cache_copy_original_name("image.jpg"), None);
     }
 }

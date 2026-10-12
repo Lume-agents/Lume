@@ -8,6 +8,7 @@
     extractResponseFiles,
     type ResponseFileCard,
   } from "$lib/chatAttachments";
+  import ImageLightbox from "$lib/ImageLightbox.svelte";
   import { exportLocalFile, openSessionFile, readLocalImageDataUrl, setTerminalFileDialogActive } from "$lib/lume";
 
   let {
@@ -36,6 +37,7 @@
   let previews = $state<Record<string, string>>({});
   let attemptedPreviews = $state<Record<string, boolean>>({});
   let savingPath = $state<string | null>(null);
+  let viewing = $state<ResponseFileCard | null>(null);
   const windowLabel = getCurrentWindow().label;
 
   $effect(() => {
@@ -96,8 +98,8 @@
         <button
           class="resource-preview"
           type="button"
-          title={tr("Open file", "Abrir arquivo")}
-          onclick={() => void openResource(resource)}
+          title={resource.isImage && previews[resource.path] ? tr("View the whole image", "Ver a imagem inteira") : tr("Open file", "Abrir arquivo")}
+          onclick={() => { if (resource.isImage && previews[resource.path]) viewing = resource; else void openResource(resource); }}
         >
           {#if resource.isImage && previews[resource.path]}
             <img src={previews[resource.path]} alt={resource.name} />
@@ -132,6 +134,11 @@
       </article>
     {/each}
   </div>
+{/if}
+
+{#if viewing}
+  {@const resource = viewing}
+  <ImageLightbox src={previews[resource.path] ?? ""} alt={resource.name} {language} load={() => readLocalImageDataUrl(resource.path)} onclose={() => (viewing = null)} />
 {/if}
 
 <style>

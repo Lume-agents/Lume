@@ -1742,7 +1742,7 @@ fn safe_attachment_name(name: &str, index: usize, mime: &str) -> String {
     })
 }
 
-fn cache_attachment_name(name: &str) -> String {
+pub(crate) fn cache_attachment_name(name: &str) -> String {
     let value = name
         .chars()
         .map(|character| {

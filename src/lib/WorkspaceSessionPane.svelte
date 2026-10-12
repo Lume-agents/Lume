@@ -40,6 +40,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import { renderFileTypeIconHtml } from "$lib/fileTypeIcons";
   import ResponseAttachments from "$lib/ResponseAttachments.svelte";
+  import AttachmentImage from "$lib/AttachmentImage.svelte";
   import { displayText } from "$lib/i18n";
   import { displayFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
   import { activityThinkingLabel, activityThinkingState, formatAgentDuration, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
@@ -2597,8 +2598,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                 {#if item.attachments?.length}
                   <div class="attachments">
                     {#each item.attachments as attachment}
-                      {#if attachment.previewDataUrl}
-                        <img src={attachment.previewDataUrl} alt={attachment.name} />
+                      {#if attachment.previewDataUrl || (attachment.path && isImageAttachmentPath(attachment.path))}
+                        <AttachmentImage {attachment} {language} width={92} height={68} />
                       {:else}
                         <span title={attachment.name}>{attachment.name}</span>
                       {/if}
@@ -2887,7 +2888,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         {#each promptAttachments as attachment, index}
           <span class:file={!(attachment.previewDataUrl)} title={attachment.name}>
             {#if attachment.previewDataUrl}
-              <img src={attachment.previewDataUrl} alt={attachment.name} />
+              <AttachmentImage {attachment} {language} width="100%" height="100%" radius={0} />
             {:else}
               <LumeIcon name="file" size={16} />
               <small>{attachment.name}</small>
@@ -3486,7 +3487,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .changed-file:hover > :global(.lume-icon:last-child), .changed-file:focus-visible > :global(.lume-icon:last-child) { color: var(--workspace-accent); opacity: 1; transform: translateX(0) rotate(-90deg); }
   .changed-files b { font-size: var(--workspace-chat-tiny-size); font-variant-numeric: tabular-nums; }.added { color: #438f67; }.removed { color: #b96862; }
   .attachments { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 7px; }
-  .attachments img { width: 92px; height: 68px; object-fit: cover; border-radius: 10px; }
   .attachments span { max-width: 190px; padding: 6px 8px; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 7px; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
   .empty-chat { margin: auto; display: grid; justify-items: center; gap: 7px; color: var(--workspace-faint); text-align: center; }
   .empty-chat strong { color: var(--workspace-muted); font-size: 12px; }.empty-chat span { max-width: 270px; font-size: 10px; line-height: 1.5; }
@@ -3577,7 +3577,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer .queue-tray button:hover:not(:disabled) { background: color-mix(in srgb, #4e98ca 10%, transparent); transform: none; }
   .pending-attachments { max-width: 760px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 7px; }
   .pending-attachments > span { position: relative; width: 54px; height: 42px; display: flex; align-items: center; gap: 6px; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-muted); background: var(--workspace-raised); }
-  .pending-attachments img { width: 100%; height: 100%; object-fit: cover; }
   .pending-attachments > span.file { width: min(170px, 44cqw); padding: 0 26px 0 9px; }
   .pending-attachments small { min-width: 0; overflow: hidden; font-size: 8px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
   .composer .pending-attachments button { position: absolute; top: 3px; right: 3px; width: 18px; height: 18px; padding: 0; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--workspace-line) 75%, transparent); border-radius: 6px; color: var(--workspace-strong); background: color-mix(in srgb, var(--workspace-raised) 90%, transparent); font-size: 13px; cursor: pointer; }

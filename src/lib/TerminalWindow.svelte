@@ -27,6 +27,7 @@
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import ResponseAttachments from "$lib/ResponseAttachments.svelte";
+  import AttachmentImage from "$lib/AttachmentImage.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import { usageAlertDismissals } from "$lib/usageAlertDismissals";
@@ -3793,8 +3794,8 @@
                     {#if item.attachments?.length}
                       <div class="message-images">
                         {#each item.attachments as attachment}
-                          {#if attachment.previewDataUrl}
-                            <img src={attachment.previewDataUrl} alt={attachment.name} />
+                          {#if attachment.previewDataUrl || (attachment.path && isImageAttachmentPath(attachment.path))}
+                            <AttachmentImage {attachment} {language} width="100%" height={120} radius={7} />
                           {:else}
                             <span class="message-file" title={attachment.name}>
                               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.8h6l4 4V17H5zM11 3v4h4M7.5 11h5M7.5 14h4" /></svg>
@@ -4390,7 +4391,7 @@
             {#each promptAttachments as attachment, index}
               <span class:file-attachment={!attachment.previewDataUrl} title={attachment.name}>
                 {#if attachment.previewDataUrl}
-                  <img src={attachment.previewDataUrl} alt={attachment.name} />
+                  <AttachmentImage {attachment} {language} width="100%" height="100%" radius={8} />
                 {:else}
                   <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.8h6l4 4V17H5zM11 3v4h4M7.5 11h5M7.5 14h4" /></svg>
                   <small>{attachment.name}</small>
@@ -4949,7 +4950,6 @@
   .markdown-content :global(video) { max-width: 100%; height: auto; }
   .markdown-content :global(hr) { height: 1px; margin: 8px 0; border: 0; background: rgba(77, 104, 91, 0.12); }
   .message-images { margin-top: 7px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
-  .message-images img { width: 100%; max-height: 150px; display: block; border-radius: 7px; object-fit: cover; }
   .message-file { min-width: 0; min-height: 38px; padding: 7px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(82, 106, 95, 0.14); border-radius: 7px; color: #52665d; background: rgba(52, 145, 99, 0.045); }
   .message-file svg { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .message-file small { min-width: 0; overflow: hidden; color: inherit; font: 650 var(--chat-tiny-font-size)/1.2 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
@@ -5160,7 +5160,6 @@
   .pending-images { width: 100%; min-height: 51px; padding: 4px 5px; display: flex; align-items: center; gap: 6px; overflow-x: auto; border-radius: 8px; background: rgba(52, 145, 99, 0.045); }
   .pending-images-label { max-width: 52px; flex: 0 0 auto; color: #829088; font: 750 var(--chat-tiny-font-size)/1.25 var(--lume-font-ui, Inter, sans-serif); text-transform: uppercase; }
   .pending-images > span { position: relative; width: 42px; height: 42px; flex: 0 0 auto; }
-  .pending-images img { width: 100%; height: 100%; display: block; border: 1px solid rgba(82, 106, 95, 0.14); border-radius: 8px; object-fit: cover; }
   .pending-images > span.file-attachment { width: 116px; padding: 5px 7px; display: flex; align-items: center; gap: 5px; border: 1px solid rgba(82, 106, 95, 0.14); border-radius: 8px; color: #52665d; background: rgba(255, 255, 255, 0.5); }
   .pending-images .file-attachment > svg { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .pending-images .file-attachment > small { min-width: 0; overflow: hidden; font: 650 var(--chat-tiny-font-size)/1.2 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }

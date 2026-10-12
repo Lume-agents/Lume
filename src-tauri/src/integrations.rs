@@ -1295,9 +1295,11 @@ fn claude_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
         .into_iter()
         .filter_map(|path| {
             let file = fs::File::open(&path).ok()?;
+            let size = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
             let mut bytes_read = 0usize;
             let mut identity: Option<(String, String)> = None;
             let mut name = None;
+            let mut conversation = false;
             for line in BufReader::new(file).lines().take(128) {
                 let line = line.ok()?;
                 bytes_read = bytes_read.saturating_add(line.len());
@@ -1317,11 +1319,15 @@ fn claude_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
                     }
                 }
                 name = name.or_else(|| claude_session_name(&value));
-                if identity.is_some() && name.is_some() {
+                conversation = conversation || claude_transcript_entry_is_conversation(&value);
+                if identity.is_some() && name.is_some() && conversation {
                     break;
                 }
             }
             let (id, working_directory) = identity?;
+            if is_claude_scratch_transcript(&working_directory, conversation, size) {
+                return None;
+            }
             if !seen.insert(id.clone()) {
                 return None;
             }
@@ -1340,6 +1346,15 @@ fn claude_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
             })
         })
         .collect()
+}
+
+/// Transcripts nobody can resume: probes and helpers leave small files with only bookkeeping
+/// records (or live in a temp folder), and Claude itself refuses to resume a conversation
+/// that has nothing in it. Listing them shows up as a phantom agent named after its folder.
+fn is_claude_scratch_transcript(working_directory: &str, conversation: bool, size: u64) -> bool {
+    crate::session_filters::is_temp_workspace(working_directory)
+        // A large file whose first lines are all preamble is still a real conversation.
+        || (!conversation && size < 64 * 1024)
 }
 
 /// Antigravity CLI documents a workspace-to-last-conversation cache. Use that
@@ -4847,5 +4862,30 @@ mod tests {
             vec![crate::domain::PermissionAction::OpenSource]
         );
         assert_eq!(event.permission.expect("permission").summary, "write");
+    }
+
+    #[test]
+    fn the_claude_resume_list_leaves_out_empty_probe_and_temp_transcripts() {
+        let root = std::env::temp_dir().join(format!("lume-claude-resume-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let write = |folder: &str, id: &str, directory: &str, with_conversation: bool| {
+            let project = root.join(folder);
+            fs::create_dir_all(&project).unwrap();
+            let mut lines = vec![
+                r#"{"type":"mode","mode":"default","sessionId":"ID"}"#.to_string(),
+                format!(r#"{{"type":"system","sessionId":"{id}","cwd":"{directory}"}}"#),
+                format!(r#"{{"type":"last-prompt","sessionId":"{id}"}}"#),
+            ];
+            if with_conversation {
+                lines.push(format!(r#"{{"type":"user","sessionId":"{id}","cwd":"{directory}","message":{{"role":"user","content":"Fix the login"}}}}"#));
+            }
+            fs::write(project.join(format!("{id}.jsonl")), lines.join("\n")).unwrap();
+        };
+        write("-home-user", "empty-home", "/home/user", false);
+        write("-home-user-project", "real", "/home/user/project", true);
+        write("-tmp-probe", "temp", "/tmp/ask-probe", true);
+        let listed = claude_resumable_sessions(&root).into_iter().map(|session| session.id).collect::<Vec<_>>();
+        assert_eq!(listed, vec!["real".to_string()], "only a conversation somebody can continue is offered");
+        let _ = fs::remove_dir_all(&root);
     }
 }

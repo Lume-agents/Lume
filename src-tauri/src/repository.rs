@@ -697,3 +697,113 @@ pub fn github_account(refresh: bool) -> Result<Value, String> {
         }
     })
 }
+
+const REFERENCE_QUERY: &str = r#"query($owner:String!,$name:String!,$number:Int!) {
+  repository(owner:$owner,name:$name) {
+    issueOrPullRequest(number:$number) {
+      __typename
+      ... on PullRequest {
+        title state isDraft merged url body createdAt updatedAt headRefName baseRefName additions deletions changedFiles reviewDecision
+        author { login } comments { totalCount } labels(first:6) { nodes { name color } }
+        commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+      ... on Issue {
+        title state stateReason url body createdAt updatedAt
+        author { login } comments { totalCount } labels(first:6) { nodes { name color } }
+      }
+    }
+  }
+}"#;
+
+fn reference_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
+/// A pull request or issue mentioned in a chat, read through the GitHub CLI.
+pub fn github_reference(
+    owner: &str,
+    repo: &str,
+    number: u32,
+    refresh: bool,
+) -> Result<Value, String> {
+    if !reference_name(owner) || !reference_name(repo) || number == 0 {
+        return Err("invalid_reference".into());
+    }
+    cached_remote(format!("ref:{owner}/{repo}#{number}"), refresh, || {
+        let response = gh(&[
+            "api".into(),
+            "--hostname".into(),
+            "github.com".into(),
+            "graphql".into(),
+            "-f".into(),
+            format!("query={REFERENCE_QUERY}"),
+            "-f".into(),
+            format!("owner={owner}"),
+            "-f".into(),
+            format!("name={repo}"),
+            "-F".into(),
+            format!("number={number}"),
+        ]);
+        let item = match response {
+            Ok(response) => response["data"]["repository"]["issueOrPullRequest"].clone(),
+            Err(error) => return json!({"state": error}),
+        };
+        if item.is_null() {
+            return json!({"state": "not_found"});
+        }
+        let pull = item["__typename"] == "PullRequest";
+        let status = if pull && item["merged"] == true {
+            "merged"
+        } else if item["state"] == "OPEN" {
+            "open"
+        } else {
+            "closed"
+        };
+        let body: String = item["body"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(6000)
+            .collect();
+        json!({
+            "state": "connected",
+            "kind": if pull { "pull_request" } else { "issue" },
+            "owner": owner, "repo": repo, "number": number,
+            "title": item["title"], "status": status, "draft": item["isDraft"],
+            "url": item["url"], "body": body,
+            "author": item["author"]["login"],
+            "labels": item["labels"]["nodes"],
+            "comments": item["comments"]["totalCount"],
+            "createdAt": item["createdAt"], "updatedAt": item["updatedAt"],
+            "head": item["headRefName"], "base": item["baseRefName"],
+            "additions": item["additions"], "deletions": item["deletions"], "changedFiles": item["changedFiles"],
+            "review": item["reviewDecision"],
+            "checks": item["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"],
+            "fetchedAt": timestamp(),
+        })
+    })
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn only_plain_owner_and_repository_names_are_queried() {
+        assert!(reference_name("Lume-agents") && reference_name("Lume.app"));
+        assert!(!reference_name("a/b") && !reference_name("a b") && !reference_name(""));
+        assert_eq!(github_reference("a/b", "repo", 1, false).unwrap_err(), "invalid_reference");
+        assert_eq!(github_reference("owner", "repo", 0, false).unwrap_err(), "invalid_reference");
+    }
+
+    #[test]
+    #[ignore = "needs the GitHub CLI signed in"]
+    fn live_pull_request_reference() {
+        let value = github_reference("Lume-agents", "Lume", 26, true).expect("reference");
+        assert_eq!(value["state"], "connected", "{value}");
+    }
+}

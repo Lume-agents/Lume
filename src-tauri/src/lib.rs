@@ -552,6 +552,21 @@ fn cancel_cli_install(id: String) -> bool {
     cli_installer::cancel(&id)
 }
 
+/// A pull request or issue mentioned in a chat: its status, checks, labels and description.
+#[tauri::command]
+async fn get_github_reference(
+    owner: String,
+    repo: String,
+    number: u32,
+    refresh: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        repository::github_reference(&owner, &repo, number, refresh)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 async fn commit_session_repository(
     state: State<'_, AppState>,
@@ -3390,6 +3405,7 @@ pub fn run() {
             stop_session_environment,
             get_session_repository,
             get_session_repository_diff,
+            get_github_reference,
             commit_session_repository,
             cli_install_plans,
             start_cli_install,

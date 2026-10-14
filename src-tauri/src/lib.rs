@@ -1022,6 +1022,10 @@ fn refresh_antigravity_rate_limits(app: AppHandle, state: AppState) {
 }
 
 fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
+    // A probe is a `claude` process too; starting one while a prompt starts can collide on the token refresh.
+    if launcher::claude_prompt_in_flight() {
+        return;
+    }
     static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;

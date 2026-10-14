@@ -18,6 +18,24 @@ export type ConversationFeedItem =
   | { kind: "entry"; id: string; entry: ConversationEntry }
   | { kind: "trace"; id: string; entries: ConversationEntry[]; files: FileChangeSummary[] };
 
+/** Claude's note that two of its processes refreshed the login at once; Lume retries, so it passes by itself. */
+function isTransientAuthNotice(text?: string): boolean {
+  return /^\s*Failed to refresh OAuth token: another Claude Code process is refreshing it/i.test(text ?? "");
+}
+
+/** Notices that something later in the chat has already made moot: the prompt went through on the retry. */
+function supersededNoticeIds(activities: SessionActivity[]): Set<string> {
+  const spoken = activities.filter((activity) =>
+    (activity.kind === "prompt" || activity.kind === "message") && !isTransientAuthNotice(activity.detail) && !isResumeFiller(activity.detail));
+  const hidden = new Set<string>();
+  for (const activity of activities) {
+    if (activity.kind === "message" && isTransientAuthNotice(activity.detail) && spoken.some((other) => other.createdAt > activity.createdAt)) {
+      hidden.add(activity.id);
+    }
+  }
+  return hidden;
+}
+
 /** What the CLI answers by itself when a conversation is resumed; it is not part of the conversation. */
 function isResumeFiller(text?: string): boolean {
   return (text ?? "").trim() === "No response requested.";
@@ -69,10 +87,11 @@ export function buildConversationEntries(
 ): ConversationEntry[] {
   let sequence = 0;
   const sortedActivities = [...activities].sort((left, right) => left.createdAt - right.createdAt);
+  const supersededNotices = supersededNoticeIds(sortedActivities);
   const uniquePrompts: SessionActivity[] = [];
   let messageSinceLastPrompt = false;
   for (const activity of sortedActivities) {
-    if (activity.kind === "message" && !isResumeFiller(activity.detail)) messageSinceLastPrompt = true;
+    if (activity.kind === "message" && !isResumeFiller(activity.detail) && !supersededNotices.has(activity.id)) messageSinceLastPrompt = true;
     if (activity.kind !== "prompt") continue;
     const existing = uniquePrompts.at(-1);
     const duplicate = existing
@@ -111,7 +130,7 @@ export function buildConversationEntries(
   for (const activity of sortedActivities) {
     if (["queued_prompt", "codex_queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
     if (activity.kind === "prompt" && isSyntheticPromptText(activity.detail)) continue;
-    if (activity.kind === "message" && isResumeFiller(activity.detail)) continue;
+    if (activity.kind === "message" && (isResumeFiller(activity.detail) || supersededNotices.has(activity.id))) continue;
     if (activity.kind === "prompt") {
       let duplicateIndex = -1;
       for (let index = entries.length - 1; index >= 0; index -= 1) {

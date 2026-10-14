@@ -260,3 +260,19 @@ test("an image shown at send time and its cache copy from the transcript are one
   ]);
   assert.equal(two[0].activity.attachments.length, 2);
 });
+
+test("the login-refresh notice disappears when the prompt went through on the retry, and stays when nothing followed it", () => {
+  const notice = "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh. Retry in a minute.";
+  const retried = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "commit everything"),
+    activity("claude:chat:transcript:notice:0", "message", 2_000, notice),
+    activity("claude:chat:transcript:user:0", "prompt", 5_000, "commit everything"),
+    activity("claude:chat:transcript:answer:0", "message", 9_000, "Done, committed."),
+  ]);
+  assert.deepEqual(retried.map((entry) => `${entry.activity.kind}:${entry.activity.detail}`), ["prompt:commit everything", "message:Done, committed."]);
+  const failed = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "commit everything"),
+    activity("claude:chat:transcript:notice:0", "message", 2_000, notice),
+  ]);
+  assert.equal(failed.length, 2, "an unanswered failure is still shown");
+});

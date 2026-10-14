@@ -2,9 +2,9 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Mutex, OnceLock,
     },
     thread,
@@ -416,6 +416,64 @@ pub fn run_next_queued_claude_prompt(
     Ok(true)
 }
 
+/// Prompts Lume has handed to Claude that have not finished yet.
+static CLAUDE_PROMPTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a Claude prompt is running. Background probes (usage, MCP status) stay out of its way: each is a
+/// `claude` process too, and two of them starting together can fight over the account's token refresh.
+pub fn claude_prompt_in_flight() -> bool {
+    CLAUDE_PROMPTS_IN_FLIGHT.load(Ordering::SeqCst) > 0
+}
+
+struct InFlight;
+
+impl InFlight {
+    fn begin() -> Self {
+        CLAUDE_PROMPTS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        CLAUDE_PROMPTS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Claude's own message when two of its processes refresh the login at the same moment. It passes by itself.
+const OAUTH_COLLISION: &str = "failed to refresh oauth token";
+const OAUTH_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(1_500), Duration::from_millis(4_000)];
+
+fn is_oauth_collision(output: &std::process::Output) -> bool {
+    [&output.stdout, &output.stderr]
+        .into_iter()
+        .any(|bytes| String::from_utf8_lossy(bytes).to_lowercase().contains(OAUTH_COLLISION))
+}
+
+fn claude_interrupt_pending(session_id: &str) -> bool {
+    claude_interrupts().lock().map(|interrupts| interrupts.contains_key(session_id)).unwrap_or(false)
+}
+
+fn spawn_claude_prompt(payload: &TerminalPayload) -> Result<Child, String> {
+    let mut command = crate::executables::command(&payload.command)?;
+    command
+        .args(&payload.arguments)
+        .env("LUME_MANAGED_SESSION", "1")
+        .env("LUME_CLAUDE_PROMPT_CAPTURE", "1")
+        .current_dir(&payload.working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .spawn()
+        .map_err(|error| format!("Não foi possível iniciar o Claude: {error}"))
+}
+
 pub fn launch_claude_prompt(
     request: LaunchRequest,
     app: AppHandle,
@@ -440,27 +498,28 @@ pub fn launch_claude_prompt(
         start_claude_session_with_id(&mut payload.arguments, &native_id);
     }
     add_scoped_claude_hooks(&mut payload, &crate::integrations::lume_executable()?)?;
-    let mut command = crate::executables::command(&payload.command)?;
-    command
-        .args(&payload.arguments)
-        .env("LUME_MANAGED_SESSION", "1")
-        .env("LUME_CLAUDE_PROMPT_CAPTURE", "1")
-        .current_dir(&payload.working_directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    let child = command
-        .spawn()
-        .map_err(|error| format!("Não foi possível iniciar o Claude: {error}"))?;
+    let child = spawn_claude_prompt(&payload)?;
+    let in_flight = InFlight::begin();
     thread::Builder::new()
         .name("lume-claude-prompt".into())
         .spawn(move || {
-            let output = child.wait_with_output();
+            let _in_flight = in_flight;
+            let mut child = child;
+            let mut retries = OAUTH_RETRY_DELAYS.iter();
+            // Two Claude processes refreshing the login together make one of them fail with a message that says
+            // to retry in a minute. Retrying right away succeeds, so the person never sees it.
+            let output = loop {
+                let output = child.wait_with_output();
+                let collided = output.as_ref().is_ok_and(is_oauth_collision);
+                let Some(delay) = retries.next().filter(|_| collided && !claude_interrupt_pending(&session_id)) else {
+                    break output;
+                };
+                thread::sleep(*delay);
+                match spawn_claude_prompt(&payload) {
+                    Ok(next) => child = next,
+                    Err(_) => break output,
+                }
+            };
             // Lume stopped this prompt: it is already marked as interrupted, so the
             // process dying is not a failure. A cancel pauses the queue; a steer moves on.
             if let Some(interrupt) = take_claude_interrupt(&session_id) {
@@ -1496,5 +1555,23 @@ end timeout"#
         assert!(fresh_payload.exists() && fresh_desktop.exists() && unrelated.exists());
         assert_eq!(sweep_launches(&root.join("missing"), now), 0, "no launches folder is not an error");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_token_refresh_collision_is_recognized_in_either_stream() {
+        let make = |stdout: &str, stderr: &str| std::process::Output { status: Default::default(), stdout: stdout.as_bytes().to_vec(), stderr: stderr.as_bytes().to_vec() };
+        assert!(is_oauth_collision(&make("Failed to refresh OAuth token: another Claude Code process is refreshing it", "")));
+        assert!(is_oauth_collision(&make("", "error: FAILED TO REFRESH OAUTH TOKEN")));
+        assert!(!is_oauth_collision(&make("All done", "warning: slow network")));
+    }
+
+    #[test]
+    fn prompts_in_flight_are_counted_until_their_guard_drops() {
+        let before = CLAUDE_PROMPTS_IN_FLIGHT.load(Ordering::SeqCst);
+        let guard = InFlight::begin();
+        assert!(claude_prompt_in_flight());
+        assert_eq!(CLAUDE_PROMPTS_IN_FLIGHT.load(Ordering::SeqCst), before + 1);
+        drop(guard);
+        assert_eq!(CLAUDE_PROMPTS_IN_FLIGHT.load(Ordering::SeqCst), before);
     }
 }

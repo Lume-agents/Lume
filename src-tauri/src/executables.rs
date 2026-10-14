@@ -141,21 +141,13 @@ fn platform_command(path: &Path) -> Command {
 fn platform_command(path: &Path) -> Command {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    if matches!(
-        path.extension().and_then(|value| value.to_str()),
-        Some("cmd" | "bat")
-    ) {
-        let mut command = Command::new("cmd.exe");
-        command
-            .args(["/D", "/S", "/C"])
-            .arg(path)
-            .creation_flags(CREATE_NO_WINDOW);
-        command
-    } else {
-        let mut command = Command::new(path);
-        command.creation_flags(CREATE_NO_WINDOW);
-        command
-    }
+    // A `.cmd` or `.bat` shim (npm installs Codex and Claude as one) is handed to `Command` as it is: the
+    // standard library runs it through `cmd.exe` and quotes the path and every argument for it. Building
+    // `cmd.exe /S /C <path> <args>` by hand breaks on a folder with a space (`C:\Users\João Pedro`):
+    // `/S` strips the quotes around the path, and `cmd` then looks for `C:\Users\João`.
+    let mut command = Command::new(path);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
 }
 
 fn prepend_parent_to_path(command: &mut Command, executable: &Path) {
@@ -187,5 +179,19 @@ mod tests {
         let directories = unix_install_directories(Path::new("/Users/me"));
         assert!(directories.contains(&PathBuf::from("/Users/me/.claude/local")));
         assert!(directories.contains(&PathBuf::from("/opt/homebrew/bin")));
+    }
+
+    /// The folder of the person who reported this had a space and an accent in its name.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_cmd_shim_in_a_folder_with_a_space_and_an_accent_runs_with_its_arguments() {
+        let directory = env::temp_dir().join(format!("Lume teste Jo\u{e3}o Pedro {}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let shim = directory.join("echoer.cmd");
+        std::fs::write(&shim, "@echo off\r\necho got %*\r\n").unwrap();
+        let output = platform_command(&shim).args(["app-server", "--listen", "ws://127.0.0.1:43999"]).output().expect("the shim starts");
+        let _ = std::fs::remove_dir_all(&directory);
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains("got app-server --listen ws://127.0.0.1:43999"), "{text}");
     }
 }

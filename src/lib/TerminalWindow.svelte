@@ -58,7 +58,9 @@
   type ChatEntry = ConversationEntry;
   type ChatFeedItem = ConversationFeedItem;
   import {
+    addFileChanges,
     displayFileChangePath,
+    isSeparateEdit,
     mergeFileChanges,
     summarizeFileChanges,
     type FileChangeSummary,
@@ -1392,7 +1394,7 @@
   }
   const changedFiles = $derived.by(() => {
     const files: FileChangeSummary[] = [];
-    for (const activity of activities) mergeFileChanges(files, activityChanges(activity), session?.workingDirectory);
+    for (const activity of activities) (isSeparateEdit(activity) ? addFileChanges : mergeFileChanges)(files, activityChanges(activity), session?.workingDirectory);
     for (const result of session?.results ?? []) {
       mergeFileChanges(
         files,

@@ -126,3 +126,31 @@ const windowsFiles = collectReviewFiles([{
 assert.deepEqual(windowsFiles.map((file) => file.path), ["src-tauri/src/workspace_windows.rs"]);
 
 console.log("review diff test suite passed");
+
+// Claude Code edits a file with several tool calls; each one is its own change and none replaces another.
+const claudeEdit = (id, createdAt, hunk) => ({
+  id: `claude:s1:tool:${id}`, kind: "file", title: "/work/project/src/b.ts", status: "completed", createdAt, files: ["/work/project/src/b.ts"],
+  detail: `diff --git a//work/project/src/b.ts b//work/project/src/b.ts\n--- a//work/project/src/b.ts\n+++ b//work/project/src/b.ts\n${hunk}`,
+});
+const firstEdit = claudeEdit("toolu_1", 40, "@@ -1,2 +1,3 @@\n keep\n-old one\n+new one\n+extra one\n");
+const secondEdit = claudeEdit("toolu_2", 41, "@@ -10,2 +11,2 @@\n keep\n-old two\n+new two\n");
+const editedTwice = collectReviewFiles([firstEdit, secondEdit], "/work/project");
+assert.deepEqual(editedTwice.map(({ path, added, removed }) => ({ path, added, removed })), [{ path: "src/b.ts", added: 3, removed: 2 }]);
+assert.ok(editedTwice[0].diff.includes("new one") && editedTwice[0].diff.includes("new two"), "the diff keeps every edit");
+// The same edit reported again (a retry of the hook) is not counted twice.
+assert.deepEqual(collectReviewFiles([firstEdit, { ...firstEdit, id: "claude:s1:tool:toolu_1b" }], "/work/project").map(({ added, removed }) => ({ added, removed })), [{ added: 2, removed: 1 }]);
+
+// Lines whose content starts with "--" or "++" are changes, not file headers.
+const contentLines = "diff --git a/db/query.sql b/db/query.sql\n--- a/db/query.sql\n+++ b/db/query.sql\n@@ -1,3 +1,3 @@\n--- a comment\n+-- another comment\n ++i;\n-----\n+---\n";
+const sqlFiles = collectReviewFiles([{ id: "sql", kind: "file", title: "db/query.sql", detail: contentLines, status: "completed", createdAt: 50, files: ["db/query.sql"] }], "/work/project");
+assert.deepEqual(sqlFiles.map(({ added, removed }) => ({ added, removed })), [{ added: 2, removed: 2 }]);
+
+// The second edit's hunk keeps its own line numbers inside the combined diff.
+const combined = parseReviewDiff(editedTwice[0].diff);
+assert.ok(combined.some((line) => line.kind === "added" && line.content === "new two" && line.newLine === 12), "line numbers of a later edit");
+console.log("multi-edit review tests passed");
+
+const shown = parseReviewDiff(contentLines);
+assert.deepEqual(shown.filter((line) => line.kind === "removed").map((line) => line.content), ["-- a comment", "----"]);
+assert.deepEqual(shown.filter((line) => line.kind === "added").map((line) => line.content), ["-- another comment", "---"]);
+console.log("content lines tests passed");

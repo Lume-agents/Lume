@@ -276,3 +276,28 @@ test("the login-refresh notice disappears when the prompt went through on the re
   ]);
   assert.equal(failed.length, 2, "an unanswered failure is still shown");
 });
+
+test("separate Claude edits to one file add up in the files changed after the final message", () => {
+  const edit = (id, createdAt) => activity(`claude:chat:tool:${id}`, "file", createdAt, `edit ${id}`, { files: ["/work/src/a.ts"] });
+  const counts = { "edit one": [3, 1], "edit two": [2, 2], "edit three": [4, 0] };
+  const changes = (item) => (counts[item.detail] ? [{ path: "src/a.ts", added: counts[item.detail][0], removed: counts[item.detail][1] }] : []);
+  const activities = [
+    activity("prompt", "prompt", 10),
+    edit("one", 20), edit("two", 30), edit("three", 40),
+    activity("final", "message", 50, "Done."),
+  ];
+  const entries = entriesFor(activities, { results: [{ id: "r", response: "Done.", createdAt: 50, files: [], tests: [] }] }, changes);
+  const feed = buildConversationFeed(entries, { workingDirectory: "/work" });
+  const files = fileChangesForFinalResponses(feed, "/work").get("activity:final");
+  assert.deepEqual(files, [{ path: "src/a.ts", added: 9, removed: 3 }]);
+});
+
+test("two Claude edits with the same size are both kept", () => {
+  const activities = [
+    activity("prompt", "prompt", 10),
+    activity("claude:chat:tool:one", "file", 20, "edit one", { files: ["/work/src/a.ts"] }),
+    activity("claude:chat:tool:two", "file", 30, "edit two", { files: ["/work/src/a.ts"] }),
+  ];
+  const entries = entriesFor(activities, {}, () => [{ path: "src/a.ts", added: 1, removed: 1 }]);
+  assert.equal(entries.filter((entry) => entry.activity.kind === "file").length, 2);
+});

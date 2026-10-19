@@ -1,6 +1,6 @@
 import type { AgentSession, SessionActivity } from "$lib/domain";
 import type { FileChangeSummary } from "$lib/fileChanges";
-import { mergeFileChanges, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
+import { addFileChanges, isSeparateEdit, mergeFileChanges, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
 import { cleanPromptTransport, isSyntheticPromptText, promptTextKey, sameAttachment } from "$lib/chatAttachments";
 import { activityCategory, isHiddenAgentActivity, isPresentableTraceActivity } from "$lib/activityPresentation";
 import { latestResponseText, sameResponseText } from "$lib/responseDedup.js";
@@ -198,7 +198,7 @@ export function buildConversationEntries(
       continue;
     }
 
-    if (activity.kind === "file" && files.length) {
+    if (activity.kind === "file" && files.length && !isSeparateEdit(activity)) {
       const signature = fileChangesKey(files, session?.workingDirectory);
       const duplicateFileEntry = entries.findLast((entry) =>
         entry.activity.kind === "file"
@@ -344,7 +344,7 @@ export function buildConversationFeed(
         ? entry.files
         : entry.activity.files.map((path) => ({ path, added: 0, removed: 0 }));
       if (fileChanges.length || finalResponse.files.length) {
-        mergeFileChanges(finalResponse.files, fileChanges, options.workingDirectory);
+        (isSeparateEdit(entry.activity) ? addFileChanges : mergeFileChanges)(finalResponse.files, fileChanges, options.workingDirectory);
         finalResponse.activity.files = [...new Set([
           ...finalResponse.activity.files,
           ...entry.activity.files,
@@ -363,7 +363,7 @@ export function buildConversationFeed(
         feed.push(trace);
       }
       trace.entries.push(entry);
-      mergeFileChanges(trace.files, entry.files, options.workingDirectory);
+      (isSeparateEdit(entry.activity) ? addFileChanges : mergeFileChanges)(trace.files, entry.files, options.workingDirectory);
       continue;
     }
     trace = null;
@@ -384,7 +384,11 @@ export function fileChangesForFinalResponses(
   let turnFiles: FileChangeSummary[] = [];
   for (const item of feed) {
     if (item.kind === "trace") {
-      mergeFileChanges(turnFiles, item.files, workingDirectory);
+      // Edits are added one by one; whatever else the trace reported is the same change seen again.
+      const edits = item.entries.filter((entry) => isSeparateEdit(entry.activity));
+      for (const entry of edits) addFileChanges(turnFiles, entry.files, workingDirectory);
+      const others = item.entries.filter((entry) => !isSeparateEdit(entry.activity));
+      for (const entry of others) mergeFileChanges(turnFiles, entry.files, workingDirectory);
       continue;
     }
     if (item.entry.activity.kind === "prompt") {

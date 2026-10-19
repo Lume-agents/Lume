@@ -183,10 +183,12 @@ fn map_event_with_context(
     {
         return None;
     }
-    // Claude's internal forks (recap, prompt suggestion) also fire SubagentStop,
-    // but without an agent_type; only real subagents carry one.
+    // Claude's internal forks (recap, prompt suggestion) also fire SubagentStop and run tools of their
+    // own, all tagged with an agent_id but without an agent_type; only real subagents carry one.
+    // Their text and tool calls are not part of the conversation, so none of their events count.
     if provider == "claude"
-        && matches!(hook_name.as_str(), "SubagentStart" | "SubagentStop")
+        && (matches!(hook_name.as_str(), "SubagentStart" | "SubagentStop")
+            || string(raw, "agent_id").is_some_and(|agent_id| !agent_id.trim().is_empty()))
         && string(raw, "agent_type").is_none_or(|agent_type| agent_type.trim().is_empty())
     {
         return None;
@@ -2418,6 +2420,37 @@ mod tests {
             }
             assert!(map_event("claude", &raw).is_none());
         }
+    }
+
+    #[test]
+    fn claude_internal_fork_tools_are_not_conversation_activity() {
+        // The recap and the prompt suggestion run as forks that call tools; those calls and their text
+        // used to land in the chat after the final message.
+        for hook in ["PreToolUse", "PostToolUse"] {
+            let raw = json!({
+                "session_id": "claude-session",
+                "cwd": "/work/project",
+                "hook_event_name": hook,
+                "agent_id": "fork-1",
+                "tool_name": "Read",
+                "tool_use_id": "toolu_fork",
+                "tool_input": { "file_path": "/work/project/a.ts" },
+                "agent_transcript_path": "/tmp/fork.jsonl"
+            });
+            assert!(map_event("claude", &raw).is_none(), "{hook}");
+        }
+        // A real subagent names its type, and the main agent has no agent_id at all.
+        let subagent = json!({
+            "session_id": "claude-session", "cwd": "/work/project", "hook_event_name": "PostToolUse",
+            "agent_id": "agent-1", "agent_type": "general-purpose", "tool_name": "Read", "tool_use_id": "toolu_sub",
+            "tool_input": { "file_path": "/work/project/a.ts" }
+        });
+        assert!(map_event("claude", &subagent).is_some());
+        let main = json!({
+            "session_id": "claude-session", "cwd": "/work/project", "hook_event_name": "PostToolUse",
+            "tool_name": "Read", "tool_use_id": "toolu_main", "tool_input": { "file_path": "/work/project/a.ts" }
+        });
+        assert!(map_event("claude", &main).is_some());
     }
 
     #[test]

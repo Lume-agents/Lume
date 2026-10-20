@@ -27,6 +27,7 @@
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import ResponseAttachments from "$lib/ResponseAttachments.svelte";
+  import AttachmentImage from "$lib/AttachmentImage.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import { usageAlertDismissals } from "$lib/usageAlertDismissals";
@@ -57,7 +58,9 @@
   type ChatEntry = ConversationEntry;
   type ChatFeedItem = ConversationFeedItem;
   import {
+    addFileChanges,
     displayFileChangePath,
+    isSeparateEdit,
     mergeFileChanges,
     summarizeFileChanges,
     type FileChangeSummary,
@@ -83,6 +86,8 @@
     closeTerminalWindow,
     decidePermission,
     finishLayeredTerminalResize,
+    terminateSession,
+    takeControlSession,
     getSessionCollaborationMode,
     getClaudeSessionModelSettings,
     getSessionPermissionMode,
@@ -125,8 +130,8 @@
     submitPrompt,
     syncTerminalWindowPosition,
     terminalGroupFullscreenActive,
-    takeControlSession,
-    terminateSession,
+    compactSession,
+    launchAgentSession,
     deleteSessionNote,
     toggleTerminalGroupFullscreen,
     undockTerminalWindow,
@@ -323,9 +328,11 @@
   let accentOpacity = $state(100);
   let darkBase = $state<Preferences["darkBase"]>("theme");
   let lightBase = $state<Preferences["lightBase"]>("theme");
+  let customDarkSurfaces = $state<Preferences["customDarkSurfaces"]>({});
+  let customLightSurfaces = $state<Preferences["customLightSurfaces"]>({});
   let uiFont = $state("default");
   let codeFont = $state("default");
-  const baseCss = $derived([appearanceBaseCss(darkBase, lightBase), appearanceFontCss(uiFont, codeFont)].filter(Boolean).join(";"));
+  const baseCss = $derived([appearanceBaseCss(darkBase, lightBase, customDarkSurfaces, customLightSurfaces), appearanceFontCss(uiFont, codeFont)].filter(Boolean).join(";"));
   $effect(() => { void ensureCustomFonts({ uiFont, codeFont }); });
   const workflowGroup = $derived.by(() => {
     if (!windowState?.groupId) return undefined;
@@ -1072,7 +1079,9 @@
     ? tr(`Context: ${compactTokens(contextTokens)} of ${compactTokens(contextWindow)} (${contextPercent}%)`, `Contexto: ${compactTokens(contextTokens)} de ${compactTokens(contextWindow)} (${contextPercent}%)`)
     : "");
   const canCompact = $derived(Boolean(
-    session?.agent === "claude_code" && session.controlOrigin === "lume" && canSubmit && !promptIsRunning && readyForPrompt && !sending,
+    session?.controlOrigin === "lume"
+    && (session.agent === "omp" ? session.status === "completed" && canSubmit && queuedPrompts.length === 0 : session.agent === "claude_code")
+    && (session.agent === "omp" || (canSubmit && !promptIsRunning && readyForPrompt && !sending)),
   ));
 
   $effect(() => {
@@ -1299,6 +1308,9 @@
   }
 
   function promptUnavailableText() {
+    if (session?.agent === "omp" && capabilities?.promptUnavailableReason === "monitoring_only") {
+      return tr("Oh My Pi sessions are read-only until the terminal session is closed.", "As sessões do Oh My Pi ficam somente para leitura até fechar a sessão no terminal.");
+    }
     if (capabilities?.promptUnavailableReason === "session_not_connected") {
       return tr(
         "Waiting for this session to connect to Lume",
@@ -1384,7 +1396,7 @@
   }
   const changedFiles = $derived.by(() => {
     const files: FileChangeSummary[] = [];
-    for (const activity of activities) mergeFileChanges(files, activityChanges(activity), session?.workingDirectory);
+    for (const activity of activities) (isSeparateEdit(activity) ? addFileChanges : mergeFileChanges)(files, activityChanges(activity), session?.workingDirectory);
     for (const result of session?.results ?? []) {
       mergeFileChanges(
         files,
@@ -1567,6 +1579,8 @@
       accentOpacity = nextPreferences.accentOpacity;
       darkBase = nextPreferences.darkBase;
       lightBase = nextPreferences.lightBase;
+      customDarkSurfaces = nextPreferences.customDarkSurfaces ?? {};
+      customLightSurfaces = nextPreferences.customLightSurfaces ?? {};
       uiFont = nextPreferences.uiFont;
       codeFont = nextPreferences.codeFont;
       workflowGroups = nextPreferences.workflowGroups;
@@ -1663,6 +1677,8 @@
         accentOpacity = payload.accentOpacity;
         darkBase = payload.darkBase;
         lightBase = payload.lightBase;
+        customDarkSurfaces = payload.customDarkSurfaces ?? {};
+        customLightSurfaces = payload.customLightSurfaces ?? {};
         uiFont = payload.uiFont;
         codeFont = payload.codeFont;
         workflowGroups = payload.workflowGroups;
@@ -2606,6 +2622,7 @@
   }
 
   function effortValues() {
+    if (session?.agent === "omp") return ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
     if (session?.agent === "claude_code") return claudeEffortValues(claudeModels, claudeModel);
     return currentModelOption()?.supportedReasoningEfforts.map((effort) => effort.value) ?? [];
   }
@@ -2643,7 +2660,7 @@
   }
 
   async function openModelDialog() {
-    if (!session || !["codex", "claude_code", "opencode", "antigravity"].includes(session.agent)) return false;
+    if (!session || !["codex", "claude_code", "opencode", "antigravity", "omp"].includes(session.agent)) return false;
     if (modelLoading || modelSaving) return true;
     composerToolsOpen = false;
     if (session.controlOrigin !== "lume") {
@@ -2670,9 +2687,9 @@
         modelSettings = await getSessionModelSettings(session.id);
         selectedModel = modelSettings.model;
         selectedEffort = modelSettings.reasoningEffort ?? "";
-      } else if (session.agent === "codex" || session.agent === "opencode") {
+      } else if (["codex", "opencode", "omp"].includes(session.agent)) {
         modelSettings = await getSessionModelSettings(session.id);
-        if (session.agent === "codex") sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
+        if (["codex", "omp"].includes(session.agent)) sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
         selectedModel = modelSettings.model;
         if (session.agent === "codex") fastMode = isFastServiceTier(modelSettings.serviceTier);
         const option = currentModelOption();
@@ -2745,7 +2762,7 @@
     modelError = null;
     const deferredUntilPromptEnds = (session.agent === "codex" || session.agent === "antigravity") && promptIsRunning;
     try {
-      if (session.agent === "codex" || session.agent === "opencode" || session.agent === "antigravity") {
+      if (["codex", "opencode", "antigravity", "omp"].includes(session.agent)) {
         modelSettings = await setSessionModelSettings(
           session.id,
           selectedModel,
@@ -2895,22 +2912,47 @@
 
   async function confirmTakeover() {
     if (!session || !capabilities?.canTakeControl || takingControl) return;
+    const currentSession = session;
     const pendingPrompt = prompt.trim();
     const pendingAttachments = [...promptAttachments];
     takingControl = true;
     message = null;
-    try {
-      await takeControlSession(session.id, pendingPrompt, pendingAttachments);
+    const finishTakeover = async (force = false) => {
+      await takeControlSession(currentSession.id, pendingPrompt, pendingAttachments, force);
       takeoverConfirm = false;
       if (prompt.trim() === pendingPrompt) prompt = "";
       promptAttachments = [];
       await refresh();
+    };
+    try {
+      await finishTakeover();
     } catch (error) {
-      message = String(error).replace(/^Error:\s*/, "");
+      const detail = String(error).replace(/^Error:\s*/, "");
+      if (session.agent === "omp" && detail.includes("omp_session_maybe_live")) {
+        const confirmed = window.confirm(tr(
+          "Lume cannot confirm whether the terminal session is still live. Continue anyway? Close omp in the terminal first if it is open.",
+          "O Lume não consegue confirmar se a sessão do terminal ainda está ativa. Continuar mesmo assim? Feche o omp no terminal antes, se estiver aberto.",
+        ));
+        if (confirmed) await finishTakeover(true).catch((retryError) => { message = String(retryError).replace(/^Error:\s*/, ""); });
+      } else {
+        message = session.agent === "omp" && detail.includes("omp_session_live")
+          ? tr("Close omp in the terminal to take control.", "Feche o omp no terminal para assumir o controle.")
+          : detail;
+      }
       await refresh().catch(() => undefined);
     } finally {
       sending = false;
       takingControl = false;
+    }
+  }
+  async function setupOmp() {
+    const workingDirectory = session?.workingDirectory?.trim();
+    if (!workingDirectory) return;
+    try {
+      await launchAgentSession("omp", workingDirectory, false, undefined, "terminal");
+      dismissedConnectionError = session?.statusLabel ?? "";
+    } catch (error) {
+      message = String(error).replace(/^Error:\s*/, "");
     }
   }
 
@@ -3107,10 +3149,17 @@
     void sendPrompt();
   }
 
-  /** Sends Claude's own `/compact`, keeping whatever was being typed. */
   async function compactContext() {
-    if (!canCompact) return;
+    if (!canCompact || !session) return;
     composerToolsOpen = false;
+    if (session.agent === "omp") {
+      try {
+        await compactSession(session.id);
+      } catch (error) {
+        message = String(error).replace(/^Error:\s*/, "");
+      }
+      return;
+    }
     const draft = prompt;
     const draftAttachments = promptAttachments;
     prompt = "/compact";
@@ -3191,6 +3240,7 @@
   }
 
   function actionLabel(action: PermissionAction) {
+    if (session?.agent === "omp" && action === "allow_once") return tr("Allow once", "Permitir uma vez");
     return {
       allow_once: tr("Allow", "Permitir"),
       allow_session: tr("For session", "Na sessão"),
@@ -3752,8 +3802,8 @@
                     {#if item.attachments?.length}
                       <div class="message-images">
                         {#each item.attachments as attachment}
-                          {#if attachment.previewDataUrl}
-                            <img src={attachment.previewDataUrl} alt={attachment.name} />
+                          {#if attachment.previewDataUrl || (attachment.path && isImageAttachmentPath(attachment.path))}
+                            <AttachmentImage {attachment} {language} width="100%" height={120} radius={7} />
                           {:else}
                             <span class="message-file" title={attachment.name}>
                               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.8h6l4 4V17H5zM11 3v4h4M7.5 11h5M7.5 14h4" /></svg>
@@ -3796,6 +3846,7 @@
                       text={item.detail}
                       attachments={item.attachments ?? []}
                       workingDirectory={session.workingDirectory}
+                      sessionId={session.id}
                       {language}
                       onError={(error) => (message = error)}
                     />
@@ -3864,7 +3915,7 @@
                 <strong>{displayText(language, session.pendingPermission.summary)}</strong>
                 <code>{session.pendingPermission.resource}</code>
                 <div>
-                  {#each session.permissionProfile.availableActions as action}
+                  {#each (session.agent === "omp" ? session.permissionProfile.availableActions.filter((action) => action === "allow_once" || action === "deny") : session.permissionProfile.availableActions) as action}
                     <button class:danger={action === "deny"} class:loading={permissionPending === action} type="button" disabled={permissionPending !== null} onclick={() => permission(action)}>
                       {#if permissionPending === action}<i class="permission-spinner" aria-hidden="true"></i>{/if}
                       {actionLabel(action)}
@@ -4069,9 +4120,11 @@
           <div class="terminate-dialog takeover-dialog" role="alertdialog" aria-modal="true" aria-labelledby="takeover-title" tabindex="-1" use:dialogFocus={{ onDismiss: () => { if (!takingControl) takeoverConfirm = false; }, fallbackFocus: () => document.querySelector<HTMLTextAreaElement>(".terminal-composer textarea") }} onpointerdown={(event) => event.stopPropagation()}>
             <div>
               <strong id="takeover-title">{tr("Continue this session in Lume?", "Continuar esta sessão no Lume?")}</strong>
-              <p>{session.status === "running"
-                ? tr("The external CLI is running a task. Taking control will stop that task, close only the agent process, and resume the same thread in Lume.", "A CLI externa está executando uma tarefa. Assumir o controle interromperá essa tarefa, fechará somente o processo do agente e retomará a mesma thread no Lume.")
-                : tr("Lume will close only the external agent process and resume the same thread here. The terminal and chat history will be preserved.", "O Lume fechará somente o processo externo do agente e retomará a mesma thread aqui. O terminal e o histórico do chat serão preservados.")}</p>
+              <p>{session.agent === "omp"
+                ? tr("Close omp in the terminal before taking control. Lume will then resume this session without the external process.", "Feche o omp no terminal antes de assumir o controle. Depois, o Lume retomará esta sessão sem o processo externo.")
+                : session.status === "running"
+                  ? tr("The external CLI is running a task. Taking control will stop that task, close only the agent process, and resume the same thread in Lume.", "A CLI externa está executando uma tarefa. Assumir o controle interromperá essa tarefa, fechará somente o processo do agente e retomará a mesma thread no Lume.")
+                  : tr("Lume will close only the external agent process and resume the same thread here. The terminal and chat history will be preserved.", "O Lume fechará somente o processo externo do agente e retomará a mesma thread aqui. O terminal e o histórico do chat serão preservados.")}</p>
             </div>
             <footer>
               <button disabled={takingControl} type="button" onclick={() => (takeoverConfirm = false)}>{tr("Cancel", "Cancelar")}</button>
@@ -4136,7 +4189,7 @@
                   <label>
                     <span class="model-settings-label">{tr("Permissions", "Permissões")}</span>
                     <LumeSelect value={sessionPermission.mode} disabled={permissionSaving || session?.controlOrigin !== "lume"}
-                      options={sessionPermission.modes.map((mode) => ({ value: mode, label: permissionLabel(mode, tr), description: permissionDescription(mode, tr) }))}
+                      options={(session?.agent === "omp" ? ["full_access", "workspace_write", "custom"].filter((mode) => sessionPermission?.modes.includes(mode)) : sessionPermission.modes).map((mode) => ({ value: mode, label: permissionLabel(mode, tr, session?.agent), description: permissionDescription(mode, tr, session?.agent) }))}
                       ariaLabel={tr("Permissions", "Permissões")} minWidth={250} onValueChange={(value) => void chooseSessionPermission(value)} />
                   </label>
                   <small>{tr("Applies to the messages you send from Lume.", "Vale para as mensagens enviadas pelo Lume.")}</small>
@@ -4144,7 +4197,7 @@
               {/if}
             {/snippet}
             {#if modelLoading}
-              {#if session.agent === "antigravity"}{@render permissionSection()}{/if}
+              {#if session.agent === "antigravity" || session.agent === "omp"}{@render permissionSection()}{/if}
               <div class="model-settings-loading"><span></span>{tr("Loading available models…", "Carregando modelos disponíveis…")}</div>
             {:else if session.agent === "claude_code"}
               <section class="model-settings-section claude-model-settings">
@@ -4201,7 +4254,7 @@
                   {/each}
                 </div>
               </section>
-              {#if session.agent === "codex"}{@render permissionSection()}{/if}
+              {#if session.agent === "codex" || session.agent === "omp"}{@render permissionSection()}{/if}
               {#if session.agent === "codex"}{@render fastModeSection()}{/if}
 
               {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
@@ -4346,7 +4399,7 @@
             {#each promptAttachments as attachment, index}
               <span class:file-attachment={!attachment.previewDataUrl} title={attachment.name}>
                 {#if attachment.previewDataUrl}
-                  <img src={attachment.previewDataUrl} alt={attachment.name} />
+                  <AttachmentImage {attachment} {language} width="100%" height="100%" radius={8} />
                 {:else}
                   <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.8h6l4 4V17H5zM11 3v4h4M7.5 11h5M7.5 14h4" /></svg>
                   <small>{attachment.name}</small>
@@ -4404,7 +4457,7 @@
                       <span><strong>{tr("Attach file", "Anexar arquivo")}</strong><small>{promptAttachments.length}/4</small></span>
                     </button>
                   {/if}
-                  {#if session.agent === "claude_code"}
+                  {#if session.agent === "claude_code" || session.agent === "omp"}
                     <button disabled={!canCompact} type="button" role="menuitem" onclick={() => void compactContext()}>
                       <span class="tool-icon"><LumeIcon name="compact" size={15} /></span>
                       <span><strong>{tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
@@ -4537,9 +4590,10 @@
       <span>{tr("Connecting to session…", "Conectando à sessão…")}</span>
     </section>
   {/if}
-  {#if session && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini"].includes(session.agent) && (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)))}
+  {#if session && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini", "omp"].includes(session.agent) && (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)) || (session.agent === "omp" && session.status === "failed" && /no models available/i.test(session.statusLabel)))}
     <AgentConnectionDialog agent={(session.agent === "claude_code" ? "claude" : session.agent) as ConnectableAgent}
-      message={connectionRequired ?? agentConnectionMessage(session.statusLabel) ?? ""} {language}
+      message={connectionRequired ?? (session.agent === "omp" && /no models available/i.test(session.statusLabel) ? tr("No models are available. Configure omp, then retry this session.", "Nenhum modelo está disponível. Configure o omp e tente esta sessão novamente.") : agentConnectionMessage(session.statusLabel) ?? "")} {language}
+      onSetup={session.agent === "omp" && /no models available/i.test(session.statusLabel) ? () => void setupOmp() : undefined}
       onClose={() => { dismissedConnectionError = session?.statusLabel ?? ""; connectionRequired = null; }} />
   {/if}
 </main>
@@ -4904,7 +4958,6 @@
   .markdown-content :global(video) { max-width: 100%; height: auto; }
   .markdown-content :global(hr) { height: 1px; margin: 8px 0; border: 0; background: rgba(77, 104, 91, 0.12); }
   .message-images { margin-top: 7px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
-  .message-images img { width: 100%; max-height: 150px; display: block; border-radius: 7px; object-fit: cover; }
   .message-file { min-width: 0; min-height: 38px; padding: 7px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(82, 106, 95, 0.14); border-radius: 7px; color: #52665d; background: rgba(52, 145, 99, 0.045); }
   .message-file svg { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .message-file small { min-width: 0; overflow: hidden; color: inherit; font: 650 var(--chat-tiny-font-size)/1.2 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
@@ -5115,7 +5168,6 @@
   .pending-images { width: 100%; min-height: 51px; padding: 4px 5px; display: flex; align-items: center; gap: 6px; overflow-x: auto; border-radius: 8px; background: rgba(52, 145, 99, 0.045); }
   .pending-images-label { max-width: 52px; flex: 0 0 auto; color: #829088; font: 750 var(--chat-tiny-font-size)/1.25 var(--lume-font-ui, Inter, sans-serif); text-transform: uppercase; }
   .pending-images > span { position: relative; width: 42px; height: 42px; flex: 0 0 auto; }
-  .pending-images img { width: 100%; height: 100%; display: block; border: 1px solid rgba(82, 106, 95, 0.14); border-radius: 8px; object-fit: cover; }
   .pending-images > span.file-attachment { width: 116px; padding: 5px 7px; display: flex; align-items: center; gap: 5px; border: 1px solid rgba(82, 106, 95, 0.14); border-radius: 8px; color: #52665d; background: rgba(255, 255, 255, 0.5); }
   .pending-images .file-attachment > svg { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .pending-images .file-attachment > small { min-width: 0; overflow: hidden; font: 650 var(--chat-tiny-font-size)/1.2 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }

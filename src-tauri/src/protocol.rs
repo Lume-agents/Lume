@@ -67,6 +67,7 @@ pub struct SessionCapabilities {
     pub can_attach_images: bool,
     pub can_interrupt: bool,
     pub can_take_control: bool,
+    pub can_compact: bool,
     pub prompt_deliveries: Vec<PromptDelivery>,
 }
 
@@ -88,7 +89,7 @@ impl SessionCapabilities {
         } else if session.control_origin == SessionControlOrigin::External
             && matches!(
                 session.agent,
-                AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::OpenCode
+                AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::OpenCode | AgentKind::Omp
             )
         {
             Some(PromptUnavailableReason::ExternalSession)
@@ -104,18 +105,21 @@ impl SessionCapabilities {
                 && session.permission_profile.can_respond_from_lume
                 && !monitor_only,
             can_answer_question: session.pending_question.is_some() && !monitor_only,
-            can_terminate: (session.source == SessionSource::Cli && session.process_id.is_some())
-                || (matches!(
-                    session.agent,
-                    AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
-                ) && session.source == SessionSource::Desktop
-                    && session.control_origin == SessionControlOrigin::Lume
-                    && has_nonempty_value(session.native_session_id.as_deref()))
-                || (session.agent == AgentKind::ClaudeCode
-                    && matches!(session.source, SessionSource::Cli | SessionSource::Desktop)
-                    && session.process_id.is_none()
-                    && session.control_origin == SessionControlOrigin::Lume
-                    && has_nonempty_value(session.native_session_id.as_deref())),
+            can_terminate: (session.agent == AgentKind::Omp
+                && session.control_origin == SessionControlOrigin::Lume
+                && has_nonempty_value(session.native_session_id.as_deref()))
+                || ((session.source == SessionSource::Cli && session.process_id.is_some())
+                    || (matches!(
+                        session.agent,
+                        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
+                    ) && session.source == SessionSource::Desktop
+                        && session.control_origin == SessionControlOrigin::Lume
+                        && has_nonempty_value(session.native_session_id.as_deref()))
+                    || (session.agent == AgentKind::ClaudeCode
+                        && matches!(session.source, SessionSource::Cli | SessionSource::Desktop)
+                        && session.process_id.is_none()
+                        && session.control_origin == SessionControlOrigin::Lume
+                        && has_nonempty_value(session.native_session_id.as_deref()))),
             can_open_source: matches!(session.source, SessionSource::Web | SessionSource::Vscode),
             can_read_results: !session.results.is_empty() || session.last_response.is_some(),
             can_attach_images: session.source != SessionSource::Web
@@ -130,13 +134,18 @@ impl SessionCapabilities {
                 && can_interrupt_session(session),
             can_take_control: session.control_origin == SessionControlOrigin::External
                 && session.source == SessionSource::Cli
-                && session.agent == AgentKind::Codex
+                && matches!(session.agent, AgentKind::Codex | AgentKind::Omp)
                 && has_nonempty_value(session.native_session_id.as_deref())
                 && has_nonempty_value(session.working_directory.as_deref())
-                && session.process_id.is_some(),
-            prompt_deliveries: if session.agent == AgentKind::Codex
-                && session.source != SessionSource::Web
+                && (session.agent == AgentKind::Omp || session.process_id.is_some()),
+            can_compact: session.agent == AgentKind::Omp
                 && session.control_origin == SessionControlOrigin::Lume
+                && session.status == SessionStatus::Completed,
+            prompt_deliveries: if (session.agent == AgentKind::Codex
+                && session.source != SessionSource::Web
+                && session.control_origin == SessionControlOrigin::Lume)
+                || (session.agent == AgentKind::Omp
+                    && session.control_origin == SessionControlOrigin::Lume)
             {
                 vec![
                     PromptDelivery::NewTurn,
@@ -2172,7 +2181,10 @@ mod tests {
         assert!(explicit_message_todo(sentence).is_none());
         assert!(!is_work_tracking_message(sentence));
         let heading = "Próximo to do:\n\n- Conferir estados\n- Rodar checks";
-        assert_eq!(explicit_message_todo(heading).map(|items| items.len()), Some(2));
+        assert_eq!(
+            explicit_message_todo(heading).map(|items| items.len()),
+            Some(2)
+        );
     }
 
     #[test]

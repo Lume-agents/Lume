@@ -1,7 +1,7 @@
 import type { PromptAttachment, SessionActivity, SessionResult } from "$lib/domain";
 // Node executes this module directly in the focused parser test; Vite resolves the same source in the app.
 // @ts-expect-error TypeScript's bundler mode disallows the explicit source extension used by Node.
-import { mergeFileChanges, summarizeFileChanges } from "./fileChanges.ts";
+import { isSeparateEdit, mergeFileChanges, summarizeFileChanges } from "./fileChanges.ts";
 
 export interface ReviewFileChange {
   path: string;
@@ -100,11 +100,25 @@ export function collectReviewFiles(
     if (activity.kind === "file" && !reported.includes(activity.title) && !genericFileTitle.test(activity.title.trim())) {
       reported.push(activity.title);
     }
-    mergeFileChanges(files, summarizeFileChanges(activity.detail ?? "", reported, workingDirectory), workingDirectory);
     const detail = activity.detail ?? "";
-    for (const diff of [...recordedDiffs(detail), ...structuredDiffChunks(detail)]) {
-      const [summary] = summarizeFileChanges(diff, [], workingDirectory);
-      if (!summary) continue;
+    const chunks = [...recordedDiffs(detail), ...structuredDiffChunks(detail)]
+      .map((diff) => ({ diff, summary: summarizeFileChanges(diff, [], workingDirectory)[0] }))
+      .filter((chunk) => chunk.summary);
+    if (isSeparateEdit(activity) && chunks.length) {
+      // Each edit adds its lines and its hunks to the file; an edit already recorded is not counted again.
+      for (const { diff, summary } of chunks) {
+        const current = files.find((file) => file.path === summary.path);
+        if (!current) files.push({ ...summary, diff });
+        else if (!current.diff?.includes(diff)) {
+          current.added += summary.added;
+          current.removed += summary.removed;
+          current.diff = current.diff ? `${current.diff}\n${diff}` : diff;
+        }
+      }
+      continue;
+    }
+    mergeFileChanges(files, summarizeFileChanges(detail, reported, workingDirectory), workingDirectory);
+    for (const { diff, summary } of chunks) {
       const current = files.find((file) => file.path === summary.path);
       if (current) current.diff = diff;
       else files.push({ ...summary, diff });
@@ -243,11 +257,44 @@ export function parseReviewDiff(diff: string): ReviewDiffLine[] {
   const result: ReviewDiffLine[] = [];
   let oldLine: number | undefined;
   let newLine: number | undefined;
+  // The hunk header says how many lines it holds: inside it, a line starting with "--" or "++" is a change.
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const line of diff.split(/\r?\n/)) {
-    const hunk = line.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith("+")) {
+        result.push({ kind: "added", content: line.slice(1), newLine });
+        if (newLine !== undefined) newLine += 1;
+        newLeft -= 1;
+        continue;
+      }
+      if (line.startsWith("-")) {
+        result.push({ kind: "removed", content: line.slice(1), oldLine });
+        if (oldLine !== undefined) oldLine += 1;
+        oldLeft -= 1;
+        continue;
+      }
+      if (line.startsWith(" ") || line === "") {
+        result.push({ kind: "context", content: line.slice(1), oldLine, newLine });
+        if (oldLine !== undefined) oldLine += 1;
+        if (newLine !== undefined) newLine += 1;
+        oldLeft -= 1;
+        newLeft -= 1;
+        continue;
+      }
+      if (line.startsWith("\\")) {
+        result.push({ kind: "meta", content: line });
+        continue;
+      }
+      oldLeft = 0;
+      newLeft = 0;
+    }
+    const hunk = line.match(/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
     if (hunk) {
       oldLine = Number(hunk[1]);
-      newLine = Number(hunk[2]);
+      newLine = Number(hunk[3]);
+      oldLeft = Number(hunk[2] ?? 1);
+      newLeft = Number(hunk[4] ?? 1);
       result.push({ kind: "hunk", content: line });
       continue;
     }

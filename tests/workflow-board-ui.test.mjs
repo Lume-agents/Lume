@@ -43,9 +43,9 @@ function nativeFixture() {
   const listeners = new Map();
   let nextId = 1;
   const contract = { instruction: "Trabalhe no papel definido.", expectedInput: "Objetivo e contexto.", producedOutput: "Resultado para a próxima etapa.", completionCondition: "Entregar o resultado revisado." };
-  const sessions = ["Pesquisa", "Implementação", "Revisão"].map((sessionName, index) => ({
-    id: "session-" + index, nativeSessionId: "native-" + index, sessionName, agent: ["codex", "claude_code", "opencode"][index],
-    agentLabel: ["Codex", "Claude Code", "OpenCode"][index], project: "Lume · teste", workingDirectory: "/fixture/lume",
+  const sessions = ["Pesquisa", "Implementação", "Revisão", "Monitoramento"].map((sessionName, index) => ({
+    id: "session-" + index, nativeSessionId: "native-" + index, sessionName, agent: ["codex", "claude_code", "opencode", "omp"][index],
+    agentLabel: ["Codex", "Claude Code", "OpenCode", "Oh My Pi"][index], project: "Lume · teste", workingDirectory: "/fixture/lume",
     source: "desktop", controlOrigin: "lume", status: "waiting_for_input", statusLabel: "Esperando ação",
     startedAt: new Date().toISOString(), updatedAt: Date.now(), results: [], activities: [], activityTotal: 0,
     permissionProfile: { canRespondFromLume: true, mode: "full_access" },
@@ -285,8 +285,12 @@ try {
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
   await evaluate("window.__fixture.status('waiting_for_approval', { pendingConnectionId: 'connection-fixture' })");
   await wait("document.querySelector('.edge-hub.waiting')");
-  await click(".board-run .primary");
+  assert.equal(await evaluate("document.querySelectorAll('.board-card:not(.ghost) .card-orb').length === document.querySelectorAll('.board-card:not(.ghost)').length"), true, "every card carries a status orb");
+  assert.equal(await evaluate("document.querySelectorAll('.card-orb.orb-approval').length"), 1, "the step whose result waits for a decision says so");
+  await wait("document.querySelector('.edge-approve')");
+  await click(".edge-approve"); // the arrow itself lets the handoff through
   await wait("document.querySelector('.board-run').dataset.status === 'ready'");
+  assert.equal(await evaluate("document.querySelector('.edge-approve')"), null, "nothing left to approve on the arrow");
   await click(".board-run .primary");
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
   await evaluate("window.__fixture.status('failed', { error: 'Falha simulada' })");

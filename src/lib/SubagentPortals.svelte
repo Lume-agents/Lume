@@ -5,7 +5,7 @@
   import type { Language } from "$lib/i18n";
   import { noteSubagentInteraction, type WorkspaceSubagent } from "$lib/workspaceAgents";
   import { activityCategory, activityDisplayTitle, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
-  import { loadSubagentTimeline, submitPrompt } from "$lib/lume";
+  import { loadSubagentTimeline, steerOmpSubagent, submitPrompt } from "$lib/lume";
   import { renderSafeMarkdown } from "$lib/markdown.js";
   import { collectReviewFiles, parseReviewDiff } from "$lib/reviewDiffs";
   import ActivityTypeIcon from "$lib/ActivityTypeIcon.svelte";
@@ -15,6 +15,7 @@
 
   let { session, children, language }: { session: HubSession; children: WorkspaceSubagent[]; language: Language } = $props();
   let root: HTMLElement;
+  let panel = $state<HTMLDivElement | null>(null);
   let rail: HTMLDivElement;
   let timelineElement = $state<HTMLDivElement | null>(null);
   let portalOrigin = $state(32);
@@ -57,11 +58,11 @@
   const canMessageChild = $derived(Boolean(
     selectedChild
     && selectedChild.status === "running"
-    && selectedChild.path.startsWith("/")
-    && session.agent === "codex"
+    && (session.agent === "omp" || selectedChild.path.startsWith("/"))
+    && ((session.agent === "codex" || session.agent === "omp") && session.controlOrigin === "lume")
     && session.status === "running"
     && session.capabilities.canPrompt
-    && session.capabilities.promptDeliveries.includes("steer"),
+    && (session.agent === "omp" || session.capabilities.promptDeliveries.includes("steer")),
   ));
 
   $effect(() => {
@@ -107,7 +108,10 @@
     if (!button) return;
     const buttonRect = button.getBoundingClientRect();
     const rootRect = root.getBoundingClientRect();
-    portalOrigin = Math.max(24, Math.min(rootRect.width - 24, buttonRect.left + buttonRect.width / 2 - rootRect.left - 8));
+    // The bubble grows from the clicked avatar, measured inside the panel, whose width never depends on the rail.
+    const panelLeft = panel?.offsetLeft ?? 8;
+    const panelWidth = panel?.offsetWidth ?? 520;
+    portalOrigin = Math.max(24, Math.min(panelWidth - 24, buttonRect.left + buttonRect.width / 2 - rootRect.left - panelLeft));
   }
 
   async function setRailCollapsed(collapsed: boolean) {
@@ -153,7 +157,7 @@
   }
 
   async function refreshChild(child: WorkspaceSubagent) {
-    if (session.agent !== "codex" || !child.id.startsWith("codex:")) return;
+    if (!["codex", "omp"].includes(session.agent) || !child.id.startsWith(`${session.agent}:`)) return;
     const requestSessionId = session.id;
     const requestKey = `${requestSessionId}:${child.id}`;
     if (inFlight.has(requestKey)) return;
@@ -177,11 +181,11 @@
   }
 
   function refreshVisible() {
-    if (!mounted || document.hidden || session.agent !== "codex") return;
+    if (!mounted || document.hidden || !["codex", "omp"].includes(session.agent)) return;
     const now = Date.now();
     for (const child of children) {
       if (inFlight.size >= 2) break;
-      if (!child.id.startsWith("codex:")) continue;
+      if (!child.id.startsWith(`${session.agent}:`)) continue;
       if (inFlight.has(`${session.id}:${child.id}`)) continue;
       const fetched = lastFetched.get(child.id) ?? 0;
       if (fetched && child.status !== "running" && child.id !== selectedId) continue;
@@ -215,14 +219,21 @@
     messageSending = true;
     messageNotice = "";
     try {
-      const routedPrompt = [
-        "The Lume user wants to message an existing subagent. Use your collaboration send_message tool to relay the exact message below to the target path. Do not perform the subagent's task yourself. If the subagent is unavailable, tell the user that delivery failed.",
-        JSON.stringify({ target: child.path, message }),
-      ].join("\n\n");
-      await submitPrompt(session.id, routedPrompt, [], "steer");
+      if (session.agent === "omp") {
+        const subagentId = child.id.split(":subagent:").at(-1);
+        if (!subagentId) throw new Error(tr("Subagent ID is unavailable.", "O ID do subagente não está disponível."));
+        await steerOmpSubagent(session.id, subagentId, message);
+        messageNotice = tr("Message sent to the subagent.", "Mensagem enviada ao subagente.");
+      } else {
+        const routedPrompt = [
+          "The Lume user wants to message an existing subagent. Use your collaboration send_message tool to relay the exact message below to the target path. Do not perform the subagent's task yourself. If the subagent is unavailable, tell the user that delivery failed.",
+          JSON.stringify({ target: child.path, message }),
+        ].join("\n\n");
+        await submitPrompt(session.id, routedPrompt, [], "steer");
+        messageNotice = tr("Request sent to the main agent for delivery.", "Pedido enviado ao agente principal para encaminhamento.");
+      }
       noteSubagentInteraction(child.id);
       messageDraft = "";
-      messageNotice = tr("Request sent to the main agent for delivery.", "Pedido enviado ao agente principal para encaminhamento.");
     } catch (error) {
       messageNotice = String(error).replace(/^Error:\s*/, "");
     } finally {
@@ -281,8 +292,8 @@
   });
 </script>
 
-<section class:compact={railCollapsed} class:timeline-open={!railCollapsed && expanded && Boolean(selectedChild)} class="subagent-portals" bind:this={root} aria-label={tr("Subagent activity", "Atividade dos subagentes")}
-  style={`--portal-origin:${portalOrigin}px`}
+<div class:compact={railCollapsed} class="portal-host" bind:this={root} style={`--portal-origin:${portalOrigin}px`}>
+<section class:compact={railCollapsed} class="subagent-portals" aria-label={tr("Subagent activity", "Atividade dos subagentes")}
   style:background={railCollapsed ? "transparent" : undefined}
   style:border-bottom-color={railCollapsed ? "transparent" : undefined}>
   <div class:visible={railCollapsed} class="portal-compact" role="group" aria-label={tr("Subagents", "Subagentes")} aria-hidden={!railCollapsed} inert={!railCollapsed}>
@@ -368,14 +379,14 @@
       </div>
     </div>
   </div>
-
-  <div id={`subagent-timeline-${session.id}`} class:open={expanded} class:has-final={Boolean(selectedFinal)} class="portal-panel" aria-hidden={!expanded} inert={!expanded}>
+</section>
+  <div id={`portal-panel-${session.id}`} bind:this={panel} class:open={expanded && Boolean(selectedChild)} class="portal-panel" aria-hidden={!expanded} inert={!expanded}>
     {#if selectedChild}
       <header class="portal-panel-header">
         <span class="panel-avatar"><ThreadAvatar seed={`${session.id}:subagent:${selectedChild.id}`} label={selectedChild.label} size={28} /></span>
         <span class="panel-heading"><strong>{selectedChild.label}</strong><small>{statusText(selectedChild.status)}</small></span>
-        {#if session.agent === "codex"}
-          <button type="button" class:active={messageOpen} disabled={!canMessageChild} aria-label={tr(`Message ${selectedChild.label}`, `Enviar mensagem para ${selectedChild.label}`)} aria-expanded={messageOpen} title={canMessageChild ? tr("Message via the main agent", "Enviar pelo agente principal") : tr("Messaging requires an active Codex subagent controlled by Lume", "O envio exige um subagente Codex ativo controlado pelo Lume")} onclick={() => messageOpen = !messageOpen}><LumeIcon name="send" size={14} /></button>
+        {#if session.agent === "codex" || session.agent === "omp"}
+          <button type="button" class:active={messageOpen} disabled={!canMessageChild} aria-label={tr(`Message ${selectedChild.label}`, `Enviar mensagem para ${selectedChild.label}`)} aria-expanded={messageOpen} title={canMessageChild ? (session.agent === "omp" ? tr("Send directly to the subagent", "Enviar diretamente ao subagente") : tr("Message via the main agent", "Enviar pelo agente principal")) : (session.agent === "omp" ? tr("Messaging requires a running subagent in an omp session controlled by Lume", "O envio exige um subagente em execução numa sessão omp controlada pelo Lume") : tr("Messaging requires an active Codex subagent controlled by Lume", "O envio exige um subagente Codex ativo controlado pelo Lume"))} onclick={() => messageOpen = !messageOpen}><LumeIcon name="send" size={14} /></button>
         {/if}
         <button type="button" aria-label={tr("Close timeline", "Fechar timeline")} onclick={() => closePortal(true)}><LumeIcon name="close" size={14} /></button>
       </header>
@@ -427,7 +438,7 @@
           <p class="timeline-empty">{tr("Loading activity…", "Carregando atividade…")}</p>
         {:else if errors[selectedChild.id]}
           <p class="timeline-empty">{tr("This timeline is not available yet.", "Esta timeline ainda não está disponível.")}</p>
-        {:else if session.agent !== "codex"}
+        {:else if (!["codex", "omp"].includes(session.agent))}
           <div class="timeline-entry" role="listitem">
             <span class="entry-rail"><i></i></span>
             <span class="entry-icon"><ActivityTypeIcon category="tool" size={14} /></span>
@@ -449,22 +460,24 @@
       </div>
       {#if messageOpen}
         <form class="subagent-composer" onsubmit={(event) => { event.preventDefault(); void sendToSubagent(); }}>
-          <label for={`subagent-message-${session.id}`}>{tr(`Message ${selectedChild.label}`, `Mensagem para ${selectedChild.label}`)} <small>{tr("via main agent", "via agente principal")}</small></label>
+          <label for={`subagent-message-${session.id}`}>{tr(`Message ${selectedChild.label}`, `Mensagem para ${selectedChild.label}`)} <small>{session.agent === "omp" ? tr("direct to subagent", "diretamente ao subagente") : tr("via main agent", "via agente principal")}</small></label>
           <div class="composer-row">
             <textarea id={`subagent-message-${session.id}`} bind:value={messageDraft} disabled={!canMessageChild || messageSending} maxlength="4000" rows="2" placeholder={tr("Write a message for this subagent…", "Escreva uma mensagem para este subagente…")}></textarea>
-            <button type="submit" disabled={!canMessageChild || !messageDraft.trim() || messageSending} aria-label={tr("Ask the main agent to relay", "Pedir ao agente principal para encaminhar")}><LumeIcon name="send" size={16} /></button>
+            <button type="submit" disabled={!canMessageChild || !messageDraft.trim() || messageSending} aria-label={session.agent === "omp" ? tr("Send to subagent", "Enviar ao subagente") : tr("Ask the main agent to relay", "Pedir ao agente principal para encaminhar")}><LumeIcon name="send" size={16} /></button>
           </div>
           {#if messageNotice}<p role="status">{messageNotice}</p>{/if}
         </form>
       {/if}
     {/if}
   </div>
-</section>
+</div>
 
 <style>
-  /* Expanded, the card hangs from the header like a bubble sized to its subagents; it only spans the chat once they no longer fit. */
-  .subagent-portals { position: relative; z-index: 3; width: fit-content; min-width: min(calc(100% - 20px), 176px); max-width: calc(100% - 20px); margin: -1px auto 6px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-top: 0; border-radius: 0 0 18px 18px; background: color-mix(in srgb, var(--workspace-pane) 96%, var(--workspace-raised)); box-shadow: 0 12px 26px rgba(0, 0, 0, .13); transition: width 200ms cubic-bezier(.16, 1, .3, 1); }
-  .subagent-portals.timeline-open { width: min(calc(100% - 20px), 560px); }
+  /* The card hangs from the header like a bubble sized to its subagents only; it spans the chat once they no longer fit.
+     The timeline panel belongs to the host, so opening it never changes the card's width. */
+  .portal-host { position: relative; z-index: 3; box-sizing: border-box; width: 100%; margin: -1px 0 6px; padding: 0 10px; display: flex; flex: 0 0 auto; justify-content: center; }
+  .portal-host.compact { margin: 0; padding: 0; }
+  .subagent-portals { position: relative; width: fit-content; min-width: min(100%, 176px); max-width: 100%; flex: 0 1 auto; border: 1px solid var(--workspace-line); border-top: 0; border-radius: 0 0 18px 18px; background: color-mix(in srgb, var(--workspace-pane) 96%, var(--workspace-raised)); box-shadow: 0 12px 26px rgba(0, 0, 0, .13); }
   .subagent-portals.compact { width: auto; min-width: 0; max-width: none; margin: 0; border: 0; border-radius: 0; background: none; box-shadow: none; }
   .portal-rail-content { display: grid; grid-template-rows: minmax(0, 1fr); overflow: hidden; opacity: 1; transform: translateY(0); transition: grid-template-rows 240ms cubic-bezier(.16, 1, .3, 1), opacity 170ms ease, transform 240ms cubic-bezier(.16, 1, .3, 1); }
   .portal-rail-content.collapsed { grid-template-rows: minmax(0, 0fr); opacity: 0; pointer-events: none; transform: translateY(-8px); }
@@ -533,8 +546,8 @@
   .portal-avatar { position: absolute; top: -5px; left: -3px; width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid var(--workspace-pane); border-radius: 7px; background: var(--workspace-pane); box-shadow: 0 2px 5px rgba(0, 0, 0, .14); }
   .portal-name { max-width: 60px; overflow: hidden; color: var(--workspace-muted); font-size: 8px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }
   .portal-button.chosen .portal-name { color: var(--portal-color); }
-  .portal-panel { position: absolute; z-index: 1; top: calc(100% - 4px); left: 8px; width: min(520px, calc(100% - 16px)); max-height: min(600px, 70vh); box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; border: 1px solid color-mix(in srgb, var(--workspace-accent) 25%, var(--workspace-line)); border-radius: 19px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 48px rgba(3, 19, 14, .23); opacity: 0; pointer-events: none; clip-path: circle(24px at var(--portal-origin) 0); transform: translateY(-8px) scale(.96); transform-origin: var(--portal-origin) 0; transition: clip-path 220ms cubic-bezier(.2, .8, .2, 1), transform 220ms cubic-bezier(.2, .8, .2, 1), opacity 160ms ease; }
-  .portal-panel.has-final { width: min(560px, calc(100% - 16px)); max-height: min(650px, 76vh); }
+  .portal-panel { position: absolute; z-index: 1; top: calc(100% - 4px); left: max(8px, calc(50% - 260px)); width: min(520px, calc(100% - 16px)); max-height: min(600px, 70vh); box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; border: 1px solid color-mix(in srgb, var(--workspace-accent) 25%, var(--workspace-line)); border-radius: 19px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 48px rgba(3, 19, 14, .23); opacity: 0; pointer-events: none; clip-path: circle(24px at var(--portal-origin) 0); transform: translateY(-8px) scale(.96); transform-origin: var(--portal-origin) 0; transition: clip-path 220ms cubic-bezier(.2, .8, .2, 1), transform 220ms cubic-bezier(.2, .8, .2, 1), opacity 160ms ease; }
+  .portal-panel.has-final { left: max(8px, calc(50% - 280px)); width: min(560px, calc(100% - 16px)); max-height: min(650px, 76vh); }
   .portal-panel.open { opacity: 1; pointer-events: auto; z-index: 6; clip-path: circle(1000px at var(--portal-origin) 0); transform: translateY(0) scale(1); transition-duration: 320ms; }
   .portal-panel-header { min-height: 52px; padding: 10px 12px; display: flex; align-items: center; gap: 9px; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); }
   .panel-avatar { flex: 0 0 auto; }

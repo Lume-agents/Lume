@@ -19,6 +19,8 @@
     label,
     readyColors = defaultColors,
     minimumOpacity = 20,
+    showOpacity = true,
+    fullRange = false,
     onValueChange,
     onReset,
   } = $props<{
@@ -29,6 +31,10 @@
     label?: string;
     readyColors?: string[];
     minimumOpacity?: number;
+    /** Hide the opacity slider for colors that are always solid. */
+    showOpacity?: boolean;
+    /** Lightness from pure black to white, with a saturation slider: for surfaces rather than accents. */
+    fullRange?: boolean;
     onValueChange: (value: string, opacity: number) => void;
     onReset: () => void;
   }>();
@@ -44,6 +50,7 @@
   let draft = $state("#43b47d");
   let hue = $state(145);
   let lightness = $state(48);
+  let saturation = $state(62);
   let draftOpacity = $state(100);
   let reducedMotion = $state(false);
 
@@ -94,9 +101,10 @@
     const min = Math.min(r, g, b);
     const delta = max - min;
     const light = (max + min) / 2;
-    if (!delta) return { hue: 0, lightness: Math.round(light * 100) };
+    if (!delta) return { hue: 0, lightness: Math.round(light * 100), saturation: 0 };
     const rawHue = max === r ? ((g - b) / delta) % 6 : max === g ? (b - r) / delta + 2 : (r - g) / delta + 4;
-    return { hue: Math.round((rawHue * 60 + 360) % 360), lightness: Math.round(light * 100) };
+    const sat = delta / (1 - Math.abs(2 * light - 1));
+    return { hue: Math.round((rawHue * 60 + 360) % 360), lightness: Math.round(light * 100), saturation: Math.round(sat * 100) };
   }
 
   function hexToRgba(hex: string, alpha: number) {
@@ -109,13 +117,15 @@
     const hsl = hexToHsl(normalizedValue);
     hue = hsl.hue;
     lightness = hsl.lightness;
+    saturation = fullRange ? hsl.saturation : 62;
     draftOpacity = displayOpacity;
   }
 
-  function updateCustom(nextHue = hue, nextLightness = lightness) {
+  function updateCustom(nextHue = hue, nextLightness = lightness, nextSaturation = saturation) {
     hue = nextHue;
     lightness = nextLightness;
-    draft = hslToHex(hue, 62, lightness);
+    saturation = nextSaturation;
+    draft = hslToHex(hue, saturation, lightness);
   }
 
   function chooseReadyColor(color: string) {
@@ -225,8 +235,9 @@
         <section class="custom-controls">
           <div class="color-preview checkerboard"><i style:background={previewColor}></i></div>
           <label><span>{tr("Hue", "Matiz")}<b>{hue}°</b></span><input class="hue" type="range" min="0" max="359" value={hue} oninput={(event) => updateCustom(Number(event.currentTarget.value), lightness)} /></label>
-          <label><span>{tr("Lightness", "Luminosidade")}<b>{lightness}%</b></span><input class="lightness" type="range" min="12" max="88" value={lightness} oninput={(event) => updateCustom(hue, Number(event.currentTarget.value))} /></label>
-          <label><span>{tr("Opacity", "Opacidade")}<b>{draftOpacity}%</b></span><input class="opacity" type="range" min={minimumOpacity} max="100" value={draftOpacity} oninput={(event) => (draftOpacity = Number(event.currentTarget.value))} /></label>
+          <label><span>{tr("Lightness", "Luminosidade")}<b>{lightness}%</b></span><input class="lightness" type="range" min={fullRange ? 0 : 12} max={fullRange ? 100 : 88} value={lightness} oninput={(event) => updateCustom(hue, Number(event.currentTarget.value))} /></label>
+          {#if fullRange}<label><span>{tr("Saturation", "Saturação")}<b>{saturation}%</b></span><input class="saturation" type="range" min="0" max="100" value={saturation} oninput={(event) => updateCustom(hue, lightness, Number(event.currentTarget.value))} /></label>{/if}
+          {#if showOpacity}<label><span>{tr("Opacity", "Opacidade")}<b>{draftOpacity}%</b></span><input class="opacity" type="range" min={minimumOpacity} max="100" value={draftOpacity} oninput={(event) => (draftOpacity = Number(event.currentTarget.value))} /></label>{/if}
         </section>
       {/if}
 
@@ -262,6 +273,7 @@
   .custom-controls label b { color: var(--picker-text); font-variant-numeric: tabular-nums; }
   .custom-controls input { width: 100%; height: 7px; margin: 0; appearance: none; border: 0; border-radius: 999px; outline: 0; cursor: pointer; }
   .custom-controls input.hue { background: linear-gradient(90deg, #e34b4b, #dfd84d, #48c96b, #43c8c9, #4b72dc, #a654d8, #e34b4b); }
+  .custom-controls input.saturation { background: linear-gradient(90deg, hsl(var(--picker-hue) 0% 48%), hsl(var(--picker-hue) 100% 48%)); }
   .custom-controls input.lightness { background: linear-gradient(90deg, #050706, hsl(var(--picker-hue) 62% 48%), #fff); }
   .custom-controls input.opacity { background: linear-gradient(90deg, transparent, var(--picker-draft)), repeating-conic-gradient(color-mix(in srgb, var(--picker-text) 12%, transparent) 0 25%, transparent 0 50%) 0 / 8px 8px; }
   .custom-controls input::-webkit-slider-thumb { width: 15px; height: 15px; appearance: none; border: 3px solid var(--picker-surface); border-radius: 50%; background: var(--picker-preview); box-shadow: 0 0 0 1px color-mix(in srgb, var(--picker-text) 40%, transparent); }

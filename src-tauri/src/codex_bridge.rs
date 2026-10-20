@@ -1,11 +1,12 @@
 use std::{
     collections::{HashMap, VecDeque},
-    io::ErrorKind,
+    fs::File,
+    io::{ErrorKind, Read, Seek, SeekFrom},
     net::{TcpListener, TcpStream},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc, Condvar, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -337,7 +338,9 @@ impl Clone for CodexBridge {
 
 impl CodexBridge {
     pub fn start(state: AppState, app: AppHandle) -> Result<Self, String> {
-        cleanup_orphaned_server()?;
+        // Looking for a server left behind by a crash scans every process, so it runs beside the
+        // launch instead of before the Orb; no server is started until it has finished.
+        start_orphan_cleanup();
         let _ = server_url();
         let proxy_token = random_secret(32)?;
         let proxy_url: Arc<str> = format!("{PROXY_BASE_URL}?token={proxy_token}").into();
@@ -1032,6 +1035,7 @@ fn ensure_server_process(process_slot: &Mutex<Option<ManagedChild>>) -> Result<(
     if server_available() {
         return Ok(());
     }
+    wait_for_orphan_cleanup();
     if let Some(process) = stored_process.as_mut() {
         match probe_existing_server(process, server_available, Duration::from_secs(2))? {
             ExistingServer::Ready => return Ok(()),
@@ -1055,12 +1059,8 @@ fn ensure_server_process(process_slot: &Mutex<Option<ManagedChild>>) -> Result<(
             *stored_process = Some(process);
             return Ok(());
         }
-        if process
-            .try_wait()
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            return Err("O servidor do Codex encerrou antes de ficar disponível".into());
+        if let Some(status) = process.try_wait().map_err(|error| error.to_string())? {
+            return Err(early_exit_message(&status.to_string(), &server_log_tail(&server_log_path(), 600)));
         }
         thread::sleep(Duration::from_millis(80));
     }
@@ -1095,6 +1095,41 @@ fn probe_existing_server(
         thread::sleep(
             Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
         );
+    }
+}
+
+/// Set once the search for servers left behind by an earlier run is over.
+static ORPHAN_CLEANUP: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+fn finish_orphan_cleanup() {
+    if let Ok(mut done) = ORPHAN_CLEANUP.0.lock() {
+        *done = true;
+        ORPHAN_CLEANUP.1.notify_all();
+    }
+}
+
+fn start_orphan_cleanup() {
+    let spawned = thread::Builder::new().name("lume-codex-orphan-cleanup".into()).spawn(|| {
+        if let Err(error) = cleanup_orphaned_server() {
+            eprintln!("Could not clean up an old Codex App Server: {error}");
+        }
+        finish_orphan_cleanup();
+    });
+    if spawned.is_err() {
+        finish_orphan_cleanup();
+    }
+}
+
+/// A new server must not start while an old one is still being stopped (they would share the machine's port).
+fn wait_for_orphan_cleanup() {
+    let Ok(mut done) = ORPHAN_CLEANUP.0.lock() else { return };
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !*done {
+        let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else { return };
+        match ORPHAN_CLEANUP.1.wait_timeout(done, left) {
+            Ok((next, _)) => done = next,
+            Err(_) => return,
+        }
     }
 }
 
@@ -1205,14 +1240,43 @@ impl Drop for CodexBridge {
     }
 }
 
+/// Where the Codex App Server's own output goes. When it exits at once, this is what says why.
+fn server_log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("lume-codex-app-server-{}.log", std::process::id()))
+}
+
+/// The end of the server's log, on one line, for an error message.
+fn server_log_tail(path: &std::path::Path, limit: u64) -> String {
+    let Ok(mut file) = File::open(path) else { return String::new() };
+    let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    if file.seek(SeekFrom::Start(length.saturating_sub(limit))).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    if file.take(limit).read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&bytes).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn early_exit_message(status: &str, output: &str) -> String {
+    if output.is_empty() {
+        format!("O servidor do Codex encerrou antes de ficar disponível ({status}); ele não escreveu nenhuma mensagem")
+    } else {
+        format!("O servidor do Codex encerrou antes de ficar disponível ({status}): {output}")
+    }
+}
+
 fn command_for_server() -> Result<Command, String> {
     let mut command = crate::executables::command("codex")?;
     command
         .args(["app-server", "--listen", server_url()])
         .env("LUME_MANAGED_SESSION", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdin(Stdio::null());
+    match File::create(server_log_path()).and_then(|log| log.try_clone().map(|copy| (log, copy))) {
+        Ok((out, err)) => command.stdout(Stdio::from(out)).stderr(Stdio::from(err)),
+        Err(_) => command.stdout(Stdio::null()).stderr(Stdio::null()),
+    };
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
@@ -5685,5 +5749,21 @@ mod tests {
             "",
             false,
         ));
+    }
+
+    #[test]
+    fn an_early_exit_reports_what_the_server_wrote() {
+        let path = std::env::temp_dir().join(format!("lume-codex-log-test-{}.log", std::process::id()));
+        std::fs::write(&path, "line one\r\n  error: unknown option '--listen'\r\n").unwrap();
+        let tail = server_log_tail(&path, 600);
+        assert_eq!(tail, "line one error: unknown option '--listen'");
+        let message = early_exit_message("exit code: 2", &tail);
+        assert!(message.starts_with("O servidor do Codex encerrou antes de ficar disponível (exit code: 2): "));
+        assert!(message.ends_with("unknown option '--listen'"));
+        std::fs::write(&path, "x".repeat(5000)).unwrap();
+        assert_eq!(server_log_tail(&path, 600).len(), 600, "only the end is read");
+        let _ = std::fs::remove_file(&path);
+        assert!(early_exit_message("exit code: 1", "").contains("não escreveu nenhuma mensagem"));
+        assert_eq!(server_log_tail(&path, 600), "");
     }
 }

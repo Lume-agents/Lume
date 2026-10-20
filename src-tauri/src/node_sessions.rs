@@ -142,7 +142,9 @@ pub fn conversation_of(session: &AgentSession, now: i64) -> Conversation {
         .iter()
         .filter_map(|activity| {
             let (text, _) = clip(activity.detail.as_deref().unwrap_or_default());
-            (!text.is_empty()).then(|| ConversationMessage {
+            // Claude Code records its own notices (a finished background command, a reminder) as prompts.
+            let said_by_a_person = activity.kind != "prompt" || crate::adapters::visible_claude_user_text(&text);
+            (!text.is_empty() && said_by_a_person).then(|| ConversationMessage {
                 id: activity.id.clone(),
                 role: if activity.kind == "prompt" { "user" } else { "assistant" }.into(),
                 text,
@@ -271,6 +273,7 @@ mod tests {
             activity("m2", "message", "Done: the total is fixed.", 30),
             activity("p1", "prompt", "Fix the cart total", 10),
             activity("c1", "command", "cat ~/.ssh/id_rsa", 20),
+            activity("n1", "prompt", "<task-notification>done</task-notification>", 15),
             activity("f1", "file", "diff --git a/secret.env b/secret.env", 25),
         ], vec![]);
         let conversation = conversation_of(&session, 99);

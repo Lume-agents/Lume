@@ -15,6 +15,10 @@ for (const plugin of ["autostart", "notification", "global-shortcut"]) {
 assert.equal(identifiers.includes("opener:default"), false);
 assert.equal(identifiers.includes("opener:allow-default-urls"), false);
 
+// Paths come from the agent's own text: opening them goes through open_session_file, which checks them in Rust.
+assert.equal(identifiers.includes("opener:allow-open-path"), false, "the webview must not open arbitrary paths");
+assert.equal(identifiers.includes("opener:allow-reveal-item-in-dir"), false);
+
 // allow-open-url without a scope rejects every URL (the plugin allows nothing by default).
 const openUrl = capability.permissions.filter((permission) => typeof permission === "object" && permission.identifier === "opener:allow-open-url");
 assert.equal(openUrl.length, 1, "opener:allow-open-url must be declared once, with a URL scope");

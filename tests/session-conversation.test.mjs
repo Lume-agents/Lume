@@ -208,3 +208,96 @@ test("a cancelled request is one notice in the chat, not a tool event and not tw
     "a later cancel is a new notice",
   );
 });
+
+test("Claude's own notices are not shown as something the user sent", () => {
+  const entries = entriesFor([
+    activity("typed", "prompt", 10, "Rode os testes"),
+    activity("notice", "prompt", 20, "<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>"),
+    activity("reminder", "prompt", 25, "<system-reminder>\nContext\n</system-reminder>"),
+    activity("answer", "message", 30, "Os testes passaram"),
+  ]);
+  assert.deepEqual(entries.map((entry) => entry.activity.id), ["typed", "answer"]);
+});
+
+test("the resume filler the CLI writes does not split a prompt from its own copy", () => {
+  // Sent once from Lume, then read back from the transcript after the CLI wrote its own answer in between.
+  const entries = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "commit everything"),
+    activity("claude:chat:transcript:filler:0", "message", 2_000, "No response requested."),
+    activity("claude:chat:transcript:user:0", "prompt", 3_000, "commit everything"),
+    activity("claude:chat:transcript:error:0", "message", 4_000, "Failed to refresh OAuth token: retry in a minute"),
+  ]);
+  assert.deepEqual(entries.map((entry) => `${entry.activity.kind}:${entry.activity.detail}`), [
+    "prompt:commit everything",
+    "message:Failed to refresh OAuth token: retry in a minute",
+  ]);
+  // Sending the same text again after a real answer is a new prompt.
+  const resent = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "commit everything"),
+    activity("claude:chat:transcript:error:0", "message", 4_000, "Failed to refresh OAuth token: retry in a minute"),
+    activity("local:chat:2", "prompt", 9_000, "commit everything"),
+  ]);
+  assert.equal(resent.filter((entry) => entry.activity.kind === "prompt").length, 2);
+});
+
+test("an image shown at send time and its cache copy from the transcript are one attachment", () => {
+  const shown = { id: "attachment:1:0", name: "image.jpg", mimeType: "image/jpeg", previewDataUrl: "data:image/jpeg;base64,AAAA" };
+  const copy = { id: "response-file:abc", name: "1791581411129-0-image.jpg", mimeType: "image/jpeg", previewDataUrl: "", path: "/cache/prompt-attachments/1791581411129-0-image.jpg" };
+  const entries = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "what is this?", { attachments: [shown] }),
+    activity("claude:chat:transcript:user:0", "prompt", 2_000, "what is this?", { attachments: [copy] }),
+  ]);
+  assert.equal(entries.length, 1);
+  const [attachment] = entries[0].activity.attachments;
+  assert.equal(entries[0].activity.attachments.length, 1, "no second chip without a photo");
+  assert.equal(attachment.name, "image.jpg");
+  assert.ok(attachment.previewDataUrl, "the photo is kept");
+  assert.equal(attachment.path, copy.path, "and it knows where the file is");
+  const other = { ...copy, id: "response-file:def", name: "1791581411130-1-other.png", path: "/cache/prompt-attachments/1791581411130-1-other.png" };
+  const two = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "two files", { attachments: [shown] }),
+    activity("claude:chat:transcript:user:0", "prompt", 2_000, "two files", { attachments: [copy, other] }),
+  ]);
+  assert.equal(two[0].activity.attachments.length, 2);
+});
+
+test("the login-refresh notice disappears when the prompt went through on the retry, and stays when nothing followed it", () => {
+  const notice = "Failed to refresh OAuth token: another Claude Code process is refreshing it or exited mid-refresh. Retry in a minute.";
+  const retried = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "commit everything"),
+    activity("claude:chat:transcript:notice:0", "message", 2_000, notice),
+    activity("claude:chat:transcript:user:0", "prompt", 5_000, "commit everything"),
+    activity("claude:chat:transcript:answer:0", "message", 9_000, "Done, committed."),
+  ]);
+  assert.deepEqual(retried.map((entry) => `${entry.activity.kind}:${entry.activity.detail}`), ["prompt:commit everything", "message:Done, committed."]);
+  const failed = entriesFor([
+    activity("local:chat:1", "prompt", 1_000, "commit everything"),
+    activity("claude:chat:transcript:notice:0", "message", 2_000, notice),
+  ]);
+  assert.equal(failed.length, 2, "an unanswered failure is still shown");
+});
+
+test("separate Claude edits to one file add up in the files changed after the final message", () => {
+  const edit = (id, createdAt) => activity(`claude:chat:tool:${id}`, "file", createdAt, `edit ${id}`, { files: ["/work/src/a.ts"] });
+  const counts = { "edit one": [3, 1], "edit two": [2, 2], "edit three": [4, 0] };
+  const changes = (item) => (counts[item.detail] ? [{ path: "src/a.ts", added: counts[item.detail][0], removed: counts[item.detail][1] }] : []);
+  const activities = [
+    activity("prompt", "prompt", 10),
+    edit("one", 20), edit("two", 30), edit("three", 40),
+    activity("final", "message", 50, "Done."),
+  ];
+  const entries = entriesFor(activities, { results: [{ id: "r", response: "Done.", createdAt: 50, files: [], tests: [] }] }, changes);
+  const feed = buildConversationFeed(entries, { workingDirectory: "/work" });
+  const files = fileChangesForFinalResponses(feed, "/work").get("activity:final");
+  assert.deepEqual(files, [{ path: "src/a.ts", added: 9, removed: 3 }]);
+});
+
+test("two Claude edits with the same size are both kept", () => {
+  const activities = [
+    activity("prompt", "prompt", 10),
+    activity("claude:chat:tool:one", "file", 20, "edit one", { files: ["/work/src/a.ts"] }),
+    activity("claude:chat:tool:two", "file", 30, "edit two", { files: ["/work/src/a.ts"] }),
+  ];
+  const entries = entriesFor(activities, {}, () => [{ path: "src/a.ts", added: 1, removed: 1 }]);
+  assert.equal(entries.filter((entry) => entry.activity.kind === "file").length, 2);
+});

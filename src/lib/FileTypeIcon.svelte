@@ -8,7 +8,9 @@
 </script>
 
 <span class:brand={Boolean(presentation.icon)} class:monochrome={presentation.monochrome} class:multicolor={Boolean(presentation.icon) && !presentation.monochrome} class:maintained={Boolean(presentation.maintainedPath)} class="file-type-icon" aria-hidden="true" style:width={`${size}px`} style:height={`${size}px`}>
-  {#if presentation.maintainedPath}
+  {#if presentation.glyph}
+    <svg viewBox="0 0 20 20"><path d={presentation.glyph} /></svg>
+  {:else if presentation.maintainedPath}
     <svg class="maintained-icon" viewBox="0 0 24 24" style:width={`${displaySize}px`} style:height={`${displaySize}px`}><path d={presentation.maintainedPath} /></svg>
   {:else if presentation.icon}
     <Icon icon={presentation.icon} width={displaySize} height={displaySize} />

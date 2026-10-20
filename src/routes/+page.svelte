@@ -19,9 +19,10 @@
   } from "@tauri-apps/api/window";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import BrandIcon from "$lib/BrandIcon.svelte";
-  import AccentColorPicker from "$lib/AccentColorPicker.svelte";
+  import AppearanceSettings from "$lib/AppearanceSettings.svelte";
   import { ensureCustomFonts } from "$lib/fonts";
-  import { appearanceAttributes, appearanceThemes, darkBases, lightBases } from "$lib/appearance";
+  import { appearanceAttributes } from "$lib/appearance";
+  import LumeLogo from "$lib/LumeLogo.svelte";
   import OrbResponse from "$lib/OrbResponse.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
   import {
@@ -50,6 +51,7 @@
   import { collectAgentAlerts } from "$lib/agentAlerts";
   import { usageAlertDismissals } from "$lib/usageAlertDismissals";
   import { playTone as playNotificationTone, type ToneKind } from "$lib/notificationTones";
+  import { dismissLaunchSplash, rememberLaunchTheme } from "$lib/launchSplash";
   import { PAIR_REQUEST_EVENT, pairRequestBanner } from "$lib/pairRequests";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import { SYSTEM_BANNER_CONTEXT, type SystemBannerNotice, type SystemBannerReporter } from "$lib/systemBannerContext";
@@ -706,15 +708,9 @@
   });
 
   const effectiveDark = $derived(preferences.darkMode ?? systemDark);
+  $effect(() => rememberLaunchTheme(effectiveDark));
   const appearance = $derived(appearanceAttributes(preferences));
   $effect(() => { void ensureCustomFonts(preferences); });
-  const darkWorkspaceOpacity = $derived(
-    preferences.workspaceDarkBackgroundColor
-      ? preferences.workspaceDarkBackgroundOpacity
-      : preferences.workspaceBackgroundColor
-        ? preferences.workspaceBackgroundOpacity
-        : preferences.workspaceDarkBackgroundOpacity
-  );
   $effect(() => {
     const root = document.documentElement;
     root.dataset.theme = effectiveDark ? "dark" : "light";
@@ -859,6 +855,8 @@
       overlayReady = true;
       await routeStartupMode();
       updatePresentationReady = true;
+      // The launch capsule hands over to the Orb, which wakes up once to say it is ready.
+      if (dismissLaunchSplash()) wakeMascot();
 
       const [nextSessions, nextIntegrations, nextVscodeStatus, nextPlugins, nextTerminals] = await Promise.all([
         loadSessions(),
@@ -2612,6 +2610,9 @@
         true,
         stored.id,
         profile?.launchTarget ?? preferences.launchTarget,
+        undefined,
+        undefined,
+        stored.profile,
       );
       launcherOpen = false;
       resumeAgent = null;
@@ -2643,8 +2644,12 @@
               "Codex connected. Open /hooks in Codex and trust the Lume hook once.",
               "Codex conectado. Abra /hooks no Codex e confie no hook Lume uma vez.",
             )
-          : tr(`${integration.label} connected to Lume.`, `${integration.label} conectado ao Lume.`)
-        : tr(`${integration.label} disconnected.`, `${integration.label} desconectado.`);
+          : integration.kind === "omp"
+            ? tr("Lume's optional extension was installed in Oh My Pi.", "A extensão opcional do Lume foi instalada no Oh My Pi.")
+            : tr(`${integration.label} connected to Lume.`, `${integration.label} conectado ao Lume.`)
+        : integration.kind === "omp"
+          ? tr("Lume's extension was removed from Oh My Pi.", "A extensão do Lume foi removida do Oh My Pi.")
+          : tr(`${integration.label} disconnected.`, `${integration.label} desconectado.`);
     } catch (error) {
       settingsMessageIsError = true;
       settingsMessage = String(error).replace(/^Error:\s*/, "");
@@ -2764,22 +2769,6 @@
       settingsMessageIsError = true;
       settingsMessage = String(error).replace(/^Error:\s*/, "");
       return false;
-    } finally {
-      savingSettings = false;
-    }
-  }
-
-  async function selectAppearanceTheme(theme: Preferences["appearanceTheme"]) {
-    const previous = preferences;
-    preferences = { ...preferences, appearanceTheme: theme };
-    savingSettings = true;
-    try {
-      await savePreferences(preferences);
-      if (isTauri) void emit("lume://preferences-changed", preferences);
-    } catch (error) {
-      preferences = previous;
-      settingsMessageIsError = true;
-      settingsMessage = String(error).replace(/^Error:\s*/, "");
     } finally {
       savingSettings = false;
     }
@@ -3883,6 +3872,12 @@
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
+              <summary class="settings-section-label">{tr("Appearance", "Aparência")}</summary>
+              <div class="settings-section-content">
+                <AppearanceSettings {preferences} language={preferences.language} dark={effectiveDark} disabled={savingSettings} onpatch={updateAppearancePatch} />
+              </div>
+            </details>
+            <details use:animatedDisclosure class="settings-section">
               <summary class="settings-section-label">{tr("Preferences", "Preferências")}</summary>
               <div class="settings-section-content">
             <label class="field-row">
@@ -3894,58 +3889,6 @@
                 onValueChange={(value) => updatePreference("language", value as Preferences["language"])}
               />
             </label>
-            <div class="setting-row">
-              <div><strong>{tr("Dark mode", "Modo escuro")}</strong><span>{tr("Switch between the light and dark appearance.", "Alterne entre a aparência clara e escura.")}</span></div>
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  checked={effectiveDark}
-                  onchange={(event) =>
-                    updatePreference("darkMode", event.currentTarget.checked)}
-                />
-                <span></span>
-              </label>
-            </div>
-            <div class="appearance-theme-setting">
-              <span><strong>{tr("Surface tint", "Tom das superfícies")}</strong></span>
-              <div class="appearance-theme-list">
-                {#each appearanceThemes as theme (theme.value)}
-                  <button class:active={appearance.theme === theme.value} type="button" title={theme.label} aria-label={theme.label} onclick={() => void selectAppearanceTheme(theme.value)}>
-                    <i style:--theme-accent={theme.accent} style:--theme-surface={effectiveDark ? theme.darkSurface : theme.lightSurface}></i>
-                  </button>
-                {/each}
-              </div>
-            </div>
-            <div class="appearance-theme-setting">
-              <span><strong>{tr("Neutral surfaces", "Superfícies neutras")}</strong></span>
-              <div class="appearance-theme-list">
-                {#if effectiveDark}
-                  {#each darkBases as base (base.value)}
-                    <button class:active={preferences.darkBase === base.value} type="button" title={tr(base.label, base.labelPt)} aria-label={tr(base.label, base.labelPt)} onclick={() => void updateAppearancePatch({ darkBase: base.value })}>
-                      <i style:--theme-accent={appearance.accent ?? "#43b47d"} style:--theme-surface={base.pigments?.surface ?? appearanceThemes.find((theme) => theme.value === appearance.theme)?.darkSurface}></i>
-                    </button>
-                  {/each}
-                {:else}
-                  {#each lightBases as base (base.value)}
-                    <button class:active={preferences.lightBase === base.value} type="button" title={tr(base.label, base.labelPt)} aria-label={tr(base.label, base.labelPt)} onclick={() => void updateAppearancePatch({ lightBase: base.value })}>
-                      <i style:--theme-accent={appearance.accent ?? "#43b47d"} style:--theme-surface={base.pigments?.surface ?? appearanceThemes.find((theme) => theme.value === appearance.theme)?.lightSurface}></i>
-                    </button>
-                  {/each}
-                {/if}
-              </div>
-            </div>
-            <div class="field-row appearance-accent-row">
-              <span><strong>{tr("Accent color", "Cor de destaque")}</strong><small>{appearance.accent ?? tr("Following the surface tint", "Seguindo o tom das superfícies")}</small></span>
-              <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} readyColors={appearanceThemes.map((theme) => theme.accent)} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} language={preferences.language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void updateAppearancePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void updateAppearancePatch({ accentColor: undefined, accentOpacity: 100 })} />
-            </div>
-            <div class="field-row appearance-accent-row">
-              <span><strong>{tr("Light workspace", "Workspace claro")}</strong><small>{preferences.workspaceLightBackgroundColor ?? tr("Light theme preset", "Preset do tema claro")} · {preferences.workspaceLightBackgroundOpacity}%</small></span>
-              <AccentColorPicker value={preferences.workspaceLightBackgroundColor} opacity={preferences.workspaceLightBackgroundOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.lightSurface ?? "#e9eee8"} readyColors={["#f7f8f4", "#eef2ec", "#e9eee8", "#e9eee3", "#e5edf0", "#ece9f1", "#f0e9e2"]} minimumOpacity={35} language={preferences.language} label={tr("Light workspace background", "Fundo claro do Workspace")} onValueChange={(color, opacity) => void updateAppearancePatch({ workspaceLightBackgroundColor: color, workspaceLightBackgroundOpacity: opacity })} onReset={() => void updateAppearancePatch({ workspaceLightBackgroundColor: undefined, workspaceLightBackgroundOpacity: 96 })} />
-            </div>
-            <div class="field-row appearance-accent-row">
-              <span><strong>{tr("Dark workspace", "Workspace escuro")}</strong><small>{preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor ?? tr("Dark theme preset", "Preset do tema escuro")} · {darkWorkspaceOpacity}%</small></span>
-              <AccentColorPicker value={preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor} opacity={darkWorkspaceOpacity} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.darkSurface ?? "#14231c"} readyColors={["#0f1915", "#14231c", "#182116", "#101f28", "#1b1726", "#261a13", "#121916"]} minimumOpacity={35} language={preferences.language} label={tr("Dark workspace background", "Fundo escuro do Workspace")} onValueChange={(color, opacity) => void updateAppearancePatch({ workspaceDarkBackgroundColor: color, workspaceDarkBackgroundOpacity: opacity })} onReset={() => void updateAppearancePatch({ workspaceDarkBackgroundColor: undefined, workspaceDarkBackgroundOpacity: 96, workspaceBackgroundColor: undefined })} />
-            </div>
             <div class="field-row">
               <span><strong>{tr("Open Lume as", "Abrir o Lume como")}</strong><small>{tr("Choose the default view for the next launch.", "Escolha a visualização padrão da próxima abertura.")}</small></span>
               <LumeSelect
@@ -4820,6 +4763,7 @@
   .agent-claude,
   .agent-claude_code { color: #d97757; background: #f7ece6; }
   .agent-antigravity { color: #476c5b; background: #e8f1ec; }
+  .agent-omp { color: #8540a6; background: #f5e9f7; }
   .agent-deepseek { color: #5786fe; background: #edf2ff; }
   .agent-gemini { color: #6e73ca; background: #eef0fb; }
   .agent-vscode { color: #287aa9; background: #edf6fb; }

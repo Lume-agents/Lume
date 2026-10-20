@@ -6,6 +6,7 @@ mod antigravity_stream;
 mod browser_server;
 mod claude_control;
 mod cli_installer;
+pub mod cli_ui;
 mod codex_bridge;
 mod codex_cli_identity;
 mod codex_daemon_observer;
@@ -28,7 +29,6 @@ mod legacy_cli_gateway_cleanup;
 mod macos_process_supervisor;
 mod mobile_gateway;
 mod mobile_server;
-pub mod cli_ui;
 pub mod node_client;
 mod node_http;
 pub mod node_identity;
@@ -38,14 +38,16 @@ pub mod node_pairing;
 pub mod node_relay;
 pub mod node_sessions;
 pub mod node_service;
-#[allow(dead_code)]
-pub mod relay_e2e;
-#[allow(dead_code)]
-pub mod relay_link;
+pub mod omp_rpc;
+mod omp_sessions;
 mod opencode_acp;
 mod overlay;
 mod path_mentions;
 mod protocol;
+#[allow(dead_code)]
+pub mod relay_e2e;
+#[allow(dead_code)]
+pub mod relay_link;
 mod repository;
 mod session_environments;
 mod session_filters;
@@ -53,6 +55,9 @@ mod state;
 mod store;
 mod terminal_windows;
 mod pair_watch;
+mod session_files;
+mod startup_trace;
+mod windows_launcher;
 mod usage_monitor;
 mod workflow_runtime;
 mod workspace_windows;
@@ -547,6 +552,21 @@ fn cancel_cli_install(id: String) -> bool {
     cli_installer::cancel(&id)
 }
 
+/// A pull request or issue mentioned in a chat: its status, checks, labels and description.
+#[tauri::command]
+async fn get_github_reference(
+    owner: String,
+    repo: String,
+    number: u32,
+    refresh: bool,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        repository::github_reference(&owner, &repo, number, refresh)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 async fn commit_session_repository(
     state: State<'_, AppState>,
@@ -624,6 +644,14 @@ async fn get_subagent_timeline(
     session_id: String,
     activity_id: String,
 ) -> Result<Vec<SessionActivity>, String> {
+    if session_id.starts_with("omp:") {
+        let (parent_id, child_id) = state.omp_subagent_thread(&session_id, &activity_id)?;
+        return Ok(tauri::async_runtime::spawn_blocking(move || {
+            omp_sessions::load_subagent_timeline(&parent_id, &child_id)
+        })
+        .await
+        .map_err(|error| error.to_string())??);
+    }
     let (parent_thread_id, child_thread_id) =
         state.codex_subagent_thread(&session_id, &activity_id)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -787,24 +815,39 @@ fn execute_hub_command(
 
 #[tauri::command]
 fn resolve_permission(
+    app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     permission_id: String,
     action: PermissionAction,
 ) -> Result<(), String> {
+    let session = state.connected_session(&session_id)?;
+    if session.agent == AgentKind::Omp
+        && session.control_origin == domain::SessionControlOrigin::Lume
+    {
+        app.state::<omp_rpc::OmpRpc>()
+            .answer_approval(&session_id, &permission_id, action)?;
+    }
     control::resolve_permission(state.inner(), &session_id, &permission_id, action)
 }
 
 #[tauri::command]
 fn resolve_question(
+    app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     question_id: String,
     answers: Vec<QuestionAnswer>,
 ) -> Result<(), String> {
+    let session = state.connected_session(&session_id)?;
+    if session.agent == AgentKind::Omp
+        && session.control_origin == domain::SessionControlOrigin::Lume
+    {
+        app.state::<omp_rpc::OmpRpc>()
+            .answer_question(&session_id, &question_id, &answers)?;
+    }
     control::resolve_question(state.inner(), &session_id, &question_id, answers)
 }
-
 #[tauri::command]
 fn open_session_source(
     state: State<'_, AppState>,
@@ -848,6 +891,23 @@ async fn submit_prompt(
 #[tauri::command]
 fn read_local_image_data_url(path: String) -> Result<String, String> {
     control::local_image_data_url(&path)
+}
+
+/// Opens a file the agent cited, in the default app, if it is a plain file inside the session's folder.
+#[tauri::command]
+fn open_session_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    let session = state.connected_session(&session_id)?;
+    let file = session_files::openable_file(session.working_directory.as_deref().unwrap_or_default(), &path)?;
+    // Windows canonical paths carry a `\\?\` prefix that the shell does not always accept.
+    let file = file.to_string_lossy();
+    app.opener()
+        .open_path(file.strip_prefix(r"\\?\").unwrap_or(&file), None::<String>)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -962,6 +1022,10 @@ fn refresh_antigravity_rate_limits(app: AppHandle, state: AppState) {
 }
 
 fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
+    // A probe is a `claude` process too; starting one while a prompt starts can collide on the token refresh.
+    if launcher::claude_prompt_in_flight() {
+        return;
+    }
     static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
@@ -1007,13 +1071,14 @@ async fn take_control_session(
     session_id: String,
     prompt: Option<String>,
     attachments: Option<Vec<PromptAttachmentInput>>,
+    force: Option<bool>,
 ) -> Result<(), String> {
     let state = state.inner().clone();
     let bridge = bridge.inner().clone();
     let browser = browser.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let controlled_session_id =
-            control::take_control_session(&app, &state, &bridge, &session_id)?;
+            control::take_control_session(&app, &state, &bridge, &session_id, force.unwrap_or(false))?;
         let prompt = prompt.unwrap_or_default();
         let attachments = attachments.unwrap_or_default();
         if !prompt.trim().is_empty() || !attachments.is_empty() {
@@ -1171,6 +1236,47 @@ async fn set_session_model_settings(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+#[tauri::command]
+fn compact_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let session = state.connected_session(&session_id)?;
+    if session.agent != domain::AgentKind::Omp
+        || session.control_origin != domain::SessionControlOrigin::Lume
+        || session.status != domain::SessionStatus::Completed
+    {
+        return Err("This session is not ready to compact".into());
+    }
+    app.state::<omp_rpc::OmpRpc>()
+        .command(&session_id, "compact", serde_json::json!({}))?;
+    protocol::emit_sessions_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn steer_omp_subagent(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    activity_id: String,
+    message: String,
+) -> Result<(), String> {
+    let session = state.connected_session(&session_id)?;
+    if session.agent != domain::AgentKind::Omp
+        || session.control_origin != domain::SessionControlOrigin::Lume
+    {
+        return Err("Only Lume-controlled Oh My Pi sessions can message subagents".into());
+    }
+    let (_, subagent_id) = state.omp_subagent_thread(&session_id, &activity_id)?;
+    app.state::<omp_rpc::OmpRpc>().command(
+        &session_id,
+        "steer_subagent",
+        serde_json::json!({"subagentId":subagent_id,"message":message}),
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1941,13 +2047,13 @@ fn set_preferences(
     }
     if !matches!(
         preferences.dark_base.as_str(),
-        "theme" | "graphite" | "black" | "slate"
+        "theme" | "graphite" | "black" | "slate" | "custom"
     ) {
         return Err("Unknown dark base".into());
     }
     if !matches!(
         preferences.light_base.as_str(),
-        "theme" | "white" | "gray" | "beige"
+        "theme" | "white" | "gray" | "beige" | "custom"
     ) {
         return Err("Unknown light base".into());
     }
@@ -1981,6 +2087,34 @@ fn set_preferences(
             valid.then(|| color.to_ascii_lowercase())
         });
     }
+    let hex = |color: Option<String>| {
+        color.and_then(|color| {
+            let valid = color.len() == 7
+                && color.starts_with('#')
+                && color[1..].chars().all(|value| value.is_ascii_hexdigit());
+            valid.then(|| color.to_ascii_lowercase())
+        })
+    };
+    for palette in [
+        &mut preferences.custom_dark_surfaces,
+        &mut preferences.custom_light_surfaces,
+    ] {
+        palette.canvas = hex(palette.canvas.take());
+        palette.surface = hex(palette.surface.take());
+        palette.sidebar = hex(palette.sidebar.take());
+    }
+    if !matches!(
+        preferences.backdrop.style.as_str(),
+        "solid" | "linear" | "radial" | "mesh"
+    ) {
+        return Err("Unknown backdrop style".into());
+    }
+    preferences.backdrop.from = hex(preferences.backdrop.from.take());
+    preferences.backdrop.to = hex(preferences.backdrop.to.take());
+    preferences.backdrop.angle = preferences.backdrop.angle.min(360);
+    preferences.backdrop.grain = preferences.backdrop.grain.min(100);
+    preferences.backdrop.vignette = preferences.backdrop.vignette.min(100);
+    preferences.backdrop.glow = preferences.backdrop.glow.min(100);
     preferences.accent_opacity = preferences.accent_opacity.clamp(20, 100);
     preferences.workspace_background_opacity =
         preferences.workspace_background_opacity.clamp(35, 100);
@@ -2485,6 +2619,7 @@ fn diagnose_integration(
                     | (IntegrationKind::OpenCode, domain::AgentKind::OpenCode)
                     | (IntegrationKind::DeepSeek, domain::AgentKind::DeepSeek)
                     | (IntegrationKind::Gemini, domain::AgentKind::Gemini)
+                    | (IntegrationKind::Omp, domain::AgentKind::Omp)
             )
         })
         .map(|session| session.updated_at)
@@ -2605,6 +2740,117 @@ fn launch_session_impl(
 ) -> Result<(), String> {
     if request.agent == IntegrationKind::Claude {
         integrations::ensure_claude_connected()?;
+    }
+    if request.agent == IntegrationKind::Omp && request.target != "terminal" {
+        let managed = app.state::<omp_rpc::OmpRpc>();
+        static NEXT_OMP_LAUNCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let placeholder = format!(
+            "omp-rpc:pending-{}-{}",
+            state::now_millis(),
+            NEXT_OMP_LAUNCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let (mode, warning) = request
+            .permission_mode
+            .as_ref()
+            .map(omp_rpc::approval_mode)
+            .map_or((None, false), |(mode, warning)| (Some(mode), warning));
+        let started = managed.start(
+            &placeholder,
+            &request.working_directory,
+            request
+                .resume
+                .then_some(request.resume_id.as_deref())
+                .flatten(),
+            request.profile.as_deref(),
+            mode,
+        );
+        let (session_id, native_id, failure) = match started {
+            Ok(native_id) => {
+                let session_id = format!("omp-rpc:{native_id}");
+                managed.rekey(&placeholder, &session_id)?;
+                (session_id, Some(native_id), None)
+            }
+            Err(error) => (
+                placeholder.replacen("pending-", "failed-", 1),
+                None,
+                Some(error),
+            ),
+        };
+        let failed = failure.is_some();
+        let permission_profile = control::omp_permission_profile(
+            request
+                .permission_mode
+                .clone()
+                .unwrap_or_else(|| omp_rpc::configured_access_mode(&request.working_directory)),
+        );
+        let warning_activity = warning.then(|| SessionActivity {
+            id: format!("{session_id}:readonly-warning"),
+            kind: "warning".into(),
+            title: "O omp não tem modo somente leitura".into(),
+            detail: Some(
+                "Esta sessão pergunta antes de alterar; comandos aprovados ainda têm acesso total."
+                    .into(),
+            ),
+            status: "completed".into(),
+            created_at: state::now_millis(),
+            files: vec![],
+            attachments: vec![],
+            append_detail: false,
+        });
+        let event = HookEvent {
+            event: if failed {
+                HookEventKind::Failed
+            } else {
+                HookEventKind::SessionStarted
+            },
+            session_id: session_id.clone(),
+            agent: AgentKind::Omp,
+            agent_label: Some(
+                request
+                    .profile
+                    .as_deref()
+                    .filter(|profile| !profile.is_empty())
+                    .map_or_else(
+                        || "Oh My Pi".into(),
+                        |profile| format!("Oh My Pi · {profile}"),
+                    ),
+            ),
+            session_name: None,
+            project: std::path::Path::new(&request.working_directory)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string),
+            source: Some(SessionSource::Desktop),
+            source_app: None,
+            control_origin: SessionControlOrigin::Lume,
+            status_label: Some(failure.unwrap_or_else(|| "Ready in Lume".into())),
+            started_at: Some(
+                chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339(),
+            ),
+            process_id: None,
+            native_session_id: native_id,
+            working_directory: Some(request.working_directory.clone()),
+            permission_profile: Some(permission_profile),
+            permission: None,
+            question: None,
+            last_response: None,
+            activity: warning_activity,
+            activities: vec![],
+            wait_for_decision: false,
+        };
+        crate::event_server::publish_event(state, app, event)?;
+        if failed {
+            return Ok(());
+        }
+        if let Some(prompt) = request
+            .initial_prompt
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            managed.prompt(&session_id, prompt, "new_turn")?;
+            state.record_prompt_activity(&session_id, prompt, Vec::new())?;
+        }
+        return Ok(());
     }
     if request.agent == IntegrationKind::OpenCode {
         if request.resume {
@@ -2922,6 +3168,7 @@ fn prepared_resume_preview_event(
         IntegrationKind::OpenCode => return None,
         IntegrationKind::DeepSeek => return None,
         IntegrationKind::Gemini => return None,
+        IntegrationKind::Omp => return None,
     };
     let native_session_id = request.resume_id.clone()?;
     let project = std::path::Path::new(&request.working_directory)
@@ -3008,20 +3255,32 @@ pub fn run() {
             }
         })
         .setup(move |app| {
-            if let Ok(executable) = integrations::lume_executable() {
-                integrations::refresh_connected(&executable.to_string_lossy());
-            }
+            let mut trace = startup_trace::StartupTrace::new();
             let database_path = app
                 .path()
                 .app_data_dir()
                 .map_err(|error| error.to_string())?
                 .join("lume.sqlite3");
-            if let Err(error) = legacy_cli_gateway_cleanup::cleanup(
-                database_path.parent().unwrap_or(&database_path),
-            ) {
-                eprintln!("Could not finish the legacy CLI Gateway cleanup: {error}");
-            }
+            // File housekeeping that nothing in the first frame depends on runs beside the launch.
+            let housekeeping_data_dir = database_path.parent().map(std::path::Path::to_path_buf);
+            let _ = std::thread::Builder::new()
+                .name("lume-startup-housekeeping".into())
+                .spawn(move || {
+                    if let Ok(executable) = integrations::lume_executable() {
+                        integrations::refresh_connected(&executable.to_string_lossy());
+                        #[cfg(target_os = "windows")]
+                        windows_launcher::refresh(&executable);
+                    }
+                    if let Some(directory) = housekeeping_data_dir {
+                        if let Err(error) = legacy_cli_gateway_cleanup::cleanup(&directory) {
+                            eprintln!("Could not finish the legacy CLI Gateway cleanup: {error}");
+                        }
+                        launcher::sweep_stale_launches(&directory);
+                    }
+                });
+            trace.mark("housekeeping started");
             let state = AppState::new(&database_path)?;
+            trace.mark("state opened");
             app.manage(PendingShortcutAction(Mutex::new(
                 startup_shortcut_action.clone(),
             )));
@@ -3030,7 +3289,9 @@ pub fn run() {
             if let Err(error) = apply_global_shortcuts(app.handle(), &state.preferences()?) {
                 eprintln!("Could not register global shortcuts: {error}");
             }
+            trace.mark("global shortcuts");
             app.manage(state.clone());
+            app.manage(omp_rpc::OmpRpc::new(state.clone(), app.handle().clone()));
             app.manage(session_environments::EnvironmentMonitor::default());
             app.manage(opencode_acp::OpenCodeBridge::new(
                 state.clone(),
@@ -3044,11 +3305,17 @@ pub fn run() {
                 codex_bridge::CodexBridge::start(state.clone(), app.handle().clone())?;
             let workflow_codex_bridge = codex_bridge.clone();
             app.manage(codex_bridge);
+            trace.mark("codex bridge");
             codex_sessions::start(state.clone(), app.handle().clone())?;
+            trace.mark("codex sessions");
+            omp_sessions::start(state.clone(), app.handle().clone())?;
+            trace.mark("omp sessions");
             event_server::start(state.clone(), app.handle().clone())?;
+            trace.mark("hook server");
             let browser_control = browser_server::BrowserControl::default();
             browser_server::start(state.clone(), app.handle().clone(), browser_control.clone())?;
             app.manage(browser_control.clone());
+            trace.mark("browser server");
             let mobile_gateway = mobile_gateway::MobileGateway::default();
             let mobile_server = mobile_server::MobileServer::start_loopback(
                 state.clone(),
@@ -3065,6 +3332,7 @@ pub fn run() {
                     eprintln!("Could not restore mobile network access: {error}");
                 }
             }
+            trace.mark("mobile server");
             app.manage(mobile_gateway);
             app.manage(mobile_server);
             app.manage(terminal_windows::TerminalWindows::default());
@@ -3079,11 +3347,13 @@ pub fn run() {
                 browser_control,
             );
             app.manage(workflow_runtime);
+            trace.mark("workflow runtime");
             discovery::start(state.clone(), app.handle().clone())?;
             codex_daemon_observer::start(state.clone(), app.handle().clone())?;
             overlay::start_fullscreen_guard(state.clone(), app.handle().clone())?;
             usage_monitor::start(state.clone(), app.handle().clone());
             pair_watch::start(state.clone(), app.handle().clone());
+            trace.mark("watchers started");
 
             if let Some(window) = app.get_webview_window("main") {
                 overlay::neutralize_text_scaling(&window);
@@ -3110,6 +3380,7 @@ pub fn run() {
                 }
                 window.show()?;
             }
+            trace.mark("orb window shown");
 
             let show = MenuItem::with_id(app, "show", "Mostrar Lume", true, None::<&str>)?;
             let workspace =
@@ -3166,6 +3437,7 @@ pub fn run() {
             stop_session_environment,
             get_session_repository,
             get_session_repository_diff,
+            get_github_reference,
             commit_session_repository,
             cli_install_plans,
             start_cli_install,
@@ -3190,6 +3462,7 @@ pub fn run() {
             open_session_source,
             submit_prompt,
             read_local_image_data_url,
+            open_session_file,
             export_local_file,
             set_terminal_file_dialog_active,
             set_native_file_dialog_active,
@@ -3201,6 +3474,8 @@ pub fn run() {
             list_session_mcp_servers,
             get_session_model_settings,
             set_session_model_settings,
+            compact_session,
+            steer_omp_subagent,
             set_session_agent_mode,
             get_session_fast_mode,
             set_session_fast_mode,
@@ -3309,8 +3584,13 @@ pub fn run() {
             launch_session,
             open_automation_settings
         ])
-        .run(tauri::generate_context!())
-        .expect("erro ao executar o Lume");
+        .build(tauri::generate_context!())
+        .expect("erro ao criar o Lume")
+        .run(|app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app_handle.state::<omp_rpc::OmpRpc>().terminate_all();
+            }
+        });
 }
 
 pub fn run_ingest_client() -> i32 {
@@ -3520,6 +3800,7 @@ mod tests {
             resume: true,
             resume_id: Some("thread-1".into()),
             target: "terminal".into(),
+            profile: None,
             initial_prompt: None,
             permission_mode: None,
             approval_policy: None,
@@ -3564,6 +3845,7 @@ mod tests {
             resume: false,
             resume_id: None,
             target: "auto".into(),
+            profile: None,
             initial_prompt: None,
             permission_mode: None,
             approval_policy: None,
@@ -3587,6 +3869,7 @@ mod tests {
             resume: true,
             resume_id: Some("thread-headless".into()),
             target: "auto".into(),
+            profile: None,
             initial_prompt: None,
             permission_mode: None,
             approval_policy: None,
@@ -3631,6 +3914,7 @@ mod tests {
             resume: true,
             resume_id: Some(native_id.clone()),
             target: "auto".into(),
+            profile: None,
             initial_prompt: None,
             permission_mode: Some(domain::AccessMode::WorkspaceWrite),
             approval_policy: None,
@@ -3678,6 +3962,7 @@ mod tests {
             resume: true,
             resume_id: Some("claude-thread-1".into()),
             target: "terminal".into(),
+            profile: None,
             initial_prompt: None,
             permission_mode: None,
             approval_policy: None,

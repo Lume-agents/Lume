@@ -380,8 +380,14 @@ pub fn start(app: &AppHandle, kind: &str, method_id: &str) -> Result<String, Str
 
     let log_budget = Arc::new(Mutex::new(0usize));
     let readers = [
-        child.stdout.take().map(|stream| pipe_lines(app, &id, stream, log_budget.clone())),
-        child.stderr.take().map(|stream| pipe_lines(app, &id, stream, log_budget.clone())),
+        child
+            .stdout
+            .take()
+            .map(|stream| pipe_lines(app, &id, stream, log_budget.clone())),
+        child
+            .stderr
+            .take()
+            .map(|stream| pipe_lines(app, &id, stream, log_budget.clone())),
     ];
     let app = app.clone();
     let run_id = id.clone();
@@ -437,9 +443,12 @@ pub fn cancel(id: &str) -> bool {
         .lock()
         .ok()
         .and_then(|running| {
-            running.as_ref().filter(|install| install.id == id).map(|install| {
-                install.cancel.store(true, Ordering::SeqCst);
-            })
+            running
+                .as_ref()
+                .filter(|install| install.id == id)
+                .map(|install| {
+                    install.cancel.store(true, Ordering::SeqCst);
+                })
         })
         .is_some()
 }
@@ -500,7 +509,10 @@ fn pipe_lines(
     thread::spawn(move || {
         let mut reader = BufReader::new(stream);
         let mut buffer = Vec::new();
-        while reader.read_until(b'\n', &mut buffer).is_ok_and(|read| read > 0) {
+        while reader
+            .read_until(b'\n', &mut buffer)
+            .is_ok_and(|read| read > 0)
+        {
             let text = String::from_utf8_lossy(&buffer).into_owned();
             buffer.clear();
             let line = clean_line(&text);
@@ -638,10 +650,21 @@ mod tests {
         let kinds = entries.iter().map(|entry| entry.kind).collect::<Vec<_>>();
         assert_eq!(
             kinds,
-            ["claude", "codex", "gemini", "opencode", "antigravity", "github"]
+            [
+                "claude",
+                "codex",
+                "gemini",
+                "opencode",
+                "antigravity",
+                "github"
+            ]
         );
         for entry in &entries {
-            assert!(!entry.methods.is_empty(), "{} has no install method", entry.kind);
+            assert!(
+                !entry.methods.is_empty(),
+                "{} has no install method",
+                entry.kind
+            );
             for method in &entry.methods {
                 assert!(!method.display().trim().is_empty());
             }
@@ -650,7 +673,10 @@ mod tests {
 
     #[test]
     fn progress_lines_lose_escape_codes_and_keep_the_last_redraw() {
-        assert_eq!(clean_line("\u{1b}[32mok\u{1b}[0m installed\r\n"), "ok installed");
+        assert_eq!(
+            clean_line("\u{1b}[32mok\u{1b}[0m installed\r\n"),
+            "ok installed"
+        );
         assert_eq!(clean_line("10%\r50%\r100%\n"), "100%");
         assert_eq!(clean_line("   \r\n"), "");
     }

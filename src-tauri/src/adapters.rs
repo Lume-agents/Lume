@@ -183,10 +183,12 @@ fn map_event_with_context(
     {
         return None;
     }
-    // Claude's internal forks (recap, prompt suggestion) also fire SubagentStop,
-    // but without an agent_type; only real subagents carry one.
+    // Claude's internal forks (recap, prompt suggestion) also fire SubagentStop and run tools of their
+    // own, all tagged with an agent_id but without an agent_type; only real subagents carry one.
+    // Their text and tool calls are not part of the conversation, so none of their events count.
     if provider == "claude"
-        && matches!(hook_name.as_str(), "SubagentStart" | "SubagentStop")
+        && (matches!(hook_name.as_str(), "SubagentStart" | "SubagentStop")
+            || string(raw, "agent_id").is_some_and(|agent_id| !agent_id.trim().is_empty()))
         && string(raw, "agent_type").is_none_or(|agent_type| agent_type.trim().is_empty())
     {
         return None;
@@ -377,7 +379,9 @@ fn hook_activity(
     if matches!(hook_name, "UserPromptSubmit" | "BeforeAgent") {
         let prompt = ["prompt", "user_prompt", "message"]
             .into_iter()
-            .find_map(|key| string(raw, key));
+            .find_map(|key| string(raw, key))
+            // The hook also fires for Claude's own notices; they are not something the user said.
+            .filter(|prompt| provider != "claude" || visible_claude_user_text(prompt));
         return prompt.map(|prompt| SessionActivity {
             id: format!("{provider}:{session_id}:prompt:{}", now_millis()),
             kind: "prompt".into(),
@@ -1625,6 +1629,9 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
         {
             continue;
         }
+        if is_claude_resume_filler(&entry) {
+            continue;
+        }
         let entry_id = string(&entry, "uuid")
             .unwrap_or_else(|| format!("{:x}", Sha256::digest(line.as_bytes())));
         let created_at = string(&entry, "timestamp")
@@ -1797,6 +1804,25 @@ fn track_claude_turn_tokens(
     }
 }
 
+/// Resuming a conversation makes the CLI write `Continue from where you left off.` and answer it
+/// itself with a synthetic "No response requested.". Neither is something the person or the agent said,
+/// and the answer would otherwise sit between a prompt and its own copy from the transcript.
+fn is_claude_resume_filler(entry: &Value) -> bool {
+    entry.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
+        && entry.pointer("/message/model").and_then(Value::as_str) == Some("<synthetic>")
+        && match entry.pointer("/message/content") {
+            Some(Value::String(text)) => text.trim() == "No response requested.",
+            Some(Value::Array(blocks)) => {
+                !blocks.is_empty()
+                    && blocks.iter().all(|block| {
+                        string(block, "type").as_deref() == Some("text")
+                            && string(block, "text").is_some_and(|text| text.trim() == "No response requested.")
+                    })
+            }
+            _ => false,
+        }
+}
+
 fn is_claude_user_prompt(entry: &Value) -> bool {
     if entry.get("isMeta").and_then(Value::as_bool) == Some(true) {
         return false;
@@ -1863,7 +1889,9 @@ fn push_claude_user_text(
     }
 }
 
-fn visible_claude_user_text(value: &str) -> bool {
+/// Whether a user-role message is something the person wrote. Claude Code also records its own
+/// notices in that role, such as the one that tells it a background command finished.
+pub(crate) fn visible_claude_user_text(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
         && ![
@@ -1871,6 +1899,7 @@ fn visible_claude_user_text(value: &str) -> bool {
             "<local-command-",
             "<system-reminder>",
             "<available-deferred-tools>",
+            "<task-notification>",
         ]
         .iter()
         .any(|prefix| value.starts_with(prefix))
@@ -2394,6 +2423,37 @@ mod tests {
     }
 
     #[test]
+    fn claude_internal_fork_tools_are_not_conversation_activity() {
+        // The recap and the prompt suggestion run as forks that call tools; those calls and their text
+        // used to land in the chat after the final message.
+        for hook in ["PreToolUse", "PostToolUse"] {
+            let raw = json!({
+                "session_id": "claude-session",
+                "cwd": "/work/project",
+                "hook_event_name": hook,
+                "agent_id": "fork-1",
+                "tool_name": "Read",
+                "tool_use_id": "toolu_fork",
+                "tool_input": { "file_path": "/work/project/a.ts" },
+                "agent_transcript_path": "/tmp/fork.jsonl"
+            });
+            assert!(map_event("claude", &raw).is_none(), "{hook}");
+        }
+        // A real subagent names its type, and the main agent has no agent_id at all.
+        let subagent = json!({
+            "session_id": "claude-session", "cwd": "/work/project", "hook_event_name": "PostToolUse",
+            "agent_id": "agent-1", "agent_type": "general-purpose", "tool_name": "Read", "tool_use_id": "toolu_sub",
+            "tool_input": { "file_path": "/work/project/a.ts" }
+        });
+        assert!(map_event("claude", &subagent).is_some());
+        let main = json!({
+            "session_id": "claude-session", "cwd": "/work/project", "hook_event_name": "PostToolUse",
+            "tool_name": "Read", "tool_use_id": "toolu_main", "tool_input": { "file_path": "/work/project/a.ts" }
+        });
+        assert!(map_event("claude", &main).is_some());
+    }
+
+    #[test]
     fn claude_edit_hook_activity_carries_the_diff() {
         let activity = hook_activity(
             "claude",
@@ -2592,6 +2652,30 @@ mod tests {
                 ("prompt-2".to_string(), 3, 4, 7, 7),
             ]
         );
+    }
+
+    #[test]
+    fn claude_own_notices_are_not_something_the_user_said() {
+        for notice in [
+            "<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>",
+            "<system-reminder>\nContext\n</system-reminder>",
+            "<command-name>/compact</command-name>",
+            "<local-command-stdout>ok</local-command-stdout>",
+        ] {
+            assert!(!visible_claude_user_text(notice), "{notice}");
+        }
+        assert!(visible_claude_user_text("Corrija o teste que falhou"));
+
+        // The prompt hook fires for the notice too, but it must not show up as a sent prompt.
+        let notice = json!({ "session_id": "s1", "prompt": "<task-notification>done</task-notification>" });
+        assert!(hook_activity("claude", "UserPromptSubmit", &notice, "s1", None).is_none());
+        let typed = json!({ "session_id": "s1", "prompt": "Rode os testes" });
+        assert_eq!(
+            hook_activity("claude", "UserPromptSubmit", &typed, "s1", None).and_then(|activity| activity.detail),
+            Some("Rode os testes".to_string())
+        );
+        // Other agents keep every prompt as before.
+        assert!(hook_activity("codex", "UserPromptSubmit", &notice, "s1", None).is_some());
     }
 
     #[test]
@@ -2887,5 +2971,15 @@ mod tests {
         )
         .expect("evento que informa só o cwd");
         assert_eq!(cwd_event.working_directory.as_deref(), Some("/work/second"));
+    }
+
+    #[test]
+    fn the_resume_filler_the_cli_writes_is_not_part_of_the_conversation() {
+        let filler = json!({ "type": "assistant", "message": { "role": "assistant", "model": "<synthetic>", "content": [{ "type": "text", "text": "No response requested." }] } });
+        assert!(is_claude_resume_filler(&filler));
+        let error = json!({ "type": "assistant", "message": { "role": "assistant", "model": "<synthetic>", "content": [{ "type": "text", "text": "Failed to refresh OAuth token: retry in a minute" }] } });
+        assert!(!is_claude_resume_filler(&error), "a synthetic error is information the person needs");
+        let real = json!({ "type": "assistant", "message": { "role": "assistant", "model": "claude-opus-4", "content": [{ "type": "text", "text": "No response requested." }] } });
+        assert!(!is_claude_resume_filler(&real), "only the CLI's own synthetic answer is dropped");
     }
 }

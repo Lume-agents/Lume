@@ -2,9 +2,9 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Mutex, OnceLock,
     },
     thread,
@@ -33,6 +33,8 @@ pub struct LaunchRequest {
     pub resume: bool,
     pub resume_id: Option<String>,
     pub target: String,
+    #[serde(default)]
+    pub profile: Option<String>,
     #[serde(default)]
     pub initial_prompt: Option<String>,
     #[serde(default)]
@@ -170,7 +172,17 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
         IntegrationKind::DeepSeek => ("dsh".to_string(), vec!["--profile".into(), "tui".into()]),
         IntegrationKind::Gemini => ("gemini".to_string(), Vec::new()),
         IntegrationKind::OpenCode => ("opencode".to_string(), Vec::new()),
+        IntegrationKind::Omp => ("omp".to_string(), Vec::new()),
     };
+    if request.agent == IntegrationKind::Omp {
+        if let Some(profile) = request
+            .profile
+            .as_deref()
+            .filter(|profile| !profile.is_empty())
+        {
+            arguments.extend(["--profile".into(), profile.into()]);
+        }
+    }
     if request.agent == IntegrationKind::Claude
         && request
             .initial_prompt
@@ -225,6 +237,12 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
             }
             IntegrationKind::DeepSeek => {}
             IntegrationKind::OpenCode => {}
+            IntegrationKind::Omp => {
+                arguments.push("--resume".into());
+                if let Some(id) = &request.resume_id {
+                    arguments.push(id.clone());
+                }
+            }
         }
     }
     if let Some(prompt) = request
@@ -398,6 +416,64 @@ pub fn run_next_queued_claude_prompt(
     Ok(true)
 }
 
+/// Prompts Lume has handed to Claude that have not finished yet.
+static CLAUDE_PROMPTS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a Claude prompt is running. Background probes (usage, MCP status) stay out of its way: each is a
+/// `claude` process too, and two of them starting together can fight over the account's token refresh.
+pub fn claude_prompt_in_flight() -> bool {
+    CLAUDE_PROMPTS_IN_FLIGHT.load(Ordering::SeqCst) > 0
+}
+
+struct InFlight;
+
+impl InFlight {
+    fn begin() -> Self {
+        CLAUDE_PROMPTS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        CLAUDE_PROMPTS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Claude's own message when two of its processes refresh the login at the same moment. It passes by itself.
+const OAUTH_COLLISION: &str = "failed to refresh oauth token";
+const OAUTH_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(1_500), Duration::from_millis(4_000)];
+
+fn is_oauth_collision(output: &std::process::Output) -> bool {
+    [&output.stdout, &output.stderr]
+        .into_iter()
+        .any(|bytes| String::from_utf8_lossy(bytes).to_lowercase().contains(OAUTH_COLLISION))
+}
+
+fn claude_interrupt_pending(session_id: &str) -> bool {
+    claude_interrupts().lock().map(|interrupts| interrupts.contains_key(session_id)).unwrap_or(false)
+}
+
+fn spawn_claude_prompt(payload: &TerminalPayload) -> Result<Child, String> {
+    let mut command = crate::executables::command(&payload.command)?;
+    command
+        .args(&payload.arguments)
+        .env("LUME_MANAGED_SESSION", "1")
+        .env("LUME_CLAUDE_PROMPT_CAPTURE", "1")
+        .current_dir(&payload.working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .spawn()
+        .map_err(|error| format!("Não foi possível iniciar o Claude: {error}"))
+}
+
 pub fn launch_claude_prompt(
     request: LaunchRequest,
     app: AppHandle,
@@ -422,27 +498,28 @@ pub fn launch_claude_prompt(
         start_claude_session_with_id(&mut payload.arguments, &native_id);
     }
     add_scoped_claude_hooks(&mut payload, &crate::integrations::lume_executable()?)?;
-    let mut command = crate::executables::command(&payload.command)?;
-    command
-        .args(&payload.arguments)
-        .env("LUME_MANAGED_SESSION", "1")
-        .env("LUME_CLAUDE_PROMPT_CAPTURE", "1")
-        .current_dir(&payload.working_directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    let child = command
-        .spawn()
-        .map_err(|error| format!("Não foi possível iniciar o Claude: {error}"))?;
+    let child = spawn_claude_prompt(&payload)?;
+    let in_flight = InFlight::begin();
     thread::Builder::new()
         .name("lume-claude-prompt".into())
         .spawn(move || {
-            let output = child.wait_with_output();
+            let _in_flight = in_flight;
+            let mut child = child;
+            let mut retries = OAUTH_RETRY_DELAYS.iter();
+            // Two Claude processes refreshing the login together make one of them fail with a message that says
+            // to retry in a minute. Retrying right away succeeds, so the person never sees it.
+            let output = loop {
+                let output = child.wait_with_output();
+                let collided = output.as_ref().is_ok_and(is_oauth_collision);
+                let Some(delay) = retries.next().filter(|_| collided && !claude_interrupt_pending(&session_id)) else {
+                    break output;
+                };
+                thread::sleep(*delay);
+                match spawn_claude_prompt(&payload) {
+                    Ok(next) => child = next,
+                    Err(_) => break output,
+                }
+            };
             // Lume stopped this prompt: it is already marked as interrupted, so the
             // process dying is not a failure. A cancel pauses the queue; a steer moves on.
             if let Some(interrupt) = take_claude_interrupt(&session_id) {
@@ -721,7 +798,8 @@ fn apply_permission_profile(request: &LaunchRequest, arguments: &mut Vec<String>
         IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
         | IntegrationKind::DeepSeek
-        | IntegrationKind::Gemini => {}
+        | IntegrationKind::Gemini
+        | IntegrationKind::Omp => {}
     }
 }
 
@@ -743,13 +821,20 @@ fn launch_terminal(
         desktop_escape(executable),
         desktop_escape(&payload_path)
     );
-    fs::write(&desktop_path, desktop).map_err(|error| error.to_string())?;
-    Command::new("gio")
-        .arg("launch")
-        .arg(&desktop_path)
-        .spawn()
-        .map_err(|error| format!("Não foi possível abrir o terminal: {error}"))?;
-    Ok(())
+    let launched = fs::write(&desktop_path, desktop)
+        .map_err(|error| error.to_string())
+        .and_then(|()| {
+            Command::new("gio")
+                .arg("launch")
+                .arg(&desktop_path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| format!("Não foi possível abrir o terminal: {error}"))
+        });
+    if launched.is_err() {
+        discard_launch_files(&[&payload_path, &desktop_path]);
+    }
+    launched
 }
 
 #[cfg(target_os = "windows")]
@@ -759,7 +844,7 @@ fn launch_terminal(
     app_data_dir: &Path,
 ) -> Result<(), String> {
     let payload_path = persist_terminal_payload(&payload, app_data_dir)?;
-    if command_available("wt.exe") {
+    let launched = if command_available("wt.exe") {
         Command::new("wt.exe")
             .args(windows_terminal_arguments(
                 executable,
@@ -767,7 +852,8 @@ fn launch_terminal(
                 &payload.working_directory,
             ))
             .spawn()
-            .map_err(|error| error.to_string())?;
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     } else {
         use std::os::windows::process::CommandExt;
 
@@ -780,9 +866,13 @@ fn launch_terminal(
             .current_dir(&payload.working_directory)
             .creation_flags(CREATE_NEW_CONSOLE)
             .spawn()
-            .map_err(|error| format!("Não foi possível abrir o Prompt de Comando: {error}"))?;
+            .map(|_| ())
+            .map_err(|error| format!("Não foi possível abrir o Prompt de Comando: {error}"))
+    };
+    if launched.is_err() {
+        discard_launch_files(&[&payload_path]);
     }
-    Ok(())
+    launched
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -823,7 +913,7 @@ fn launch_terminal(
             Err(terminal_app_error(&String::from_utf8_lossy(&output.stderr)))
         });
     if opened.is_err() {
-        let _ = fs::remove_file(&payload_path);
+        discard_launch_files(&[&payload_path]);
     }
     opened
 }
@@ -892,6 +982,42 @@ fn applescript_string(value: &str) -> String {
     )
 }
 
+/// A launch payload carries the first prompt and the session id, so one that nobody read must not stay.
+const LAUNCH_PAYLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// The Linux `.desktop` entry is only needed while `gio launch` starts the terminal.
+const LAUNCH_DESKTOP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+fn discard_launch_files(paths: &[&Path]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Removes launch files nobody consumed: payloads older than a day and `.desktop` entries older than an hour.
+pub fn sweep_stale_launches(app_data_dir: &Path) -> usize {
+    sweep_launches(app_data_dir, std::time::SystemTime::now())
+}
+
+fn sweep_launches(app_data_dir: &Path, now: std::time::SystemTime) -> usize {
+    let Ok(entries) = fs::read_dir(app_data_dir.join("launches")) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let max_age = match path.extension().and_then(|extension| extension.to_str()) {
+            Some("json") => LAUNCH_PAYLOAD_MAX_AGE,
+            Some("desktop") => LAUNCH_DESKTOP_MAX_AGE,
+            _ => continue,
+        };
+        let Ok(metadata) = entry.metadata() else { continue };
+        let Ok(modified) = metadata.modified() else { continue };
+        if metadata.is_file() && now.duration_since(modified).is_ok_and(|age| age > max_age) && fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn persist_terminal_payload(
     payload: &TerminalPayload,
@@ -899,6 +1025,7 @@ fn persist_terminal_payload(
 ) -> Result<PathBuf, String> {
     let launches = app_data_dir.join("launches");
     fs::create_dir_all(&launches).map_err(|error| error.to_string())?;
+    sweep_stale_launches(app_data_dir);
     let sequence = LAUNCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let payload_path = launches.join(format!("{}-{sequence}.json", now_millis()));
     fs::write(
@@ -927,6 +1054,7 @@ fn launch_vscode(payload: &TerminalPayload, agent: &IntegrationKind) -> Result<(
             IntegrationKind::DeepSeek => "deepseek",
             IntegrationKind::Gemini => "gemini",
             IntegrationKind::OpenCode => "opencode",
+            IntegrationKind::Omp => "omp",
         },
         "cwd": payload.working_directory,
         "args": payload.arguments,
@@ -1016,6 +1144,7 @@ mod tests {
             resume,
             resume_id: resume_id.map(str::to_string),
             target: "auto".into(),
+            profile: None,
             initial_prompt: None,
             permission_mode: None,
             approval_policy: None,
@@ -1400,5 +1529,49 @@ activate
 end tell
 end timeout"#
         );
+    }
+
+    #[test]
+    fn forgotten_launch_files_are_swept_by_age_and_the_rest_is_left_alone() {
+        let root = std::env::temp_dir().join(format!("lume-launch-sweep-{}", std::process::id()));
+        let launches = root.join("launches");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&launches).unwrap();
+        let now = std::time::SystemTime::now();
+        let make = |name: &str, age: Duration| {
+            let path = launches.join(name);
+            fs::write(&path, "x").unwrap();
+            fs::File::options().write(true).open(&path).unwrap().set_modified(now - age).unwrap();
+            path
+        };
+        let hour = Duration::from_secs(3600);
+        let old_payload = make("1-0.json", hour * 25);
+        let old_desktop = make("1-0.desktop", hour * 2);
+        let fresh_payload = make("2-0.json", hour * 2);
+        let fresh_desktop = make("2-0.desktop", Duration::from_secs(60));
+        let unrelated = make("notes.txt", hour * 100);
+        assert_eq!(sweep_launches(&root, now), 2);
+        assert!(!old_payload.exists() && !old_desktop.exists());
+        assert!(fresh_payload.exists() && fresh_desktop.exists() && unrelated.exists());
+        assert_eq!(sweep_launches(&root.join("missing"), now), 0, "no launches folder is not an error");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_token_refresh_collision_is_recognized_in_either_stream() {
+        let make = |stdout: &str, stderr: &str| std::process::Output { status: Default::default(), stdout: stdout.as_bytes().to_vec(), stderr: stderr.as_bytes().to_vec() };
+        assert!(is_oauth_collision(&make("Failed to refresh OAuth token: another Claude Code process is refreshing it", "")));
+        assert!(is_oauth_collision(&make("", "error: FAILED TO REFRESH OAUTH TOKEN")));
+        assert!(!is_oauth_collision(&make("All done", "warning: slow network")));
+    }
+
+    #[test]
+    fn prompts_in_flight_are_counted_until_their_guard_drops() {
+        let before = CLAUDE_PROMPTS_IN_FLIGHT.load(Ordering::SeqCst);
+        let guard = InFlight::begin();
+        assert!(claude_prompt_in_flight());
+        assert_eq!(CLAUDE_PROMPTS_IN_FLIGHT.load(Ordering::SeqCst), before + 1);
+        drop(guard);
+        assert_eq!(CLAUDE_PROMPTS_IN_FLIGHT.load(Ordering::SeqCst), before);
     }
 }

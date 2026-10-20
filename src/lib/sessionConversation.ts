@@ -1,7 +1,7 @@
 import type { AgentSession, SessionActivity } from "$lib/domain";
 import type { FileChangeSummary } from "$lib/fileChanges";
-import { mergeFileChanges, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
-import { cleanPromptTransport, promptTextKey } from "$lib/chatAttachments";
+import { addFileChanges, isSeparateEdit, mergeFileChanges, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
+import { cleanPromptTransport, isSyntheticPromptText, promptTextKey, sameAttachment } from "$lib/chatAttachments";
 import { activityCategory, isHiddenAgentActivity, isPresentableTraceActivity } from "$lib/activityPresentation";
 import { latestResponseText, sameResponseText } from "$lib/responseDedup.js";
 
@@ -18,6 +18,29 @@ export type ConversationFeedItem =
   | { kind: "entry"; id: string; entry: ConversationEntry }
   | { kind: "trace"; id: string; entries: ConversationEntry[]; files: FileChangeSummary[] };
 
+/** Claude's note that two of its processes refreshed the login at once; Lume retries, so it passes by itself. */
+function isTransientAuthNotice(text?: string): boolean {
+  return /^\s*Failed to refresh OAuth token: another Claude Code process is refreshing it/i.test(text ?? "");
+}
+
+/** Notices that something later in the chat has already made moot: the prompt went through on the retry. */
+function supersededNoticeIds(activities: SessionActivity[]): Set<string> {
+  const spoken = activities.filter((activity) =>
+    (activity.kind === "prompt" || activity.kind === "message") && !isTransientAuthNotice(activity.detail) && !isResumeFiller(activity.detail));
+  const hidden = new Set<string>();
+  for (const activity of activities) {
+    if (activity.kind === "message" && isTransientAuthNotice(activity.detail) && spoken.some((other) => other.createdAt > activity.createdAt)) {
+      hidden.add(activity.id);
+    }
+  }
+  return hidden;
+}
+
+/** What the CLI answers by itself when a conversation is resumed; it is not part of the conversation. */
+function isResumeFiller(text?: string): boolean {
+  return (text ?? "").trim() === "No response requested.";
+}
+
 function textKey(value?: string): string {
   return (value ?? "")
     .replace(/\r\n?/g, "\n")
@@ -33,14 +56,16 @@ function fileChangesKey(files: FileChangeSummary[], workingDirectory?: string): 
 }
 
 function mergeAttachments(target: SessionActivity, source: SessionActivity) {
-  const attachments = [...(target.attachments ?? [])];
+  const attachments = (target.attachments ?? []).map((attachment) => ({ ...attachment }));
   for (const attachment of source.attachments ?? []) {
-    const duplicate = attachments.some((existing) =>
-      existing.path && attachment.path
-        ? existing.path.replace(/\\/g, "/").toLowerCase() === attachment.path.replace(/\\/g, "/").toLowerCase()
-        : existing.name === attachment.name
-    );
-    if (!duplicate) attachments.push(attachment);
+    const existing = attachments.find((candidate) => sameAttachment(candidate, attachment));
+    if (!existing) {
+      attachments.push(attachment);
+      continue;
+    }
+    // The same file seen twice: keep what was shown first and learn where it lives.
+    if (!existing.path && attachment.path) existing.path = attachment.path;
+    if (!existing.previewDataUrl && attachment.previewDataUrl) existing.previewDataUrl = attachment.previewDataUrl;
   }
   if (attachments.length) target.attachments = attachments;
 }
@@ -62,10 +87,11 @@ export function buildConversationEntries(
 ): ConversationEntry[] {
   let sequence = 0;
   const sortedActivities = [...activities].sort((left, right) => left.createdAt - right.createdAt);
+  const supersededNotices = supersededNoticeIds(sortedActivities);
   const uniquePrompts: SessionActivity[] = [];
   let messageSinceLastPrompt = false;
   for (const activity of sortedActivities) {
-    if (activity.kind === "message") messageSinceLastPrompt = true;
+    if (activity.kind === "message" && !isResumeFiller(activity.detail) && !supersededNotices.has(activity.id)) messageSinceLastPrompt = true;
     if (activity.kind !== "prompt") continue;
     const existing = uniquePrompts.at(-1);
     const duplicate = existing
@@ -103,6 +129,8 @@ export function buildConversationEntries(
   const entries: ConversationEntry[] = [];
   for (const activity of sortedActivities) {
     if (["queued_prompt", "codex_queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
+    if (activity.kind === "prompt" && isSyntheticPromptText(activity.detail)) continue;
+    if (activity.kind === "message" && (isResumeFiller(activity.detail) || supersededNotices.has(activity.id))) continue;
     if (activity.kind === "prompt") {
       let duplicateIndex = -1;
       for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -170,7 +198,7 @@ export function buildConversationEntries(
       continue;
     }
 
-    if (activity.kind === "file" && files.length) {
+    if (activity.kind === "file" && files.length && !isSeparateEdit(activity)) {
       const signature = fileChangesKey(files, session?.workingDirectory);
       const duplicateFileEntry = entries.findLast((entry) =>
         entry.activity.kind === "file"
@@ -316,7 +344,7 @@ export function buildConversationFeed(
         ? entry.files
         : entry.activity.files.map((path) => ({ path, added: 0, removed: 0 }));
       if (fileChanges.length || finalResponse.files.length) {
-        mergeFileChanges(finalResponse.files, fileChanges, options.workingDirectory);
+        (isSeparateEdit(entry.activity) ? addFileChanges : mergeFileChanges)(finalResponse.files, fileChanges, options.workingDirectory);
         finalResponse.activity.files = [...new Set([
           ...finalResponse.activity.files,
           ...entry.activity.files,
@@ -335,7 +363,7 @@ export function buildConversationFeed(
         feed.push(trace);
       }
       trace.entries.push(entry);
-      mergeFileChanges(trace.files, entry.files, options.workingDirectory);
+      (isSeparateEdit(entry.activity) ? addFileChanges : mergeFileChanges)(trace.files, entry.files, options.workingDirectory);
       continue;
     }
     trace = null;
@@ -356,7 +384,11 @@ export function fileChangesForFinalResponses(
   let turnFiles: FileChangeSummary[] = [];
   for (const item of feed) {
     if (item.kind === "trace") {
-      mergeFileChanges(turnFiles, item.files, workingDirectory);
+      // Edits are added one by one; whatever else the trace reported is the same change seen again.
+      const edits = item.entries.filter((entry) => isSeparateEdit(entry.activity));
+      for (const entry of edits) addFileChanges(turnFiles, entry.files, workingDirectory);
+      const others = item.entries.filter((entry) => !isSeparateEdit(entry.activity));
+      for (const entry of others) mergeFileChanges(turnFiles, entry.files, workingDirectory);
       continue;
     }
     if (item.entry.activity.kind === "prompt") {

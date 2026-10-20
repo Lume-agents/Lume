@@ -16,7 +16,43 @@ function session(overrides = {}) {
 }
 
 assert.equal(sessionCapabilities(session()).canInterrupt, true);
-for (const agent of ["codex", "opencode", "antigravity"]) {
+assert.equal(sessionCapabilities(session({ agent: "omp", controlOrigin: "external" })).canPrompt, false);
+assert.equal(sessionCapabilities(session({ agent: "omp", controlOrigin: "external" })).promptUnavailableReason, "monitoring_only");
+assert.deepEqual(sessionCapabilities(session({ agent: "omp", controlOrigin: "external" })).promptDeliveries, []);
+const controlledOmp = sessionCapabilities(session({
+  agent: "omp",
+  source: "desktop",
+  controlOrigin: "lume",
+  status: "running",
+  capabilities: undefined,
+}));
+assert.equal(controlledOmp.canPrompt, true);
+assert.equal(controlledOmp.canInterrupt, true);
+assert.deepEqual(controlledOmp.promptDeliveries, ["new_turn", "steer", "queue"]);
+assert.equal(sessionCapabilities(session({
+  agent: "omp",
+  pendingPermission: { id: "approval" },
+  pendingQuestion: { id: "question" },
+  permissionProfile: { canRespondFromLume: true },
+})).canApprove, true);
+assert.equal(sessionCapabilities(session({
+  agent: "omp",
+  pendingQuestion: { id: "question" },
+  permissionProfile: { canRespondFromLume: true },
+})).canAnswerQuestion, true);
+assert.equal(sessionCapabilities(session({ agent: "omp", controlOrigin: "external", nativeSessionId: "omp-1", processId: 42 })).canTakeControl, true);
+assert.equal(sessionCapabilities(session({ agent: "omp", controlOrigin: "lume", source: "desktop" })).canTakeControl, false);
+const monitoredOmp = sessionCapabilities(session({
+  agent: "omp",
+  controlOrigin: "external",
+  pendingPermission: { id: "approval", actions: ["allow_once"] },
+  pendingQuestion: { id: "question" },
+  permissionProfile: { canRespondFromLume: true },
+}));
+assert.equal(monitoredOmp.canApprove, false);
+assert.equal(monitoredOmp.canAnswerQuestion, false);
+assert.equal(monitoredOmp.canAttachImages, false);
+for (const agent of ["codex", "opencode", "antigravity", "omp"]) {
   for (const source of ["desktop", "cli"]) {
     assert.equal(
       sessionCapabilities(session({ agent, source })).canTerminate,

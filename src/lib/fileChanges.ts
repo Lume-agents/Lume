@@ -67,6 +67,10 @@ export function summarizeFileChanges(
   let added = 0;
   let removed = 0;
   let counting = false;
+  // Inside a hunk the header says how many lines it holds, so a changed line that merely starts with
+  // "--" or "++" (a SQL comment, `++i`, a YAML separator) is still counted and never read as a file header.
+  let hunkOld = 0;
+  let hunkNew = 0;
 
   const flush = () => {
     record(summaries, currentPath, added, removed);
@@ -75,6 +79,14 @@ export function summarizeFileChanges(
   };
 
   for (const line of detail.split(/\r?\n/)) {
+    if (counting && currentPath && (hunkOld > 0 || hunkNew > 0)) {
+      if (line.startsWith("+")) { added += 1; hunkNew -= 1; continue; }
+      if (line.startsWith("-")) { removed += 1; hunkOld -= 1; continue; }
+      if (line.startsWith("\\")) continue;
+      if (line.startsWith(" ") || line === "") { hunkOld -= 1; hunkNew -= 1; continue; }
+      hunkOld = 0;
+      hunkNew = 0;
+    }
     const patchHeader = line.match(/^\*\*\* (?:Update|Add|Delete) File:\s+(.+)$/);
     const gitHeader = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
     const nextFile = line.match(/^\+\+\+\s+(?:b\/)?(.+)$/);
@@ -89,6 +101,9 @@ export function summarizeFileChanges(
     }
     if (line.startsWith("@@")) {
       counting = true;
+      const sizes = line.match(/^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/);
+      hunkOld = sizes ? Number(sizes[1] ?? 1) : 0;
+      hunkNew = sizes ? Number(sizes[2] ?? 1) : 0;
       continue;
     }
     if (line === "*** End Patch") {
@@ -131,6 +146,32 @@ export function summarizeFileChanges(
   return [...summaries.values()].filter(
     (change) => change.added > 0 || change.removed > 0 || explicitlyReportedPaths.has(change.path),
   );
+}
+
+/** Claude Code edits a file one tool call at a time: every call is its own change to the same file. */
+export function isSeparateEdit(activity: { id: string; kind: string }): boolean {
+  return activity.kind === "file" && activity.id.startsWith("claude:");
+}
+
+/**
+ * Adds changes that are separate edits (one tool call each) to what a turn already changed, summing the lines
+ * instead of treating a repeated file as the same report seen twice, which `mergeFileChanges` does.
+ */
+export function addFileChanges(
+  target: FileChangeSummary[],
+  incoming: FileChangeSummary[],
+  workingDirectory?: string,
+): void {
+  for (const change of incoming) {
+    const path = normalizeFileChangePath(change.path, workingDirectory);
+    const current = target.find((item) => normalizeFileChangePath(item.path, workingDirectory) === path);
+    if (current) {
+      current.added += change.added;
+      current.removed += change.removed;
+    } else {
+      target.push({ ...change, path });
+    }
+  }
 }
 
 export function mergeFileChanges(

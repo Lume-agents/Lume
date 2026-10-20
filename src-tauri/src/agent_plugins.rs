@@ -141,6 +141,13 @@ pub fn catalog() -> Vec<Box<dyn AgentPlugin>> {
             direct_permissions: false,
             hook_events: &[],
         }),
+        Box::new(BuiltInAgentPlugin {
+            kind: IntegrationKind::Omp,
+            label: "Oh My Pi",
+            executable: "omp",
+            direct_permissions: false,
+            hook_events: &[],
+        }),
     ]
 }
 
@@ -240,7 +247,7 @@ mod tests {
     #[test]
     fn built_in_plugins_expose_their_monitoring_contract() {
         let plugins = catalog();
-        assert_eq!(plugins.len(), 6);
+        assert_eq!(plugins.len(), 7);
         let claude = plugins
             .iter()
             .find(|plugin| plugin.kind() == IntegrationKind::Claude)

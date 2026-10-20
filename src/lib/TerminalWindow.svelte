@@ -328,9 +328,11 @@
   let accentOpacity = $state(100);
   let darkBase = $state<Preferences["darkBase"]>("theme");
   let lightBase = $state<Preferences["lightBase"]>("theme");
+  let customDarkSurfaces = $state<Preferences["customDarkSurfaces"]>({});
+  let customLightSurfaces = $state<Preferences["customLightSurfaces"]>({});
   let uiFont = $state("default");
   let codeFont = $state("default");
-  const baseCss = $derived([appearanceBaseCss(darkBase, lightBase), appearanceFontCss(uiFont, codeFont)].filter(Boolean).join(";"));
+  const baseCss = $derived([appearanceBaseCss(darkBase, lightBase, customDarkSurfaces, customLightSurfaces), appearanceFontCss(uiFont, codeFont)].filter(Boolean).join(";"));
   $effect(() => { void ensureCustomFonts({ uiFont, codeFont }); });
   const workflowGroup = $derived.by(() => {
     if (!windowState?.groupId) return undefined;
@@ -1577,6 +1579,8 @@
       accentOpacity = nextPreferences.accentOpacity;
       darkBase = nextPreferences.darkBase;
       lightBase = nextPreferences.lightBase;
+      customDarkSurfaces = nextPreferences.customDarkSurfaces ?? {};
+      customLightSurfaces = nextPreferences.customLightSurfaces ?? {};
       uiFont = nextPreferences.uiFont;
       codeFont = nextPreferences.codeFont;
       workflowGroups = nextPreferences.workflowGroups;
@@ -1673,6 +1677,8 @@
         accentOpacity = payload.accentOpacity;
         darkBase = payload.darkBase;
         lightBase = payload.lightBase;
+        customDarkSurfaces = payload.customDarkSurfaces ?? {};
+        customLightSurfaces = payload.customLightSurfaces ?? {};
         uiFont = payload.uiFont;
         codeFont = payload.codeFont;
         workflowGroups = payload.workflowGroups;

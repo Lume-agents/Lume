@@ -218,6 +218,25 @@ export interface HistoryEntry {
   createdAt: number;
 }
 
+export interface SurfacePalette {
+  canvas?: string;
+  surface?: string;
+  sidebar?: string;
+}
+
+export type BackdropStyle = "solid" | "linear" | "radial" | "mesh";
+
+/** What sits behind the Workspace chats: a plain color or gradient, plus optional effects. */
+export interface Backdrop {
+  style: BackdropStyle;
+  from?: string;
+  to?: string;
+  angle: number;
+  grain: number;
+  vignette: number;
+  glow: number;
+}
+
 export interface Preferences {
   language: "en" | "pt-BR";
   startupMode: "ask" | "orb" | "workspace";
@@ -228,9 +247,9 @@ export interface Preferences {
   accentColor?: string;
   accentOpacity: number;
   /** Neutral dark surfaces; "theme" keeps the tinted ones of the base theme. */
-  darkBase: "theme" | "graphite" | "black" | "slate";
+  darkBase: "theme" | "graphite" | "black" | "slate" | "custom";
   /** Neutral light surfaces; "theme" keeps the tinted ones of the base theme. */
-  lightBase: "theme" | "white" | "gray" | "beige";
+  lightBase: "theme" | "white" | "gray" | "beige" | "custom";
   /** "default", a bundled font id, "system", or "custom:<id>". */
   uiFont: string;
   codeFont: string;
@@ -240,6 +259,10 @@ export interface Preferences {
   workspaceLightBackgroundOpacity: number;
   workspaceDarkBackgroundColor?: string;
   workspaceDarkBackgroundOpacity: number;
+  /** Surface colors of the "custom" neutral base, one set per color mode. */
+  customDarkSurfaces: SurfacePalette;
+  customLightSurfaces: SurfacePalette;
+  backdrop: Backdrop;
   soundEnabled: boolean;
   soundVolume: number;
   popupNotificationsEnabled: boolean;

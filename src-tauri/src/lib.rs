@@ -2047,13 +2047,13 @@ fn set_preferences(
     }
     if !matches!(
         preferences.dark_base.as_str(),
-        "theme" | "graphite" | "black" | "slate"
+        "theme" | "graphite" | "black" | "slate" | "custom"
     ) {
         return Err("Unknown dark base".into());
     }
     if !matches!(
         preferences.light_base.as_str(),
-        "theme" | "white" | "gray" | "beige"
+        "theme" | "white" | "gray" | "beige" | "custom"
     ) {
         return Err("Unknown light base".into());
     }
@@ -2087,6 +2087,34 @@ fn set_preferences(
             valid.then(|| color.to_ascii_lowercase())
         });
     }
+    let hex = |color: Option<String>| {
+        color.and_then(|color| {
+            let valid = color.len() == 7
+                && color.starts_with('#')
+                && color[1..].chars().all(|value| value.is_ascii_hexdigit());
+            valid.then(|| color.to_ascii_lowercase())
+        })
+    };
+    for palette in [
+        &mut preferences.custom_dark_surfaces,
+        &mut preferences.custom_light_surfaces,
+    ] {
+        palette.canvas = hex(palette.canvas.take());
+        palette.surface = hex(palette.surface.take());
+        palette.sidebar = hex(palette.sidebar.take());
+    }
+    if !matches!(
+        preferences.backdrop.style.as_str(),
+        "solid" | "linear" | "radial" | "mesh"
+    ) {
+        return Err("Unknown backdrop style".into());
+    }
+    preferences.backdrop.from = hex(preferences.backdrop.from.take());
+    preferences.backdrop.to = hex(preferences.backdrop.to.take());
+    preferences.backdrop.angle = preferences.backdrop.angle.min(360);
+    preferences.backdrop.grain = preferences.backdrop.grain.min(100);
+    preferences.backdrop.vignette = preferences.backdrop.vignette.min(100);
+    preferences.backdrop.glow = preferences.backdrop.glow.min(100);
     preferences.accent_opacity = preferences.accent_opacity.clamp(20, 100);
     preferences.workspace_background_opacity =
         preferences.workspace_background_opacity.clamp(35, 100);

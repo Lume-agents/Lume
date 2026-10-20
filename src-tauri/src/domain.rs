@@ -713,6 +713,43 @@ pub struct WorkflowHistoryRecord {
     pub steps: Vec<WorkflowStepHistory>,
 }
 
+/// Surface colors a person picked for one color mode; a missing one keeps the theme's own.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SurfacePalette {
+    pub canvas: Option<String>,
+    pub surface: Option<String>,
+    pub sidebar: Option<String>,
+}
+
+/// What sits behind the Workspace chats: a plain color, a gradient, and optional effects.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Backdrop {
+    /// "solid", "linear", "radial" or "mesh".
+    pub style: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub angle: u16,
+    pub grain: u8,
+    pub vignette: u8,
+    pub glow: u8,
+}
+
+impl Default for Backdrop {
+    fn default() -> Self {
+        Self {
+            style: "solid".into(),
+            from: None,
+            to: None,
+            angle: 160,
+            grain: 0,
+            vignette: 0,
+            glow: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Preferences {
@@ -738,6 +775,10 @@ pub struct Preferences {
     pub workspace_light_background_opacity: u8,
     pub workspace_dark_background_color: Option<String>,
     pub workspace_dark_background_opacity: u8,
+    /// Surface colors for the "custom" neutral base, one set per color mode.
+    pub custom_dark_surfaces: SurfacePalette,
+    pub custom_light_surfaces: SurfacePalette,
+    pub backdrop: Backdrop,
     pub sound_enabled: bool,
     pub sound_volume: u8,
     pub popup_notifications_enabled: bool,
@@ -783,6 +824,9 @@ impl Default for Preferences {
             workspace_light_background_opacity: 96,
             workspace_dark_background_color: None,
             workspace_dark_background_opacity: 96,
+            custom_dark_surfaces: SurfacePalette::default(),
+            custom_light_surfaces: SurfacePalette::default(),
+            backdrop: Backdrop::default(),
             sound_enabled: true,
             sound_volume: 55,
             popup_notifications_enabled: true,

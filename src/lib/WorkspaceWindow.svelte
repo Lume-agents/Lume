@@ -13,7 +13,6 @@
   import QRCode from "qrcode";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import LumeLogo from "$lib/LumeLogo.svelte";
-  import AccentColorPicker from "$lib/AccentColorPicker.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
@@ -26,7 +25,8 @@
   import WorkspaceSidebarToggleIcon from "$lib/WorkspaceSidebarToggleIcon.svelte";
   import { copyResolvedColorTokens } from "$lib/floatingTheme";
   import { codeFonts, ensureCustomFonts, importCustomFont, listCustomFonts, removeCustomFont, uiFonts, type CustomFont } from "$lib/fonts";
-  import { appearanceAttributes, appearanceThemes, darkBases, lightBases, type AppearanceTheme } from "$lib/appearance";
+  import { appearanceAttributes, appearanceThemes, backdropBackground, backdropEffects, normalizeBackdrop, workspaceCanvas } from "$lib/appearance";
+  import AppearanceSettings from "$lib/AppearanceSettings.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
@@ -789,28 +789,19 @@
   // zero width, so drafts and streams survive), which leaves the room to the diff.
   const reviewFocusSession = $derived(reviewOpen && !boardOpen && !maximizedSession && secondary ? focusedSession : null);
   const darkMode = $derived(preferences.darkMode ?? systemDark);
-  const appearanceMode = $derived<"system" | "light" | "dark">(
-    preferences.darkMode === undefined ? "system" : preferences.darkMode ? "dark" : "light"
-  );
   const appearance = $derived(appearanceAttributes(preferences));
   $effect(() => { void ensureCustomFonts(preferences); });
   const selectedAppearanceTheme = $derived(
     appearanceThemes.find((theme) => theme.value === appearance.theme) ?? appearanceThemes[0]
   );
-  const workspaceCanvasColor = $derived(
-    darkMode
-      ? preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor ?? selectedAppearanceTheme.darkSurface
-      : preferences.workspaceLightBackgroundColor ?? selectedAppearanceTheme.lightSurface
-  );
-  const workspaceCanvasOpacity = $derived(
-    darkMode
-      ? preferences.workspaceDarkBackgroundColor
-        ? preferences.workspaceDarkBackgroundOpacity
-        : preferences.workspaceBackgroundColor
-          ? preferences.workspaceBackgroundOpacity
-          : preferences.workspaceDarkBackgroundOpacity
-      : preferences.workspaceLightBackgroundOpacity
-  );
+  const canvas = $derived(workspaceCanvas(preferences, darkMode));
+  const workspaceCanvasColor = $derived(canvas.color);
+  const backdrop = $derived(normalizeBackdrop(preferences.backdrop));
+  const backdropAccent = $derived(appearance.accent ?? selectedAppearanceTheme.accent);
+  const backdropPaint = $derived(backdropBackground(backdrop, canvas.color, backdropAccent));
+  const backdropLayers = $derived(backdropEffects(backdrop, backdropAccent));
+  // A gradient shows through the chats, so their own canvas color steps aside.
+  const workspaceCanvasOpacity = $derived(backdropPaint ? 0 : canvas.opacity);
   const detectedProjects = $derived.by(() => {
     const projects = new Map<string, string>();
     for (const [key, profile] of Object.entries(preferences.projectProfiles)) {
@@ -2058,16 +2049,9 @@
     }
   }
 
-  function selectAppearance(mode: "system" | "light" | "dark") {
-    void updatePreference("darkMode", mode === "system" ? undefined : mode === "dark");
-  }
-
-  function selectTheme(theme: AppearanceTheme) {
-    void savePreferencePatch({ appearanceTheme: theme });
-  }
-
   async function savePreferencePatch(patch: Partial<Preferences>) {
-    if (settingsSaving) return false;
+    // A later change waits for the save in flight instead of being dropped (a slider can commit right behind another).
+    while (settingsSaving) await new Promise((resolve) => setTimeout(resolve, 30));
     const previous = preferences;
     const next = { ...preferences, ...patch };
     preferences = next;
@@ -3074,63 +3058,8 @@
             <summary>{tr("Appearance", "Aparência")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.appearance}
-            <div class="appearance-options" aria-label={tr("Color mode", "Modo de cores")}>
-              {#each [
-                { id: "system", label: tr("System", "Sistema") },
-                { id: "light", label: tr("Light", "Claro") },
-                { id: "dark", label: tr("Dark", "Escuro") },
-              ] as option (option.id)}
-                <button
-                  class:active={appearanceMode === option.id}
-                  class="appearance-option mode-{option.id}"
-                  type="button"
-                  aria-pressed={appearanceMode === option.id}
-                  disabled={settingsSaving}
-                  onclick={() => selectAppearance(option.id as "system" | "light" | "dark")}
-                >
-                  <span class="appearance-preview" aria-hidden="true"><i></i><b></b><em></em></span>
-                  <strong>{option.label}</strong>
-                </button>
-              {/each}
-            </div>
-            <p class="theme-label"><strong>{tr("Surface tint", "Tom das superfícies")}</strong>{#if (darkMode ? preferences.darkBase : preferences.lightBase) !== "theme"}<small>{tr("Not visible with a neutral surface.", "Sem efeito com superfície neutra.")}</small>{/if}</p>
-            <div class="theme-options" class:overridden={(darkMode ? preferences.darkBase : preferences.lightBase) !== "theme"} aria-label={tr("Surface tint", "Tom das superfícies")}>
-              {#each appearanceThemes as theme (theme.value)}
-                <button
-                  class:active={appearance.theme === theme.value}
-                  type="button"
-                  aria-pressed={appearance.theme === theme.value}
-                  onclick={() => selectTheme(theme.value)}
-                >
-                  <span style:--theme-accent={theme.accent} style:--theme-surface={darkMode ? theme.darkSurface : theme.lightSurface}></span>
-                  {theme.label}
-                </button>
-              {/each}
-            </div>
-            <p class="theme-label"><strong>{tr("Neutral surfaces", "Superfícies neutras")}</strong></p>
-            {#if darkMode}
-              <div class="theme-options" aria-label={tr("Dark surface", "Superfície escura")}>
-                {#each darkBases as base (base.value)}
-                  <button class:active={preferences.darkBase === base.value} type="button" aria-pressed={preferences.darkBase === base.value} onclick={() => void savePreferencePatch({ darkBase: base.value })}>
-                    <span style:--theme-accent={appearance.accent ?? selectedAppearanceTheme.accent} style:--theme-surface={base.pigments?.surface ?? selectedAppearanceTheme.darkSurface}></span>
-                    {tr(base.label, base.labelPt)}
-                  </button>
-                {/each}
-              </div>
-            {:else}
-              <div class="theme-options" aria-label={tr("Light surface", "Superfície clara")}>
-                {#each lightBases as base (base.value)}
-                  <button class:active={preferences.lightBase === base.value} type="button" aria-pressed={preferences.lightBase === base.value} onclick={() => void savePreferencePatch({ lightBase: base.value })}>
-                    <span style:--theme-accent={appearance.accent ?? selectedAppearanceTheme.accent} style:--theme-surface={base.pigments?.surface ?? selectedAppearanceTheme.lightSurface}></span>
-                    {tr(base.label, base.labelPt)}
-                  </button>
-                {/each}
-              </div>
-            {/if}
-            <div class="workspace-setting-row accent-setting">
-              <span><strong>{tr("Accent color", "Cor de destaque")}</strong><small>{appearance.accent ?? tr("Following the surface tint", "Seguindo o tom das superfícies")}</small></span>
-              <AccentColorPicker value={appearance.accent} opacity={preferences.accentOpacity} readyColors={appearanceThemes.map((theme) => theme.accent)} fallback={appearanceThemes.find((theme) => theme.value === appearance.theme)?.accent ?? "#43b47d"} {language} label={tr("Accent color", "Cor de destaque")} onValueChange={(color, opacity) => void savePreferencePatch({ accentColor: color, accentOpacity: opacity })} onReset={() => void savePreferencePatch({ accentColor: undefined, accentOpacity: 100 })} />
-            </div>
+            <AppearanceSettings {preferences} {language} dark={darkMode} disabled={settingsSaving} onpatch={savePreferencePatch}>
+              {#snippet typography()}
             <div class="workspace-setting-row font-setting">
               <span><strong>{tr("Interface font", "Fonte da interface")}</strong></span>
               <LumeSelect ariaLabel={tr("Interface font", "Fonte da interface")} value={preferences.uiFont} minWidth={150} options={fontOptions(uiFonts)} onValueChange={(value) => void savePreferencePatch({ uiFont: value })} />
@@ -3147,14 +3076,8 @@
                 <button class="font-import" type="button" onclick={() => void deleteFont(font)}><LumeIcon name="trash" size={14} />{tr("Remove", "Remover")}</button>
               </div>
             {/each}
-            <div class="workspace-setting-row accent-setting">
-              <span><strong>{tr("Light workspace", "Workspace claro")}</strong><small>{preferences.workspaceLightBackgroundColor ?? tr("Using the light preset", "Usando o preset claro")} · {preferences.workspaceLightBackgroundOpacity}%</small></span>
-              <AccentColorPicker value={preferences.workspaceLightBackgroundColor} opacity={preferences.workspaceLightBackgroundOpacity} fallback={selectedAppearanceTheme.lightSurface} readyColors={["#f7f8f4", "#eef2ec", "#e9eee8", "#e9eee3", "#e5edf0", "#ece9f1", "#f0e9e2"]} minimumOpacity={35} {language} label={tr("Light workspace background", "Fundo claro do Workspace")} onValueChange={(color, opacity) => void savePreferencePatch({ workspaceLightBackgroundColor: color, workspaceLightBackgroundOpacity: opacity })} onReset={() => void savePreferencePatch({ workspaceLightBackgroundColor: undefined, workspaceLightBackgroundOpacity: 96 })} />
-            </div>
-            <div class="workspace-setting-row accent-setting">
-              <span><strong>{tr("Dark workspace", "Workspace escuro")}</strong><small>{preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor ?? tr("Using the dark preset", "Usando o preset escuro")} · {workspaceCanvasOpacity}%</small></span>
-              <AccentColorPicker value={preferences.workspaceDarkBackgroundColor ?? preferences.workspaceBackgroundColor} opacity={workspaceCanvasOpacity} fallback={selectedAppearanceTheme.darkSurface} readyColors={["#0f1915", "#14231c", "#182116", "#101f28", "#1b1726", "#261a13", "#121916"]} minimumOpacity={35} {language} label={tr("Dark workspace background", "Fundo escuro do Workspace")} onValueChange={(color, opacity) => void savePreferencePatch({ workspaceDarkBackgroundColor: color, workspaceDarkBackgroundOpacity: opacity })} onReset={() => void savePreferencePatch({ workspaceDarkBackgroundColor: undefined, workspaceDarkBackgroundOpacity: 96, workspaceBackgroundColor: undefined })} />
-            </div>
+              {/snippet}
+              {#snippet backdropImage()}
             <div class="workspace-setting-row wallpaper-setting" data-tooltip={workspaceBackgroundImage ? tr("Stored locally on this device", "Salva localmente neste dispositivo") : tr("Add your own workspace backdrop", "Adicione um plano de fundo ao Workspace")}>
               <span><strong>{tr("Background image", "Imagem de fundo")}</strong></span>
               {#if workspaceBackgroundImage}<i class="wallpaper-preview" style:background-image={`url("${workspaceBackgroundImage}")`} aria-hidden="true"></i>{/if}
@@ -3183,6 +3106,8 @@
                 <input class="workspace-switch" type="checkbox" checked={agentMessageSurface} onchange={(event) => setAgentMessageSurface(event.currentTarget.checked)} />
               </label>
             {/if}
+              {/snippet}
+            </AppearanceSettings>
             {/if}
             </div>
           </details>
@@ -3537,6 +3462,10 @@
       ondrop={dropSessionInWorkspace}
     >
     <div class:covered={boardOpen} class="board-chat-layer" inert={boardOpen} aria-hidden={boardOpen}>
+    {#if backdropPaint}<div class="workspace-backdrop" style:background={backdropPaint} aria-hidden="true"></div>{/if}
+    {#if backdropLayers.glow}<div class="workspace-backdrop" style:background={backdropLayers.glow} aria-hidden="true"></div>{/if}
+    {#if backdropLayers.vignette}<div class="workspace-backdrop over" style:background={backdropLayers.vignette} aria-hidden="true"></div>{/if}
+    {#if backdropLayers.grain}<div class="workspace-backdrop over grain" style:background-image={backdropLayers.grain} style:opacity={backdropLayers.grainOpacity} aria-hidden="true"></div>{/if}
     {#if workspaceBackgroundImage}
       <div
         class="workspace-wallpaper"
@@ -3848,20 +3777,6 @@
   .settings-section-content { padding-bottom: 18px; }
   .settings-loading-hint { margin: 3px 0 9px; color: var(--workspace-muted); font-size: 8px; line-height: 1.4; }
   .settings-hint { margin: 2px 0 10px; color: var(--workspace-muted); font-size: 8px; line-height: 1.5; }
-  .appearance-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
-  .appearance-option { min-width: 0; padding: 7px; display: grid; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: transparent; cursor: pointer; text-align: left; transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
-  .appearance-option:hover { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 32%, var(--workspace-line)); transform: translateY(-1px); }
-  .appearance-option.active { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 48%, transparent); background: var(--workspace-accent-soft); }
-  .appearance-option > strong { overflow: hidden; font-size: 8px; font-weight: 760; text-overflow: ellipsis; white-space: nowrap; }
-  .appearance-preview { height: 43px; padding: 6px; display: grid; grid-template-columns: 13px 1fr; grid-template-rows: 7px 1fr; gap: 4px; overflow: hidden; border: 1px solid rgba(46, 67, 56, .13); border-radius: 7px; background: #f6f5ef; }
-  .appearance-preview i { grid-row: 1 / -1; border-radius: 3px; background: #dfe5db; }.appearance-preview b { border-radius: 2px; background: #d6dfd8; }.appearance-preview em { border-radius: 3px; background: #fffefa; }
-  .mode-dark .appearance-preview { border-color: rgba(208, 229, 218, .11); background: #101815; }.mode-dark .appearance-preview i { background: #1d2923; }.mode-dark .appearance-preview b { background: #28372f; }.mode-dark .appearance-preview em { background: #17221d; }
-  .mode-system .appearance-preview { background: linear-gradient(120deg, #f6f5ef 0 49.5%, #101815 50.5% 100%); }.mode-system .appearance-preview i { background: linear-gradient(120deg, #dfe5db 0 49.5%, #1d2923 50.5% 100%); }.mode-system .appearance-preview b { background: linear-gradient(120deg, #d6dfd8 0 49.5%, #28372f 50.5% 100%); }.mode-system .appearance-preview em { background: linear-gradient(120deg, #fffefa 0 49.5%, #17221d 50.5% 100%); }
-  .theme-options { margin-top: 10px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 5px; }
-  .theme-options button { min-width: 0; padding: 7px 4px; display: grid; justify-items: center; gap: 5px; border: 1px solid transparent; border-radius: 9px; color: var(--workspace-muted); background: transparent; font-size: 7px; font-weight: 720; cursor: pointer; }
-  .theme-options button:hover, .theme-options button.active { color: var(--workspace-strong); background: var(--workspace-subtle); }
-  .theme-options button.active { border-color: color-mix(in srgb, var(--theme-accent) 48%, transparent); }
-  .theme-options button span { width: 30px; height: 20px; border: 5px solid var(--theme-surface); border-radius: 7px; background: var(--theme-accent); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .15); }
   .accent-setting { margin-top: 7px; }
   .wallpaper-setting { position: relative; max-width: 100%; overflow: hidden; }
   .wallpaper-input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
@@ -3893,10 +3808,6 @@
   .diagnostic-list i { width: 5px; height: 5px; border-radius: 50%; background: #c38b3e; }
   .diagnostic-list b { color: var(--workspace-text); font-weight: 700; }
   .inline-actions { padding-top: 10px; display: flex; justify-content: flex-end; gap: 6px; }
-  .theme-label { margin: 6px 0 -2px; display: grid; gap: 2px; }
-  .theme-label strong { color: var(--workspace-strong); font-size: 11px; }
-  .theme-label small { color: var(--workspace-muted); font-size: 10px; }
-  .theme-options.overridden { opacity: .5; }
   .font-setting { align-items: center; }
   .font-import { min-height: 28px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-text); background: var(--workspace-subtle); font-size: 10px; cursor: pointer; }
   .font-import:hover { border-color: var(--workspace-accent); color: var(--workspace-accent); }
@@ -4116,6 +4027,8 @@
   /* The board covers the chats: they stay mounted (scroll and drafts survive) but stop painting and animating. */
   .board-chat-layer.covered { visibility: hidden; }
   .board-chat-layer.covered :global(*), .board-chat-layer.covered :global(*::before), .board-chat-layer.covered :global(*::after) { animation-play-state: paused !important; }
+  .workspace-backdrop { position: absolute; z-index: -1; inset: 0; pointer-events: none; }
+  .workspace-backdrop.over { z-index: 2; }
   .workspace-wallpaper { position: absolute; z-index: -1; inset: 0; width: 100%; height: 100%; background-position: center; background-size: cover; background-repeat: no-repeat; pointer-events: none; }
   .workbench.split { grid-template-columns: minmax(0, 1fr) 7px minmax(0, 1fr); }
   .workbench.resizing { user-select: none; }

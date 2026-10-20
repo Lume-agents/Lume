@@ -2933,7 +2933,7 @@
               <span class="session-icon"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName(session)} size={34} /><i class="session-status-dot status-{waitingForChildren ? 'subagents' : session.status}" aria-hidden="true"></i></span>
               <span class="session-copy">
                 <strong>{sessionName(session)}</strong>
-                <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{session.agentLabel} · {sessionSubtitle(session)}</span>{#if session.forkedFrom}<span class="session-fork" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)} aria-label={tr("Fork", "Fork")}><LumeIcon name="fork" size={10} /></span>{/if}</small>
+                <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{session.agentLabel} · {sessionSubtitle(session)}</span>{#if session.source === "web"}<span class="source-web" title={tr("Web chat, read through the browser Companion", "Chat da web, lido pelo Companion do navegador")}>Web</span>{/if}{#if session.forkedFrom}<span class="session-fork" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)} aria-label={tr("Fork", "Fork")}><LumeIcon name="fork" size={10} /></span>{/if}</small>
                 <em class="status-{waitingForChildren ? 'subagents' : session.status}"><i></i>{waitingForChildren ? tr("Waiting for subagents", "Aguardando subagentes") : statusLabel(session)}</em>
               </span>
             {#if childAgents.length}
@@ -4052,6 +4052,7 @@
   .session-copy strong, .session-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-copy strong { color: var(--workspace-strong); font-size: 10px; font-weight: 720; letter-spacing: -.01em; }
   .session-copy small { color: var(--workspace-muted); font-size: 8px; line-height: 1.3; }
+  .source-web { flex: 0 0 auto; padding: 0 5px; border: 1px solid color-mix(in srgb, #4e98ca 55%, transparent); border-radius: 5px; color: #4e98ca; background: color-mix(in srgb, #4e98ca 10%, transparent); font-size: 8px; font-weight: 800; letter-spacing: .06em; line-height: 13px; text-transform: uppercase; }
   .session-copy .session-meta { display: flex; align-items: center; gap: 4px; }
   .session-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-meta .session-fork { flex: 0 0 auto; min-width: auto; display: inline-flex; color: var(--workspace-accent); }

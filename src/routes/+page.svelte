@@ -5,11 +5,11 @@
   import { groupSessions, readSidebarGroups, sidebarGroupsKey, writeSidebarGroups, type SidebarGroupState } from "$lib/sidebarGroups";
   import { cubicOut } from "svelte/easing";
   import { fade, fly, slide } from "svelte/transition";
-  import { getVersion } from "@tauri-apps/api/app";
   import { emit, listen } from "@tauri-apps/api/event";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import { relaunch } from "@tauri-apps/plugin-process";
-  import { check, type Update } from "@tauri-apps/plugin-updater";
+  import { appUpdates, appUpdateAction, startAppUpdatesOwner } from "$lib/appUpdateRuntime";
+  import UpdateBanner from "$lib/UpdateBanner.svelte";
+  import AppUpdateNotice from "$lib/AppUpdateNotice.svelte";
   import QRCode from "qrcode";
   import {
     availableMonitors,
@@ -22,7 +22,6 @@
   import AccentColorPicker from "$lib/AccentColorPicker.svelte";
   import { ensureCustomFonts } from "$lib/fonts";
   import { appearanceAttributes, appearanceThemes, darkBases, lightBases } from "$lib/appearance";
-  import LumeLogo from "$lib/LumeLogo.svelte";
   import OrbResponse from "$lib/OrbResponse.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
   import {
@@ -167,14 +166,6 @@
     | "whiteboardShortcut"
     | "workspaceShortcut";
   type MonitorOption = { id: string; label: string };
-  type UpdateState =
-    | "idle"
-    | "checking"
-    | "up_to_date"
-    | "available"
-    | "downloading"
-    | "ready"
-    | "error";
 
   const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const runtimePlatform = typeof navigator === "undefined"
@@ -369,15 +360,11 @@
     .map((radius) => `${radius + (21 - radius) * morphProgress}px`).join(" "));
   let mascotAwake = $state(false);
   let mascotSleepTimer: ReturnType<typeof setTimeout> | undefined;
-  let appVersion = $state("0.4.0");
-  let updateState = $state<UpdateState>("idle");
-  let availableVersion = $state<string | null>(null);
-  let updateDetail = $state("Updates are checked automatically.");
-  let updateProgress = $state<number | null>(null);
+  const updateState = $derived($appUpdates.status);
+  let updatePresentationReady = $state(false);
   let dismissedAgentAlertIds = $state<string[]>([]);
   let rateLimitRefreshRequested = false;
   let antigravityRateLimitRefreshRequested = false;
-  let pendingUpdate: Update | null = null;
   let suppressCompactToggle = false;
   let dragState: {
     pointerId: number;
@@ -815,6 +802,11 @@
     let stopMobileDeviceListening: (() => void) | undefined;
     let stopWorkspaceFailureListening: (() => void) | undefined;
     let stopShortcutStatusListening: (() => void) | undefined;
+    let stopUpdates: (() => void) | undefined;
+    void startAppUpdatesOwner().then((stop) => {
+      if (disposed) stop();
+      else stopUpdates = stop;
+    }).catch((error) => reportPanelBanner({ id: "update-start-error", message: String(error), tone: "error" }));
     if (isTauri) {
       void watchShortcutRegistrationError((error) => {
         if (!disposed) shortcutRegistrationError = error;
@@ -830,7 +822,6 @@
       }).catch(() => undefined);
     }
     let pollTimer: ReturnType<typeof setInterval> | undefined;
-    let updateTimer: ReturnType<typeof setInterval> | undefined;
     let resumeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     let sessionRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     const refreshAfterResume = () => {
@@ -845,8 +836,6 @@
     window.addEventListener("focus", refreshAfterResume);
     window.addEventListener("pageshow", refreshAfterResume);
     document.addEventListener("visibilitychange", refreshWhenVisible);
-
-    updateTimer = setInterval(() => void checkForUpdates(), 6 * 60 * 60 * 1_000);
 
     void (async () => {
       const [nextPreferences, nextDisplayBackend] = await Promise.all([
@@ -869,6 +858,7 @@
       await positionWindow();
       overlayReady = true;
       await routeStartupMode();
+      updatePresentationReady = true;
 
       const [nextSessions, nextIntegrations, nextVscodeStatus, nextPlugins, nextTerminals] = await Promise.all([
         loadSessions(),
@@ -892,7 +882,6 @@
           .catch(() => undefined);
       }
       selectedProfileKey = detectedProjects[0]?.key ?? null;
-      void initializeUpdater();
       integrations = nextIntegrations;
       vscodeStatus = nextVscodeStatus;
       externalPlugins = nextPlugins;
@@ -969,85 +958,15 @@
       window.removeEventListener("pointerup", finishOverlayDragFromWindow, true);
       window.removeEventListener("pointercancel", finishOverlayDragFromWindow, true);
       if (pollTimer) clearInterval(pollTimer);
-      if (updateTimer) clearInterval(updateTimer);
+      stopUpdates?.();
       if (resumeRefreshTimer) clearTimeout(resumeRefreshTimer);
       if (sessionRefreshTimer) clearTimeout(sessionRefreshTimer);
       if (mascotSleepTimer) clearTimeout(mascotSleepTimer);
       orbSettleRevision += 1;
-      if (pendingUpdate) void pendingUpdate.close();
     };
   });
 
-  async function initializeUpdater() {
-    if (!isTauri) {
-      updateState = "up_to_date";
-      return;
-    }
-
-    try {
-      appVersion = await getVersion();
-    } catch {
-      // Keep the package version as fallback.
-    }
-    await checkForUpdates();
-  }
-
-  async function checkForUpdates(): Promise<Update | null> {
-    if (
-      !isTauri ||
-      updateState === "checking" ||
-      updateState === "downloading" ||
-      updateState === "ready"
-    ) return pendingUpdate;
-    updateState = "checking";
-    updateDetail = tr("Checking for a new version…", "Procurando uma nova versão…");
-    updateProgress = null;
-
-    try {
-      const nextUpdate = await check({
-        timeout: 15_000,
-        headers: {
-          "Cache-Control": "no-cache",
-          Pragma: "no-cache",
-        },
-      });
-      if (pendingUpdate && pendingUpdate !== nextUpdate) await pendingUpdate.close();
-      pendingUpdate = nextUpdate;
-      availableVersion = nextUpdate?.version ?? null;
-      if (nextUpdate) {
-        updateState = "available";
-        updateDetail = tr(
-          `Version ${nextUpdate.version} is ready to download.`,
-          `A versão ${nextUpdate.version} está pronta para baixar.`,
-        );
-      } else {
-        updateState = "up_to_date";
-        updateDetail = tr("You are using the latest version.", "Você está usando a versão mais recente.");
-      }
-      return nextUpdate;
-    } catch (error) {
-      updateState = "error";
-      updateDetail = tr(
-        "Could not check for updates right now. Try again shortly.",
-        "Não foi possível verificar agora. Tente novamente em instantes.",
-      );
-      reportPanelBanner({ id: "update-check-error", message: `${updateDetail} ${String(error).replace(/^Error:\s*/, "")}`, tone: "error" });
-      return null;
-    }
-  }
-
-  async function handleUpdateButton() {
-    if (updateState === "checking" || updateState === "downloading" || updateState === "ready") {
-      return;
-    }
-    await checkForUpdates();
-  }
-
-  async function handleInstallUpdate() {
-    if (updateState !== "available") return;
-    const latestUpdate = await checkForUpdates();
-    if (latestUpdate && updateState === "available") await installAvailableUpdate();
-  }
+  async function checkForUpdates() { await appUpdateAction("check"); }
 
   async function handleCompanionUpdateRequest(payload: CompanionUpdateEvent) {
     for (let attempt = 0; updateState === "checking" && attempt < 40; attempt += 1) {
@@ -1064,45 +983,6 @@
       behavior: "smooth",
       block: "center",
     });
-    updateDetail = tr(
-      `Lume Mobile ${payload.mobileVersion} found this desktop update.`,
-      `O Lume Mobile ${payload.mobileVersion} encontrou esta atualização do desktop.`,
-    );
-  }
-
-  async function installAvailableUpdate() {
-    if (!pendingUpdate || updateState === "downloading") return;
-    updateState = "downloading";
-    updateDetail = tr("Downloading and preparing the update…", "Baixando e preparando a atualização…");
-    updateProgress = 0;
-    let downloaded = 0;
-    let total: number | undefined;
-
-    try {
-      await pendingUpdate.downloadAndInstall((event) => {
-        if (event.event === "Started") {
-          total = event.data.contentLength;
-          return;
-        }
-        if (event.event === "Progress") {
-          downloaded += event.data.chunkLength;
-          updateProgress = total ? Math.min(99, Math.round((downloaded / total) * 100)) : null;
-          return;
-        }
-        updateProgress = 100;
-      });
-      updateState = "ready";
-      updateDetail = tr("Update installed. Restarting Lume…", "Atualização instalada. Reiniciando o Lume…");
-      await relaunch();
-    } catch (error) {
-      updateState = "error";
-      updateDetail = tr(
-        "The update could not be installed. Try again.",
-        "A atualização não pôde ser instalada. Tente novamente.",
-      );
-      reportPanelBanner({ id: "update-install-error", message: `${updateDetail} ${String(error).replace(/^Error:\s*/, "")}`, tone: "error" });
-      updateProgress = null;
-    }
   }
 
   const announcedUsageAlerts = new Set<string>();
@@ -2873,13 +2753,6 @@
   ): Promise<boolean> {
     const previous = preferences;
     preferences = { ...preferences, [key]: value };
-    if (key === "language") {
-      if (updateState === "up_to_date") {
-        updateDetail = tr("You are using the latest version.", "Você está usando a versão mais recente.");
-      } else if (updateState === "idle") {
-        updateDetail = tr("Updates are checked automatically.", "As atualizações são verificadas automaticamente.");
-      }
-    }
     savingSettings = true;
     try {
       await savePreferences(preferences);
@@ -3119,6 +2992,7 @@
   onpointermove={wakeMascot}
   aria-label={tr("Lume, agent monitor", "Lume, monitor de agentes")}
 >
+  <AppUpdateNotice language={preferences.language} dark={effectiveDark} ready={updatePresentationReady && !startupChooserOpen && !onboardingOpen} surfaceOpen={expanded} noticeVisible={view !== "settings"} onReveal={async () => { if (!expanded) await toggleExpanded(); }} />
   {#if cliAssociationSessionId}
     {#key cliAssociationSessionId}
       <CodexCliAssociationDialog sessionId={cliAssociationSessionId} language={preferences.language} dark={effectiveDark} onClose={() => { cliAssociationSessionId = null; }} onLinked={() => refreshSessions(false)} />
@@ -3166,7 +3040,7 @@
       {/if}
     </button>
   {:else}
-    <section use:observePanelSize class:content-visible={contentVisible} class:morphing class:measuring={measuringPanel} class:palette-open={paletteOpen} class:launcher-open={launcherOpen} class:workflow-settings-open={workflowSettingsOpen} class:onboarding={startupChooserOpen || onboardingOpen} class:guide={onboardingOpen} class="panel">
+    <section use:observePanelSize class:content-visible={contentVisible} class:morphing class:measuring={measuringPanel} class:palette-open={paletteOpen} class:launcher-open={launcherOpen} class:workflow-settings-open={workflowSettingsOpen} class:onboarding={startupChooserOpen || onboardingOpen} class:guide={onboardingOpen} class:release-notes-open={$appUpdates.notes !== null && !startupChooserOpen && !onboardingOpen} class="panel">
       {#if onboardingOpen}
         <div class="startup-chooser-layer">
           <OnboardingGuide
@@ -4453,47 +4327,6 @@
                 {/if}
               </div>
             </details>
-            <section class="settings-section settings-section-static">
-              <div class="settings-section-label">{tr("About", "Sobre")}</div>
-              <div class="settings-section-content">
-                <div class="update-card" data-update-card aria-live="polite">
-              <div class="update-main">
-                <LumeLogo size={30} />
-                <div class="update-copy">
-                  <strong>Lume</strong>
-                  <span>{tr("Version", "Versão")} {appVersion}</span>
-                </div>
-                {#if updateState === "available"}
-                  <button class="update-available" type="button" onclick={handleInstallUpdate}>
-                    {tr("Update to", "Atualizar para")} {availableVersion}
-                  </button>
-                {:else}
-                  <button
-                    type="button"
-                    disabled={updateState === "checking" || updateState === "downloading" || updateState === "ready"}
-                    onclick={handleUpdateButton}
-                  >
-                    {updateState === "checking"
-                      ? tr("Checking…", "Verificando…")
-                      : updateState === "downloading"
-                        ? updateProgress === null
-                          ? tr("Downloading…", "Baixando…")
-                          : `${updateProgress}%`
-                        : updateState === "ready"
-                          ? tr("Restarting…", "Reiniciando…")
-                          : tr("Check", "Verificar")}
-                  </button>
-                {/if}
-              </div>
-              {#if updateState !== "error"}<p>{updateDetail}</p>{/if}
-              {#if updateState === "downloading" || updateState === "ready"}
-                <div class:indeterminate={updateProgress === null} class="update-progress" aria-hidden="true">
-                  <span style:width={`${updateProgress ?? 24}%`}></span>
-                </div>
-              {/if}
-                </div>
-              </div>
-            </section>
             <details use:animatedDisclosure class="settings-section">
               <summary class="settings-section-label">{tr("Reset", "Redefinir")}</summary>
               <div class="settings-section-content">
@@ -4512,6 +4345,7 @@
                 </div>
               </div>
             </details>
+            <UpdateBanner state={$appUpdates} language={preferences.language} dark={effectiveDark} />
             <span class:visible={savingSettings} class="save-state">{tr("Saving…", "Salvando…")}</span>
           </div>
         {/if}
@@ -4687,6 +4521,7 @@
 
   .panel.onboarding { min-height: 320px; }
   .panel.guide { min-height: 520px; }
+  .panel.release-notes-open { min-height: 460px; }
   .agent-setup-host { --agent-setup-font: 10px; color: inherit; --workspace-accent: #3f9b69; }
   .setup-guide-link { margin: 0 0 8px; padding: 0; border: 0; color: #3f9b69; background: transparent; font: inherit; font-size: 9px; font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
   .panel.onboarding > :not(.startup-chooser-layer) { display: none; }
@@ -5281,9 +5116,6 @@
     transform: rotate(180deg);
   }
   .settings-section > .settings-section-label:hover { color: #66766f; }
-  .settings-section-static > .settings-section-label { cursor: default; }
-  .settings-section-static > .settings-section-label::after { content: none; }
-  .settings-section-static > .settings-section-label:hover { color: #929c97; }
   .settings-section-content { padding: 0 1px 6px; }
   .integration-group-label { padding: 9px 2px 3px; color: #77847e; font-size: 8px; font-weight: 760; letter-spacing: 0.04em; text-transform: uppercase; }
   .integration-group-label:first-child { padding-top: 3px; }
@@ -5418,22 +5250,6 @@
   .permission-choice { display: flex; align-items: center; gap: 7px; }
   .permission-state { max-width: 62px; color: #919b96; font-size: 7px; font-weight: 720; line-height: 1.25; text-align: right; }
   .permission-state.allowed { color: #47745f; }
-  .update-card { padding: 12px; border: 1px solid rgba(92, 111, 103, 0.11); border-radius: 13px; background: rgba(84, 111, 99, 0.035); }
-  .update-main { display: flex; align-items: center; gap: 9px; }
-  .update-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
-  .update-copy strong { color: #35423d; font-size: 10px; }
-  .update-copy span,
-  .update-card p { color: #89938f; font-size: 9px; }
-  .update-card p { margin: 9px 0 0; line-height: 1.4; }
-  .update-main button { min-width: 63px; height: 27px; padding: 0 8px; border: 1px solid rgba(82, 105, 95, 0.14); border-radius: 8px; color: #577064; background: transparent; font-size: 9px; font-weight: 680; cursor: pointer; transition: background 150ms ease, transform 150ms ease; }
-  .update-main button.update-available { color: #f7fbf9; border-color: #527c6c; background: #527c6c; }
-  .update-main button:hover:not(:disabled) { transform: translateY(-1px); background: rgba(82, 112, 99, 0.09); }
-  .update-main button.update-available:hover { background: #476f60; }
-  .update-main button:disabled { cursor: default; opacity: 0.58; }
-  .update-progress { height: 2px; margin-top: 9px; overflow: hidden; border-radius: 999px; background: rgba(82, 112, 99, 0.1); }
-  .update-progress span { height: 100%; display: block; border-radius: inherit; background: #5f8ac7; transition: width 180ms ease; }
-  .update-progress.indeterminate span { animation: update-slide 1.15s ease-in-out infinite alternate; }
-  @keyframes update-slide { from { transform: translateX(-70%); } to { transform: translateX(320%); } }
   .save-state { display: block; color: #87928d; font-size: 9px; text-align: right; opacity: 0; transition: opacity 120ms ease; }
   .save-state.visible { opacity: 1; }
 
@@ -5482,7 +5298,6 @@
   .overlay-shell:not(.dark) .session-row:hover:not(.attention),
   .overlay-shell:not(.dark) .session-row.selected:not(.attention) { background: #c8ddcc; }
   .overlay-shell:not(.dark) .diagnostic-card,
-  .overlay-shell:not(.dark) .update-card,
   .overlay-shell:not(.dark) .mobile-access-card,
   .overlay-shell:not(.dark) .paired-device-card {
     border-color: rgba(70, 98, 85, 0.2);
@@ -5540,7 +5355,6 @@
   .overlay-shell.dark .integration-row strong,
   .overlay-shell.dark .field-row strong,
   .overlay-shell.dark .launch-setting strong { color: #e3ebe7; }
-  .overlay-shell.dark .update-copy strong { color: #e3ebe7; }
   .overlay-shell.dark .launcher-row strong { color: #dfe8e3; }
   .overlay-shell.dark .panel-header,
   .overlay-shell.dark footer,
@@ -5562,7 +5376,6 @@
   .overlay-shell.dark .session-name-editor input,
   .overlay-shell.dark .session-name-editor button { color: #c5d0cb; border-color: rgba(207, 223, 215, 0.12); background: rgba(222, 233, 228, 0.04); }
   .overlay-shell.dark .session-name-editor button.primary { color: #f4faf7; background: #397b5c; }
-  .overlay-shell.dark .update-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .terminal-picker-copy small { color: #9aaba3; }
   .overlay-shell.dark .project-name { color: #9aaba3; }
   .overlay-shell.dark .mobile-access-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }

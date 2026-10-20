@@ -37,7 +37,7 @@
     "test:macos-automation": "node --experimental-strip-types tests/macos-automation.test.mjs",
     "test:orb-docking": "node --experimental-strip-types tests/orb-docking.test.mjs",
     "test:orb-feedback": "node --experimental-strip-types tests/orb-feedback.test.mjs",
-    "test:workspace-startup": "node --experimental-strip-types tests/workspace-startup.test.mjs",
+    "test:workspace-startup": "node --experimental-strip-types tests/workspace-startup.test.mjs && node --experimental-strip-types tests/app-updates.test.mjs && node tests/app-updates-ui.test.mjs",
     "test:terminal-opening": "node --experimental-strip-types tests/terminal-opening.test.mjs",
     "test:surface-sizing": "node --experimental-strip-types tests/surface-sizing.test.mjs",
     "test:slash-commands": "node --experimental-strip-types tests/slash-commands.test.mjs",

@@ -527,7 +527,7 @@ fn map_event(event: BrowserEvent) -> Result<HookEvent, String> {
         agent,
         agent_label: Some(label.into()),
         session_name: Some(truncate(&event.title, 100)),
-        project: Some(truncate(&event.origin, 100)),
+        project: Some(label.into()),
         source: Some(SessionSource::Web),
         source_app,
         control_origin: SessionControlOrigin::External,
@@ -595,6 +595,34 @@ mod tests {
             event.permission.expect("permissão").resource,
             "https://chatgpt.com"
         );
+    }
+
+    #[test]
+    fn web_context_uses_the_service_name_instead_of_its_url() {
+        for (provider, origin, label) in [
+            ("chatgpt", "https://chatgpt.com", "ChatGPT"),
+            ("codex", "https://chat.openai.com", "ChatGPT"),
+            ("claude", "https://claude.ai", "Claude"),
+            ("deepseek", "https://chat.deepseek.com", "DeepSeek"),
+            ("gemini", "https://gemini.google.com", "Gemini"),
+        ] {
+            let event = map_event(BrowserEvent {
+                provider: provider.into(),
+                session_id: "hash-only".into(),
+                title: "Conversa de teste".into(),
+                origin: origin.into(),
+                browser: Some("chrome".into()),
+                protocol_version: 2,
+                state: BrowserState::PermissionRequired,
+                last_response: None,
+            })
+            .expect("evento web");
+
+            assert_eq!(event.project.as_deref(), Some(label));
+            assert_eq!(event.session_name.as_deref(), Some("Conversa de teste"));
+            assert_eq!(event.source_app.as_deref(), Some("chrome"));
+            assert_eq!(event.permission.expect("permissão").resource, origin);
+        }
     }
 
     #[test]

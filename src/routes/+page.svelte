@@ -2,6 +2,7 @@
   import { dev } from "$app/environment";
   import { onMount, setContext, tick } from "svelte";
   import { flip } from "svelte/animate";
+  import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
   import { groupSessions, readSidebarGroups, sidebarGroupsKey, writeSidebarGroups, type SidebarGroupState } from "$lib/sidebarGroups";
   import { cubicOut } from "svelte/easing";
   import { fade, fly, slide } from "svelte/transition";
@@ -3397,6 +3398,7 @@
                       <path d="m8 5 5 5-5 5" />
                     </svg>
                   </button>
+                  <span class="session-environment-marker"><SessionEnvironmentMenu sessionId={session.id} language={preferences.language} variant="sidebar" /></span>
 
                   {#if selectedId === session.id}
                     {@const capabilities = sessionCapabilities(session)}
@@ -4720,11 +4722,13 @@
 
 
   .session-row {
+    position: relative;
     border-bottom: 1px solid rgba(105, 123, 115, 0.1);
     transition: background 160ms ease;
   }
 
   .session-row:last-child { border-bottom: 0; }
+  .session-environment-marker { position: absolute; right: 30px; bottom: 9px; z-index: 2; }
   .session-row:hover:not(.attention),
   .session-row.selected:not(.attention) { margin: 0 -6px; padding: 0 6px; border-radius: 12px; background: rgba(76, 104, 92, 0.045); }
   .session-row.attention { margin: 0 -6px; padding: 0 6px; border-radius: 12px; background: linear-gradient(90deg, rgba(183, 111, 36, 0.11), rgba(183, 111, 36, 0.025) 76%, transparent); }

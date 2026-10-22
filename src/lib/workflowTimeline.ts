@@ -14,6 +14,12 @@ export interface TimelineSpan {
   label: string;
   detail?: string;
   failed?: boolean;
+  /** The activity the span shows, for the hover card. */
+  activity?: SessionActivity;
+  /** The row that handed its work to this span (the first span after a handoff). */
+  receivedFrom?: string;
+  /** The row this span's work went to (the last span before a handoff). */
+  handedTo?: string;
 }
 
 export interface TimelineRow {
@@ -123,6 +129,7 @@ export function buildWorkflowTimeline(input: {
         label: firstLine(activity.title) || activity.kind,
         detail: kind === "thinking" ? undefined : firstLine(activity.detail),
         failed: activity.status === "failed",
+        activity,
       });
     });
     if (row.status === "failed" && spans.length && spans[spans.length - 1].rowId === row.id) spans[spans.length - 1].failed = true;
@@ -136,6 +143,10 @@ export function buildWorkflowTimeline(input: {
     const approval = !(connection.advanceMode === "automatic" && !connection.requiresApproval);
     const done = target.start !== undefined && target.start >= source.end - 1_000;
     handoffs.push({ id: connection.id, from: source.id, to: target.id, at: source.end, approval, done });
+    const lastOfSource = [...spans].reverse().find((span) => span.rowId === source.id && span.kind !== "waiting");
+    if (lastOfSource) lastOfSource.handedTo = target.id;
+    const firstOfTarget = spans.find((span) => span.rowId === target.id && span.kind !== "waiting");
+    if (done && firstOfTarget) firstOfTarget.receivedFrom = source.id;
     // The target sat ready while the handoff waited (for approval, or for the step to be picked up).
     const waitEnd = done ? target.start! : live ? now : source.end;
     if (waitEnd - source.end > 800) {

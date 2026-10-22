@@ -1032,7 +1032,7 @@
         activitiesFor={(step) => (demoCells ? demoSession(sessionFor(step), demoCells[group?.steps.indexOf(step) ?? 0], now) : sessionFor(step))?.activities ?? []}
         labelFor={(step) => {
           const session = sessionFor(step);
-          return { title: step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role), subtitle: [name(session), session?.agentLabel].filter(Boolean).join(" · ") };
+          return { title: step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role), subtitle: [name(session), session?.agentLabel].filter(Boolean).join(" · "), agent: [session?.agentLabel, name(session)].filter(Boolean).join(" · ") };
         }}
         onOpenStep={(step) => { const session = sessionFor(step); if (session) onOpenChat(session); }}
       />

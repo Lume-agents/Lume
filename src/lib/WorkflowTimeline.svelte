@@ -3,7 +3,8 @@
   import type { SessionActivity, WorkflowConnectionDefinition, WorkflowRun, WorkflowStepDefinition } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import { localize } from "$lib/i18n";
-  import { formatAgentDuration } from "$lib/activityPresentation";
+  import { activityCategory, activityDisplayTitle, activityPreview, formatAgentDuration, type ActivityCategory } from "$lib/activityPresentation";
+  import ActivityTypeIcon from "$lib/ActivityTypeIcon.svelte";
   import { buildWorkflowTimeline, timelineTicks, type TimelineSpan } from "$lib/workflowTimeline";
   import LumeIcon from "$lib/LumeIcon.svelte";
 
@@ -13,7 +14,7 @@
     order: string[];
     connections: WorkflowConnectionDefinition[];
     activitiesFor: (step: WorkflowStepDefinition) => SessionActivity[];
-    labelFor: (step: WorkflowStepDefinition) => { title: string; subtitle: string };
+    labelFor: (step: WorkflowStepDefinition) => { title: string; subtitle: string; agent?: string };
     language: Language;
     onOpenStep?: (step: WorkflowStepDefinition) => void;
   } = $props();
@@ -46,6 +47,59 @@
   function kindLabel(span: TimelineSpan) {
     if (span.kind === "waiting") return span.label === "approval" ? tr("Waiting for your approval", "Aguardando sua aprovação") : span.label === "handoff" ? tr("Waiting for its turn", "Aguardando a vez") : tr("Waiting for you", "Aguardando você");
     return span.kind === "tool" ? tr("Tool call", "Ferramenta") : tr("Thinking", "Pensando");
+  }
+  /** The first sentence of an agent's message, without Markdown, short enough for a card. */
+  function sentence(text: string | undefined) {
+    const plain = (text ?? "").replace(/```[\s\S]*?```/g, " ").replace(/[*_`#>]+/g, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/\s+/g, " ").trim();
+    const first = plain.match(/^.{12,}?[.!?](?=\s|$)/)?.[0] ?? plain;
+    return first.length > 120 ? `${first.slice(0, 117).trimEnd()}…` : first;
+  }
+  function roleOf(rowId: string | undefined) {
+    const row = model?.rows.find((item) => item.id === rowId);
+    const step = row ? stepOf(row.stepId) : undefined;
+    return step ? labelFor(step).title : "";
+  }
+  function lastMessageOf(rowId: string) {
+    const row = model?.rows.find((item) => item.id === rowId);
+    const step = row ? stepOf(row.stepId) : undefined;
+    return step ? sentence(activitiesFor(step).findLast((activity) => activity.kind === "message")?.detail) : "";
+  }
+  /** What the hover card says about a span: the headline, the tool line and how it ended or connected. */
+  function describe(span: TimelineSpan) {
+    const activity = span.activity;
+    const category: ActivityCategory | "analysis" = activity ? activityCategory(activity) : span.kind === "waiting" ? "tool" : "analysis";
+    let headline: string;
+    let meta: string;
+    if (span.kind === "waiting") {
+      headline = kindLabel(span);
+      meta = tr("Waiting", "Aguardando");
+    } else if (span.kind === "tool" && activity) {
+      const files = activity.files.map((path) => path.split(/[\\/]/).at(-1)).filter(Boolean);
+      headline = activityDisplayTitle(activity, language);
+      meta = files.length ? files.slice(0, 3).join(", ") : activityPreview(activity) || headline;
+    } else if (activity?.detail) {
+      headline = sentence(activity.detail) || tr("Thought it through", "Pensou no próximo passo");
+      meta = tr("Thinking", "Pensando");
+    } else {
+      headline = span.receivedFrom ? tr("Read the handoff and planned the work", "Leu a passagem e planejou o trabalho") : tr("Read the request and planned the work", "Leu o pedido e planejou o trabalho");
+      meta = tr("Thinking", "Pensando");
+    }
+    const row = model?.rows.find((item) => item.id === span.rowId);
+    let outcome: { kind: "failed" | "link"; text: string } | null = null;
+    if (span.failed) {
+      const reason = (span.kind === "tool" ? activityPreview(activity!) : "") || row?.error || "";
+      outcome = { kind: "failed", text: reason ? tr(`Failed: ${reason}`, `Falhou: ${reason}`) : tr("Failed", "Falhou") };
+    } else if (span.kind === "waiting") {
+      const source = model?.handoffs.find((handoff) => handoff.to === span.rowId);
+      const summary = source ? lastMessageOf(source.from) : "";
+      if (source) outcome = { kind: "link", text: summary ? `${roleOf(source.from)}: ${summary}` : tr(`${roleOf(source.from)} finished`, `${roleOf(source.from)} terminou`) };
+    } else if (span.receivedFrom) {
+      const summary = lastMessageOf(span.receivedFrom);
+      outcome = { kind: "link", text: tr(`From ${roleOf(span.receivedFrom)}`, `De ${roleOf(span.receivedFrom)}`) + (summary ? `: ${summary}` : "") };
+    } else if (span.handedTo) {
+      outcome = { kind: "link", text: tr(`Handed over to ${roleOf(span.handedTo)}`, `Passado para ${roleOf(span.handedTo)}`) };
+    }
+    return { headline, meta, category, outcome };
   }
   function statusLine() {
     if (!model || !run) return "";
@@ -108,11 +162,15 @@
         {#if model.live}<span class="now" style:left={x(now)} aria-hidden="true"></span>{/if}
         {#if hovered}
           {@const index = rowIndex.get(hovered.rowId) ?? 0}
-          <div class="card" class:below={index === 0} style:left={`clamp(0px, calc(${x(hovered.start)} - 20px), calc(100% - 240px))`} style:--i={index} aria-hidden="true">
-            <small style:--c={colorOf(hovered.rowId)}><i></i>{kindLabel(hovered)}{#if hovered.failed} · <em>{tr("Failed", "Falhou")}</em>{/if}</small>
-            {#if hovered.label && hovered.kind !== "waiting"}<strong>{hovered.label}</strong>{/if}
-            {#if hovered.detail}<code>{hovered.detail}</code>{/if}
-            <span>{seconds(hovered.end - hovered.start)}{#if hovered.open} · {tr("in progress", "em andamento")}{/if}</span>
+          {@const row = model.rows.find((item) => item.id === hovered?.rowId)}
+          {@const step = row ? stepOf(row.stepId) : undefined}
+          {@const who = step ? labelFor(step) : { title: "", subtitle: "", agent: "" }}
+          {@const card = describe(hovered)}
+          <div class="card" class:below={index === 0} style:left={`clamp(0px, calc(${x(hovered.start)} - 24px), calc(100% - 290px))`} style:--i={index} style:--c={colorOf(hovered.rowId)} aria-hidden="true">
+            <small class="who"><i></i><b>{who.title}</b>{#if who.agent}<em>{who.agent}</em>{/if}</small>
+            <strong>{card.headline}</strong>
+            <span class="meta">{#if hovered.kind !== "waiting"}<ActivityTypeIcon category={card.category} size={13} /><code>{card.meta}</code><b>·</b>{/if}{seconds(hovered.end - hovered.start)}{#if hovered.open}<b>·</b>{tr("in progress", "em andamento")}{/if}</span>
+            {#if card.outcome}<span class="outcome {card.outcome.kind}">{#if card.outcome.kind === "failed"}<LumeIcon name="close" size={11} />{:else}<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3v6.5a2 2 0 0 0 2 2h6M9.5 8.5 12 11.5 9.5 14.5" /></svg>{/if}<span>{card.outcome.text}</span></span>{/if}
           </div>
         {/if}
       </div>
@@ -167,14 +225,20 @@
   .handoff .dot.bottom { bottom: -4px; }
   .now { position: absolute; z-index: 2; top: -4px; bottom: 20px; width: 0; border-left: 1.5px solid var(--workspace-strong); }
   .now::after { position: absolute; bottom: -5px; left: -5px; width: 9px; height: 9px; border-radius: 50%; content: ""; background: var(--workspace-strong); }
-  .card { position: absolute; z-index: 5; bottom: calc(100% - var(--i) * var(--row) - 4px); width: 240px; padding: 9px 11px; display: grid; gap: 3px; border: 1px solid var(--workspace-line); border-radius: 11px; background: var(--workspace-pane, var(--workspace-raised)); box-shadow: 0 12px 30px rgba(0, 0, 0, .22); pointer-events: none; }
-  .card.below { top: calc(var(--row) - 4px); bottom: auto; }
-  .card small { display: flex; align-items: center; gap: 6px; color: var(--workspace-muted); font-size: 10.5px; font-weight: 650; }
-  .card small i { width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
-  .card small em { color: #d9645c; font-style: normal; }
-  .card strong { overflow: hidden; color: var(--workspace-strong); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-  .card code { overflow: hidden; color: var(--workspace-text); font: 10.5px/1.45 var(--lume-font-code, ui-monospace, monospace); text-overflow: ellipsis; white-space: nowrap; }
-  .card span { color: var(--workspace-faint); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  .card { position: absolute; z-index: 5; bottom: calc(100% - var(--i) * var(--row) - 2px); width: 290px; padding: 11px 13px 12px; display: grid; gap: 5px; border: 1px solid var(--workspace-line); border-radius: 14px; background: color-mix(in srgb, var(--workspace-raised) 96%, var(--workspace-strong)); box-shadow: 0 16px 40px rgba(0, 0, 0, .28); pointer-events: none; }
+  .card.below { top: calc(var(--row) - 2px); bottom: auto; }
+  .card .who { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11px; }
+  .card .who i { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--c); }
+  .card .who b { color: var(--workspace-strong); font-weight: 700; }
+  .card .who em { overflow: hidden; color: var(--workspace-muted); font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+  .card strong { display: -webkit-box; overflow: hidden; color: var(--workspace-strong); font-size: 13px; font-weight: 650; line-height: 1.35; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
+  .card .meta { min-width: 0; display: flex; align-items: center; gap: 6px; color: var(--workspace-muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .card .meta code { min-width: 0; overflow: hidden; font: 10.5px/1.4 var(--lume-font-code, ui-monospace, monospace); text-overflow: ellipsis; }
+  .card .meta b { color: var(--workspace-faint); font-weight: 400; }
+  .card .outcome { display: flex; align-items: flex-start; gap: 6px; color: var(--workspace-muted); font-size: 11px; line-height: 1.45; }
+  .card .outcome > :first-child { flex: 0 0 auto; margin-top: 2px; }
+  .card .outcome span { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
+  .card .outcome.failed { color: #e0736b; }
   footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 14px; color: var(--workspace-muted); font-size: 10.5px; }
   footer span { display: inline-flex; align-items: center; gap: 6px; }
   .key { display: inline-block; width: 16px; height: 9px; border-radius: 3px; --c: var(--workspace-accent); }

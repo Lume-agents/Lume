@@ -14,6 +14,7 @@
   import { formatAgentDuration } from "$lib/activityPresentation";
   import { demoFrames, demoSession, demoTodoCount, type DemoState } from "$lib/boardSimulator";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
+  import WorkflowTimeline from "$lib/WorkflowTimeline.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
@@ -88,6 +89,13 @@
   let previewOpen = $state(false);
   let edgeMenu = $state<{ id: string; mode: "menu" | "settings" | "insert" } | null>(null);
   let problemStepIds = $state<string[]>([]);
+  // The same workflow seen as cards on a canvas or as its last run laid out over time.
+  const modeKey = "lume:workflow-board:mode";
+  let boardMode = $state<"board" | "timeline">((() => { try { return localStorage.getItem(modeKey) === "timeline" ? "timeline" : "board"; } catch { return "board"; } })());
+  function setBoardMode(mode: "board" | "timeline") {
+    boardMode = mode;
+    try { localStorage.setItem(modeKey, mode); } catch { /* the choice just is not remembered */ }
+  }
 
   const queue = new WorkflowBoardSaveQueue((next) => onSaveGroup(next));
   const groups = $derived([
@@ -1013,8 +1021,30 @@
     </div>
   </div>
 
+  {#if boardMode === "timeline" && group?.steps.length}
+    <div class="board-timeline" in:fade={{ duration: duration(140) }}>
+      <WorkflowTimeline
+        {run}
+        steps={group.steps}
+        order={chain?.order ?? []}
+        connections={group.connections}
+        {language}
+        activitiesFor={(step) => (demoCells ? demoSession(sessionFor(step), demoCells[group?.steps.indexOf(step) ?? 0], now) : sessionFor(step))?.activities ?? []}
+        labelFor={(step) => {
+          const session = sessionFor(step);
+          return { title: step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role), subtitle: [name(session), session?.agentLabel].filter(Boolean).join(" · ") };
+        }}
+        onOpenStep={(step) => { const session = sessionFor(step); if (session) onOpenChat(session); }}
+      />
+    </div>
+  {/if}
+
   <header class="board-toolbar">
     <span class="board-title"><WorkspaceHeaderIcon name="workflow" size={19} /><strong>Workflow</strong></span>
+    <span class="board-mode" role="group" aria-label={tr("View", "Visualização")}>
+      <button class:on={boardMode === "board"} type="button" aria-pressed={boardMode === "board"} onclick={() => setBoardMode("board")}>{tr("Board", "Board")}</button>
+      <button class:on={boardMode === "timeline"} type="button" aria-pressed={boardMode === "timeline"} onclick={() => setBoardMode("timeline")}>{tr("Timeline", "Linha do tempo")}</button>
+    </span>
     {#if groups.length}<LumeSelect value={activeId} options={groups.map((item, index) => ({ value: item.id, label: groupName(item, index) }))} ariaLabel={tr("Select workflow", "Selecionar workflow")} minWidth={132} variant="heading" onValueChange={activate} />{/if}
     <button type="button" title={tr("New workflow", "Novo workflow")} aria-label={tr("New workflow", "Novo workflow")} onclick={createGroup}><LumeIcon name="plus" size={16} /></button>
     <button class:confirm={confirmingDelete} class="delete-workflow" type="button" disabled={!group || locked || deleting} title={confirmingDelete ? tr("Click again to delete this workflow", "Clique de novo para excluir este workflow") : tr("Delete workflow", "Excluir workflow")} aria-label={confirmingDelete ? tr("Confirm deleting this workflow", "Confirmar exclusão deste workflow") : tr("Delete workflow", "Excluir workflow")} onclick={requestDeleteGroup}><LumeIcon name="trash" size={15} />{#if confirmingDelete}<span>{tr("Delete?", "Excluir?")}</span>{/if}</button>
@@ -1548,6 +1578,11 @@
   .empty-card p { margin: 0; max-width: 300px; font-size: 12px; line-height: 1.6; color: var(--workspace-muted); }
   .empty-card button { margin: 3px 0; pointer-events: auto; color: var(--workspace-strong); }
   .empty-card small { max-width: 280px; font-size: 10px; color: var(--workspace-muted); line-height: 1.5; }
+  .board-timeline { position: absolute; z-index: 4; inset: 78px 0 150px; padding: 0 18px; overflow: auto; display: grid; align-content: start; justify-items: center; background: color-mix(in srgb, var(--workspace-bg, var(--workspace-pane)) 72%, transparent); backdrop-filter: blur(6px); }
+  .board-timeline > :global(.timeline) { width: min(920px, 100%); }
+  .board-mode { flex: 0 0 auto; display: inline-flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--workspace-subtle); }
+  .board-toolbar .board-mode button { width: auto; height: 26px; display: inline-flex; white-space: nowrap; min-height: 26px; padding: 0 10px; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
+  .board-toolbar .board-mode button.on { color: var(--workspace-accent); background: var(--workspace-accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 30%, transparent); }
   .board-run { position: absolute; z-index: 5; left: 50%; bottom: 16px; width: min(780px, calc(100% - 36px)); transform: translateX(-50%); padding: 12px 14px 13px; overflow: hidden; display: grid; gap: 10px; border: 1px solid var(--workspace-line); border-radius: 18px; background: var(--hud-surface); box-shadow: var(--hud-shadow); }
   .run-track { position: absolute; inset: 0 0 auto; height: 3px; background: color-mix(in srgb, var(--workspace-muted) 14%, transparent); }
   .run-track i { display: block; height: 100%; width: var(--progress, 0%); border-radius: 0 3px 3px 0; background: linear-gradient(90deg, var(--role-planner), var(--role-implementer)); transition: width 320ms cubic-bezier(.2, .8, .2, 1); }

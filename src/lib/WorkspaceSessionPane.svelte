@@ -2415,7 +2415,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     <span class="agent-mark"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName()} size={38} /></span>
     <span class="pane-identity">
       <strong>{sessionName()}</strong>
-      <small title={session.workingDirectory}><BrandIcon name={session.agent} size={10} />{session.agentLabel} · {session.project}{#if session.source === "web"}<span class="source-web" title={tr("Web chat, read through the browser Companion", "Chat da web, lido pelo Companion do navegador")}>Web</span>{/if}{#if session.forkedFrom}<span class="fork-mark" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)}><LumeIcon name="fork" size={10} />{tr("Fork", "Fork")}</span>{/if}</small>
+      <small title={session.workingDirectory}><BrandIcon name={session.agent} size={10} />{session.agentLabel} · {session.project}{#if session.forkedFrom}<span class="fork-mark" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)}><LumeIcon name="fork" size={10} />{tr("Fork", "Fork")}</span>{/if}</small>
       {#if visible && onOpenRepository}<SessionRepositoryBadge {session} {language} onOpen={onOpenRepository} />{/if}
     </span>
     {#if session.controlOrigin === "external"}
@@ -3291,7 +3291,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .mcp-tools li { min-width: 0; display: grid; gap: 1px; }
   .mcp-tools code { overflow: hidden; text-overflow: ellipsis; color: var(--workspace-accent); font: 700 var(--workspace-chat-tiny-size) "SFMono-Regular", Consolas, monospace; }
   .mcp-tools span, .mcp-no-tools { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); line-height: 1.4; }
-  .source-web { flex: 0 0 auto; padding: 0 5px; border: 1px solid color-mix(in srgb, #4e98ca 55%, transparent); border-radius: 5px; color: #4e98ca; background: color-mix(in srgb, #4e98ca 10%, transparent); font-size: 8px; font-weight: 800; letter-spacing: .06em; line-height: 13px; text-transform: uppercase; }
   .find-bar { position: absolute; z-index: 14; top: 62px; right: 18px; width: min(340px, calc(100% - 36px)); padding: 5px 6px 5px 10px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: var(--workspace-raised); box-shadow: 0 10px 30px rgba(8, 18, 13, .2); }
   .find-bar input { min-width: 0; flex: 1; height: 26px; padding: 0 2px; border: 0; outline: 0; color: var(--workspace-strong); background: transparent; font: inherit; font-size: 12px; }
   .find-count { min-width: 38px; color: var(--workspace-muted); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }

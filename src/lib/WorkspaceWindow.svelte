@@ -884,6 +884,24 @@
     return value.trim().replaceAll("\\", "/").replace(/\/+$/, "").toLocaleLowerCase();
   }
 
+  // The same source label the Orb shows for sessions that Lume does not control.
+  function sourceLabel(session: HubSession) {
+    if (session.source === "web") {
+      if (session.sourceApp === "chrome") return "Chrome";
+      if (session.sourceApp === "edge") return "Edge";
+      if (session.sourceApp === "brave") return "Brave";
+      return "Web";
+    }
+    return ({ cli: "CLI", vscode: "VS Code", desktop: "Lume" } as Record<string, string>)[session.source] ?? "";
+  }
+
+  function sourceIcon(session: HubSession) {
+    if (session.source === "cli") return "terminal" as const;
+    if (session.source === "vscode") return "vscode" as const;
+    if (session.source === "web") return session.sourceApp ?? ("browsers" as const);
+    return session.source === "desktop" ? ("lume" as const) : ("unknown" as const);
+  }
+
   function sessionSubtitle(session: HubSession) {
     const directory = session.workingDirectory?.trim().replace(/[\\/]+$/, "");
     return directory?.split(/[\\/]/).pop() || session.project || session.agentLabel;
@@ -2865,8 +2883,13 @@
             <button class="session-select" type="button" aria-label={`${sessionName(session)} · ${waitingForChildren ? tr("Waiting for subagents", "Aguardando subagentes") : statusLabel(session)}`} aria-current={session.id === focusedPaneId ? "page" : undefined} aria-expanded={childAgents.length ? expandedSubagentSessions.has(session.id) : undefined} aria-controls={childAgents.length ? `workspace-subagents-${session.id}` : undefined} onclick={() => activateSidebarSession(session, childAgents.length > 0)} onkeydown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openSessionContextMenu(session, rect.left + rect.width / 2, rect.bottom); } }}>
               <span class="session-icon"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName(session)} size={34} /><i class="session-status-dot status-{waitingForChildren ? 'subagents' : session.status}" aria-hidden="true"></i></span>
               <span class="session-copy">
-                <strong>{sessionName(session)}</strong>
-                <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{session.agentLabel} · {sessionSubtitle(session)}</span>{#if session.source === "web"}<span class="source-web" title={tr("Web chat, read through the browser Companion", "Chat da web, lido pelo Companion do navegador")}>Web</span>{/if}{#if session.forkedFrom}<span class="session-fork" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)} aria-label={tr("Fork", "Fork")}><LumeIcon name="fork" size={10} /></span>{/if}</small>
+                <span class="session-title-row">
+                  <strong>{sessionName(session)}</strong>
+                  {#if session.controlOrigin === "external"}
+                    <span class="source-label"><BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />{sourceLabel(session)}</span>
+                  {/if}
+                </span>
+                <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{session.agentLabel} · {sessionSubtitle(session)}</span>{#if session.forkedFrom}<span class="session-fork" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)} aria-label={tr("Fork", "Fork")}><LumeIcon name="fork" size={10} /></span>{/if}</small>
                 <em class="status-{waitingForChildren ? 'subagents' : session.status}"><i></i>{waitingForChildren ? tr("Waiting for subagents", "Aguardando subagentes") : statusLabel(session)}</em>
               </span>
             {#if childAgents.length}
@@ -3834,9 +3857,11 @@
   .session-status-dot { position: absolute; top: 0; right: 0; width: 9px; height: 9px; box-sizing: border-box; border: 2px solid var(--workspace-sidebar); border-radius: 50%; background: #8a9891; opacity: 0; transform: scale(.55); pointer-events: none; transition: opacity 130ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .session-copy { min-width: 0; display: grid; gap: 2px; flex: 1; opacity: 1; transform: translateX(0); transition: opacity 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .session-copy strong, .session-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-title-row { min-width: 0; display: flex; align-items: center; gap: 6px; }
+  .session-title-row strong { min-width: 0; flex: 0 1 auto; }
+  .source-label { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; border-radius: 999px; color: var(--workspace-muted); background: color-mix(in srgb, var(--workspace-muted) 11%, transparent); font-size: 8px; font-weight: 720; letter-spacing: .045em; line-height: 1.25; text-transform: uppercase; }
   .session-copy strong { color: var(--workspace-strong); font-size: 10px; font-weight: 720; letter-spacing: -.01em; }
   .session-copy small { color: var(--workspace-muted); font-size: 8px; line-height: 1.3; }
-  .source-web { flex: 0 0 auto; padding: 0 5px; border: 1px solid color-mix(in srgb, #4e98ca 55%, transparent); border-radius: 5px; color: #4e98ca; background: color-mix(in srgb, #4e98ca 10%, transparent); font-size: 8px; font-weight: 800; letter-spacing: .06em; line-height: 13px; text-transform: uppercase; }
   .session-copy .session-meta { display: flex; align-items: center; gap: 4px; }
   .session-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-meta .session-fork { flex: 0 0 auto; min-width: auto; display: inline-flex; color: var(--workspace-accent); }

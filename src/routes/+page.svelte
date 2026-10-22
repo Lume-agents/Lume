@@ -611,6 +611,7 @@
   }
 
   function sessionDirectoryName(session: AgentSession) {
+    if (session.source === "web") return session.agentLabel;
     const directory = session.workingDirectory?.trim().replace(/[\\/]+$/, "");
     return directory?.split(/[\\/]/).pop() || session.project?.trim() || session.agentLabel;
   }
@@ -3264,7 +3265,7 @@
                       ...workflowReplacementSessions(missing.group.id, missing.step.id).map((session) => ({
                         value: workflowSessionKey(session),
                         label: sessionDisplayName(session),
-                        description: `${session.agentLabel} · ${session.project}`,
+                        description: session.source === "web" ? session.agentLabel : `${session.agentLabel} · ${session.project}`,
                       })),
                     ]}
                     onValueChange={(value) => void replaceWorkflowSession(missing.group.id, missing.step.id, value)}

@@ -3702,7 +3702,7 @@
         onwheel={handleOutputWheel}
       >
         {#if activeTab === "chat"}
-          <p><span>$</span> {session.agentLabel.toLowerCase()} <i>{session.project}</i>{#if session.forkedFrom}<span class="fork-mark" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)}><LumeIcon name="fork" size={10} />fork</span>{/if}</p>
+          <p><span>$</span> {session.agentLabel.toLowerCase()}{#if session.source !== "web"} <i>{session.project}</i>{/if}{#if session.forkedFrom}<span class="fork-mark" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)}><LumeIcon name="fork" size={10} />fork</span>{/if}</p>
           <p class="status status-{session.status}"><span>&gt;</span> {displayText(language, session.statusLabel)}</p>
         {/if}
         {#if session.pendingQuestion}

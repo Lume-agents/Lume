@@ -2415,7 +2415,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     <span class="agent-mark"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName()} size={38} /></span>
     <span class="pane-identity">
       <strong>{sessionName()}</strong>
-      <small title={session.workingDirectory}><BrandIcon name={session.agent} size={10} />{session.agentLabel} · {session.project}{#if session.forkedFrom}<span class="fork-mark" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)}><LumeIcon name="fork" size={10} />{tr("Fork", "Fork")}</span>{/if}</small>
+      <small title={session.workingDirectory}><BrandIcon name={session.agent} size={10} />{session.source === "web" ? session.agentLabel : `${session.agentLabel} · ${session.project}`}{#if session.forkedFrom}<span class="fork-mark" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)}><LumeIcon name="fork" size={10} />{tr("Fork", "Fork")}</span>{/if}</small>
       {#if visible && onOpenRepository}<SessionRepositoryBadge {session} {language} onOpen={onOpenRepository} />{/if}
     </span>
     {#if session.controlOrigin === "external"}
@@ -3303,9 +3303,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .session-pane.status-completed { --pane-status-color: #50aa79; }
   .session-pane.status-permission_required { --pane-status-color: #d0a142; }
   .session-pane.status-failed { --pane-status-color: #c66762; }
-  .pane-header { position: relative; z-index: 2; min-width: 0; min-height: 64px; padding: 10px 14px 10px 17px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); background: radial-gradient(ellipse 250px 115px at 100% 0%, color-mix(in srgb, var(--pane-status-color) 18%, transparent), transparent 85%), var(--workspace-pane); cursor: grab; user-select: none; }
+  .pane-header { position: relative; z-index: 2; min-width: 0; min-height: 64px; padding: 10px 14px 10px 17px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); border-radius: 0 0 16px 16px; background: radial-gradient(ellipse 250px 115px at 100% 0%, color-mix(in srgb, var(--pane-status-color) 18%, transparent), transparent 85%), var(--workspace-pane); cursor: grab; user-select: none; }
   .pane-header:active { cursor: grabbing; }
-  .pane-header::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 1px; background: color-mix(in srgb, var(--workspace-accent) 20%, transparent); content: ""; transform: scaleX(.18); transform-origin: left; transition: transform 320ms cubic-bezier(.16, 1, .3, 1); }
+  .pane-header::after { position: absolute; right: 16px; bottom: -1px; left: 16px; height: 1px; background: color-mix(in srgb, var(--workspace-accent) 20%, transparent); content: ""; transform: scaleX(.18); transform-origin: left; transition: transform 320ms cubic-bezier(.16, 1, .3, 1); }
   .session-pane:hover .pane-header::after,
   .session-pane.focused .pane-header::after { transform: scaleX(1); }
   .session-pane.focused .pane-header::after { background: color-mix(in srgb, var(--workspace-accent) 58%, transparent); }

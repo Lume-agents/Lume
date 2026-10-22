@@ -902,6 +902,11 @@
     return session.source === "desktop" ? ("lume" as const) : ("unknown" as const);
   }
 
+  /** "Agent · folder"; a web chat has no folder, so it is just the agent. */
+  function sessionMeta(session: HubSession) {
+    return session.source === "web" ? session.agentLabel : `${session.agentLabel} · ${sessionSubtitle(session)}`;
+  }
+
   function sessionSubtitle(session: HubSession) {
     const directory = session.workingDirectory?.trim().replace(/[\\/]+$/, "");
     return directory?.split(/[\\/]/).pop() || session.project || session.agentLabel;
@@ -2889,7 +2894,7 @@
                     <span class="source-label"><BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />{sourceLabel(session)}</span>
                   {/if}
                 </span>
-                <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{session.agentLabel} · {sessionSubtitle(session)}</span>{#if session.forkedFrom}<span class="session-fork" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)} aria-label={tr("Fork", "Fork")}><LumeIcon name="fork" size={10} /></span>{/if}</small>
+                <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{sessionMeta(session)}</span>{#if session.forkedFrom}<span class="session-fork" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)} aria-label={tr("Fork", "Fork")}><LumeIcon name="fork" size={10} /></span>{/if}</small>
                 <em class="status-{waitingForChildren ? 'subagents' : session.status}"><i></i>{waitingForChildren ? tr("Waiting for subagents", "Aguardando subagentes") : statusLabel(session)}</em>
               </span>
             {#if childAgents.length}
@@ -3577,7 +3582,7 @@
     {#if dragSession}
       <div class="session-drag-preview" bind:this={dragPreviewElement} aria-hidden="true">
         <ThreadAvatar seed={dragSession.nativeSessionId || dragSession.sessionName || dragSession.id} label={sessionName(dragSession)} size={34} />
-        <span><strong>{sessionName(dragSession)}</strong><small><BrandIcon name={dragSession.agent} size={11} />{dragSession.agentLabel} · {sessionSubtitle(dragSession)}</small></span>
+        <span><strong>{sessionName(dragSession)}</strong><small><BrandIcon name={dragSession.agent} size={11} />{sessionMeta(dragSession)}</small></span>
         <LumeIcon name="layout" size={15} />
       </div>
     {/if}

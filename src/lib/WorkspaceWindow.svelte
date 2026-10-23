@@ -149,8 +149,25 @@
 
   let sessions = $state<HubSession[]>([]);
   let externalWriterConflicts = $state<Record<string, ExternalWriterConflict>>({});
-  let preferences = $state<Preferences>(structuredClone(defaultPreferences));
-  let language = $state<Language>("en");
+  // Only what is needed to paint the loading screen in the user's own look is remembered locally.
+  const appearanceSnapshotKey = "lume:appearance-snapshot:v1";
+  const appearanceKeys = [
+    "language", "darkMode", "appearanceTheme", "accentColor", "accentOpacity", "darkBase", "lightBase", "uiFont", "codeFont",
+    "workspaceBackgroundColor", "workspaceBackgroundOpacity", "workspaceLightBackgroundColor", "workspaceLightBackgroundOpacity",
+    "workspaceDarkBackgroundColor", "workspaceDarkBackgroundOpacity", "customDarkSurfaces", "customLightSurfaces", "backdrop",
+  ] as const satisfies readonly (keyof Preferences)[];
+  function savedAppearance(): Partial<Preferences> {
+    try {
+      const raw = JSON.parse(localStorage.getItem(appearanceSnapshotKey) || "{}");
+      return Object.fromEntries(appearanceKeys.filter((key) => key in raw).map((key) => [key, raw[key]]));
+    } catch { return {}; }
+  }
+  let preferences = $state<Preferences>({ ...structuredClone(defaultPreferences), ...savedAppearance() });
+  $effect(() => {
+    const snapshot = Object.fromEntries(appearanceKeys.map((key) => [key, preferences[key]]));
+    try { localStorage.setItem(appearanceSnapshotKey, JSON.stringify(snapshot)); } catch { /* The loading screen then falls back to the defaults. */ }
+  });
+  let language = $state<Language>(preferences.language);
   let systemDark = $state(false);
   let settingsOpen = $state(false);
   let settingsLoading = $state(false);
@@ -2448,15 +2465,15 @@
           // Older app processes may not expose the conflict query yet; live events still work.
         });
       const preferenceRevisionAtRequest = preferenceEventRevision;
-      const [loadedPreferences, loadedSessions] = await Promise.all([
-        loadPreferences(),
-        refresh(),
-      ]);
+      const preferencesRequest = loadPreferences().then((loadedPreferences) => {
+        if (startup.active && preferenceEventRevision === preferenceRevisionAtRequest) {
+          preferences = loadedPreferences;
+          language = loadedPreferences.language;
+        }
+        return loadedPreferences;
+      });
+      const [, loadedSessions] = await Promise.all([preferencesRequest, refresh()]);
       if (!startup.active) return;
-      if (preferenceEventRevision === preferenceRevisionAtRequest) {
-        preferences = loadedPreferences;
-        language = loadedPreferences.language;
-      }
       if (!loadedSessions) throw new Error(error || tr("Could not load your sessions", "Não foi possível carregar suas sessões"));
     }, {
       onLoaded: () => { loading = false; },

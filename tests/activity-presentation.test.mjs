@@ -138,3 +138,29 @@ assert.deepEqual(gitRuns.map((run) => [run.category, run.activities.length]), [[
 assert.equal(activityGroupSummary([git("git status"), git("git diff")], "en"), "2 git operations");
 assert.equal(activityGroupSummary([git("git status"), git("npm run dev")], "pt-BR"), "1 operação git, 1 comando");
 await import("./git-events.test.mjs");
+
+// Skills and instruction files read as their own events.
+{
+  const { activityCategory: category, activityDisplayTitle: title } = await import("../src/lib/activityPresentation.ts");
+  const make = (extra) => ({ id: "x", kind: "tool", title: "", status: "completed", createdAt: 1, files: [], ...extra });
+  const skill = make({ title: "Skill", detail: "artifact-design" });
+  console.assert(category(skill) === "skill");
+  if (title(skill, "pt-BR") !== "Usou a skill artifact-design") throw new Error(title(skill, "pt-BR"));
+  const codexSkill = make({ kind: "command", title: "exec", detail: "sed -n '1,200p' /home/dev/.codex/skills/release-notes/SKILL.md" });
+  if (category(codexSkill) !== "skill" || title(codexSkill, "en") !== "Used the release-notes skill") throw new Error(title(codexSkill, "en"));
+  const loaded = make({ title: "Instructions", detail: "/work/app/CLAUDE.md", files: ["/work/app/CLAUDE.md"] });
+  if (title(loaded, "pt-BR") !== "Leu as instruções de CLAUDE.md") throw new Error(title(loaded, "pt-BR"));
+  const readAgents = make({ kind: "command", title: "exec", detail: "cat AGENTS.md" });
+  if (category(readAgents) !== "instruction") throw new Error(category(readAgents));
+  // Editing the instruction file is still an edit.
+  if (category(make({ kind: "file", title: "File changed", detail: "--- a/CLAUDE.md" })) !== "edit") throw new Error("edit");
+  // A command that merely mentions agents is not an instruction read.
+  if (category(make({ kind: "command", title: "exec", detail: "grep -rn agents src" })) === "instruction") throw new Error("false positive");
+  console.log("skill and instruction tests passed");
+}
+{
+  const { activityDisplayTitle: title } = await import("../src/lib/activityPresentation.ts");
+  const sub = { id: "s", kind: "subagent", title: "Subagent · /root/Reviewer", status: "running", createdAt: 1, files: [] };
+  if (title(sub, "pt-BR") !== "Subagente Reviewer") throw new Error(title(sub, "pt-BR"));
+  console.log("subagent title test passed");
+}

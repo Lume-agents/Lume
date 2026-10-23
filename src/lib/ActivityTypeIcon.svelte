@@ -5,7 +5,11 @@
 </script>
 
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-  {#if category === "command"}
+  {#if category === "skill"}
+    <path d="M12 3.5 14.2 8l4.9.7-3.55 3.45.84 4.85L12 14.7 7.6 17l.84-4.85L4.9 8.7 9.8 8z" />
+  {:else if category === "instruction"}
+    <path d="M7 3h7l4 4v14H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM14 3v4h4M9.5 11h5M9.5 14h5M9.5 17h3" />
+  {:else if category === "command"}
     <path d="m4 7 5 5-5 5M11 17h9" />
   {:else if category === "test"}
     <rect x="4" y="3" width="16" height="18" rx="2" />

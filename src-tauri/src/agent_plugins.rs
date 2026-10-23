@@ -97,6 +97,7 @@ pub fn catalog() -> Vec<Box<dyn AgentPlugin>> {
                 "PostToolUse",
                 "PostToolUseFailure",
                 "PostToolBatch",
+                "InstructionsLoaded",
                 "Notification",
                 "SubagentStart",
                 "SubagentStop",

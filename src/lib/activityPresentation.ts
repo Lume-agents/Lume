@@ -4,7 +4,7 @@ import type { Language } from "$lib/i18n";
 // @ts-expect-error TypeScript's bundler mode disallows the explicit source extension used by Node.
 import { gitActivityInfo, gitEventTitle } from "./gitEvents.ts";
 
-export type ActivityCategory = "edit" | "git" | "read" | "search" | "test" | "command" | "tool" | "plan";
+export type ActivityCategory = "edit" | "git" | "read" | "search" | "test" | "command" | "tool" | "plan" | "skill" | "instruction";
 export type ActivityThinkingState = "working" | "searching" | "solving" | "listening" | "connecting" | "weaving" | "composing" | "breathing" | "shaping";
 
 function firstLine(value?: string): string {
@@ -18,7 +18,30 @@ function normalizedToolTitle(value: string): string {
     .trim();
 }
 
+const instructionFile = /(?:^|[\\/\s"'`])(CLAUDE(?:\.local)?\.md|AGENTS(?:\.override)?\.md|GEMINI\.md|\.cursorrules|copilot-instructions\.md|\.claude[\\/]rules[\\/][^\s"'`]+\.md)(?=$|[\s"'`;|&)])/i;
+const skillFile = /([^\\/\s"'`]+)[\\/]SKILL\.md(?=$|[\s"'`;|&)])/i;
+
+/** A skill the agent used: Claude's Skill tool names it; other agents read the skill's SKILL.md. */
+export function activitySkill(activity: SessionActivity): string | null {
+  if (normalizedToolTitle(activity.title) === "Skill") return firstLine(activity.detail) || null;
+  if (activity.kind === "file") return null;
+  return `${activity.title}\n${activity.detail ?? ""}`.match(skillFile)?.[1] ?? null;
+}
+
+/** An instruction file the agent read: CLAUDE.md, AGENTS.md, GEMINI.md, a rules file… (Claude also reports the ones it loads). */
+export function activityInstructionFile(activity: SessionActivity): string | null {
+  if (activity.kind === "file") return null;
+  if (normalizedToolTitle(activity.title) === "Instructions") {
+    const path = activity.files[0] ?? firstLine(activity.detail);
+    return path.split(/[\\/]/).at(-1) || path || null;
+  }
+  const match = `${activity.title}\n${activity.detail ?? ""}`.match(instructionFile)?.[1];
+  return match ? match.split(/[\\/]/).at(-1) ?? match : null;
+}
+
 export function activityCategory(activity: SessionActivity): ActivityCategory {
+  if (activitySkill(activity)) return "skill";
+  if (activityInstructionFile(activity)) return "instruction";
   const title = normalizedToolTitle(activity.title).toLowerCase();
   const detail = firstLine(activity.detail).toLowerCase();
   const searchable = `${title} ${detail}`;
@@ -147,6 +170,19 @@ export function activityDisplayTitle(activity: SessionActivity, language: Langua
     if (count > 0) return pt ? `${count} arquivo${count === 1 ? " alterado" : "s alterados"}` : `${count} file${count === 1 ? " edited" : "s edited"}`;
     return pt ? "Arquivos alterados" : "Edited files";
   }
+  if (activity.kind === "subagent") {
+    // "Subagent · /root/Reviewer" names the agent by its path; the last part is its name.
+    const name = normalizedToolTitle(activity.title).replace(/^(?:Subagente|Subagent)\s*[·:]\s*/i, "").split(/[\\/]/).filter(Boolean).at(-1);
+    return pt ? `Subagente ${name || ""}`.trim() : `Subagent ${name || ""}`.trim();
+  }
+  if (category === "skill") {
+    const skill = activitySkill(activity);
+    return pt ? `Usou a skill ${skill}` : `Used the ${skill} skill`;
+  }
+  if (category === "instruction") {
+    const file = activityInstructionFile(activity);
+    return pt ? `Leu as instruções de ${file}` : `Read the instructions in ${file}`;
+  }
   if (category === "read") return pt ? "Contexto inspecionado" : "Inspected context";
   if (category === "search") return pt ? "Busca no projeto" : "Searched the project";
   if (category === "test") return pt ? "Validação executada" : "Ran a check";
@@ -227,6 +263,8 @@ export function activityRunTitle(run: ActivityRun, language: Language): string {
   }
   if (run.category === "read") return pt ? `${count} leituras de contexto` : `${count} context reads`;
   if (run.category === "search") return pt ? `${count} buscas no projeto` : `${count} project searches`;
+  if (run.category === "skill") return pt ? `${count} skills usadas` : `${count} skills used`;
+  if (run.category === "instruction") return pt ? `${count} arquivos de instruções lidos` : `Read ${count} instruction files`;
   return pt ? `${count} ferramentas utilizadas` : `${count} tools used`;
 }
 
@@ -241,6 +279,8 @@ function phrase(language: Language, category: ActivityCategory, count: number, f
   if (category === "test") return pt ? `${count} validaç${count === 1 ? "ão" : "ões"}` : `${count} check${count === 1 ? "" : "s"}`;
   if (category === "command") return pt ? `${count} comando${count === 1 ? "" : "s"}` : `${count} command${count === 1 ? "" : "s"}`;
   if (category === "git") return pt ? `${count} operaç${count === 1 ? "ão" : "ões"} git` : `${count} git operation${count === 1 ? "" : "s"}`;
+  if (category === "skill") return pt ? `${count} skill${count === 1 ? "" : "s"}` : `${count} skill${count === 1 ? "" : "s"}`;
+  if (category === "instruction") return pt ? "instruções lidas" : "read instructions";
   return pt ? `${count} ferramenta${count === 1 ? "" : "s"}` : `${count} tool${count === 1 ? "" : "s"}`;
 }
 
@@ -253,7 +293,7 @@ export function activityGroupSummary(activities: SessionActivity[], language: La
     counts.set(category, (counts.get(category) ?? 0) + 1);
     if (category === "edit") activity.files.forEach((file) => files.add(file));
   }
-  const order: ActivityCategory[] = ["edit", "git", "read", "search", "test", "command", "tool"];
+  const order: ActivityCategory[] = ["skill", "instruction", "edit", "git", "read", "search", "test", "command", "tool"];
   const parts = order.flatMap((category) => {
     const count = counts.get(category) ?? 0;
     return count ? [phrase(language, category, count, files.size)] : [];

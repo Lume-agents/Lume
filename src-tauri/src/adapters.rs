@@ -225,6 +225,7 @@ fn map_event_with_context(
         | ("claude", "PostToolUse" | "PostToolUseFailure")
         | ("gemini", "AfterTool") => HookEventKind::Running,
         ("claude", "PostToolBatch")
+        | ("claude", "InstructionsLoaded")
         | ("claude", "PermissionDenied")
         | ("claude", "SubagentStart" | "SubagentStop")
         | ("claude", "TaskCreated" | "TaskCompleted") => HookEventKind::Activity,
@@ -486,11 +487,80 @@ fn hook_activity(
             append_detail: false,
         });
     }
+    // Claude loaded an instruction file (CLAUDE.md, a rules file, an imported memory): one event per file.
+    if provider == "claude" && hook_name == "InstructionsLoaded" {
+        let path = string(raw, "file_path")?;
+        return Some(SessionActivity {
+            id: format!("{provider}:{session_id}:instructions:{path}"),
+            kind: "tool".into(),
+            title: "Instructions".into(),
+            detail: Some(path.clone()),
+            status: "completed".into(),
+            created_at: now_millis(),
+            files: vec![path],
+            attachments: Vec::new(),
+            append_detail: false,
+        });
+    }
     if !matches!(
         hook_name,
         "PreToolUse" | "BeforeTool" | "PostToolUse" | "PostToolUseFailure" | "AfterTool"
     ) {
         return None;
+    }
+
+    if provider == "claude" {
+        let tool_name = string(raw, "tool_name").unwrap_or_default();
+        // Claude Code's own plumbing (loading tool schemas, scheduling a wake-up, entering a mode or a
+        // worktree, the answer to a question it asked, a teammate message) is not work on the project:
+        // shown as tool events, it read as stray messages around the reply.
+        // A question it asks is shown as a question while it waits; only its answer is left out.
+        if CLAUDE_INTERNAL_TOOLS.contains(&tool_name.as_str())
+            && !(tool_name == "AskUserQuestion" && hook_name == "PreToolUse")
+        {
+            return None;
+        }
+        // The plan written before leaving plan mode is the session plan, not a tool call.
+        if tool_name == "ExitPlanMode" {
+            let plan = raw.get("tool_input").and_then(|input| string(input, "plan"))?;
+            return Some(SessionActivity {
+                id: format!(
+                    "{provider}:{session_id}:plan:{}",
+                    string(raw, "tool_use_id").unwrap_or_else(|| now_millis().to_string())
+                ),
+                kind: "plan_document".into(),
+                title: "Plan".into(),
+                detail: Some(truncate(plan.trim(), 48 * 1024)),
+                status: "completed".into(),
+                created_at: now_millis(),
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            });
+        }
+        // A skill is named, not dumped as its JSON input.
+        if tool_name == "Skill" {
+            let skill = raw.get("tool_input").and_then(|input| string(input, "skill"))?;
+            return Some(SessionActivity {
+                id: format!(
+                    "{provider}:{session_id}:tool:{}",
+                    string(raw, "tool_use_id").unwrap_or_else(|| now_millis().to_string())
+                ),
+                kind: "tool".into(),
+                title: "Skill".into(),
+                detail: Some(skill),
+                status: match hook_name {
+                    "PreToolUse" => "running",
+                    "PostToolUseFailure" => "failed",
+                    _ => "completed",
+                }
+                .into(),
+                created_at: now_millis(),
+                files: Vec::new(),
+                attachments: Vec::new(),
+                append_detail: false,
+            });
+        }
     }
 
     // Claude's task list is incremental (create, then update by id), so the whole list is read back
@@ -808,6 +878,18 @@ fn permission_profile(
         available_actions,
     }
 }
+
+/// Claude Code tools that run its own machinery rather than work on the project.
+const CLAUDE_INTERNAL_TOOLS: &[&str] = &[
+    "ToolSearch",
+    "ScheduleWakeup",
+    "EnterPlanMode",
+    "EnterWorktree",
+    "ExitWorktree",
+    "AskUserQuestion",
+    "SendMessage",
+    "SendFeedback",
+];
 
 fn is_claude_question(raw: &Value) -> bool {
     string(raw, "tool_name").as_deref() == Some("AskUserQuestion")
@@ -2451,6 +2533,28 @@ mod tests {
             "tool_name": "Read", "tool_use_id": "toolu_main", "tool_input": { "file_path": "/work/project/a.ts" }
         });
         assert!(map_event("claude", &main).is_some());
+    }
+
+    #[test]
+    fn claude_tools_that_are_not_project_work_stay_out_of_the_chat() {
+        let hook = |tool: &str, hook: &str, input: Value| {
+            hook_activity("claude", hook, &json!({ "tool_name": tool, "tool_use_id": "toolu_x", "tool_input": input }), "s1", None)
+        };
+        for tool in ["ToolSearch", "ScheduleWakeup", "EnterPlanMode", "EnterWorktree", "ExitWorktree", "SendMessage"] {
+            assert!(hook(tool, "PostToolUse", json!({})).is_none(), "{tool}");
+        }
+        // The question stays visible while it waits; its answer is not a tool event.
+        assert!(hook("AskUserQuestion", "PostToolUse", json!({ "questions": [] })).is_none());
+        assert!(hook("AskUserQuestion", "PreToolUse", json!({ "questions": [] })).is_some());
+
+        let plan = hook("ExitPlanMode", "PostToolUse", json!({ "plan": "## Plan\n1. Do it" })).expect("plan");
+        assert_eq!((plan.kind.as_str(), plan.detail.as_deref()), ("plan_document", Some("## Plan\n1. Do it")));
+
+        let skill = hook("Skill", "PreToolUse", json!({ "skill": "artifact-design" })).expect("skill");
+        assert_eq!((skill.kind.as_str(), skill.title.as_str(), skill.detail.as_deref(), skill.status.as_str()), ("tool", "Skill", Some("artifact-design"), "running"));
+
+        let instructions = hook_activity("claude", "InstructionsLoaded", &json!({ "file_path": "/work/app/CLAUDE.md", "memory_type": "Project", "load_reason": "session_start" }), "s1", None).expect("instructions");
+        assert_eq!((instructions.title.as_str(), instructions.files.clone()), ("Instructions", vec!["/work/app/CLAUDE.md".to_string()]));
     }
 
     #[test]

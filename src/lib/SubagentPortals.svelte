@@ -4,7 +4,7 @@
   import type { HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import { noteSubagentInteraction, type WorkspaceSubagent } from "$lib/workspaceAgents";
-  import { activityCategory, activityDisplayTitle, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
+  import { activityCategory, activityDisplayTitle, activityPreview, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
   import { loadSubagentTimeline, steerOmpSubagent, submitPrompt } from "$lib/lume";
   import { renderSafeMarkdown } from "$lib/markdown.js";
   import { collectReviewFiles, parseReviewDiff } from "$lib/reviewDiffs";
@@ -93,11 +93,19 @@
     return new Date(value).toLocaleTimeString(language === "pt-BR" ? "pt-BR" : "en-US", { hour: "2-digit", minute: "2-digit" });
   }
 
-  function activityText(activity: SessionActivity) {
-    if (activity.kind === "message" || activity.kind === "analysis" || activity.kind === "plan") {
-      return activity.detail?.trim() || activity.title;
-    }
-    return activity.files[0] || "";
+  /** The event's name in the timeline: what the subagent did, in plain words. */
+  function eventTitle(activity: SessionActivity) {
+    if (activity.kind === "analysis") return tr("Thinking", "Pensando");
+    if (activity.kind === "message") return tr("Message", "Mensagem");
+    if (activity.kind === "plan") return tr("Plan", "Plano");
+    return activityDisplayTitle(activity, language);
+  }
+  /** The line under a tool event: the files it touched, or the command it ran. */
+  function eventDetail(activity: SessionActivity) {
+    const files = activity.files.map((path) => path.split(/[\\/]/).at(-1)).filter(Boolean);
+    if (files.length) return files.slice(0, 4).join(", ") + (files.length > 4 ? ` +${files.length - 4}` : "");
+    if (["Skill", "Instructions"].includes(activity.title)) return "";
+    return activityPreview(activity);
   }
 
   function updatePortalOrigin() {
@@ -392,21 +400,24 @@
       </header>
       <div class="portal-timeline" bind:this={timelineElement} role="list" aria-label={tr(`Timeline for ${selectedChild.label}`, `Timeline de ${selectedChild.label}`)}>
         {#if selectedActivities.length}
-          {#each selectedEvents as activity (activity.id)}
-            <div class:live={activity.status === "running"} class="timeline-entry" role="listitem">
-              <span class="entry-rail"><i></i></span>
-              <span class="entry-icon"><ActivityTypeIcon category={activity.kind === "analysis" ? "analysis" : activityCategory(activity)} size={14} /></span>
-              <div class="entry-copy">
-                <strong>{activityDisplayTitle(activity, language)}</strong>
-                {#if activity.kind === "message" && activity.detail}
-                  <div class="entry-message">{@html renderSafeMarkdown(activity.detail)}</div>
-                {:else if activityText(activity)}
-                  <small>{activityText(activity)}</small>
-                {/if}
-              </div>
-              <time datetime={new Date(activity.createdAt).toISOString()}>{timeText(activity.createdAt)}</time>
-            </div>
-          {/each}
+          <ol class="events">
+            {#each selectedEvents as activity (activity.id)}
+              {@const text = activity.kind === "message" || activity.kind === "analysis" || activity.kind === "plan"}
+              {@const failed = activity.status === "failed"}
+              {@const detail = text ? "" : eventDetail(activity)}
+              <li class="event" class:live={activity.status === "running"} class:failed class:text class:thinking={activity.kind === "analysis"}>
+                <span class="event-mark" aria-hidden="true">{#if failed}<LumeIcon name="close" size={11} />{:else}<ActivityTypeIcon category={text ? "analysis" : activityCategory(activity)} size={13} />{/if}</span>
+                <div class="event-body">
+                  <div class="event-head"><strong>{eventTitle(activity)}</strong>{#if failed}<em>{tr("Failed", "Falhou")}</em>{/if}<time datetime={new Date(activity.createdAt).toISOString()}>{timeText(activity.createdAt)}</time></div>
+                  {#if text && activity.detail}
+                    <div class="event-text">{@html renderSafeMarkdown(activity.detail)}</div>
+                  {:else if detail}
+                    <code class="event-code" title={detail}>{detail}</code>
+                  {/if}
+                </div>
+              </li>
+            {/each}
+          </ol>
           {#if selectedChangedFiles.length}
             <section class="subagent-files" aria-label={tr("Files changed by this subagent", "Arquivos alterados por este subagente")}>
               <strong>{tr(`${selectedChangedFiles.length} file${selectedChangedFiles.length === 1 ? "" : "s"} changed`, `${selectedChangedFiles.length} arquivo${selectedChangedFiles.length === 1 ? "" : "s"} alterado${selectedChangedFiles.length === 1 ? "" : "s"}`)}</strong>
@@ -558,7 +569,7 @@
   .portal-panel-header button:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
   .portal-panel-header button.active { color: var(--workspace-accent); background: var(--workspace-accent-soft); }
   .portal-panel-header button:disabled { cursor: not-allowed; opacity: .4; }
-  .portal-timeline { min-height: 0; padding: 8px 11px 11px 14px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
+  .portal-timeline { min-height: 0; padding: 14px 16px 16px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   .timeline-entry { position: relative; min-width: 0; min-height: 39px; padding: 3px 0 8px 18px; display: flex; align-items: flex-start; gap: 8px; }
   .entry-rail { position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: var(--workspace-line); }
   .timeline-entry:last-child .entry-rail { bottom: 24px; }
@@ -572,8 +583,30 @@
   .entry-message :global(p) { margin: 0 0 8px; }
   .entry-message :global(p:last-child) { margin-bottom: 0; }
   .entry-message :global(pre) { max-width: 100%; overflow-x: auto; padding: 8px; border-radius: 6px; background: var(--workspace-subtle); }
-  .subagent-files { margin: 7px 0 12px 18px; padding-top: 11px; border-top: 1px solid var(--workspace-line); }
-  .subagent-files > strong { color: var(--workspace-strong); font-size: 10px; font-weight: 700; }
+  .events { margin: 0; padding: 2px 0 4px; list-style: none; display: grid; }
+  .event { position: relative; min-width: 0; padding: 0 0 10px 32px; }
+  .event::before { position: absolute; top: 24px; bottom: 0; left: 11px; width: 1px; content: ""; background: color-mix(in srgb, var(--workspace-line) 85%, transparent); }
+  .event:last-child::before { display: none; }
+  .event-mark { position: absolute; top: 0; left: 0; width: 23px; height: 23px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--workspace-accent) 26%, var(--workspace-line)); border-radius: 8px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 9%, var(--workspace-raised)); }
+  .event.text .event-mark { color: var(--workspace-muted); border-color: var(--workspace-line); background: var(--workspace-raised); }
+  .event.live .event-mark { color: #4d99cc; border-color: color-mix(in srgb, #4d99cc 45%, transparent); animation: event-live 1.4s ease-in-out infinite; }
+  .event.failed .event-mark { color: #d9645c; border-color: color-mix(in srgb, #d9645c 50%, transparent); background: color-mix(in srgb, #d9645c 10%, var(--workspace-raised)); }
+  .event-body { min-width: 0; display: grid; gap: 3px; padding-top: 3px; }
+  .event-head { min-width: 0; display: flex; align-items: baseline; gap: 7px; }
+  .event-head strong { min-width: 0; overflow: hidden; color: var(--workspace-strong); font-size: 11.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+  .event.text .event-head strong { color: var(--workspace-muted); font-weight: 600; }
+  .event-head em { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; color: #d9645c; background: color-mix(in srgb, #d9645c 12%, transparent); font-size: 9.5px; font-style: normal; font-weight: 700; }
+  .event-head time { margin-left: auto; flex: 0 0 auto; padding-left: 8px; color: var(--workspace-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .event-code { min-width: 0; overflow: hidden; color: var(--workspace-muted); font: 10.5px/1.5 var(--lume-font-code, ui-monospace, monospace); text-overflow: ellipsis; white-space: nowrap; }
+  .event-text { min-width: 0; color: var(--workspace-text); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+  .event.thinking .event-text { color: var(--workspace-muted); font-style: italic; }
+  .event-text :global(p) { margin: 0 0 6px; }
+  .event-text :global(p:last-child) { margin-bottom: 0; }
+  .event-text :global(pre) { max-width: 100%; overflow-x: auto; padding: 8px; border-radius: 7px; background: var(--workspace-subtle); font-size: 10.5px; }
+  .event-text :global(code) { font-size: .92em; }
+  @keyframes event-live { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, #4d99cc 16%, transparent); } }
+  .subagent-files { margin: 4px 0 12px; padding: 10px 12px 8px; border: 1px solid var(--workspace-line); border-radius: 12px; background: color-mix(in srgb, var(--workspace-subtle) 70%, transparent); }
+  .subagent-files > strong { color: var(--workspace-muted); font-size: 9.5px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
   .subagent-file-list { margin-top: 7px; display: grid; }
   .subagent-file + .subagent-file { border-top: 1px solid var(--workspace-line); }
   .subagent-file summary { min-width: 0; min-height: 30px; padding: 5px 6px; display: flex; align-items: center; gap: 6px; border-radius: 6px; color: var(--workspace-text); cursor: pointer; list-style: none; font-size: 9px; }
@@ -590,11 +623,11 @@
   .diff-line.kind-hunk { color: var(--workspace-accent); }
   .diff-line.kind-meta { color: var(--workspace-muted); }
   .diff-unavailable { margin: 2px 7px 9px; color: var(--workspace-muted); font-size: 9px; line-height: 1.4; }
-  .subagent-final { margin: 8px 0 3px 18px; padding-top: 13px; border-top: 1px solid var(--workspace-line); }
+  .subagent-final { margin: 2px 0; padding: 12px 14px 14px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); border-radius: 12px; background: color-mix(in srgb, var(--workspace-accent) 6%, var(--workspace-raised)); }
   .subagent-final header { display: flex; align-items: center; gap: 7px; color: var(--workspace-accent); }
-  .subagent-final header strong { min-width: 0; flex: 1; color: var(--workspace-strong); font-size: 11px; }
+  .subagent-final header strong { min-width: 0; flex: 1; color: var(--workspace-accent); font-size: 9.5px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
   .subagent-final time { color: var(--workspace-faint); font-size: 8px; }
-  .final-content { margin-top: 9px; color: var(--workspace-text); font-size: var(--workspace-chat-font-size, 12px); line-height: 1.6; overflow-wrap: anywhere; }
+  .final-content { margin-top: 8px; color: var(--workspace-text); font-size: 12.5px; line-height: 1.6; overflow-wrap: anywhere; }
   .final-content :global(p) { margin: 0 0 10px; }
   .final-content :global(p:last-child) { margin-bottom: 0; }
   .final-content :global(ul), .final-content :global(ol) { margin: 5px 0 10px; padding-left: 19px; }

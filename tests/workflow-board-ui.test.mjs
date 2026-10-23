@@ -39,7 +39,7 @@ await build({
 });
 
 function nativeFixture() {
-  try { localStorage.setItem("lume:tour:workspace:v1", "seen"); localStorage.setItem("lume:tour:board:v1", "seen"); } catch {}
+  try { localStorage.setItem("lume:tour:workspace:v1", "seen"); localStorage.setItem("lume:tour:board:v1", "seen"); localStorage.setItem("lume:tour:orb:v1", "seen"); } catch {}
   const callbacks = new Map();
   const listeners = new Map();
   let nextId = 1;

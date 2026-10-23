@@ -13,6 +13,7 @@ export type TourStep = {
 
 export const workspaceTourKey = "lume:tour:workspace:v1";
 export const boardTourKey = "lume:tour:board:v1";
+export const orbTourKey = "lume:tour:orb:v1";
 
 export const workspaceTour: TourStep[] = [
   { id: "welcome", targets: [], title: ["This is the Workspace", "Este é o Workspace"], body: ["Chat with several coding agents at once and follow everything they do. A minute to see where things are.", "Converse com vários agentes de código ao mesmo tempo e acompanhe tudo o que eles fazem. Um minuto para ver onde fica cada coisa."] },
@@ -34,4 +35,16 @@ export const boardTour: TourStep[] = [
   { id: "board-connect", targets: ["board-link", "board-port", "board-canvas"], title: ["Decide what passes on", "Decida o que passa adiante"], body: ["Click a connection to choose what the next step receives (the reply, the files, the checks) and whether it waits for your approval.", "Clique numa ligação para escolher o que a próxima etapa recebe (a resposta, os arquivos, os testes) e se ela espera a sua aprovação."] },
   { id: "board-run", targets: ["board-run"], media: "workflow-board", title: ["Run it", "Execute"], body: ["Write the goal and run. The steps go one after another; you can pause, stop or approve each handoff here.", "Escreva o objetivo e execute. As etapas rodam uma depois da outra; aqui você pausa, para ou aprova cada passagem."] },
   { id: "board-timeline", targets: ["board-mode"], below: true, title: ["Follow the run", "Acompanhe a execução"], body: ["The timeline shows who did what, for how long, and where the work changed hands.", "A linha do tempo mostra quem fez o quê, por quanto tempo e onde o trabalho trocou de mãos."] },
+];
+
+export const orbTour: TourStep[] = [
+  { id: "orb-welcome", targets: [], media: "orb-intro", title: ["This is the Orb", "Este é o Orb"], body: ["It sits over your windows and follows every coding agent on this computer. When one needs you, approve or reply right here.", "Ele fica sobre as suas janelas e acompanha todos os agentes de código do computador. Quando um precisa de você, aprove ou responda daqui mesmo."] },
+  { id: "orb-sessions", targets: ["orb-sessions"], title: ["Your agents", "Seus agentes"], body: ["Each row is a session. Its color says whether it is working, ready for review or waiting for your approval. Click it to read the reply and answer.", "Cada linha é uma sessão. A cor diz se ela está trabalhando, pronta para revisão ou esperando a sua aprovação. Clique para ler a resposta e responder."] },
+  { id: "orb-new", targets: ["orb-new"], below: true, title: ["Start a session", "Comece uma sessão"], body: ["Open an agent in a folder, or resume an earlier conversation.", "Abra um agente numa pasta ou retome uma conversa anterior."] },
+  { id: "orb-search", targets: ["orb-search"], below: true, title: ["Command palette", "Paleta de comandos"], body: ["Find sessions and actions from the keyboard. The global shortcut brings the Orb up from anywhere.", "Encontre sessões e ações pelo teclado. O atalho global abre o Orb de qualquer lugar."] },
+  { id: "orb-terminals", targets: ["orb-terminals"], media: "orb-dock", title: ["Terminals and workflows", "Terminais e workflows"], body: ["Open sessions as terminal windows. In Workflow mode they dock side by side and the work passes from one agent to the next.", "Abra as sessões como janelas de terminal. No modo Workflow elas se encaixam lado a lado e o trabalho passa de um agente para o próximo."] },
+  { id: "orb-inspector", targets: ["orb-inspector"], title: ["Inspector", "Inspector"], body: ["The focused session's context: its reply, changed files and repository.", "O contexto da sessão em foco: a resposta, os arquivos alterados e o repositório."] },
+  { id: "orb-workspace", targets: ["orb-workspace"], below: true, title: ["Need more room?", "Precisa de mais espaço?"], body: ["The Workspace opens chats side by side, with the workflow board and extensions.", "O Workspace abre os chats lado a lado, com o board de workflow e as extensões."] },
+  { id: "orb-collapse", targets: ["orb-collapse"], below: true, title: ["Tuck it away", "Recolha"], body: ["Collapse the Orb into a small capsule. It lets you know when someone needs you, and you can drag it anywhere.", "Recolha o Orb numa cápsula pequena. Ela avisa quando alguém precisa de você, e dá para arrastá-la para qualquer lugar."] },
+  { id: "orb-settings", targets: ["orb-settings"], title: ["Settings", "Ajustes"], body: ["Agents, appearance, shortcuts and this tour again.", "Agentes, aparência, atalhos e este tour de novo."] },
 ];

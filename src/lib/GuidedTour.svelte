@@ -6,8 +6,10 @@
   import type { TourStep } from "$lib/tours";
 
 
-  let { steps, language = "en", onPrepare, onDone } = $props<{
+  let { steps, language = "en", dark = false, onPrepare, onDone } = $props<{
     steps: TourStep[];
+    /** For surfaces without the Workspace's color tokens (the Orb): which fallback palette to use. */
+    dark?: boolean;
     language?: Language;
     /** Gets the workspace ready for a step (closes the board, opens the sidebar…) before it is measured. */
     onPrepare?: (step: string) => void | Promise<void>;
@@ -130,7 +132,7 @@
 
 <svelte:window onkeydown={keydown} />
 
-<div class="tour" role="dialog" aria-modal="true" aria-labelledby="tour-title" transition:fade={{ duration: 160 }}>
+<div class:dark class="tour" role="dialog" aria-modal="true" aria-labelledby="tour-title" transition:fade={{ duration: 160 }}>
   {#if rect}
     <div class="spotlight" style:left={`${rect.x - padding}px`} style:top={`${rect.y - padding}px`} style:width={`${rect.width + padding * 2}px`} style:height={`${rect.height + padding * 2}px`}></div>
   {:else}
@@ -170,26 +172,27 @@
 </div>
 
 <style>
-  .tour { position: fixed; z-index: 400; inset: 0; pointer-events: auto; }
+  .tour { --tour-accent: var(--workspace-accent, #428066); --tour-bg: var(--workspace-bg, #0f1512); --tour-line: var(--workspace-line, rgba(65, 94, 80, .16)); --tour-muted: var(--workspace-muted, #61736a); --tour-raised: var(--workspace-raised, #fff); --tour-strong: var(--workspace-strong, #1f2d26); --tour-subtle: var(--workspace-subtle, #eef4f0); --tour-text: var(--workspace-text, #4f6258); position: fixed; z-index: 400; inset: 0; pointer-events: auto; }
+  .tour.dark { --tour-accent: var(--workspace-accent, #4fae7e); --tour-bg: var(--workspace-bg, #0f1512); --tour-line: var(--workspace-line, rgba(205, 222, 213, .12)); --tour-muted: var(--workspace-muted, #9aaba2); --tour-raised: var(--workspace-raised, #1f2924); --tour-strong: var(--workspace-strong, #eef5f1); --tour-subtle: var(--workspace-subtle, rgba(141, 206, 176, .09)); --tour-text: var(--workspace-text, #c3d2ca); }
   .scrim { position: absolute; inset: 0; background: rgba(6, 12, 9, .56); }
-  .spotlight { position: absolute; border-radius: 14px; box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--workspace-accent, #4aa87a) 75%, transparent), 0 0 0 9999px rgba(6, 12, 9, .56); pointer-events: none; transition: left 380ms cubic-bezier(.16, 1, .3, 1), top 380ms cubic-bezier(.16, 1, .3, 1), width 380ms cubic-bezier(.16, 1, .3, 1), height 380ms cubic-bezier(.16, 1, .3, 1); }
-  .spotlight::after { position: absolute; inset: -1.5px; border-radius: inherit; box-shadow: 0 0 0 0 color-mix(in srgb, var(--workspace-accent, #4aa87a) 45%, transparent); content: ""; animation: tour-pulse 1.8s ease-out infinite; }
-  .tour-card { position: absolute; width: 340px; overflow: hidden; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .16)); border-radius: 16px; color: var(--workspace-text, #4f6258); background: var(--workspace-raised, #fff); box-shadow: 0 24px 60px rgba(5, 12, 8, .34), 0 2px 8px rgba(5, 12, 8, .14); transition: left 380ms cubic-bezier(.16, 1, .3, 1), top 380ms cubic-bezier(.16, 1, .3, 1); }
-  .tour-card.with-media { width: 400px; }
-  .tour-media { width: 100%; aspect-ratio: 16 / 9; display: block; object-fit: cover; border-bottom: 1px solid var(--workspace-line, rgba(65, 94, 80, .14)); background: var(--workspace-bg, #0f1512); }
+  .spotlight { position: absolute; border-radius: 14px; box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--tour-accent) 75%, transparent), 0 0 0 9999px rgba(6, 12, 9, .56); pointer-events: none; transition: left 380ms cubic-bezier(.16, 1, .3, 1), top 380ms cubic-bezier(.16, 1, .3, 1), width 380ms cubic-bezier(.16, 1, .3, 1), height 380ms cubic-bezier(.16, 1, .3, 1); }
+  .spotlight::after { position: absolute; inset: -1.5px; border-radius: inherit; box-shadow: 0 0 0 0 color-mix(in srgb, var(--tour-accent) 45%, transparent); content: ""; animation: tour-pulse 1.8s ease-out infinite; }
+  .tour-card { position: absolute; width: min(340px, calc(100vw - 28px)); overflow: hidden; border: 1px solid var(--tour-line); border-radius: 16px; color: var(--tour-text); background: var(--tour-raised); box-shadow: 0 24px 60px rgba(5, 12, 8, .34), 0 2px 8px rgba(5, 12, 8, .14); transition: left 380ms cubic-bezier(.16, 1, .3, 1), top 380ms cubic-bezier(.16, 1, .3, 1); }
+  .tour-card.with-media { width: min(400px, calc(100vw - 28px)); }
+  .tour-media { width: 100%; aspect-ratio: 16 / 9; display: block; object-fit: cover; border-bottom: 1px solid var(--tour-line); background: var(--tour-bg); }
   .tour-copy { padding: 16px 18px 4px; display: grid; gap: 6px; }
-  .tour-count { color: var(--workspace-accent, #428066); font: 700 10.5px/1 var(--lume-font-ui, Inter, sans-serif); letter-spacing: .04em; }
-  .tour-copy strong { color: var(--workspace-strong, #1f2d26); font: 720 15px/1.25 var(--lume-font-ui, Inter, sans-serif); letter-spacing: -.01em; }
-  .tour-copy p { margin: 0; color: var(--workspace-muted, #61736a); font: 500 12.5px/1.55 var(--lume-font-ui, Inter, sans-serif); }
+  .tour-count { color: var(--tour-accent); font: 700 10.5px/1 var(--lume-font-ui, Inter, sans-serif); letter-spacing: .04em; }
+  .tour-copy strong { color: var(--tour-strong); font: 720 15px/1.25 var(--lume-font-ui, Inter, sans-serif); letter-spacing: -.01em; }
+  .tour-copy p { margin: 0; color: var(--tour-muted); font: 500 12.5px/1.55 var(--lume-font-ui, Inter, sans-serif); }
   footer { padding: 12px 14px 14px 18px; display: flex; align-items: center; gap: 6px; }
   .tour-dots { margin-right: auto; display: flex; gap: 4px; }
-  .tour-dots i { width: 5px; height: 5px; border-radius: 999px; background: color-mix(in srgb, var(--workspace-muted, #61736a) 30%, transparent); transition: width 220ms cubic-bezier(.16, 1, .3, 1), background 220ms ease; }
-  .tour-dots i.on { width: 14px; background: var(--workspace-accent, #428066); }
+  .tour-dots i { width: 5px; height: 5px; border-radius: 999px; background: color-mix(in srgb, var(--tour-muted) 30%, transparent); transition: width 220ms cubic-bezier(.16, 1, .3, 1), background 220ms ease; }
+  .tour-dots i.on { width: 14px; background: var(--tour-accent); }
   footer button { height: 30px; padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 9px; font: 680 12px/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
-  footer .quiet { color: var(--workspace-muted, #61736a); background: transparent; }
-  footer .quiet:hover { color: var(--workspace-strong, #1f2d26); background: var(--workspace-subtle, #eef4f0); }
-  footer .primary { color: #fff; background: var(--workspace-accent, #428066); }
+  footer .quiet { color: var(--tour-muted); background: transparent; }
+  footer .quiet:hover { color: var(--tour-strong); background: var(--tour-subtle); }
+  footer .primary { color: #fff; background: var(--tour-accent); }
   footer .primary:hover { filter: brightness(1.08); }
-  @keyframes tour-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--workspace-accent, #4aa87a) 45%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
+  @keyframes tour-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--tour-accent) 45%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
   @media (prefers-reduced-motion: reduce) { .spotlight, .tour-card { transition: none; } .spotlight::after { animation: none; } }
 </style>

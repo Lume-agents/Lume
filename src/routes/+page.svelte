@@ -41,6 +41,8 @@
     type OrbPosition,
   } from "$lib/orbDocking";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import GuidedTour from "$lib/GuidedTour.svelte";
+  import { orbTour, orbTourKey } from "$lib/tours";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import { sessionLauncherTransition } from "$lib/sessionLauncherTransition";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
@@ -327,6 +329,33 @@
   let componentBanners = $state<SystemBannerItem[]>([]);
   let navigationActivation = $state({ view: "", count: 0 });
   let paletteOpen = $state(false);
+  let orbTourOpen = $state(false);
+
+  // The first time the panel is open with nothing else on it (setup guide, release notes), a short tour shows the Orb.
+  $effect(() => {
+    if (!expanded || onboardingOpen || startupChooserOpen || orbTourOpen) return;
+    try { if (localStorage.getItem(orbTourKey) !== null) return; }
+    catch { return; /* Without storage it would show every time; Settings still has it. */ }
+    const timer = window.setInterval(() => {
+      if (document.querySelector('[role="dialog"], [aria-modal="true"]')) return;
+      window.clearInterval(timer);
+      orbTourOpen = true;
+    }, 1200);
+    return () => window.clearInterval(timer);
+  });
+
+  function finishOrbTour() {
+    orbTourOpen = false;
+    try { localStorage.setItem(orbTourKey, "seen"); }
+    catch { /* It shows again next time when storage is unavailable. */ }
+  }
+
+  /** Every stop points at the session view's header and footer, so the panel goes back to it with nothing open over it. */
+  function prepareOrbTourStep() {
+    view = "sessions";
+    launcherOpen = false;
+    paletteOpen = false;
+  }
   let paletteTrigger: HTMLElement | null = null;
   let shortcutEditorKey = $state<ShortcutPreferenceKey | null>(null);
   let shortcutDraft = $state("");
@@ -3071,16 +3100,17 @@
           </div>
         </div>
         <div class="header-actions">
-          <button class:opening={openingWorkspace} class="workspace-button" type="button" title={tr("Open Workspace", "Abrir Workspace")} disabled={openingWorkspace} aria-busy={openingWorkspace} onclick={() => void showWorkspaceWindow()} aria-label={tr("Open Workspace", "Abrir Workspace")}>
+          <button class:opening={openingWorkspace} class="workspace-button" data-tour="orb-workspace" type="button" title={tr("Open Workspace", "Abrir Workspace")} disabled={openingWorkspace} aria-busy={openingWorkspace} onclick={() => void showWorkspaceWindow()} aria-label={tr("Open Workspace", "Abrir Workspace")}>
             <WorkspaceHeaderIcon name="orb" size={19} />
           </button>
-          <button class="palette-button" type="button" title={preferences.globalShortcut} onclick={showCommandPalette} aria-label={tr("Open command palette", "Abrir paleta de comandos")}>
+          <button class="palette-button" data-tour="orb-search" type="button" title={preferences.globalShortcut} onclick={showCommandPalette} aria-label={tr("Open command palette", "Abrir paleta de comandos")}>
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="4.5" /><path d="m12 12 4 4" /></svg>
           </button>
           {#if view === "sessions"}
             <button
               class:active={launcherOpen}
               class="add-button"
+              data-tour="orb-new"
               type="button"
               onclick={toggleLauncher}
               aria-expanded={launcherOpen}
@@ -3090,7 +3120,7 @@
               <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 5v10M5 10h10" /></svg>
             </button>
           {/if}
-          <button class="collapse-button" type="button" onclick={toggleExpanded} aria-label={tr("Collapse", "Recolher")}>
+          <button class="collapse-button" data-tour="orb-collapse" type="button" onclick={toggleExpanded} aria-label={tr("Collapse", "Recolher")}>
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 8 4.5 4 4.5-4" /></svg>
           </button>
         </div>
@@ -3326,7 +3356,7 @@
 
       <div class="panel-content" class:inspector-content={view === "history"}>
         {#if view === "sessions"}
-          <div class="session-list" use:revealScrollbarWhileScrolling>
+          <div class="session-list" data-tour="orb-sessions" use:revealScrollbarWhileScrolling>
             {#if visibleAgentSessions.length}
               {#each orbSections as section (section.key)}
               {#if section.group || orbSections.length > 1}
@@ -3811,6 +3841,7 @@
               <summary class="settings-section-label">{tr("Agents", "Agentes")}</summary>
               <div class="settings-section-content">
                 <button class="setup-guide-link" type="button" onclick={() => void reopenOnboarding()}>{tr("Open the setup guide", "Abrir o guia de configuração")}</button>
+                <button class="setup-guide-link" type="button" onclick={() => { view = "sessions"; orbTourOpen = true; }}>{tr("Show the Orb tour", "Ver o tour do Orb")}</button>
                 <div class="agent-setup-host">
                   <AgentSetupCards
                     language={preferences.language}
@@ -4309,6 +4340,7 @@
         </button>
         <button
           class:active={view === "board"}
+          data-tour="orb-terminals"
           type="button"
           onclick={() => activateNavigation("board")}
           aria-label={tr("Terminals", "Terminais")}
@@ -4318,6 +4350,7 @@
         </button>
         <button
           class:active={view === "history"}
+          data-tour="orb-inspector"
           type="button"
           onclick={() => activateNavigation("history")}
           aria-label={tr("Inspector", "Inspector")}
@@ -4329,6 +4362,7 @@
           class:active={view === "settings"}
           class:has-update={updateState === "available"}
           class:has-mobile-device={newMobileDevice !== null}
+          data-tour="orb-settings"
           type="button"
           onclick={() => activateNavigation("settings")}
           aria-label={tr("Settings", "Configurações")}
@@ -4338,6 +4372,9 @@
         </button>
       </footer>
     </section>
+    {#if orbTourOpen && expanded}
+      <GuidedTour steps={orbTour} language={preferences.language} dark={effectiveDark} onPrepare={prepareOrbTourStep} onDone={finishOrbTour} />
+    {/if}
   {/if}
   {#if installingPlan}
     <CliInstallDialog plan={installingPlan} language={preferences.language} onClose={() => void finishCliInstall()} />

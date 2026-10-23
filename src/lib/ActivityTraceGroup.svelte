@@ -293,7 +293,7 @@
   .cluster-summary { width: 100%; min-height: var(--activity-summary-height, 39px); padding: 6px 8px; display: flex; align-items: center; gap: 8px; border: 0; color: var(--workspace-muted, #65776e); background: transparent; cursor: pointer; text-align: left; }
   .activity-row > summary::-webkit-details-marker { display: none; }
   .cluster-mark { width: max-content; min-width: 24px; height: 24px; display: flex; align-items: center; flex: 0 0 auto; border-radius: 7px; color: var(--workspace-accent, #428066); background: transparent; }
-  .cluster-type-stack { display: flex; align-items: center; padding-left: 1px; }
+  .cluster-type-stack { display: flex; align-items: center; padding-left: 1px; isolation: isolate; }
   .cluster-type-icon { position: relative; z-index: calc(1 + var(--icon-index)); box-sizing: border-box; width: 18px; height: 18px; margin-left: -5px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--workspace-accent, #428066) 18%, var(--workspace-line, rgba(65, 94, 80, .18))); border-radius: 6px; color: var(--workspace-accent, #428066); background: var(--workspace-raised, #fff); animation: cluster-icon-arrive 220ms cubic-bezier(.16, 1, .3, 1) both; animation-delay: calc(var(--icon-index) * 24ms); }
   .cluster-type-icon:first-child { margin-left: 0; }
   .cluster-summary > strong { min-width: 0; flex: 1; overflow: hidden; font: 730 var(--chat-small-font-size, 9px)/1.35 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }

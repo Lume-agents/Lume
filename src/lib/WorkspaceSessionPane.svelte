@@ -3566,7 +3566,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer.crossfade-in { opacity: 0; pointer-events: none; transition: none; }
   .composer:not(.fresh) { position: absolute; right: 0; bottom: 0; left: 0; padding-top: 6px; pointer-events: none; }
   .composer:not(.fresh) > :global(*) { pointer-events: auto; }
-  .composer:not(.fresh)::before { position: absolute; z-index: -1; top: -34px; right: 0; bottom: 0; left: 0; background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--workspace-pane) 74%, transparent) 64%); content: ""; pointer-events: none; -webkit-backdrop-filter: blur(7px); backdrop-filter: blur(7px); -webkit-mask-image: linear-gradient(to bottom, transparent, #000 60%); mask-image: linear-gradient(to bottom, transparent, #000 60%); }
+  /* Stops short of the chat's scrollbar so the blur never covers it. */
+  .composer:not(.fresh)::before { position: absolute; z-index: -1; top: -34px; right: 9px; bottom: 0; left: 0; background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--workspace-pane) 74%, transparent) 64%); content: ""; pointer-events: none; -webkit-backdrop-filter: blur(7px); backdrop-filter: blur(7px); -webkit-mask-image: linear-gradient(to bottom, transparent, #000 60%); mask-image: linear-gradient(to bottom, transparent, #000 60%); }
   .composer.fresh { position: absolute; top: 50%; right: 0; left: 0; z-index: 3; border-top: 0; background: transparent; transform: translateY(-50%); }
   .composer-welcome { max-width: 760px; margin: 0 auto 24px; display: flex; align-items: center; justify-content: center; gap: 13px; }
   .composer-welcome strong { color: var(--workspace-strong); font-size: clamp(15px, 2.2cqw, 22px); font-weight: 710; letter-spacing: -.025em; }

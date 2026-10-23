@@ -3,6 +3,7 @@ mod agent_commands;
 mod agent_mcp;
 mod agent_plugins;
 mod antigravity_stream;
+mod command_file_changes;
 mod browser_server;
 mod claude_control;
 mod cli_installer;

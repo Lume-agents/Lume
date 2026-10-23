@@ -2562,7 +2562,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     </div>
   {/if}
 
-  <div class="conversation-shell" style:--composer-overlap={composerInIntroPosition ? "0px" : `${composerHeight}px`}>
+  <div class="conversation-shell" class:under-composer={!composerInIntroPosition} style:--composer-overlap={composerInIntroPosition ? "0px" : `${composerHeight}px`}>
   <div class="conversation" role="region" aria-label={tr("Conversation", "Conversa")} bind:this={conversationElement} onscroll={trackConversationScroll}>
     <div class="conversation-content" bind:this={conversationContentElement}>
     {#if canLoadEarlier}
@@ -2583,6 +2583,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             active={feedItem.id === activeTraceId}
             plain
             {language}
+            {onOpenReview}
           />
         </div>
       {:else}
@@ -3392,6 +3393,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .conversation-shell { position: relative; min-width: 0; min-height: 0; display: flex; flex: 1 1 auto; overflow: hidden; }
   .conversation { --chat-edge-gutter: clamp(28px, 5cqw, 54px); min-width: 0; min-height: 0; width: 100%; padding: 25px var(--chat-edge-gutter) calc(26px + var(--composer-overlap, 0px)); display: flex; flex-direction: column-reverse; flex: 1 1 auto; overflow: auto; overflow-anchor: none; overscroll-behavior: none; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   .conversation-content { width: 100%; max-width: 1040px; min-width: 0; margin-inline: auto; display: flex; flex-direction: column; gap: 15px; flex: 1 0 auto; }
+  .conversation-shell.under-composer .conversation { background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--workspace-pane) 13%, transparent) 30%, color-mix(in srgb, var(--workspace-pane) 69%, transparent) 60%, color-mix(in srgb, var(--workspace-pane) 74%, transparent) 64%) right bottom / 9px calc(var(--composer-overlap) + 34px) no-repeat; }
   .conversation::-webkit-scrollbar { width: 9px; height: 9px; }.conversation::-webkit-scrollbar-track { background: transparent; }.conversation::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: var(--workspace-scroll-thumb); background-clip: content-box; }
   .load-earlier-chat { max-width: min(240px, 100%); min-height: 30px; margin: 0 auto 7px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: var(--workspace-chat-tiny-size); font-weight: 700; cursor: pointer; }
   .load-earlier-chat:hover:not(:disabled) { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 32%, var(--workspace-line)); }
@@ -3566,7 +3568,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer.crossfade-in { opacity: 0; pointer-events: none; transition: none; }
   .composer:not(.fresh) { position: absolute; right: 0; bottom: 0; left: 0; padding-top: 6px; pointer-events: none; }
   .composer:not(.fresh) > :global(*) { pointer-events: auto; }
-  /* Stops short of the chat's scrollbar so the blur never covers it. */
+  /* Stops short of the chat's 9px scrollbar so the thumb stays on top; the conversation paints the same fade under the scrollbar. */
   .composer:not(.fresh)::before { position: absolute; z-index: -1; top: -34px; right: 9px; bottom: 0; left: 0; background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--workspace-pane) 74%, transparent) 64%); content: ""; pointer-events: none; -webkit-backdrop-filter: blur(7px); backdrop-filter: blur(7px); -webkit-mask-image: linear-gradient(to bottom, transparent, #000 60%); mask-image: linear-gradient(to bottom, transparent, #000 60%); }
   .composer.fresh { position: absolute; top: 50%; right: 0; left: 0; z-index: 3; border-top: 0; background: transparent; transform: translateY(-50%); }
   .composer-welcome { max-width: 760px; margin: 0 auto 24px; display: flex; align-items: center; justify-content: center; gap: 13px; }

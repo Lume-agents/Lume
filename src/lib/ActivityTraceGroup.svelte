@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { SessionActivity } from "$lib/domain";
   import type { Language } from "$lib/i18n";
-  import { slide } from "svelte/transition";
+  import { fade, fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import ActivityTypeIcon from "$lib/ActivityTypeIcon.svelte";
   import GitEventChips from "$lib/GitEventChips.svelte";
@@ -9,13 +9,16 @@
   import { gitActivityInfo } from "$lib/gitEvents";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import { displayFileChangePath } from "$lib/fileChanges";
+  import { fileDiffChunk, parseReviewDiff } from "$lib/reviewDiffs";
+  import LumeIcon from "$lib/LumeIcon.svelte";
   import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunFiles, activityRunTitle, groupConsecutiveTraceActivities, type ActivityCategory, type ActivityRun } from "$lib/activityPresentation";
 
-  let { activities, language = "en", active = false, plain = false } = $props<{
+  let { activities, language = "en", active = false, plain = false, onOpenReview } = $props<{
     activities: SessionActivity[];
     language?: Language;
     active?: boolean;
     plain?: boolean;
+    onOpenReview?: (path: string) => void;
   }>();
 
   const summary = $derived(activityGroupSummary(activities, language));
@@ -41,6 +44,7 @@
   let expandedRuns = $state<string[]>([]);
   let collapsedFileRuns = $state<string[]>([]);
   let selectedFileKey = $state("");
+  let fileCardAbove = $state(false);
   let initialized = false;
   let wasActive = false;
 
@@ -78,6 +82,36 @@
     return activity?.detail ?? "";
   }
 
+  /** What the floating card of an edited file shows: its own diff lines, or the raw detail when it is not a diff. */
+  function fileCard(detail: string, path: string) {
+    const chunk = detail ? fileDiffChunk(detail, path) : null;
+    const lines = chunk ? parseReviewDiff(chunk).filter((line) => line.kind !== "meta") : [];
+    return {
+      lines,
+      added: lines.filter((line) => line.kind === "added").length,
+      removed: lines.filter((line) => line.kind === "removed").length,
+    };
+  }
+
+  function openFileCard(event: MouseEvent, key: string) {
+    if (selectedFileKey === key) {
+      selectedFileKey = "";
+      return;
+    }
+    // Near the bottom of the chat the card would sit under the composer: it opens upward instead.
+    const trigger = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const chat = (event.currentTarget as HTMLElement).closest(".conversation")?.getBoundingClientRect();
+    const bottom = (chat?.bottom ?? window.innerHeight) - 120;
+    fileCardAbove = trigger.bottom + 380 > bottom && trigger.top - 380 > (chat?.top ?? 0);
+    selectedFileKey = key;
+  }
+
+  function closeFileCard(event: PointerEvent) {
+    if (!selectedFileKey) return;
+    const node = (event.target as Element | null)?.closest?.("[data-file-key]");
+    if (node?.getAttribute("data-file-key") !== selectedFileKey) selectedFileKey = "";
+  }
+
   function motionDuration(duration: number) {
     return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration;
   }
@@ -88,6 +122,8 @@
       : run.activities.at(-1)?.status;
   }
 </script>
+
+<svelte:window onpointerdown={closeFileCard} onkeydown={(event) => { if (event.key === "Escape" && selectedFileKey) selectedFileKey = ""; }} />
 
 <section class:active={isWorking} class:open={expanded} class:plain class="activity-cluster">
   <button
@@ -147,15 +183,37 @@
                   {#each runFiles as path, fileIndex (path)}
                     {@const detail = fileDetail(run, path)}
                     {@const fileKey = `${run.id}:${path}`}
-                    <div class="file-node" role="listitem" style={`--file-delay: ${Math.min(fileIndex, 6) * 30}ms`}>
-                      <button class="file-node-trigger" type="button" title={path} disabled={!detail} aria-expanded={detail ? selectedFileKey === fileKey : undefined} onclick={() => (selectedFileKey = selectedFileKey === fileKey ? "" : fileKey)}>
+                    {@const editRun = run.category === "edit"}
+                    {@const opens = Boolean(detail) || (editRun && Boolean(onOpenReview))}
+                    <div class:selected={selectedFileKey === fileKey} class="file-node" role="listitem" data-file-key={fileKey} style={`--file-delay: ${Math.min(fileIndex, 6) * 30}ms`}>
+                      <button class="file-node-trigger" type="button" title={path} disabled={!opens} aria-expanded={opens ? selectedFileKey === fileKey : undefined} onclick={(event) => openFileCard(event, fileKey)}>
                         <span class="file-node-action">{run.category === "read" ? tr("Read", "Leu") : tr("Edited", "Editou")}</span>
                         <FileTypeIcon {path} />
                         <span class="file-node-name">{displayFileChangePath(path)}</span>
                       </button>
-                      {#if detail && selectedFileKey === fileKey}
-                        <div class="file-node-detail" in:slide={{ duration: motionDuration(180), easing: cubicOut }} out:slide={{ duration: motionDuration(120), easing: cubicOut }}>
-                          <pre>{detail}</pre>
+                      {#if opens && selectedFileKey === fileKey}
+                        {@const card = editRun ? fileCard(detail, path) : { lines: [], added: 0, removed: 0 }}
+                        <div class:above={fileCardAbove} class="file-card" role="dialog" aria-label={path} in:fly={{ y: -4, duration: motionDuration(150), easing: cubicOut }} out:fade={{ duration: motionDuration(90) }}>
+                          <header>
+                            <FileTypeIcon {path} />
+                            <strong title={path}>{path.split(/[\\/]/).at(-1) || path}</strong>
+                            {#if card.added || card.removed}<span class="file-card-stats"><b class="added">+{card.added}</b><b class="removed">−{card.removed}</b></span>{/if}
+                            <button class="file-card-close" type="button" aria-label={tr("Close", "Fechar")} onclick={() => (selectedFileKey = "")}><LumeIcon name="close" size={12} /></button>
+                          </header>
+                          {#if card.lines.length}
+                            <div class="file-card-diff">
+                              {#each card.lines as line, lineIndex (lineIndex)}
+                                <div class="diff-line kind-{line.kind}"><span class="num">{line.kind === "hunk" ? "" : line.newLine ?? line.oldLine ?? ""}</span><code>{line.kind === "hunk" ? line.content : `${line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}${line.content}`}</code></div>
+                              {/each}
+                            </div>
+                          {:else if detail}
+                            <pre>{detail}</pre>
+                          {:else}
+                            <p class="file-card-empty">{tr("No diff was recorded for this change.", "Nenhum diff foi registrado para esta alteração.")}</p>
+                          {/if}
+                          {#if editRun && onOpenReview}
+                            <footer><button type="button" onclick={() => { selectedFileKey = ""; onOpenReview?.(path); }}><LumeIcon name="diff" size={13} />{tr("Open in review center", "Abrir na central de revisão")}</button></footer>
+                          {/if}
                         </div>
                       {/if}
                     </div>
@@ -333,8 +391,35 @@
   .file-node-trigger { min-width: 0; min-height: 26px; padding: 3px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 6px; color: inherit; background: transparent; text-align: left; cursor: pointer; }
   .file-node-trigger:hover:not(:disabled), .file-node-trigger:focus-visible { color: var(--workspace-accent, #428066); background: var(--workspace-subtle, #eef4f0); }
   .file-node-trigger:disabled { cursor: default; }
-  .file-node-detail { min-width: 0; margin: 3px 0 0 8px; }
-  .file-node-detail pre { max-width: 100%; margin: 0 0 5px; }
+  .file-node.selected { z-index: 6; }
+  /* The group clips its own slide transitions; an open file card has to reach past it. */
+  .activity-cluster:has(.file-card) { position: relative; z-index: 8; overflow: visible; }
+  .activity-row:has(.file-card) { position: relative; z-index: 8; }
+  /* Floats over the conversation under the file it belongs to, so opening it does not push the chat around. */
+  .file-card { position: absolute; z-index: 6; top: calc(100% + 3px); left: 8px; max-height: 360px; width: min(560px, calc(100cqw - 90px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .14)); border-radius: 11px; color: var(--workspace-text, #4f6258); background: linear-gradient(var(--workspace-raised, #fff), var(--workspace-raised, #fff)), var(--workspace-bg, #fff); box-shadow: 0 14px 36px rgba(18, 36, 27, .18), 0 2px 6px rgba(18, 36, 27, .08); }
+  .file-card.above { top: auto; bottom: calc(100% + 3px); }
+  .file-card header { min-width: 0; padding: 7px 7px 7px 10px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--workspace-line, rgba(65, 94, 80, .12)); }
+  .file-card header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--workspace-strong, #52665c); font: 700 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.3 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); text-overflow: ellipsis; white-space: nowrap; }
+  .file-card-stats { display: flex; gap: 5px; font: 700 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); }
+  .file-card-stats .added { color: #3e9870; }
+  .file-card-stats .removed { color: #b36a68; }
+  .file-card-close { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--workspace-muted, #61736a); background: transparent; cursor: pointer; }
+  .file-card-close:hover { color: var(--workspace-strong, #52665c); background: var(--workspace-subtle, #eef4f0); }
+  .file-card-diff { max-height: 300px; padding: 4px 0; overflow: auto; font: var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.6 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); scrollbar-width: thin; }
+  .file-card .diff-line { min-width: max-content; display: grid; grid-template-columns: 34px minmax(0, 1fr); }
+  .file-card .diff-line .num { padding-right: 8px; color: var(--workspace-faint, #89958f); text-align: right; user-select: none; }
+  .file-card .diff-line code { padding: 0 10px 0 4px; white-space: pre; font: inherit; }
+  .file-card .diff-line.kind-added { color: #2f7f5b; background: color-mix(in srgb, #4aa87a 11%, transparent); }
+  .file-card .diff-line.kind-removed { color: #a85d5b; background: color-mix(in srgb, #c07170 10%, transparent); }
+  .file-card .diff-line.kind-hunk { margin-top: 2px; color: var(--workspace-accent, #428066); background: color-mix(in srgb, var(--workspace-accent, #428066) 6%, transparent); }
+  .file-card pre { max-width: none; max-height: 300px; margin: 0; border: 0; border-radius: 0; background: transparent; }
+  .file-card-empty { margin: 0; padding: 12px 10px; color: var(--workspace-muted, #61736a); font: 600 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.4 var(--lume-font-ui, Inter, sans-serif); }
+  .file-card footer { padding: 6px; display: flex; justify-content: flex-end; border-top: 1px solid var(--workspace-line, rgba(65, 94, 80, .12)); }
+  .file-card footer button { height: 26px; padding: 0 10px; display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 7px; color: var(--workspace-accent, #428066); background: var(--workspace-accent-soft, color-mix(in srgb, #428066 10%, transparent)); font: 700 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
+  .file-card footer button:hover { background: color-mix(in srgb, var(--workspace-accent, #428066) 16%, transparent); }
+  :global(.terminal-window.dark) .file-card { box-shadow: 0 16px 40px rgba(0, 0, 0, .42), 0 2px 6px rgba(0, 0, 0, .2); }
+  :global(.terminal-window.dark) .file-card .diff-line.kind-added { color: #7fcca4; }
+  :global(.terminal-window.dark) .file-card .diff-line.kind-removed { color: #e09a98; }
   .file-node-action { flex: 0 0 auto; color: var(--workspace-muted, #61736a); font: 600 var(--activity-detail-size, var(--chat-tiny-font-size, 7px))/1.3 var(--lume-font-ui, Inter, sans-serif); }
   .file-node :global(.file-type-icon) { flex: 0 0 auto; }
   .file-node-name { min-width: 0; padding: 3px 6px; overflow: hidden; border-radius: 5px; color: var(--workspace-strong, #52665c); background: color-mix(in srgb, var(--workspace-subtle, #eef4f0) 75%, transparent); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 7px))/1.3 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); text-overflow: ellipsis; white-space: nowrap; }

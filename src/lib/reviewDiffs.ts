@@ -319,3 +319,14 @@ export function parseReviewDiff(diff: string): ReviewDiffLine[] {
   }
   return result;
 }
+
+/** The part of a recorded diff that belongs to `path`, when the detail holds a diff for it. */
+export function fileDiffChunk(detail: string, path: string): string | null {
+  const chunks = [...recordedDiffs(detail), ...structuredDiffChunks(detail)];
+  const name = path.replace(/\\/g, "/");
+  const matching = chunks.find((chunk) => {
+    const header = chunk.split("\n", 3).join("\n").replace(/\\/g, "/");
+    return header.includes(name) || header.includes(name.replace(/^\/+/, ""));
+  });
+  return matching ?? (chunks.length === 1 ? chunks[0] : null);
+}

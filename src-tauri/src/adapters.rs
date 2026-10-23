@@ -318,11 +318,17 @@ fn map_event_with_context(
             last_response.as_deref(),
         )
     };
-    let activities = if provider == "claude" {
+    let mut activities = if provider == "claude" {
         claude_transcript_activities(raw, &session_id)
     } else {
         Vec::new()
     };
+    if let Some(changed) = activity
+        .as_ref()
+        .and_then(|command| command_file_activity(command, hook_name.as_str(), raw, cwd.as_deref()))
+    {
+        activities.push(changed);
+    }
     let event_status_label = status_label(hook_name.as_str(), &event).map(str::to_string);
 
     Some(HookEvent {
@@ -687,6 +693,47 @@ fn hook_activity(
         attachments: Vec::new(),
         append_detail: false,
     })
+}
+
+/// The files a shell command changed, as a file edit after it. Before the command runs the hook keeps a
+/// copy of the repository's changed files to compare against once it has run.
+fn command_file_activity(
+    command: &SessionActivity,
+    hook_name: &str,
+    raw: &Value,
+    cwd: Option<&str>,
+) -> Option<SessionActivity> {
+    if !matches!(command.kind.as_str(), "command" | "test") {
+        return None;
+    }
+    // Without the tool's own id the run before cannot be matched with the run after.
+    string(raw, "tool_use_id").or_else(|| string(raw, "tool_call_id"))?;
+    match hook_name {
+        "PreToolUse" | "BeforeTool" => {
+            crate::command_file_changes::remember_before(&command.id, cwd?, &command.title);
+            None
+        }
+        "PostToolUse" | "PostToolUseFailure" | "AfterTool" => {
+            let changes = crate::command_file_changes::changes_after(&command.id)?;
+            let title = match changes.files.as_slice() {
+                [only] => only.clone(),
+                files => format!("{} files changed", files.len()),
+            };
+            Some(SessionActivity {
+                id: format!("{}:files", command.id),
+                kind: "file".into(),
+                title,
+                detail: (!changes.diff.is_empty()).then_some(changes.diff),
+                status: "completed".into(),
+                // Right after the command, so it reads as what the command did.
+                created_at: command.created_at + 1,
+                files: changes.files,
+                attachments: Vec::new(),
+                append_detail: false,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// A unified diff for a file edit made with an edit tool, when its payload allows one.

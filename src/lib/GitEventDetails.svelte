@@ -13,8 +13,8 @@
   // `all` and `new-branch` only describe how the command was typed; the rest change its outcome.
   const options = $derived(info.flags.filter((flag: string) => !["all", "new-branch", "staged"].includes(flag)));
   const rows = $derived.by(() => {
+    // The row's title already names the operation and its chips show the changed lines, so neither repeats here.
     const items: [string, string][] = [];
-    items.push([pt ? "Operação" : "Operation", info.tool === "gh" ? `gh · ${headline}` : headline]);
     if (place.length) items.push([pt ? "Repositório" : "Repository", place.join(" · ")]);
     if (info.fromBranch && info.branch) items.push(["Branch", `${info.fromBranch} → ${info.branch}`]);
     else if (info.branch || info.fromBranch) items.push(["Branch", (info.branch ?? info.fromBranch) as string]);
@@ -23,10 +23,6 @@
     if (info.subject) items.push([pt ? "Mensagem" : "Message", info.subject]);
     if (info.sync) items.push([pt ? "Sincronia" : "Sync", [info.sync.ahead ? `↑${info.sync.ahead} ${pt ? "à frente" : "ahead"}` : "", info.sync.behind ? `↓${info.sync.behind} ${pt ? "atrás" : "behind"}` : ""].filter(Boolean).join("  ")]);
     if (info.clean) items.push([pt ? "Árvore" : "Tree", pt ? "limpa" : "clean"]);
-    if (info.stats && (info.stats.files || info.stats.added || info.stats.removed)) {
-      const files = info.stats.files ? `${info.stats.files} ${pt ? (info.stats.files === 1 ? "arquivo" : "arquivos") : (info.stats.files === 1 ? "file" : "files")}` : "";
-      items.push([pt ? "Mudanças" : "Changes", [files, info.stats.added ? `+${info.stats.added}` : "", info.stats.removed ? `−${info.stats.removed}` : ""].filter(Boolean).join("  ")]);
-    }
     if (options.length) items.push([pt ? "Opções" : "Options", options.join(", ")]);
     if (result) items.push([pt ? "Resultado" : "Result", info.result === "failed" && info.note ? `${result} · ${info.note}` : result]);
     return items;

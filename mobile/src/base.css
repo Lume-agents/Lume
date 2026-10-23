@@ -1,0 +1,70 @@
+/* Page-wide basics. The look comes from Lume's tokens (themeTokens.css): .mobile-app maps them onto the
+   same --workspace-* properties the Workspace uses, so its components (events, markdown, diffs) render
+   unchanged. Text is a step larger than on the desktop, for a phone held at arm's length. */
+html, body { margin: 0; height: 100%; -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; }
+body { overscroll-behavior: none; background: var(--mobile-page, #101713); }
+* { box-sizing: border-box; }
+button, input, textarea, select { font: inherit; color: inherit; }
+button { -webkit-user-select: none; user-select: none; }
+
+.mobile-app {
+  --workspace-bg: var(--lume-canvas-light);
+  --workspace-sidebar: var(--lume-sidebar-light);
+  --workspace-pane: var(--lume-surface-light);
+  --workspace-raised: var(--lume-raised-light);
+  --workspace-line: var(--lume-line-light);
+  --workspace-strong: var(--lume-ink-strong-light);
+  --workspace-text: var(--lume-ink-light);
+  --workspace-muted: var(--lume-ink-muted-light);
+  --workspace-faint: var(--lume-ink-faint-light);
+  --workspace-accent: var(--lume-accent-strong);
+  --workspace-accent-soft: var(--lume-accent-soft-light);
+  --workspace-subtle: var(--lume-subtle-light);
+  --workspace-message: var(--lume-message-light);
+  --workspace-user: var(--lume-user-light);
+  --workspace-user-line: var(--lume-user-line-light);
+  --workspace-code: var(--lume-code-light);
+  --workspace-scroll-thumb: var(--lume-scroll-light);
+  --file-monochrome-filter: grayscale(1) brightness(0) contrast(.82);
+  --file-monochrome-opacity: .78;
+  --mobile-text-scale: 1;
+  --chat-font-size: calc(15px * var(--mobile-text-scale));
+  --chat-small-font-size: calc(12.5px * var(--mobile-text-scale));
+  --chat-tiny-font-size: calc(11px * var(--mobile-text-scale));
+  --activity-detail-size: calc(11.5px * var(--mobile-text-scale));
+  --workspace-chat-font-size: var(--chat-font-size);
+  --workspace-chat-font-adjust: calc(15px * var(--mobile-text-scale) - 13.5px);
+  --workspace-chat-small-adjust: calc(12px * var(--mobile-text-scale) - 11px);
+  --workspace-chat-small-size: var(--chat-small-font-size);
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  color: var(--workspace-text);
+  background: var(--workspace-bg);
+  font-family: var(--lume-font-ui, "Lume Inter", ui-sans-serif, system-ui, sans-serif);
+  accent-color: var(--workspace-accent);
+}
+.mobile-app.dark {
+  --workspace-bg: var(--lume-canvas-dark);
+  --workspace-sidebar: var(--lume-sidebar-dark);
+  --workspace-pane: var(--lume-surface-dark);
+  --workspace-raised: var(--lume-raised-dark);
+  --workspace-line: var(--lume-line-dark);
+  --workspace-strong: var(--lume-ink-strong-dark);
+  --workspace-text: var(--lume-ink-dark);
+  --workspace-muted: var(--lume-ink-muted-dark);
+  --workspace-faint: var(--lume-ink-faint-dark);
+  --workspace-accent: var(--lume-accent);
+  --workspace-accent-soft: var(--lume-accent-soft-dark);
+  --workspace-subtle: var(--lume-subtle-dark);
+  --workspace-message: var(--lume-message-dark);
+  --workspace-user: var(--lume-user-dark);
+  --workspace-user-line: var(--lume-user-line-dark);
+  --workspace-code: var(--lume-code-dark);
+  --workspace-scroll-thumb: var(--lume-scroll-dark);
+  --file-monochrome-filter: grayscale(1) brightness(0) invert(.94) contrast(.9);
+  --file-monochrome-opacity: .88;
+}
+.mobile-app.text-small { --mobile-text-scale: .92; }
+.mobile-app.text-large { --mobile-text-scale: 1.12; }
+.mobile-app ::selection { color: var(--workspace-strong); background: var(--workspace-accent-soft); }
+.mobile-app button:focus-visible, .mobile-app input:focus-visible, .mobile-app textarea:focus-visible { outline: 2px solid color-mix(in srgb, var(--workspace-accent) 70%, white); outline-offset: 2px; }

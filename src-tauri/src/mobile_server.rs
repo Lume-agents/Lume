@@ -68,9 +68,9 @@ const MOBILE_APP: &str = include_str!("../../mobile-pwa/app.js");
 const MOBILE_MARKDOWN: &str = include_str!("../../src/lib/markdown.js");
 const MOBILE_RESPONSE_DEDUP: &str = include_str!("../../src/lib/responseDedup.js");
 const MOBILE_STYLES: &str = include_str!("../../mobile-pwa/styles.css");
-const MOBILE_MANIFEST: &str = include_str!("../../mobile-pwa/manifest.webmanifest");
-const MOBILE_SERVICE_WORKER: &str = include_str!("../../mobile-pwa/sw.js");
-const MOBILE_ICON: &str = include_str!("../../mobile-pwa/lume-mobile-icon.svg");
+const MOBILE_MANIFEST: &str = include_str!("../../mobile/public/manifest.webmanifest");
+const MOBILE_SERVICE_WORKER: &str = include_str!("../../mobile/public/sw.js");
+const MOBILE_ICON: &str = include_str!("../../mobile/public/lume-mobile-icon.svg");
 
 trait MobileStream: Read + Write {
     fn set_mobile_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()>;
@@ -1513,6 +1513,8 @@ fn raw_response(status: u16, content_type: &str, body: &[u8]) -> String {
     )
 }
 
+/// The mobile app is the Workspace's Svelte components: they set inline `style` attributes, and its fonts
+/// travel inside styles.css as data URLs. Scripts stay limited to the page's own files.
 fn static_response(content_type: &str, body: &str, service_worker: bool) -> String {
     let worker_header = if service_worker {
         "Service-Worker-Allowed: /\r\n"
@@ -1525,7 +1527,7 @@ fn static_response(content_type: &str, body: &str, service_worker: bool) -> Stri
          Cache-Control: no-cache\r\n\
          X-Content-Type-Options: nosniff\r\n\
          Referrer-Policy: no-referrer\r\n\
-         Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\n\
+         Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\n\
          {worker_header}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
         body.len()

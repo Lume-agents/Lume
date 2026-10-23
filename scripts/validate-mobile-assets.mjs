@@ -14,28 +14,9 @@ async function requireFile(path, context) {
   }
 }
 
-async function requireMatchingFiles(source, mobile) {
-  const sourcePath = resolve(root, source);
-  const mobilePath = resolve(root, mobile);
-  await requireFile(sourcePath, source);
-  await requireFile(mobilePath, source);
-  try {
-    const [sourceContent, mobileContent] = await Promise.all([
-      readFile(sourcePath, "utf8"),
-      readFile(mobilePath, "utf8"),
-    ]);
-    if (sourceContent !== mobileContent) {
-      errors.push(`${mobile} is out of sync with ${source}`);
-    }
-  } catch {
-    // Missing files are reported above.
-  }
-}
-
-await requireMatchingFiles("src/lib/markdown.js", "mobile-pwa/markdown.js");
-await requireMatchingFiles("src/lib/responseDedup.js", "mobile-pwa/responseDedup.js");
-
-for (const entry of ["app.js", "markdown.js", "responseDedup.js", "sw.js"]) {
+// mobile-pwa/ is the build of mobile/ (npm run build:mobile): the files the desktop gateway embeds and
+// GitHub Pages and Capacitor ship. The shared modules (markdown, response dedup) are bundled into app.js.
+for (const entry of ["index.html", "app.js", "styles.css", "sw.js", "manifest.webmanifest", "lume-mobile-icon.svg"]) {
   const path = resolve(mobileRoot, entry);
   await requireFile(path, entry);
   let source = "";

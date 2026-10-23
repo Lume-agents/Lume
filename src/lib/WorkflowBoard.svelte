@@ -878,6 +878,7 @@
 <section class="workflow-board" class:entered hidden={!shown} inert={!active} aria-label={tr("Workflow board", "Board de workflow")} data-testid="workflow-board" ondragover={dragOver} ondragleave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) endDragOver(); }} ondrop={drop}>
   <div
     class="board-viewport"
+    data-tour="board-canvas"
     class:panning={gesture?.kind === "pan"}
     class:connecting={connectionSource !== null}
     class:drop-active={dropActive && !locked}
@@ -942,7 +943,7 @@
         {@const traveling = stepVisualState(run, connection.toStepId) === "running"}
         {@const cargo = cargoLabels(effectiveContextSelection(connection))}
         <div class="edge-controls" class:cargo-shown={waiting || traveling || edgeMenu?.id === connection.id || (selection?.kind === "connection" && selection.id === connection.id)} style:left={geometry.mid.x + "px"} style:top={geometry.mid.y + "px"}>
-          <button class="edge-hub" class:waiting class:open={edgeMenu?.id === connection.id} type="button" aria-haspopup="menu" aria-expanded={edgeMenu?.id === connection.id} title={tr("Connection options", "Opções da conexão")} aria-label={tr("Connection options", "Opções da conexão")} onpointerdown={(event) => event.stopPropagation()} onclick={() => toggleEdgeMenu(connection.id)}>
+          <button class="edge-hub" data-tour="board-link" class:waiting class:open={edgeMenu?.id === connection.id} type="button" aria-haspopup="menu" aria-expanded={edgeMenu?.id === connection.id} title={tr("Connection options", "Opções da conexão")} aria-label={tr("Connection options", "Opções da conexão")} onpointerdown={(event) => event.stopPropagation()} onclick={() => toggleEdgeMenu(connection.id)}>
             {#if connection.requiresApproval}<LumeIcon name="shield" size={13} />
             {:else if connection.advanceMode === "automatic"}<LumeIcon name="bolt" size={13} />
             {:else}<LumeIcon name="arrow-right" size={13} />{/if}
@@ -962,7 +963,7 @@
         {@const live = stepActivity(reactive ? shown : undefined, run?.steps.find((item) => item.stepId === step.id), language, now)}
         {@const awaiting = stepAwaitsApproval(step.id)}
         {@const trail = reactive && (state === "running" || shown?.status === "running") ? activityFeed(shown, language, 3) : []}
-        <article class="board-card" class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
+        <article data-tour="board-card" class="board-card" class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
           <button class="card-body" type="button" onpointerdown={(event) => beginCard(event, step.id)} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleName(step.role)}>
             <span class="card-role-fab" title={step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role)} aria-hidden="true">
               <i class="role-symbol"><WorkflowRoleIcon role={step.role} /></i>
@@ -1005,7 +1006,7 @@
             {:else}<i></i>{/if}
           </span>
           <button class="card-port port-in" type="button" disabled={locked} aria-label={tr("Connect to ", "Conectar a ") + name(session)} title={tr("Connection input", "Entrada da conexão")} onclick={() => connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id })}><i></i></button>
-          <button class="card-port port-out" type="button" disabled={locked} aria-label={tr("Connect from ", "Conectar de ") + name(session)} title={tr("Drag to connect", "Arraste para conectar")} onpointerdown={(event) => beginConnection(event, step.id)} onclick={(event) => { if (event.detail === 0) keyboardConnect(step.id); }}><i></i></button>
+          <button class="card-port port-out" data-tour="board-port" type="button" disabled={locked} aria-label={tr("Connect from ", "Conectar de ") + name(session)} title={tr("Drag to connect", "Arraste para conectar")} onpointerdown={(event) => beginConnection(event, step.id)} onclick={(event) => { if (event.detail === 0) keyboardConnect(step.id); }}><i></i></button>
         </article>
       {/each}
       {#if dragSession && dragPoint}
@@ -1041,7 +1042,7 @@
 
   <header class="board-toolbar">
     <span class="board-title"><WorkspaceHeaderIcon name="workflow" size={19} /><strong>Workflow</strong></span>
-    <span class="board-mode" role="group" aria-label={tr("View", "Visualização")}>
+    <span class="board-mode" data-tour="board-mode" role="group" aria-label={tr("View", "Visualização")}>
       <button class:on={boardMode === "board"} type="button" aria-pressed={boardMode === "board"} onclick={() => setBoardMode("board")}>{tr("Board", "Board")}</button>
       <button class:on={boardMode === "timeline"} type="button" aria-pressed={boardMode === "timeline"} onclick={() => setBoardMode("timeline")}>{tr("Timeline", "Linha do tempo")}</button>
     </span>
@@ -1115,7 +1116,7 @@
             <span>{tr("Role", "Papel")}</span>
             <div class="role-picker">
               {#each roles as role (role)}
-                <button class:selected={selectedStep.role === role} class="role-option role-{role}" type="button" role="radio" aria-checked={selectedStep.role === role} disabled={locked || changingRole} onclick={() => { if (selectedStep.role !== role) void changeRole(role); }}><WorkflowRoleIcon {role} /><span>{roleName(role)}</span></button>
+                <button class:selected={selectedStep.role === role} class="role-option role-{role}" style:--card-role={`var(--role-${role})`} type="button" role="radio" aria-checked={selectedStep.role === role} disabled={locked || changingRole} onclick={() => { if (selectedStep.role !== role) void changeRole(role); }}><span class="role-option-fab" aria-hidden="true"><i class="role-symbol"><WorkflowRoleIcon {role} /></i></span><span class="role-option-name">{roleName(role)}</span></button>
               {/each}
             </div>
           </div>
@@ -1205,7 +1206,7 @@
       </div>
     </aside>
   {:else if group}
-    <footer class="board-run" data-status={run?.status ?? "draft"}>
+    <footer class="board-run" data-tour="board-run" data-status={run?.status ?? "draft"}>
       <span class="run-track" aria-hidden="true"><i style:--progress={(run ? run.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length / Math.max(1, group.steps.length) * 100 : 0) + "%"}></i></span>
       <div class="run-heading"><span class="run-state"><i></i><strong>{runLoading ? tr("Loading run…", "Carregando execução…") : run ? runStatus(run.status) : tr("Ready to build", "Pronto para montar")}</strong></span><span class="run-progress">{run ? run.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length : chain?.order.length ?? 0}/{group.steps.length} {tr("steps", "etapas")}</span><input class="workflow-name" aria-label={tr("Workflow name", "Nome do workflow")} value={groupName(group)} maxlength="80" onchange={(event) => patchLayout({ name: event.currentTarget.value.trim() || undefined })} /></div>
       {#if chain?.problems.length}
@@ -1415,13 +1416,19 @@
   .field { min-width: 0; display: grid; gap: 7px; font-size: 11px; }
   .field > span { color: var(--workspace-muted); }
   .field :global(.lume-select) { width: 100%; }
-  .role-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
-  .role-option { min-width: 0; min-height: 52px; padding: 7px 4px 6px; display: grid; justify-items: center; align-content: center; gap: 4px; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-muted); background: var(--workspace-subtle); font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; transition: color 120ms ease, border-color 120ms ease, background 120ms ease; }
-  .role-option > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .role-option :global(.workflow-role-icon) { width: 18px; height: 18px; }
-  .role-option:hover:not(:disabled) { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 40%, var(--workspace-line)); }
-  .role-option.selected { color: var(--workspace-accent); border-color: var(--workspace-accent); background: var(--workspace-accent-soft); }
-  .role-option:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+  .role-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  /* The same FABs the cards wear, so a role reads the same in the picker and on the canvas. */
+  .role-option { min-width: 0; padding: 12px 2px 8px; display: grid; justify-items: center; align-content: start; gap: 7px; border: 1px solid color-mix(in srgb, var(--card-role) 20%, var(--workspace-line)); border-radius: 13px; color: var(--workspace-muted); background: linear-gradient(180deg, color-mix(in srgb, var(--card-role) 10%, var(--workspace-raised)), var(--workspace-raised) 72%); font: inherit; font-size: 9.5px; font-weight: 680; letter-spacing: -.01em; cursor: pointer; transition: color 140ms ease, border-color 140ms ease, box-shadow 160ms ease, transform 160ms cubic-bezier(.2, .8, .2, 1); }
+  .role-option-fab { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--card-role) 42%, transparent); border-radius: 50%; color: var(--card-role); background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .96) 0 13%, rgba(255, 255, 255, .34) 31%, transparent 52%), linear-gradient(145deg, #fbfdfc 12%, color-mix(in srgb, var(--card-role) 14%, #e7eeea) 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 22%, transparent), 0 4px 9px rgba(24, 58, 41, .16), 0 0 0 3px color-mix(in srgb, var(--card-role) 8%, transparent); transition: box-shadow 170ms ease, transform 170ms cubic-bezier(.2, .8, .2, 1); }
+  :global(.workspace.dark) .role-option-fab { background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .22) 0 13%, transparent 46%), linear-gradient(145deg, color-mix(in srgb, var(--card-role) 20%, #2c3631), #1e2623 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 4px 10px rgba(0, 0, 0, .4), 0 0 0 3px color-mix(in srgb, var(--card-role) 12%, transparent); }
+  .role-option .role-symbol :global(.workflow-role-icon) { width: 18px; height: 18px; }
+  .role-option-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .role-option:hover:not(:disabled) { border-color: color-mix(in srgb, var(--card-role) 45%, var(--workspace-line)); color: var(--workspace-strong); transform: translateY(-1px); }
+  .role-option:hover:not(:disabled) .role-option-fab { transform: translateY(-2px); }
+  .role-option.selected { border-color: var(--card-role); color: var(--card-role); box-shadow: 0 0 0 3px color-mix(in srgb, var(--card-role) 18%, transparent); }
+  .role-option.selected .role-option-fab { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 22%, transparent), 0 5px 10px rgba(24, 58, 41, .2), 0 0 0 5px color-mix(in srgb, var(--card-role) 22%, transparent); }
+  :global(.workspace.dark) .role-option.selected .role-option-fab { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 5px 12px rgba(0, 0, 0, .45), 0 0 0 5px color-mix(in srgb, var(--card-role) 26%, transparent); }
+  .role-option:focus-visible { outline: 2px solid var(--card-role); outline-offset: 2px; }
   .role-option:disabled { opacity: .5; cursor: default; }
   .field input, .field textarea, .run-controls textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-subtle); font: inherit; line-height: 1.5; resize: vertical; caret-color: var(--workspace-accent); }
   .field textarea { min-height: 56px; max-height: 220px; }

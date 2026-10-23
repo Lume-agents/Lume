@@ -32,7 +32,7 @@ await build({
 
 const pixel = (color) => `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><rect width="40" height="30" fill="${color}"/></svg>`)}`;
 function fixture() {
-  try { localStorage.setItem("lume:tour:workspace:v1", "seen"); } catch {}
+  try { localStorage.setItem("lume:tour:workspace:v1", "seen"); localStorage.setItem("lume:tour:board:v1", "seen"); } catch {}
   window.__calls = [];
   window.__TAURI_INTERNALS__ = {
     transformCallback: () => 1,

@@ -33,7 +33,7 @@ await build({
 });
 
 function fixture() {
-  try { localStorage.setItem("lume:tour:workspace:v1", "seen"); } catch {}
+  try { localStorage.setItem("lume:tour:workspace:v1", "seen"); localStorage.setItem("lume:tour:board:v1", "seen"); } catch {}
   const body = Array.from({ length: 40 }, (_, index) => `line ${index + 1}();`);
   const long = ["diff --git a/src/cart.ts b/src/cart.ts", "--- a/src/cart.ts", "+++ b/src/cart.ts", "@@ -1,40 +1,40 @@",
     ...body.slice(0, 18).map((line) => " " + line), '-const total = price * 2; // old', '+const total = price * quantity; // new', ...body.slice(19, 40).map((line) => " " + line)].join("\n");

@@ -38,7 +38,8 @@
   import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
   import WorkflowBoard from "$lib/WorkflowBoard.svelte";
   import WorkspaceExtensions from "$lib/WorkspaceExtensions.svelte";
-  import WorkspaceTour from "$lib/WorkspaceTour.svelte";
+  import GuidedTour from "$lib/GuidedTour.svelte";
+  import { boardTour, boardTourKey, workspaceTour, workspaceTourKey } from "$lib/tours";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
@@ -264,8 +265,8 @@
   let inspectorOpen = $state(true);
   let boardOpen = $state(false);
   let extensionsOpen = $state(false);
-  let tourOpen = $state(false);
-  const workspaceTourKey = "lume:tour:workspace:v1";
+  let activeTour = $state<"workspace" | "board" | null>(null);
+  let boardTourTimer = 0;
   // The board and the extensions take over the stage: the chats, inspector and review step aside.
   const stageTakeover = $derived(boardOpen || extensionsOpen);
   let boardMounted = $state(false);
@@ -1867,22 +1868,33 @@
     }
     try { localStorage.setItem("lume:workflow-board:open", String(open)); }
     catch { /* Opening the board is still available when storage is disabled. */ }
+    // The first time the board opens, a short tour shows how to build a workflow.
+    window.clearTimeout(boardTourTimer);
+    if (open && !activeTour && tourSeen(workspaceTourKey) && !tourSeen(boardTourKey)) boardTourTimer = window.setTimeout(() => { if (boardOpen && !activeTour) activeTour = "board"; }, 700);
   }
 
-  function startTour() {
+  function tourSeen(key: string) {
+    try { return localStorage.getItem(key) !== null; }
+    catch { return true; /* Without storage the tour would show every time; it stays in Settings. */ }
+  }
+
+  function startTour(kind: "workspace" | "board") {
     closeSettings();
-    tourOpen = true;
+    if (kind === "board") showWorkflowBoard(true);
+    window.clearTimeout(boardTourTimer);
+    activeTour = kind;
   }
 
   function finishTour() {
-    tourOpen = false;
-    try { localStorage.setItem(workspaceTourKey, "seen"); }
+    try { localStorage.setItem(activeTour === "board" ? boardTourKey : workspaceTourKey, "seen"); }
     catch { /* The tour shows again next time when storage is unavailable. */ }
+    activeTour = null;
   }
 
   /** Each step points at something on screen: overlays that would cover it are closed first. */
   function prepareTourStep() {
-    if (boardOpen) showWorkflowBoard(false);
+    if (activeTour === "board") { if (!boardOpen) showWorkflowBoard(true); }
+    else if (boardOpen) showWorkflowBoard(false);
     if (extensionsOpen) showExtensions(false);
     if (settingsOpen) closeSettings();
     headerControl = null;
@@ -2288,10 +2300,7 @@
     narrowSidebar.addEventListener("change", syncSidebarWidth);
     restoreWorkspaceLayout();
     // The first time the Workspace opens, a short tour shows where things are.
-    let tourSeen = true;
-    try { tourSeen = localStorage.getItem(workspaceTourKey) !== null; }
-    catch { /* Without storage the tour would show on every launch; leave it to Settings. */ }
-    const tourTimer = tourSeen ? 0 : window.setTimeout(() => { tourOpen = true; }, 900);
+    const tourTimer = tourSeen(workspaceTourKey) ? 0 : window.setTimeout(() => { if (!activeTour) activeTour = "workspace"; }, 900);
     try { streamMessages = localStorage.getItem(workspaceStreamMessagesKey) !== "false"; }
     catch { /* Use the default when local storage is unavailable. */ }
     try { workspaceBackgroundImage = localStorage.getItem(workspaceBackgroundImageKey) ?? ""; }
@@ -2308,7 +2317,7 @@
     };
     const handleWorkspaceKeydown = (event: KeyboardEvent) => {
       // The tour owns the keyboard while it is open.
-      if (tourOpen) return;
+      if (activeTour) return;
       if (boardOpen && !settingsOpen && !launcherOpen && !sessionContextMenu && !headerControl && !searchOpen) return;
       if (event.key === "Escape" && (settingsOpen || launcherOpen || sessionContextMenu || headerControl || searchOpen)) {
         event.preventDefault();
@@ -2514,6 +2523,7 @@
       startup.dispose();
       if (refreshTimer) clearTimeout(refreshTimer);
       window.clearTimeout(tourTimer);
+      window.clearTimeout(boardTourTimer);
       narrowSidebar.removeEventListener("change", syncSidebarWidth);
       colorScheme.removeEventListener("change", syncSystemTheme);
       window.removeEventListener("keydown", handleWorkspaceKeydown);
@@ -2981,7 +2991,11 @@
             </label>
             <div class="workspace-setting-row">
               <span><strong>{tr("Workspace tour", "Tour do Workspace")}</strong><small>{tr("Where things are, in a minute", "Onde fica cada coisa, em um minuto")}</small></span>
-              <button class="setting-action" type="button" onclick={startTour}>{tr("Show again", "Ver de novo")}</button>
+              <button class="setting-action" type="button" onclick={() => startTour("workspace")}>{tr("Show again", "Ver de novo")}</button>
+            </div>
+            <div class="workspace-setting-row">
+              <span><strong>{tr("Workflow tour", "Tour do workflow")}</strong><small>{tr("Building a workflow on the board", "Como montar um workflow no board")}</small></span>
+              <button class="setting-action" type="button" onclick={() => startTour("board")}>{tr("Show again", "Ver de novo")}</button>
             </div>
             {/if}
             </div>
@@ -3381,7 +3395,7 @@
         {preferences}
         {language}
         active={boardOpen}
-        keyboardEnabled={!settingsOpen && !launcherOpen && !sessionContextMenu && !headerControl && !searchOpen}
+        keyboardEnabled={!activeTour && !settingsOpen && !launcherOpen && !sessionContextMenu && !headerControl && !searchOpen}
         onSaveGroup={saveWorkflowBoardGroup}
         onDeleteGroup={deleteWorkflowBoardGroup}
         onOpenChat={(session) => { showWorkflowBoard(false); selectSession(session); }}
@@ -3429,8 +3443,8 @@
   {#if automationRequired}
     <MacosAutomationDialog {language} onClose={() => { automationRequired = false; }} />
   {/if}
-  {#if tourOpen}
-    <WorkspaceTour {language} onPrepare={prepareTourStep} onDone={finishTour} />
+  {#if activeTour}
+    <GuidedTour steps={activeTour === "board" ? boardTour : workspaceTour} {language} onPrepare={prepareTourStep} onDone={finishTour} />
   {/if}
 </main>
 

@@ -3,38 +3,17 @@
   import { fade } from "svelte/transition";
   import type { Language } from "$lib/i18n";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import type { TourStep } from "$lib/tours";
 
-  type TourStep = {
-    id: string;
-    /** `data-tour` names to highlight, the first one on screen wins; none centers the card. */
-    targets: string[];
-    title: [string, string];
-    body: [string, string];
-    /** A short loop of the gesture, under static/tour. */
-    media?: string;
-    /** Small controls in a row (the header buttons) take the card below, clear of their neighbours. */
-    below?: boolean;
-  };
 
-  let { language = "en", onPrepare, onDone } = $props<{
+  let { steps, language = "en", onPrepare, onDone } = $props<{
+    steps: TourStep[];
     language?: Language;
     /** Gets the workspace ready for a step (closes the board, opens the sidebar…) before it is measured. */
     onPrepare?: (step: string) => void | Promise<void>;
     onDone: (completed: boolean) => void;
   }>();
 
-  const steps: TourStep[] = [
-    { id: "welcome", targets: [], title: ["This is the Workspace", "Este é o Workspace"], body: ["Chat with several coding agents at once and follow everything they do. A minute to see where things are.", "Converse com vários agentes de código ao mesmo tempo e acompanhe tudo o que eles fazem. Um minuto para ver onde fica cada coisa."] },
-    { id: "agents", targets: ["agents"], title: ["Your agents", "Seus agentes"], body: ["Every chat with Claude Code, Codex, Gemini or OpenCode is listed here, including the ones you started in a terminal. The dot shows who is working, waiting or needs you.", "Cada chat com Claude Code, Codex, Gemini ou OpenCode aparece aqui, inclusive os que você abriu no terminal. O ponto mostra quem está trabalhando, esperando ou precisa de você."] },
-    { id: "launcher", targets: ["new-chat"], below: true, title: ["Start a chat", "Comece um chat"], body: ["Pick an agent and a folder, or resume an earlier session.", "Escolha um agente e uma pasta, ou retome uma sessão anterior."] },
-    { id: "split", targets: ["workbench"], media: "workspace-drag", title: ["Side by side", "Lado a lado"], body: ["Drag an agent from the list next to a chat to see up to three at once. Drag a header to swap them.", "Arraste um agente da lista para o lado de um chat para ver até três ao mesmo tempo. Arraste um cabeçalho para trocar a ordem."] },
-    { id: "composer", targets: ["composer"], title: ["Talk to it", "Fale com ele"], body: ["Type @ to point at files and folders, / for the agent's commands and skills. Attach images by pasting or dropping them.", "Digite @ para citar arquivos e pastas, / para os comandos e skills do agente. Anexe imagens colando ou soltando."] },
-    { id: "events", targets: ["events", "conversation"], media: "file-card", title: ["See every step", "Veja cada passo"], body: ["Commands, edits, skills and git operations show up as the agent works. Click an edited file to see its diff.", "Comandos, edições, skills e operações git aparecem enquanto o agente trabalha. Clique num arquivo editado para ver o diff."] },
-    { id: "inspector", targets: ["inspector"], below: true, title: ["Inspector and review", "Inspector e revisão"], body: ["The inspector shows the session, its changed files and the repository. From there, the review center compares every change and lets you comment on lines.", "O inspector mostra a sessão, os arquivos alterados e o repositório. De lá, a central de revisão compara cada mudança e deixa você comentar linhas."] },
-    { id: "board", targets: ["board"], below: true, media: "workflow-board", title: ["Workflows", "Workflows"], body: ["On the board, chain agents into steps (plan, build, review) and Lume hands the work from one to the next, with your approval when you want it.", "No board, encadeie agentes em etapas (planejar, implementar, revisar) e o Lume passa o trabalho de um para o outro, com a sua aprovação quando quiser."] },
-    { id: "extensions", targets: ["extensions"], below: true, title: ["Extensions", "Extensões"], body: ["Each agent's plugins, skills, MCP servers and instructions in one place, with a catalog to install more.", "Plugins, skills, servidores MCP e instruções de cada agente num só lugar, com um catálogo para instalar mais."] },
-    { id: "settings", targets: ["settings"], below: true, title: ["Make it yours", "Do seu jeito"], body: ["Appearance, notifications and this tour again live in Settings. The Lume head takes you back to the Orb.", "Aparência, notificações e este tour de novo ficam em Ajustes. A cabeça do Lume volta para o Orb."] },
-  ];
 
   let index = $state(0);
   let rect = $state<{ x: number; y: number; width: number; height: number } | null>(null);
@@ -44,7 +23,7 @@
   let mediaFailed = $state<Record<string, boolean>>({});
   let frame = 0;
 
-  const step = $derived(steps[index]);
+  const step: TourStep = $derived(steps[index]);
   const pt = $derived(language === "pt-BR");
   const last = $derived(index === steps.length - 1);
   const padding = 7;

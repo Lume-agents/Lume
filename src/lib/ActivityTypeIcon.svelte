@@ -6,7 +6,9 @@
 
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
   {#if category === "skill"}
-    <path d="M12 3.5 14.2 8l4.9.7-3.55 3.45.84 4.85L12 14.7 7.6 17l.84-4.85L4.9 8.7 9.8 8z" />
+    <path d="M12 5a3 3 0 1 0-6 .13 4 4 0 0 0-2.53 5.77 4 4 0 0 0 .56 6.59A4 4 0 1 0 12 18Z" />
+    <path d="M12 5a3 3 0 1 1 6 .13 4 4 0 0 1 2.53 5.77 4 4 0 0 1-.56 6.59A4 4 0 1 1 12 18Z" />
+    <path d="M12 5v13M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4M17.6 6.5a3 3 0 0 0 .4-1.37M6 5.13a3 3 0 0 0 .4 1.37" />
   {:else if category === "instruction"}
     <path d="M7 3h7l4 4v14H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM14 3v4h4M9.5 11h5M9.5 14h5M9.5 17h3" />
   {:else if category === "command"}
@@ -32,7 +34,9 @@
   {:else if category === "plan"}
     <path d="M5 3.5h14v17H5zM8 8h8M8 12h8M8 16h5" />
   {:else}
-    <path d="m14.5 4.5 5 5-4 4-5-5a4.5 4.5 0 0 1-6 6l6 6 3-3-6-6a4.5 4.5 0 0 1 7-7Z" />
+    <rect x="1.8" y="14.6" width="10" height="5" rx="2.5" transform="rotate(-45 6.8 17.1)" />
+    <path d="m9.2 11.2 3.6 3.6M11 13l6.4-6.4" />
+    <path d="m17 6.4 2.7-2.7.6.6-2.7 2.7z" fill="currentColor" stroke-width="1" />
   {/if}
 </svg>
 

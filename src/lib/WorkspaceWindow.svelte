@@ -3383,7 +3383,7 @@
     --workspace-background-color: var(--lume-canvas-light);
     --workspace-background-opacity: 96%;
     --workspace-bg: var(--lume-canvas-light);
-    --workspace-sidebar: color-mix(in srgb, var(--lume-sidebar-light) 96%, transparent);
+    --workspace-sidebar: var(--lume-sidebar-light);
     --workspace-pane: color-mix(in srgb, var(--lume-surface-light) 96%, transparent);
     --workspace-chat-background: color-mix(in srgb, var(--workspace-background-color) var(--workspace-background-opacity), transparent);
     --workspace-raised: var(--lume-raised-light);
@@ -3422,7 +3422,7 @@
   .workspace.dark {
     --workspace-background-color: var(--lume-canvas-dark);
     --workspace-bg: var(--lume-canvas-dark);
-    --workspace-sidebar: color-mix(in srgb, var(--lume-sidebar-dark) 96%, transparent);
+    --workspace-sidebar: var(--lume-sidebar-dark);
     --workspace-pane: color-mix(in srgb, var(--lume-surface-dark) 96%, transparent);
     --workspace-raised: var(--lume-raised-dark);
     --workspace-line: var(--lume-line-dark);
@@ -3706,9 +3706,10 @@
   /* The board covers the chats: they stay mounted (scroll and drafts survive) but stop painting and animating. */
   .board-chat-layer.covered { visibility: hidden; }
   .board-chat-layer.covered :global(*), .board-chat-layer.covered :global(*::before), .board-chat-layer.covered :global(*::after) { animation-play-state: paused !important; }
-  .workspace-backdrop { position: absolute; z-index: -1; inset: 0; pointer-events: none; }
-  .workspace-backdrop.over { z-index: 2; }
-  .workspace-wallpaper { position: absolute; z-index: -1; inset: 0; width: 100%; height: 100%; background-position: center; background-size: cover; background-repeat: no-repeat; pointer-events: none; }
+  /* Painted behind the chats' content, in this order: wallpaper, gradient and glow, vignette, grain. */
+  .workspace-backdrop { position: absolute; z-index: -2; inset: 0; pointer-events: none; }
+  .workspace-backdrop.over { z-index: -1; }
+  .workspace-wallpaper { position: absolute; z-index: -3; inset: 0; width: 100%; height: 100%; background-position: center; background-size: cover; background-repeat: no-repeat; pointer-events: none; }
   .workbench.split { grid-template-columns: minmax(0, 1fr) 7px minmax(0, 1fr); }
   .workbench.resizing { user-select: none; }
   .workbench.drag-active { cursor: move; }

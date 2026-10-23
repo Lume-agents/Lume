@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildLatestReviewTurn, buildReviewTurns, collectReviewFiles, parseReviewDiff } from "../src/lib/reviewDiffs.ts";
+import { buildLatestReviewTurn, buildReviewTurns, collectReviewFiles, fileDiffChunk, parseReviewDiff } from "../src/lib/reviewDiffs.ts";
 
 const detail = `diff --git a/src/example.ts b/src/example.ts
 index 111..222 100644
@@ -154,3 +154,14 @@ const shown = parseReviewDiff(contentLines);
 assert.deepEqual(shown.filter((line) => line.kind === "removed").map((line) => line.content), ["-- a comment", "----"]);
 assert.deepEqual(shown.filter((line) => line.kind === "added").map((line) => line.content), ["-- another comment", "---"]);
 console.log("content lines tests passed");
+
+// A file's diff is found whether the event names it relative or absolute.
+{
+  const detail = [
+    "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-a\n+A",
+    "diff --git a/src/b.ts b/src/b.ts\n--- a/src/b.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-b",
+  ].join("\n");
+  assert.match(fileDiffChunk(detail, "/work/app/src/a.ts"), /\+A/);
+  assert.match(fileDiffChunk(detail, "src/b.ts"), /-b/);
+  assert.equal(fileDiffChunk(detail, "/work/app/src/c.ts"), null);
+}

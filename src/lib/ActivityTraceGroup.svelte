@@ -8,16 +8,18 @@
   import GitEventDetails from "$lib/GitEventDetails.svelte";
   import { gitActivityInfo } from "$lib/gitEvents";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
-  import { displayFileChangePath } from "$lib/fileChanges";
+  import { displayFileChangePath, normalizeFileChangePath } from "$lib/fileChanges";
   import { fileDiffChunk, parseReviewDiff } from "$lib/reviewDiffs";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunFiles, activityRunTitle, groupConsecutiveTraceActivities, type ActivityCategory, type ActivityRun } from "$lib/activityPresentation";
 
-  let { activities, language = "en", active = false, plain = false, onOpenReview } = $props<{
+  let { activities, language = "en", active = false, plain = false, workingDirectory, onOpenReview } = $props<{
     activities: SessionActivity[];
     language?: Language;
     active?: boolean;
     plain?: boolean;
+    /** The agent's folder: files inside it are named relative to it. */
+    workingDirectory?: string;
     onOpenReview?: (path: string) => void;
   }>();
 
@@ -77,15 +79,19 @@
       : [...collapsedFileRuns, id];
   }
 
+  /** What a file node opens: for an edit, every diff the run recorded for that file; for a read, what was read. */
   function fileDetail(run: ActivityRun, path: string): string {
-    const activity = run.activities.find((item) => activityRunFiles({ ...run, activities: [item] }).includes(path));
-    return activity?.detail ?? "";
+    const touching = run.activities.filter((item) => activityRunFiles({ ...run, activities: [item] }).includes(path));
+    if (run.category === "edit") {
+      const chunks = touching.map((item) => (item.detail ? fileDiffChunk(item.detail, path) : null)).filter((chunk): chunk is string => Boolean(chunk));
+      if (chunks.length) return [...new Set(chunks)].join("\n");
+    }
+    return touching[0]?.detail ?? "";
   }
 
   /** What the floating card of an edited file shows: its own diff lines, or the raw detail when it is not a diff. */
-  function fileCard(detail: string, path: string) {
-    const chunk = detail ? fileDiffChunk(detail, path) : null;
-    const lines = chunk ? parseReviewDiff(chunk).filter((line) => line.kind !== "meta") : [];
+  function fileCard(detail: string) {
+    const lines = detail && /^(?:diff --git |--- |\*\*\* (?:Update|Add|Delete) File:)/m.test(detail) ? parseReviewDiff(detail).filter((line) => line.kind !== "meta") : [];
     return {
       lines,
       added: lines.filter((line) => line.kind === "added").length,
@@ -184,19 +190,21 @@
                     {@const detail = fileDetail(run, path)}
                     {@const fileKey = `${run.id}:${path}`}
                     {@const editRun = run.category === "edit"}
+                    {@const card = editRun ? fileCard(detail) : { lines: [], added: 0, removed: 0 }}
+                    {@const shownPath = normalizeFileChangePath(path, workingDirectory)}
                     {@const opens = Boolean(detail) || (editRun && Boolean(onOpenReview))}
                     <div class:selected={selectedFileKey === fileKey} class="file-node" role="listitem" data-file-key={fileKey} style={`--file-delay: ${Math.min(fileIndex, 6) * 30}ms`}>
-                      <button class="file-node-trigger" type="button" title={path} disabled={!opens} aria-expanded={opens ? selectedFileKey === fileKey : undefined} onclick={(event) => openFileCard(event, fileKey)}>
+                      <button class="file-node-trigger" type="button" title={shownPath} disabled={!opens} aria-expanded={opens ? selectedFileKey === fileKey : undefined} onclick={(event) => openFileCard(event, fileKey)}>
                         <span class="file-node-action">{run.category === "read" ? tr("Read", "Leu") : tr("Edited", "Editou")}</span>
                         <FileTypeIcon {path} />
-                        <span class="file-node-name">{displayFileChangePath(path)}</span>
+                        <span class="file-node-name">{displayFileChangePath(shownPath)}</span>
+                        {#if card.added || card.removed}<span class="file-node-stats"><b class="added">+{card.added}</b><b class="removed">−{card.removed}</b></span>{/if}
                       </button>
                       {#if opens && selectedFileKey === fileKey}
-                        {@const card = editRun ? fileCard(detail, path) : { lines: [], added: 0, removed: 0 }}
                         <div class:above={fileCardAbove} class="file-card" role="dialog" aria-label={path} in:fly={{ y: -4, duration: motionDuration(150), easing: cubicOut }} out:fade={{ duration: motionDuration(90) }}>
                           <header>
                             <FileTypeIcon {path} />
-                            <strong title={path}>{path.split(/[\\/]/).at(-1) || path}</strong>
+                            <strong title={path}>{shownPath}</strong>
                             {#if card.added || card.removed}<span class="file-card-stats"><b class="added">+{card.added}</b><b class="removed">−{card.removed}</b></span>{/if}
                             <button class="file-card-close" type="button" aria-label={tr("Close", "Fechar")} onclick={() => (selectedFileKey = "")}><LumeIcon name="close" size={12} /></button>
                           </header>
@@ -401,8 +409,11 @@
   .file-card header { min-width: 0; padding: 7px 7px 7px 10px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--workspace-line, rgba(65, 94, 80, .12)); }
   .file-card header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--workspace-strong, #52665c); font: 700 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.3 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); text-overflow: ellipsis; white-space: nowrap; }
   .file-card-stats { display: flex; gap: 5px; font: 700 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); }
-  .file-card-stats .added { color: #3e9870; }
-  .file-card-stats .removed { color: #b36a68; }
+  .file-card-stats .added, .file-node-stats .added { color: #3e9870; }
+  .file-card-stats .removed, .file-node-stats .removed { color: #b36a68; }
+  .file-node-stats { flex: 0 0 auto; display: flex; gap: 5px; font: 700 var(--activity-detail-size, var(--chat-tiny-font-size, 7px))/1 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); font-variant-numeric: tabular-nums; }
+  :global(.terminal-window.dark) .file-node-stats .added { color: #7fcca4; }
+  :global(.terminal-window.dark) .file-node-stats .removed { color: #e09a98; }
   .file-card-close { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--workspace-muted, #61736a); background: transparent; cursor: pointer; }
   .file-card-close:hover { color: var(--workspace-strong, #52665c); background: var(--workspace-subtle, #eef4f0); }
   .file-card-diff { max-height: 300px; padding: 4px 0; overflow: auto; font: var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.6 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); scrollbar-width: thin; }

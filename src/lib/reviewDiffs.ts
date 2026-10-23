@@ -323,10 +323,16 @@ export function parseReviewDiff(diff: string): ReviewDiffLine[] {
 /** The part of a recorded diff that belongs to `path`, when the detail holds a diff for it. */
 export function fileDiffChunk(detail: string, path: string): string | null {
   const chunks = [...recordedDiffs(detail), ...structuredDiffChunks(detail)];
-  const name = path.replace(/\\/g, "/");
+  const name = path.replace(/\\/g, "/").replace(/^\.\//, "");
+  // The diff may name the file relative to the repository while the event holds its absolute path, or the reverse.
+  const sameFile = (other: string) => {
+    const candidate = other.replace(/\\/g, "/").replace(/^[ab]\//, "").trim();
+    return candidate === name || name.endsWith(`/${candidate}`) || candidate.endsWith(`/${name.replace(/^\/+/, "")}`);
+  };
   const matching = chunks.find((chunk) => {
-    const header = chunk.split("\n", 3).join("\n").replace(/\\/g, "/");
-    return header.includes(name) || header.includes(name.replace(/^\/+/, ""));
+    const added = chunk.match(/^\+\+\+ (.+)$/m)?.[1];
+    const header = (added && added !== "/dev/null" ? added : chunk.match(/^--- (.+)$/m)?.[1]) ?? chunk.match(/^diff --git a\/.+? b\/(.+)$/m)?.[1] ?? chunk.match(/^\*\*\* (?:Update|Add|Delete) File:\s*(.+)$/m)?.[1];
+    return header ? sameFile(header) : false;
   });
   return matching ?? (chunks.length === 1 ? chunks[0] : null);
 }

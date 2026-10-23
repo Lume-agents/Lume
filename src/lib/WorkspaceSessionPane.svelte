@@ -2583,6 +2583,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             active={feedItem.id === activeTraceId}
             plain
             {language}
+            workingDirectory={session.workingDirectory}
             {onOpenReview}
           />
         </div>

@@ -1578,7 +1578,8 @@
   .empty-card p { margin: 0; max-width: 300px; font-size: 12px; line-height: 1.6; color: var(--workspace-muted); }
   .empty-card button { margin: 3px 0; pointer-events: auto; color: var(--workspace-strong); }
   .empty-card small { max-width: 280px; font-size: 10px; color: var(--workspace-muted); line-height: 1.5; }
-  .board-timeline { position: absolute; z-index: 4; inset: 78px 0 150px; padding: 0 18px; overflow: auto; display: grid; align-content: start; justify-items: center; background: color-mix(in srgb, var(--workspace-bg, var(--workspace-pane)) 72%, transparent); backdrop-filter: blur(6px); }
+  /* Covers the whole canvas so the blur also runs under the toolbar and the run panel; the padding keeps the rows clear of them. */
+  .board-timeline { position: absolute; z-index: 4; inset: 0; padding: 78px 18px 150px; overflow: auto; display: grid; align-content: start; justify-items: center; background: color-mix(in srgb, var(--workspace-bg, var(--workspace-pane)) 72%, transparent); backdrop-filter: blur(6px); }
   .board-timeline > :global(.timeline) { width: min(920px, 100%); }
   .board-mode { flex: 0 0 auto; display: inline-flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--workspace-subtle); }
   .board-toolbar .board-mode button { width: auto; height: 26px; display: inline-flex; white-space: nowrap; min-height: 26px; padding: 0 10px; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }

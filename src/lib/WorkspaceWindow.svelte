@@ -89,17 +89,6 @@
     type CliInstallPlan,
   } from "$lib/lume";
 
-  type WorkspaceNamedLayout = {
-    id: string;
-    name: string;
-    paneKeys: string[];
-    splitRatio: number;
-    tertiaryRatio: number;
-    projectFilter: string;
-    inspectorOpen: boolean;
-    updatedAt: number;
-  };
-
   type SettingsSectionKey =
     | "appearance"
     | "preferences"
@@ -251,7 +240,7 @@
   let query = $state("");
   let searchOpen = $state(false);
   let searchInput = $state<HTMLInputElement | null>(null);
-  let headerControl = $state<"project" | "layout" | null>(null);
+  let headerControl = $state<"project" | null>(null);
   let sessionContextMenu = $state<{ sessionId: string; x: number; y: number; confirming: boolean; renaming: boolean } | null>(null);
   let sessionContextBusy = $state(false);
   let sessionContextError = $state("");
@@ -295,12 +284,6 @@
   let dragPreviewVelocity = { x: 0, y: 0 };
   let dragPreviewReducedMotion = false;
   let paneHeaderGesture: PaneHeaderGesture | null = null;
-  let namedLayouts = $state<WorkspaceNamedLayout[]>([]);
-  let selectedNamedLayoutId = $state("");
-  let namingLayout = $state(false);
-  let layoutName = $state("");
-  let layoutNameInput = $state<HTMLInputElement | null>(null);
-  let layoutMessage = $state("");
   let launcherOpen = $state(false);
   let launcherRoot = $state<HTMLDivElement | null>(null);
   let launcherPopoverNode: HTMLDivElement | null = null;
@@ -344,7 +327,6 @@
     if (sidebarCollapsed) {
       closeAgentSearch();
       headerControl = null;
-      namingLayout = false;
       launcherOpen = false;
       sessionContextMenu = null;
       filter = "all";
@@ -376,18 +358,16 @@
     sidebarToggleBusy = false;
   }
 
-  function openHeaderControl(control: "project" | "layout") {
+  function openHeaderControl(control: "project") {
     sidebarCollapsed = false;
     headerControl = control;
   }
   let launchError = $state("");
   let pendingOpenedSession: { nativeId?: string; agent: string; knownIds: Set<string>; startedAt: number; replacePaneId?: string } | null = null;
-  let namedLayoutRestored = false;
   let workbenchElement = $state<HTMLElement | null>(null);
   let workspaceDropGeometry: WorkspaceDropGeometry | null = null;
 
   const workspaceLayoutKey = "lume:workspace-layout:v1";
-  const workspaceNamedLayoutsKey = "lume:workspace-named-layouts:v1";
   const workspaceStreamMessagesKey = "lume:workspace-stream-messages:v1";
   const workspaceBackgroundImageKey = "lume:workspace-background-image:v1";
   const workspaceBackgroundImageOpacityKey = "lume:workspace-background-image-opacity:v1";
@@ -805,8 +785,6 @@
     return Array.from(projects, ([key, label]) => ({ key, label })).sort((left, right) => left.label.localeCompare(right.label));
   });
   const selectedProjectProfile = $derived(selectedProfileKey ? preferences.projectProfiles[selectedProfileKey] : undefined);
-  const selectedNamedLayout = $derived(namedLayouts.find((layout) => layout.id === selectedNamedLayoutId) ?? null);
-  const selectedLayoutDirty = $derived.by(() => selectedNamedLayout ? !layoutMatchesCurrent(selectedNamedLayout) : false);
 
   $effect(() => {
     if (typeof document !== "undefined") {
@@ -866,7 +844,6 @@
       });
     }
     if (settingsMessage) items.push({ id: "settings-message", message: settingsMessage, tone: "success", onDismiss: () => { settingsMessage = ""; } });
-    if (layoutMessage) items.push({ id: "layout-message", message: layoutMessage, onDismiss: () => { layoutMessage = ""; } });
     return items;
   });
 
@@ -910,156 +887,6 @@
   function sessionSubtitle(session: HubSession) {
     const directory = session.workingDirectory?.trim().replace(/[\\/]+$/, "");
     return directory?.split(/[\\/]/).pop() || session.project || session.agentLabel;
-  }
-
-  function sessionLayoutKey(session: HubSession) {
-    return session.nativeSessionId
-      ? `native:${session.agent}:${session.nativeSessionId}`
-      : `session:${session.id}`;
-  }
-
-  function currentPaneKeys() {
-    return [primary, secondary, tertiary]
-      .filter((session): session is HubSession => Boolean(session))
-      .map(sessionLayoutKey);
-  }
-
-  function layoutMatchesCurrent(layout: WorkspaceNamedLayout) {
-    const currentKeys = currentPaneKeys();
-    return currentKeys.length === layout.paneKeys.length
-      && currentKeys.every((key, index) => key === layout.paneKeys[index])
-      && (currentKeys.length < 2 || Math.abs(splitRatio - layout.splitRatio) < 0.002)
-      && (currentKeys.length < 3 || Math.abs(tertiaryRatio - layout.tertiaryRatio) < 0.002)
-      && projectFilter === layout.projectFilter
-      && inspectorOpen === layout.inspectorOpen;
-  }
-
-  function layoutSnapshot(id: string, name: string): WorkspaceNamedLayout {
-    return {
-      id,
-      name,
-      paneKeys: currentPaneKeys(),
-      splitRatio,
-      tertiaryRatio,
-      projectFilter,
-      inspectorOpen,
-      updatedAt: Date.now(),
-    };
-  }
-
-  function persistNamedLayouts() {
-    if (typeof localStorage === "undefined") return;
-    localStorage.setItem(workspaceNamedLayoutsKey, JSON.stringify(namedLayouts));
-  }
-
-  function restoreNamedLayouts() {
-    try {
-      const parsed: unknown = JSON.parse(localStorage.getItem(workspaceNamedLayoutsKey) ?? "[]");
-      if (!Array.isArray(parsed)) return;
-      namedLayouts = parsed.filter((candidate): candidate is WorkspaceNamedLayout => {
-        if (!candidate || typeof candidate !== "object") return false;
-        const value = candidate as Partial<WorkspaceNamedLayout>;
-        return typeof value.id === "string"
-          && typeof value.name === "string"
-          && Array.isArray(value.paneKeys)
-          && value.paneKeys.length > 0
-          && value.paneKeys.length <= 3
-          && value.paneKeys.every((key) => typeof key === "string")
-          && typeof value.splitRatio === "number"
-          && typeof value.tertiaryRatio === "number"
-          && typeof value.projectFilter === "string"
-          && typeof value.inspectorOpen === "boolean"
-          && typeof value.updatedAt === "number";
-      }).slice(0, 20);
-    } catch {
-      namedLayouts = [];
-    }
-  }
-
-  async function beginNamingLayout() {
-    if (!primary) return;
-    namingLayout = true;
-    layoutName = `${tr("Layout", "Layout")} ${namedLayouts.length + 1}`;
-    layoutMessage = "";
-    await tick();
-    layoutNameInput?.focus();
-    layoutNameInput?.select();
-  }
-
-  function saveNamedLayout() {
-    const name = layoutName.trim();
-    if (!primary || !name) return;
-    if (namedLayouts.some((layout) => layout.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
-      layoutMessage = tr("A layout with this name already exists.", "Já existe um layout com este nome.");
-      return;
-    }
-    const id = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `layout-${Date.now()}`;
-    const layout = layoutSnapshot(id, name);
-    namedLayouts = [layout, ...namedLayouts].slice(0, 20);
-    selectedNamedLayoutId = id;
-    namingLayout = false;
-    layoutName = "";
-    layoutMessage = tr("Layout saved.", "Layout salvo.");
-    persistNamedLayouts();
-    persistWorkspaceLayout();
-  }
-
-  function updateNamedLayout() {
-    if (!selectedNamedLayout) return;
-    const updated = layoutSnapshot(selectedNamedLayout.id, selectedNamedLayout.name);
-    namedLayouts = namedLayouts.map((layout) => layout.id === updated.id ? updated : layout);
-    layoutMessage = tr("Layout updated.", "Layout atualizado.");
-    persistNamedLayouts();
-  }
-
-  function deleteNamedLayout() {
-    if (!selectedNamedLayout) return;
-    namedLayouts = namedLayouts.filter((layout) => layout.id !== selectedNamedLayout.id);
-    selectedNamedLayoutId = "";
-    layoutMessage = tr("Layout removed.", "Layout removido.");
-    persistNamedLayouts();
-    persistWorkspaceLayout();
-  }
-
-  function applyNamedLayout(layoutId: string) {
-    selectedNamedLayoutId = layoutId;
-    layoutMessage = "";
-    if (!layoutId) {
-      persistWorkspaceLayout();
-      return;
-    }
-    const layout = namedLayouts.find((candidate) => candidate.id === layoutId);
-    if (!layout) return;
-    const resolved: HubSession[] = [];
-    for (const key of layout.paneKeys) {
-      const session = sessions.find((candidate) => sessionLayoutKey(candidate) === key);
-      if (session && !resolved.some((candidate) => candidate.id === session.id)) resolved.push(session);
-    }
-    if (!resolved.length) {
-      selectedNamedLayoutId = "";
-      layoutMessage = tr("None of this layout's sessions are currently open.", "Nenhuma sessão deste layout está aberta.");
-      return;
-    }
-    const availableProject = layout.projectFilter === "all"
-      || workspaceProjects.some((project) => project.value === layout.projectFilter);
-    projectFilter = availableProject ? layout.projectFilter : "all";
-    [primaryId, secondaryId, tertiaryId] = [
-      resolved[0]?.id ?? null,
-      resolved[1]?.id ?? null,
-      resolved[2]?.id ?? null,
-    ];
-    focusedPaneId = primaryId;
-    maximizedPaneId = null;
-    splitRatio = Math.min(0.75, Math.max(0.25, layout.splitRatio));
-    tertiaryRatio = Math.min(0.5, Math.max(0.22, layout.tertiaryRatio));
-    inspectorOpen = layout.inspectorOpen;
-    if (resolved.length !== layout.paneKeys.length) {
-      layoutMessage = tr(
-        `${layout.paneKeys.length - resolved.length} unavailable session omitted.`,
-        `${layout.paneKeys.length - resolved.length} sessão indisponível foi omitida.`,
-      );
-    }
-    persistWorkspaceLayout();
   }
 
   function statusLabel(session: HubSession) {
@@ -1866,7 +1693,7 @@
 
   function persistWorkspaceLayout() {
     if (typeof localStorage === "undefined") return;
-    localStorage.setItem(workspaceLayoutKey, JSON.stringify({ primaryId, secondaryId, tertiaryId, focusedPaneId, maximizedPaneId, splitRatio, tertiaryRatio, projectFilter, inspectorOpen, selectedNamedLayoutId }));
+    localStorage.setItem(workspaceLayoutKey, JSON.stringify({ primaryId, secondaryId, tertiaryId, focusedPaneId, maximizedPaneId, splitRatio, tertiaryRatio, projectFilter, inspectorOpen }));
   }
 
   function restoreWorkspaceLayout() {
@@ -1881,7 +1708,6 @@
         tertiaryRatio?: number;
         projectFilter?: string;
         inspectorOpen?: boolean;
-        selectedNamedLayoutId?: string;
       } | null;
       primaryId = saved?.primaryId ?? null;
       secondaryId = saved?.secondaryId ?? null;
@@ -1896,9 +1722,6 @@
       }
       projectFilter = saved?.projectFilter ?? "all";
       inspectorOpen = saved?.inspectorOpen ?? true;
-      selectedNamedLayoutId = namedLayouts.some((layout) => layout.id === saved?.selectedNamedLayoutId)
-        ? saved?.selectedNamedLayoutId ?? ""
-        : "";
     } catch {
       localStorage.removeItem(workspaceLayoutKey);
     }
@@ -2427,7 +2250,6 @@
     };
     syncSidebarWidth(narrowSidebar);
     narrowSidebar.addEventListener("change", syncSidebarWidth);
-    restoreNamedLayouts();
     restoreWorkspaceLayout();
     try { streamMessages = localStorage.getItem(workspaceStreamMessagesKey) !== "false"; }
     catch { /* Use the default when local storage is unavailable. */ }
@@ -2455,7 +2277,6 @@
       }
       if (event.key === "Escape" && headerControl) {
         headerControl = null;
-        namingLayout = false;
         return;
       }
       if (event.key === "Escape" && searchOpen) {
@@ -2562,10 +2383,6 @@
             } else if (Date.now() - pending.startedAt > 30_000) {
               pendingOpenedSession = null;
             }
-          }
-          if (!namedLayoutRestored && sessions.length) {
-            namedLayoutRestored = true;
-            if (selectedNamedLayoutId) applyNamedLayout(selectedNamedLayoutId);
           }
         }
         return !disposed;
@@ -2708,28 +2525,8 @@
           />
         </div>
         <button class="header-control-close" type="button" aria-label={tr("Close project selector", "Fechar seletor de projetos")} onclick={() => (headerControl = null)}><LumeIcon name="close" size={14} /></button>
-      {:else if headerControl === "layout"}
-        <div class="layout-picker">
-          <LumeSelect
-            ariaLabel={tr("Saved layouts", "Layouts salvos")}
-            value={selectedNamedLayoutId}
-            options={[
-              { value: "", label: tr("Current layout", "Layout atual") },
-              ...namedLayouts.map((layout) => ({
-                value: layout.id,
-                label: layout.id === selectedNamedLayoutId && selectedLayoutDirty
-                  ? `${layout.name} · ${tr("Modified", "Modificado")}`
-                  : layout.name,
-              })),
-            ]}
-            minWidth={0}
-            onValueChange={applyNamedLayout}
-          />
-        </div>
-        <button class="header-control-close" type="button" aria-label={tr("Close layout selector", "Fechar seletor de layouts")} onclick={() => { headerControl = null; namingLayout = false; }}><LumeIcon name="close" size={14} /></button>
       {:else}
         <button class="header-control-icon" type="button" aria-label={tr("Select project", "Selecionar projeto")} title={tr("Select project", "Selecionar projeto")} onclick={() => openHeaderControl("project")}><WorkspaceHeaderIcon name="project" /></button>
-        <button class="header-control-icon" type="button" aria-label={tr("Saved layouts", "Layouts salvos")} title={tr("Saved layouts", "Layouts salvos")} onclick={() => openHeaderControl("layout")}><WorkspaceHeaderIcon name="layout" /></button>
       {/if}
       {#if headerControl === null}
       <div class="header-utilities">
@@ -2740,23 +2537,6 @@
       </div>
       {/if}
     </div>
-    {#if headerControl === "layout"}
-      <div class="layout-actions" role="group" aria-label={tr("Layout actions", "Ações do layout")}>
-        <button type="button" disabled={!primary} title={tr("Save as new layout", "Salvar como novo layout")} aria-label={tr("Save as new layout", "Salvar como novo layout")} onclick={() => void beginNamingLayout()}><LumeIcon name="plus" size={15} /></button>
-        {#if selectedNamedLayout}
-          <button type="button" disabled={!selectedLayoutDirty} title={tr("Update this layout", "Atualizar este layout")} aria-label={tr("Update this layout", "Atualizar este layout")} onclick={updateNamedLayout}><LumeIcon name="save" size={14} /></button>
-          <button class="delete-layout" type="button" title={tr("Remove this layout", "Remover este layout")} aria-label={tr("Remove this layout", "Remover este layout")} onclick={deleteNamedLayout}><LumeIcon name="trash" size={14} /></button>
-        {/if}
-      </div>
-      {#if namingLayout}
-        <form class="layout-name-editor" onsubmit={(event) => { event.preventDefault(); saveNamedLayout(); }}>
-          <LumeIcon name="layout" size={14} />
-          <input bind:this={layoutNameInput} bind:value={layoutName} maxlength="36" aria-label={tr("Layout name", "Nome do layout")} onkeydown={(event) => { if (event.key === "Escape") { namingLayout = false; layoutName = ""; } }} />
-          <button type="submit" disabled={!layoutName.trim()} title={tr("Save layout", "Salvar layout")} aria-label={tr("Save layout", "Salvar layout")}><LumeIcon name="check" size={13} /></button>
-          <button type="button" title={tr("Cancel", "Cancelar")} aria-label={tr("Cancel", "Cancelar")} onclick={() => { namingLayout = false; layoutName = ""; }}><LumeIcon name="close" size={13} /></button>
-        </form>
-      {/if}
-    {/if}
     </header>
 
     <div class:searching={searchOpen} class="session-heading">
@@ -3760,16 +3540,10 @@
   .header-utilities { margin-left: auto; display: flex; align-items: center; gap: 5px; }
   .header-selectors.expanded .header-utilities { width: 100%; justify-content: flex-end; }
   .header-selectors.expanded { animation: layout-editor-arrive 160ms cubic-bezier(.16, 1, .3, 1) both; }
-  .project-picker, .layout-picker { min-width: 0; flex: 1; }
-  .project-picker :global(.lume-select), .layout-picker :global(.lume-select) { width: 100%; min-width: 0 !important; }
-  .header-control-icon, .header-control-close, .layout-actions button, .layout-name-editor button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
-  .header-control-icon:hover, .header-control-close:hover, .layout-actions button:hover:not(:disabled), .layout-name-editor button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
-  .layout-actions { padding-top: 5px; display: flex; align-items: center; gap: 3px; }
-  .layout-actions button:disabled, .layout-name-editor button:disabled { opacity: .3; cursor: default; }
-  .layout-actions .delete-layout:hover { color: #b96862; background: color-mix(in srgb, #b96862 8%, transparent); }
-  .layout-name-editor { height: 34px; margin: 6px 0 0; padding: 2px 3px 2px 8px; display: flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 42%, var(--workspace-line)); border-radius: 9px; color: var(--workspace-accent); background: var(--workspace-raised); animation: layout-editor-arrive 160ms cubic-bezier(.16, 1, .3, 1) both; }
-  .layout-name-editor input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--workspace-strong); background: transparent; font-size: 9px; }
-  .layout-name-editor button { width: 25px; height: 25px; }
+  .project-picker { min-width: 0; flex: 1; }
+  .project-picker :global(.lume-select) { width: 100%; min-width: 0 !important; }
+  .header-control-icon, .header-control-close { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
+  .header-control-icon:hover, .header-control-close:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .session-heading { position: relative; z-index: 20; padding: 13px 15px 8px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); }
   .session-heading strong { flex: 1; color: var(--workspace-strong); font-size: 10px; font-weight: 720; }
   .session-heading span { font-size: 8px; font-variant-numeric: tabular-nums; }
@@ -4025,5 +3799,5 @@
     .workspace-stage.review-open { grid-template-columns: minmax(300px, 1fr) 0px minmax(420px, 48vw); }
   }
   @media (max-height: 640px) { .brand-top { height: 46px; }.session-heading { padding-top: 8px; }.session-tree-item { margin-bottom: 0; } }
-  @media (prefers-reduced-motion: reduce) { .workspace-loading .empty-mark, .workspace-loading-bar::after { animation: none; } .workspace, .brand-copy, .session-copy, .session-icon :global(.thread-avatar), .session-status-dot, .session-row, .session-tree-item, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .sidebar-toggle, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .layout-actions button, .workspace-stage, .session-launcher > button, .session-launcher > button :global(svg), .launcher-agent-row button, .launcher-resume-list button { transition: none; }.launcher-spinner { animation: none !important; }.session-copy em.status-running i, .session-context-menu, .layout-name-editor, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span, .subagent-row, .session-drag-preview { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .workspace-loading .empty-mark, .workspace-loading-bar::after { animation: none; } .workspace, .brand-copy, .session-copy, .session-icon :global(.thread-avatar), .session-status-dot, .session-row, .session-tree-item, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .sidebar-toggle, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .workspace-stage, .session-launcher > button, .session-launcher > button :global(svg), .launcher-agent-row button, .launcher-resume-list button { transition: none; }.launcher-spinner { animation: none !important; }.session-copy em.status-running i, .session-context-menu, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span, .subagent-row, .session-drag-preview { animation: none; } }
 </style>

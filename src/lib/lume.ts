@@ -496,6 +496,69 @@ export type McpServer = {
   tools: { name: string; description: string }[];
 };
 
+export type ExtensionKind = "plugin" | "skill" | "mcp" | "instruction" | "command" | "subagent";
+
+export type ExtensionItem = {
+  id: string;
+  kind: ExtensionKind;
+  name: string;
+  description: string;
+  scope: string;
+  path?: string | null;
+  enabled?: boolean | null;
+  version?: string | null;
+  source?: string | null;
+};
+
+export type AgentExtensions = {
+  agent: "claude" | "codex" | "gemini" | "opencode" | string;
+  label: string;
+  cli: boolean;
+  managesPlugins: boolean;
+  togglesPlugins: boolean;
+  items: ExtensionItem[];
+  problems: string[];
+};
+
+export type CatalogPlugin = {
+  id: string;
+  name: string;
+  description: string;
+  marketplace: string;
+  category?: string | null;
+  installs?: number | null;
+  installed: boolean;
+};
+
+export type PluginActionResult = {
+  ok: boolean;
+  message: string;
+  confirm?: { command: string; sha256: string } | null;
+};
+
+/** Plugins, skills, MCP servers, instructions, commands and subagents of every agent on this machine. */
+export async function listAgentExtensions(project?: string): Promise<AgentExtensions[]> {
+  return invoke<AgentExtensions[]>("list_agent_extensions", { project: project ?? null });
+}
+
+/** The plugins an agent's marketplaces offer; cached for a few minutes unless `refresh`. */
+export async function listExtensionCatalog(agent: string, refresh = false): Promise<CatalogPlugin[]> {
+  return invoke<CatalogPlugin[]>("list_extension_catalog", { agent, refresh });
+}
+
+/** Installs, removes or toggles a plugin through the agent's own CLI. */
+export async function manageAgentPlugin(agent: string, action: "install" | "uninstall" | "enable" | "disable", plugin: string, acceptCommand?: string): Promise<PluginActionResult> {
+  return invoke<PluginActionResult>("manage_agent_plugin", { agent, action, plugin, acceptCommand: acceptCommand ?? null });
+}
+
+export async function readExtensionFile(path: string, project?: string): Promise<string> {
+  return invoke<string>("read_extension_file", { path, project: project ?? null });
+}
+
+export async function revealExtensionPath(path: string, project?: string): Promise<void> {
+  return invoke<void>("reveal_extension_path", { path, project: project ?? null });
+}
+
 /** The agent's MCP servers; `probe` also asks Claude Code for their live health, which is slow. */
 export async function listSessionMcpServers(sessionId: string, probe: boolean): Promise<McpServer[]> {
   return invoke<McpServer[]>("list_session_mcp_servers", { sessionId, probe });

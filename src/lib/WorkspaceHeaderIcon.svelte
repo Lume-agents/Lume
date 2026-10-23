@@ -1,6 +1,6 @@
 <script lang="ts">
   let { name, size = 20 }: {
-    name: "project" | "layout" | "workflow" | "inspector" | "settings" | "orb";
+    name: "project" | "layout" | "extensions" | "workflow" | "inspector" | "settings" | "orb";
     size?: number;
   } = $props();
 </script>
@@ -18,6 +18,7 @@
   class="header-icon"
   class:project={name === "project"}
   class:layout={name === "layout"}
+  class:extensions={name === "extensions"}
   class:workflow={name === "workflow"}
   class:inspector={name === "inspector"}
   class:settings={name === "settings"}
@@ -33,6 +34,11 @@
     <rect x="3.5" y="4.5" width="17" height="15" rx="2.2" />
     <path class="layout-vertical" d="M9.5 6.5v11" />
     <path class="layout-horizontal" d="M11.5 11.5h7" />
+  {:else if name === "extensions"}
+    <rect x="4" y="4" width="7" height="7" rx="1.8" />
+    <rect x="4" y="13" width="7" height="7" rx="1.8" />
+    <rect x="13" y="13" width="7" height="7" rx="1.8" />
+    <rect class="extension-piece" x="13" y="4" width="7" height="7" rx="1.8" />
   {:else if name === "workflow"}
     <path class="board-link" d="M9 7h3a3 3 0 0 1 3 3v4M9 17h5" />
     <rect class="board-node-one" x="3" y="4" width="6" height="6" rx="1.5" />
@@ -65,7 +71,7 @@
   :global(button:is(:hover, :focus-visible)) .header-icon.workflow .board-node-one { transform: translateY(-1px); }
   :global(button:is(:hover, :focus-visible)) .header-icon.workflow .board-node-three { transform: translateX(1px); }
   :global(button:is(:hover, :focus-visible)) .header-icon.workflow .board-link { stroke-dashoffset: 2; }
-  .folder-front, .folder-paper, .layout-vertical, .layout-horizontal, .detective-face, .detective-hat, .bead, .lume-head { transform-box: fill-box; transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .extension-piece, .folder-front, .folder-paper, .layout-vertical, .layout-horizontal, .detective-face, .detective-hat, .bead, .lume-head { transform-box: fill-box; transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .folder-paper { opacity: 0; transition: opacity 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .folder-front { transform-origin: 4px 9.5px; }
   .bead { fill: var(--workspace-sidebar, #17231d); transition: transform 160ms cubic-bezier(.16, 1, .3, 1), fill 120ms ease; }
@@ -76,6 +82,8 @@
   :global(button:is(:hover, :focus-visible)) .header-icon.project .folder-paper { opacity: 1; transform: translateY(-2px); }
   :global(button:is(:hover, :focus-visible)) .header-icon.layout .layout-vertical { transform: translateX(2px); }
   :global(button:is(:hover, :focus-visible)) .header-icon.layout .layout-horizontal { transform: translateY(-2px); }
+  .extension-piece { transform-origin: 16.5px 7.5px; }
+  :global(button:is(:hover, :focus-visible)) .header-icon.extensions .extension-piece { transform: translate(1px, -1.5px) rotate(12deg); }
   :global(button:is(:hover, :focus-visible)) .header-icon.inspector .detective-face { transform: translateX(.5px) rotate(3deg); }
   :global(button:is(:hover, :focus-visible)) .header-icon.inspector .detective-hat { transform: translateY(-2px) rotate(-4deg); }
   :global(button:is(:hover, :focus-visible)) .header-icon.settings .bead-one { transform: translateX(4px); }
@@ -83,6 +91,6 @@
   :global(button:is(:hover, :focus-visible, .active)) .header-icon.settings .bead { fill: var(--workspace-subtle, #26392e); }
   :global(button:is(:hover, :focus-visible)) .header-icon.orb .lume-head { transform: rotate(-7deg) translateY(-1px); }
   @media (prefers-reduced-motion: reduce) {
-    .folder-front, .folder-paper, .layout-vertical, .layout-horizontal, .detective-face, .detective-hat, .bead, .lume-head, .board-link, .board-node-one, .board-node-two, .board-node-three { transition: none !important; transform: none !important; }
+    .extension-piece, .folder-front, .folder-paper, .layout-vertical, .layout-horizontal, .detective-face, .detective-hat, .bead, .lume-head, .board-link, .board-node-one, .board-node-two, .board-node-three { transition: none !important; transform: none !important; }
   }
 </style>

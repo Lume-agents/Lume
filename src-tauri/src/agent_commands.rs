@@ -326,7 +326,7 @@ fn sorted_entries(directory: &Path) -> Vec<PathBuf> {
     entries
 }
 
-fn frontmatter(text: &str) -> HashMap<String, String> {
+pub(crate) fn frontmatter(text: &str) -> HashMap<String, String> {
     let mut lines = text.lines();
     if lines.next().map(str::trim) != Some("---") {
         return HashMap::new();

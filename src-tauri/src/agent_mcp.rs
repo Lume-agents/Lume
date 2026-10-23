@@ -265,6 +265,19 @@ pub fn opencode_configured(cwd: Option<&str>) -> Vec<McpServer> {
     servers
 }
 
+pub fn gemini_configured(cwd: Option<&str>) -> Vec<McpServer> {
+    let mut servers = Vec::new();
+    if let Some(config) = home().and_then(|home| read_json(&home.join(".gemini/settings.json"))) {
+        servers.extend(json_servers(&config, "mcpServers", "user"));
+    }
+    if let Some(project) =
+        cwd.and_then(|cwd| read_json(&Path::new(cwd).join(".gemini/settings.json")))
+    {
+        servers.extend(json_servers(&project, "mcpServers", "project"));
+    }
+    servers
+}
+
 /// `[mcp_servers.name]` tables of a Codex `config.toml`. Only the keys shown are read, so a
 /// small line parser is enough and keeps secrets in `env` tables untouched.
 pub fn parse_codex_config(text: &str, scope: &str) -> Vec<McpServer> {

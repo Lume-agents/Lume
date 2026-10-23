@@ -37,6 +37,7 @@
   import WorkspaceReviewCenter from "$lib/WorkspaceReviewCenter.svelte";
   import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
   import WorkflowBoard from "$lib/WorkflowBoard.svelte";
+  import WorkspaceExtensions from "$lib/WorkspaceExtensions.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
@@ -261,6 +262,9 @@
   let maximizedPaneId = $state<string | null>(null);
   let inspectorOpen = $state(true);
   let boardOpen = $state(false);
+  let extensionsOpen = $state(false);
+  // The board and the extensions take over the stage: the chats, inspector and review step aside.
+  const stageTakeover = $derived(boardOpen || extensionsOpen);
   let boardMounted = $state(false);
   let inspectorSection = $state<"session" | "repository">("session");
   let reviewOpen = $state(false);
@@ -317,7 +321,7 @@
       await new Promise<void>((resolve) => window.setTimeout(resolve, 110));
     }
     const movingNodes = sidebarElement
-      ? [...sidebarElement.querySelectorAll<HTMLElement>(".brand-mark, .sidebar-toggle, .header-control-icon, .header-utilities button, .session-launcher > button, .session-icon")]
+      ? [...sidebarElement.querySelectorAll<HTMLElement>(".brand-mark, .sidebar-toggle, .header-control-icon, .header-selectors > .inspector-button, .header-utilities button, .session-launcher > button, .session-icon")]
         .filter((node) => node.getClientRects().length && node.getBoundingClientRect().bottom > 0)
         .slice(0, 32)
       : [];
@@ -757,7 +761,7 @@
   );
   // While the review is open only the chat it was opened from keeps its column (the others stay mounted at
   // zero width, so drafts and streams survive), which leaves the room to the diff.
-  const reviewFocusSession = $derived(reviewOpen && !boardOpen && !maximizedSession && secondary ? focusedSession : null);
+  const reviewFocusSession = $derived(reviewOpen && !stageTakeover && !maximizedSession && secondary ? focusedSession : null);
   const darkMode = $derived(preferences.darkMode ?? systemDark);
   const appearance = $derived(appearanceAttributes(preferences));
   $effect(() => { void ensureCustomFonts(preferences); });
@@ -1854,9 +1858,18 @@
   function showWorkflowBoard(open: boolean) {
     finishSidebarSessionDrag();
     boardOpen = open;
-    if (open) boardMounted = true;
+    if (open) {
+      boardMounted = true;
+      extensionsOpen = false;
+    }
     try { localStorage.setItem("lume:workflow-board:open", String(open)); }
     catch { /* Opening the board is still available when storage is disabled. */ }
+  }
+
+  function showExtensions(open: boolean) {
+    finishSidebarSessionDrag();
+    extensionsOpen = open;
+    if (open) showWorkflowBoard(false);
   }
 
   async function deleteWorkflowBoardGroup(id: string) {
@@ -2287,7 +2300,7 @@
         launcherOpen = false;
         return;
       }
-      if (event.key === "Escape" && reviewOpen && !boardOpen) {
+      if (event.key === "Escape" && reviewOpen && !stageTakeover) {
         closeReview();
         return;
       }
@@ -2295,7 +2308,7 @@
         closeSettings();
         return;
       }
-      if (boardOpen) return;
+      if (stageTakeover) return;
       if (event.key === "Escape" && maximizedPaneId) {
         maximizedPaneId = null;
         persistWorkspaceLayout();
@@ -2527,11 +2540,12 @@
         <button class="header-control-close" type="button" aria-label={tr("Close project selector", "Fechar seletor de projetos")} onclick={() => (headerControl = null)}><LumeIcon name="close" size={14} /></button>
       {:else}
         <button class="header-control-icon" type="button" aria-label={tr("Select project", "Selecionar projeto")} title={tr("Select project", "Selecionar projeto")} onclick={() => openHeaderControl("project")}><WorkspaceHeaderIcon name="project" /></button>
+        <button class:active={extensionsOpen} class="inspector-button" type="button" title={tr("Extensions", "Extensões")} aria-label={tr("Extensions", "Extensões")} aria-pressed={extensionsOpen} onclick={() => showExtensions(!extensionsOpen)}><WorkspaceHeaderIcon name="extensions" /></button>
+        <button class:active={inspectorOpen && !stageTakeover} class="inspector-button" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen && !stageTakeover} onclick={() => { if (stageTakeover) { showWorkflowBoard(false); showExtensions(false); if (!inspectorOpen) toggleInspector(); } else toggleInspector(); }}><WorkspaceHeaderIcon name="inspector" /></button>
+        <button class:active={boardOpen} class="inspector-button" type="button" title={tr("Workflow board", "Board de workflow")} aria-label={tr("Workflow board", "Board de workflow")} aria-pressed={boardOpen} onclick={() => showWorkflowBoard(!boardOpen)}><WorkspaceHeaderIcon name="workflow" /></button>
       {/if}
       {#if headerControl === null}
       <div class="header-utilities">
-        <button class:active={boardOpen} class="inspector-button" type="button" title={tr("Workflow board", "Board de workflow")} aria-label={tr("Workflow board", "Board de workflow")} aria-pressed={boardOpen} onclick={() => showWorkflowBoard(!boardOpen)}><WorkspaceHeaderIcon name="workflow" /></button>
-        <button class:active={inspectorOpen && !boardOpen} class="inspector-button" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen && !boardOpen} onclick={() => { if (boardOpen) { showWorkflowBoard(false); if (!inspectorOpen) toggleInspector(); } else toggleInspector(); }}><WorkspaceHeaderIcon name="inspector" /></button>
         <button class:active={settingsOpen} class="settings-button" type="button" title={tr("Workspace settings", "Ajustes do Workspace")} aria-label={tr("Workspace settings", "Ajustes do Workspace")} aria-expanded={settingsOpen} onclick={() => settingsOpen ? closeSettings() : void openSettings()}><WorkspaceHeaderIcon name="settings" /></button>
         <button class="compact-mode" type="button" title={tr("Return to Orb", "Voltar ao Orb")} aria-label={tr("Return to Orb", "Voltar ao Orb")} onclick={() => void returnToOrb()}><WorkspaceHeaderIcon name="orb" /></button>
       </div>
@@ -3148,14 +3162,14 @@
     </div>
   {/if}
 
-  <section class:inspector-open={inspectorOpen && !boardOpen} class:review-open={reviewOpen && !boardOpen} class:maximized={Boolean(maximizedSession) && !boardOpen} class:review-wide={reviewWide && reviewOpen && !boardOpen} class="workspace-stage">
+  <section class:inspector-open={inspectorOpen && !stageTakeover} class:review-open={reviewOpen && !stageTakeover} class:maximized={Boolean(maximizedSession) && !stageTakeover} class:review-wide={reviewWide && reviewOpen && !stageTakeover} class="workspace-stage">
     <section
       bind:this={workbenchElement}
       class:split={Boolean(secondary) && !maximizedSession}
       class:three-pane={Boolean(tertiary) && !maximizedSession}
       class:resizing={resizingDivider !== null}
       class:review-focus={Boolean(reviewFocusSession)}
-      inert={reviewWide && reviewOpen && !boardOpen}
+      inert={reviewWide && reviewOpen && !stageTakeover}
       class:drag-active={draggingSessionId !== null}
       class:header-relocating={headerRelocatingSessionId !== null}
       class="workbench"
@@ -3165,7 +3179,7 @@
       ondragleave={leaveWorkspaceDrop}
       ondrop={dropSessionInWorkspace}
     >
-    <div class:covered={boardOpen} class="board-chat-layer" inert={boardOpen} aria-hidden={boardOpen}>
+    <div class:covered={stageTakeover} class="board-chat-layer" inert={stageTakeover} aria-hidden={stageTakeover}>
     {#if backdropPaint}<div class="workspace-backdrop" style:background={backdropPaint} aria-hidden="true"></div>{/if}
     {#if backdropLayers.glow}<div class="workspace-backdrop" style:background={backdropLayers.glow} aria-hidden="true"></div>{/if}
     {#if backdropLayers.vignette}<div class="workspace-backdrop over" style:background={backdropLayers.vignette} aria-hidden="true"></div>{/if}
@@ -3307,7 +3321,7 @@
       </div>
     {/if}
       {#if error && !orderedSessions.length}<p class="workspace-error">{error}</p>{/if}
-      {#if !boardOpen && draggingSessionId && workspaceDropIntent}
+      {#if !stageTakeover && draggingSessionId && workspaceDropIntent}
         <div
           class="layout-drop-preview {workspaceDropIntent.kind}"
           style:left={`${workspaceDropIntent.left}%`}
@@ -3341,15 +3355,18 @@
         onSidebarDragOverBoard={(over) => dragOverBoard = over}
       />
     {/if}
+    {#if extensionsOpen}
+      <WorkspaceExtensions {language} project={focusedSession?.workingDirectory} onClose={() => showExtensions(false)} />
+    {/if}
     </section>
-    <div class:open={inspectorOpen && !boardOpen} class="inspector-shell" aria-hidden={!inspectorOpen || boardOpen} inert={!inspectorOpen || boardOpen}>
+    <div class:open={inspectorOpen && !stageTakeover} class="inspector-shell" aria-hidden={!inspectorOpen || stageTakeover} inert={!inspectorOpen || stageTakeover}>
       {#if inspectorOpen}
         <div class="inspector-content" in:fade={{ duration: motionDuration(140) }} out:fade={{ duration: motionDuration(100) }}>
           <WorkspaceInspector session={focusedSession} {language} {loading} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} />
         </div>
       {/if}
     </div>
-    <div class:open={reviewOpen && !boardOpen} class="review-shell" aria-hidden={!reviewOpen || boardOpen} inert={!reviewOpen || boardOpen}>
+    <div class:open={reviewOpen && !stageTakeover} class="review-shell" aria-hidden={!reviewOpen || stageTakeover} inert={!reviewOpen || stageTakeover}>
       {#if reviewOpen && focusedSession}
         <div class="review-content" in:fly={{ x: 22, duration: motionDuration(220), easing: cubicOut }} out:fly={{ x: 16, duration: motionDuration(145), easing: cubicOut }}>
           <WorkspaceReviewCenter session={focusedSession} {language} initialPath={reviewInitialPath} wide={reviewWide} onToggleWide={() => (reviewWide = !reviewWide)} onClose={closeReview} />

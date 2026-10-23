@@ -1,4 +1,5 @@
 mod adapters;
+mod agent_extensions;
 mod agent_commands;
 mod agent_mcp;
 mod agent_plugins;
@@ -1172,6 +1173,57 @@ fn set_session_collaboration_mode(
     mode: String,
 ) -> Result<String, String> {
     control::set_session_collaboration_mode(&app, state.inner(), bridge.inner(), &session_id, &mode)
+}
+
+#[tauri::command]
+async fn list_agent_extensions(
+    project: Option<String>,
+) -> Result<Vec<agent_extensions::AgentExtensions>, String> {
+    tauri::async_runtime::spawn_blocking(move || agent_extensions::list(project.as_deref()))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn list_extension_catalog(
+    agent: String,
+    refresh: bool,
+) -> Result<Vec<agent_extensions::CatalogPlugin>, String> {
+    tauri::async_runtime::spawn_blocking(move || agent_extensions::catalog(&agent, refresh))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn manage_agent_plugin(
+    agent: String,
+    action: String,
+    plugin: String,
+    accept_command: Option<String>,
+) -> Result<agent_extensions::PluginActionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        agent_extensions::manage_plugin(&agent, &action, &plugin, accept_command.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn read_extension_file(path: String, project: Option<String>) -> Result<String, String> {
+    agent_extensions::read_file(&path, project.as_deref())
+}
+
+#[tauri::command]
+fn reveal_extension_path(
+    app: AppHandle,
+    path: String,
+    project: Option<String>,
+) -> Result<(), String> {
+    // The same folders a preview may read; anything else is not Lume's to open.
+    agent_extensions::read_file(&path, project.as_deref())?;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -3424,6 +3476,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            list_agent_extensions,
+            list_extension_catalog,
+            manage_agent_plugin,
+            read_extension_file,
+            reveal_extension_path,
             custom_fonts::list_custom_fonts,
             custom_fonts::import_custom_font,
             custom_fonts::read_custom_font,

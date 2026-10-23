@@ -3303,7 +3303,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .session-pane.status-completed { --pane-status-color: #50aa79; }
   .session-pane.status-permission_required { --pane-status-color: #d0a142; }
   .session-pane.status-failed { --pane-status-color: #c66762; }
-  .pane-header { position: relative; z-index: 2; min-width: 0; min-height: 64px; padding: 10px 14px 10px 17px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); border-radius: 0 0 16px 16px; background: radial-gradient(ellipse 250px 115px at 100% 0%, color-mix(in srgb, var(--pane-status-color) 18%, transparent), transparent 85%), var(--workspace-pane); cursor: grab; user-select: none; }
+  /* Inset a little from the pane edges, so its rounded border does not run into the sidebar's. */
+  .pane-header { position: relative; z-index: 2; min-width: 0; min-height: 64px; margin: 0 6px; padding: 10px 14px 10px 17px; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; border-bottom: 1px solid var(--workspace-line); border-radius: 0 0 16px 16px; background: radial-gradient(ellipse 250px 115px at 100% 0%, color-mix(in srgb, var(--pane-status-color) 18%, transparent), transparent 85%), var(--workspace-pane); cursor: grab; user-select: none; }
   .pane-header:active { cursor: grabbing; }
   .pane-header::after { position: absolute; right: 16px; bottom: -1px; left: 16px; height: 1px; background: color-mix(in srgb, var(--workspace-accent) 20%, transparent); content: ""; transform: scaleX(.18); transform-origin: left; transition: transform 320ms cubic-bezier(.16, 1, .3, 1); }
   .session-pane:hover .pane-header::after,

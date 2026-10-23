@@ -3629,7 +3629,8 @@
     min-width: 0;
     height: 100vh;
     display: grid;
-    grid-template-columns: 256px minmax(0, 1fr);
+    --sidebar-open: 256px;
+    grid-template-columns: var(--sidebar-open) minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
     overflow: hidden;
     color: var(--workspace-text);
@@ -3975,8 +3976,12 @@
   @keyframes drop-preview-arrive { from { opacity: 0; transform: scale(.985); } }
   @keyframes add-pane-preview { 0% { opacity: 0; transform: scaleX(.76); } 65% { opacity: 1; transform: scaleX(1.015); } 100% { transform: scaleX(1); } }
   @keyframes add-label-pulse { from { box-shadow: 0 7px 20px rgba(7, 20, 13, .12), 0 0 0 0 color-mix(in srgb, var(--workspace-accent) 20%, transparent); } to { box-shadow: 0 7px 20px rgba(7, 20, 13, .14), 0 0 0 5px transparent; } }
-  @media (max-width: 980px) { .workspace:not(.sidebar-collapsed) { grid-template-columns: 216px minmax(0, 1fr); } }
+  @media (max-width: 980px) { .workspace { --sidebar-open: 216px; } }
   .workspace.sidebar-collapsed { grid-template-columns: 56px minmax(0, 1fr); }
+  /* While the column animates, the sidebar's content keeps the width it ends at: icons do not slide a second time
+     as the edge moves, and the open layout is revealed rather than squeezed. The sidebar clips the rest. */
+  .sidebar > * { width: calc(var(--sidebar-open) - 1px); }
+  .workspace.sidebar-collapsed .sidebar > * { width: 55px; }
   .workspace.sidebar-collapsed .brand-header { padding: 2px 3px 7px; border-bottom: 0; }
   .workspace.sidebar-collapsed .brand-top { height: 69px; flex-direction: column; justify-content: center; gap: 5px; }
   .workspace.sidebar-collapsed .brand-mark { width: 27px; height: 27px; }

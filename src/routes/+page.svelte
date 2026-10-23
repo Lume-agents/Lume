@@ -4373,7 +4373,7 @@
       </footer>
     </section>
     {#if orbTourOpen && expanded}
-      <GuidedTour steps={orbTour} language={preferences.language} dark={effectiveDark} onPrepare={prepareOrbTourStep} onDone={finishOrbTour} />
+      <GuidedTour steps={orbTour} language={preferences.language} dark={effectiveDark} detached onPrepare={prepareOrbTourStep} onDone={finishOrbTour} />
     {/if}
   {/if}
   {#if installingPlan}

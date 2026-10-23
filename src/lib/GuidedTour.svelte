@@ -1,13 +1,16 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { fade } from "svelte/transition";
+  import { emit, listen } from "@tauri-apps/api/event";
+  import { invoke } from "@tauri-apps/api/core";
   import type { Language } from "$lib/i18n";
-  import LumeIcon from "$lib/LumeIcon.svelte";
-  import type { TourStep } from "$lib/tours";
+  import TourCard from "$lib/TourCard.svelte";
+  import { TOUR_ACTION_EVENT, TOUR_CARD_EVENT, TOUR_READY_EVENT, type TourAction, type TourStep } from "$lib/tours";
 
-
-  let { steps, language = "en", dark = false, onPrepare, onDone } = $props<{
+  let { steps, language = "en", dark = false, detached = false, onPrepare, onDone } = $props<{
     steps: TourStep[];
+    /** The card goes in its own window beside this one (the Orb is too small to hold it); only the highlight stays here. */
+    detached?: boolean;
     /** For surfaces without the Workspace's color tokens (the Orb): which fallback palette to use. */
     dark?: boolean;
     language?: Language;
@@ -22,12 +25,11 @@
   let card = $state<HTMLElement | null>(null);
   let cardSize = $state({ width: 340, height: 220 });
   let viewport = $state({ width: 1200, height: 800 });
-  let mediaFailed = $state<Record<string, boolean>>({});
   let frame = 0;
+  // A separate card window only exists in the desktop app.
+  const external = $derived(detached && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
 
   const step: TourStep = $derived(steps[index]);
-  const pt = $derived(language === "pt-BR");
-  const last = $derived(index === steps.length - 1);
   const padding = 7;
   const gap = 16;
 
@@ -51,10 +53,6 @@
     // The target fills the screen (the chats): the card sits inside it, bottom right.
     return { x: clampX(rect.x + rect.width - width - 24), y: clampY(rect.y + rect.height - height - 24) };
   });
-
-  function tr(pair: [string, string]) {
-    return pt ? pair[1] : pair[0];
-  }
 
   function target(): HTMLElement | null {
     for (const name of step.targets) {
@@ -89,8 +87,17 @@
     const loop = () => {
       measure();
       if (performance.now() < until) frame = requestAnimationFrame(loop);
+      else if (external) void placeCard();
     };
     loop();
+  }
+
+  /** Lines the card window up with the highlight and hands it the step to show. */
+  async function placeCard() {
+    // The card window adds a margin around the card for its shadow.
+    const width = (step.media || step.demo ? 400 : 340) + 36;
+    await invoke("place_tour_card", { anchorY: rect ? rect.y + rect.height / 2 : null, width }).catch(() => {});
+    await emit(TOUR_CARD_EVENT, { step, index, total: steps.length, language, dark });
   }
 
   async function go(next: number) {
@@ -102,6 +109,7 @@
     index = next;
     await onPrepare?.(steps[next].id);
     await tick();
+    if (external) void emit(TOUR_CARD_EVENT, { step: steps[next], index: next, total: steps.length, language, dark });
     follow();
   }
 
@@ -119,13 +127,24 @@
     }
   }
 
+  function act(action: TourAction) {
+    if (action === "next") void go(index + 1);
+    else if (action === "back") void go(index - 1);
+    else onDone(false);
+  }
+
   onMount(() => {
     void go(0);
     const resize = () => follow(200);
     window.addEventListener("resize", resize);
+    const unlisten = external
+      ? [listen<TourAction>(TOUR_ACTION_EVENT, (event) => act(event.payload)), listen(TOUR_READY_EVENT, () => void placeCard())]
+      : [];
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener("resize", resize);
+      for (const pending of unlisten) void pending.then((stop) => stop());
+      if (external) void invoke("close_tour_card").catch(() => {});
     };
   });
 </script>
@@ -138,37 +157,9 @@
   {:else}
     <div class="scrim"></div>
   {/if}
-  <div bind:this={card} class:with-media={step.media && !mediaFailed[step.media]} class="tour-card" style:left={`${position.x}px`} style:top={`${position.y}px`}>
-    {#key step.id}
-      {#if step.media && !mediaFailed[step.media]}
-        {@const clip = `/tour/${step.media}-${pt ? "pt" : "en"}`}
-        <!-- WebM for WebKitGTK, H.264 for the macOS and Windows webviews; when neither plays, the card goes without. -->
-        <video class="tour-media" autoplay loop muted playsinline onloadeddata={() => follow(120)}>
-          <source src={`${clip}.webm`} type="video/webm" />
-          <source src={`${clip}.mp4`} type="video/mp4" onerror={() => (mediaFailed = { ...mediaFailed, [step.media ?? ""]: true })} />
-        </video>
-      {/if}
-      <div class="tour-copy" in:fade={{ duration: 160 }}>
-        <span class="tour-count">{index + 1} / {steps.length}</span>
-        <strong id="tour-title">{tr(step.title)}</strong>
-        <p>{tr(step.body)}</p>
-      </div>
-    {/key}
-    <footer>
-      <span class="tour-dots" aria-hidden="true">
-        {#each steps as item, dot (item.id)}<i class:on={dot === index}></i>{/each}
-      </span>
-      {#if index === 0}
-        <button class="quiet" type="button" onclick={() => onDone(false)}>{pt ? "Pular" : "Skip"}</button>
-      {:else}
-        <button class="quiet" type="button" onclick={() => void go(index - 1)}>{pt ? "Voltar" : "Back"}</button>
-      {/if}
-      <button class="primary" type="button" onclick={() => void go(index + 1)}>
-        {#if last}{pt ? "Começar" : "Done"}{:else if index === 0}{pt ? "Mostrar" : "Show me"}{:else}{pt ? "Próximo" : "Next"}{/if}
-        {#if !last}<LumeIcon name="arrow-right" size={13} />{/if}
-      </button>
-    </footer>
-  </div>
+  {#if !external}
+    <TourCard bind:element={card} {step} {index} total={steps.length} {language} {dark} style={`position: absolute; left: ${position.x}px; top: ${position.y}px; transition: left 380ms cubic-bezier(.16, 1, .3, 1), top 380ms cubic-bezier(.16, 1, .3, 1);`} onBack={() => act("back")} onNext={() => act("next")} onSkip={() => act("skip")} onMediaReady={() => follow(120)} />
+  {/if}
 </div>
 
 <style>
@@ -177,22 +168,6 @@
   .scrim { position: absolute; inset: 0; background: rgba(6, 12, 9, .56); }
   .spotlight { position: absolute; border-radius: 14px; box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--tour-accent) 75%, transparent), 0 0 0 9999px rgba(6, 12, 9, .56); pointer-events: none; transition: left 380ms cubic-bezier(.16, 1, .3, 1), top 380ms cubic-bezier(.16, 1, .3, 1), width 380ms cubic-bezier(.16, 1, .3, 1), height 380ms cubic-bezier(.16, 1, .3, 1); }
   .spotlight::after { position: absolute; inset: -1.5px; border-radius: inherit; box-shadow: 0 0 0 0 color-mix(in srgb, var(--tour-accent) 45%, transparent); content: ""; animation: tour-pulse 1.8s ease-out infinite; }
-  .tour-card { position: absolute; width: min(340px, calc(100vw - 28px)); overflow: hidden; border: 1px solid var(--tour-line); border-radius: 16px; color: var(--tour-text); background: var(--tour-raised); box-shadow: 0 24px 60px rgba(5, 12, 8, .34), 0 2px 8px rgba(5, 12, 8, .14); transition: left 380ms cubic-bezier(.16, 1, .3, 1), top 380ms cubic-bezier(.16, 1, .3, 1); }
-  .tour-card.with-media { width: min(400px, calc(100vw - 28px)); }
-  .tour-media { width: 100%; aspect-ratio: 16 / 9; display: block; object-fit: cover; border-bottom: 1px solid var(--tour-line); background: var(--tour-bg); }
-  .tour-copy { padding: 16px 18px 4px; display: grid; gap: 6px; }
-  .tour-count { color: var(--tour-accent); font: 700 10.5px/1 var(--lume-font-ui, Inter, sans-serif); letter-spacing: .04em; }
-  .tour-copy strong { color: var(--tour-strong); font: 720 15px/1.25 var(--lume-font-ui, Inter, sans-serif); letter-spacing: -.01em; }
-  .tour-copy p { margin: 0; color: var(--tour-muted); font: 500 12.5px/1.55 var(--lume-font-ui, Inter, sans-serif); }
-  footer { padding: 12px 14px 14px 18px; display: flex; align-items: center; gap: 6px; }
-  .tour-dots { margin-right: auto; display: flex; gap: 4px; }
-  .tour-dots i { width: 5px; height: 5px; border-radius: 999px; background: color-mix(in srgb, var(--tour-muted) 30%, transparent); transition: width 220ms cubic-bezier(.16, 1, .3, 1), background 220ms ease; }
-  .tour-dots i.on { width: 14px; background: var(--tour-accent); }
-  footer button { height: 30px; padding: 0 12px; display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 9px; font: 680 12px/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
-  footer .quiet { color: var(--tour-muted); background: transparent; }
-  footer .quiet:hover { color: var(--tour-strong); background: var(--tour-subtle); }
-  footer .primary { color: #fff; background: var(--tour-accent); }
-  footer .primary:hover { filter: brightness(1.08); }
   @keyframes tour-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--tour-accent) 45%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
-  @media (prefers-reduced-motion: reduce) { .spotlight, .tour-card { transition: none; } .spotlight::after { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .spotlight { transition: none; } .spotlight::after { animation: none; } }
 </style>

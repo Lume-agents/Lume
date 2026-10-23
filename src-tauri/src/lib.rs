@@ -56,6 +56,7 @@ mod session_filters;
 mod state;
 mod store;
 mod terminal_windows;
+mod tour_card;
 mod pair_watch;
 mod session_files;
 mod startup_trace;
@@ -3476,6 +3477,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            tour_card::place_tour_card,
+            tour_card::fit_tour_card,
+            tour_card::close_tour_card,
             list_agent_extensions,
             list_extension_catalog,
             manage_agent_plugin,

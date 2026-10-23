@@ -38,6 +38,7 @@
   import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
   import WorkflowBoard from "$lib/WorkflowBoard.svelte";
   import WorkspaceExtensions from "$lib/WorkspaceExtensions.svelte";
+  import WorkspaceTour from "$lib/WorkspaceTour.svelte";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
@@ -263,6 +264,8 @@
   let inspectorOpen = $state(true);
   let boardOpen = $state(false);
   let extensionsOpen = $state(false);
+  let tourOpen = $state(false);
+  const workspaceTourKey = "lume:tour:workspace:v1";
   // The board and the extensions take over the stage: the chats, inspector and review step aside.
   const stageTakeover = $derived(boardOpen || extensionsOpen);
   let boardMounted = $state(false);
@@ -1866,6 +1869,26 @@
     catch { /* Opening the board is still available when storage is disabled. */ }
   }
 
+  function startTour() {
+    closeSettings();
+    tourOpen = true;
+  }
+
+  function finishTour() {
+    tourOpen = false;
+    try { localStorage.setItem(workspaceTourKey, "seen"); }
+    catch { /* The tour shows again next time when storage is unavailable. */ }
+  }
+
+  /** Each step points at something on screen: overlays that would cover it are closed first. */
+  function prepareTourStep() {
+    if (boardOpen) showWorkflowBoard(false);
+    if (extensionsOpen) showExtensions(false);
+    if (settingsOpen) closeSettings();
+    headerControl = null;
+    launcherOpen = false;
+  }
+
   function showExtensions(open: boolean) {
     finishSidebarSessionDrag();
     extensionsOpen = open;
@@ -2264,6 +2287,11 @@
     syncSidebarWidth(narrowSidebar);
     narrowSidebar.addEventListener("change", syncSidebarWidth);
     restoreWorkspaceLayout();
+    // The first time the Workspace opens, a short tour shows where things are.
+    let tourSeen = true;
+    try { tourSeen = localStorage.getItem(workspaceTourKey) !== null; }
+    catch { /* Without storage the tour would show on every launch; leave it to Settings. */ }
+    const tourTimer = tourSeen ? 0 : window.setTimeout(() => { tourOpen = true; }, 900);
     try { streamMessages = localStorage.getItem(workspaceStreamMessagesKey) !== "false"; }
     catch { /* Use the default when local storage is unavailable. */ }
     try { workspaceBackgroundImage = localStorage.getItem(workspaceBackgroundImageKey) ?? ""; }
@@ -2279,6 +2307,8 @@
       systemDark = event.matches;
     };
     const handleWorkspaceKeydown = (event: KeyboardEvent) => {
+      // The tour owns the keyboard while it is open.
+      if (tourOpen) return;
       if (boardOpen && !settingsOpen && !launcherOpen && !sessionContextMenu && !headerControl && !searchOpen) return;
       if (event.key === "Escape" && (settingsOpen || launcherOpen || sessionContextMenu || headerControl || searchOpen)) {
         event.preventDefault();
@@ -2483,6 +2513,7 @@
       disposed = true;
       startup.dispose();
       if (refreshTimer) clearTimeout(refreshTimer);
+      window.clearTimeout(tourTimer);
       narrowSidebar.removeEventListener("change", syncSidebarWidth);
       colorScheme.removeEventListener("change", syncSystemTheme);
       window.removeEventListener("keydown", handleWorkspaceKeydown);
@@ -2540,13 +2571,13 @@
         <button class="header-control-close" type="button" aria-label={tr("Close project selector", "Fechar seletor de projetos")} onclick={() => (headerControl = null)}><LumeIcon name="close" size={14} /></button>
       {:else}
         <button class="header-control-icon" type="button" aria-label={tr("Select project", "Selecionar projeto")} title={tr("Select project", "Selecionar projeto")} onclick={() => openHeaderControl("project")}><WorkspaceHeaderIcon name="project" /></button>
-        <button class:active={extensionsOpen} class="inspector-button" type="button" title={tr("Extensions", "Extensões")} aria-label={tr("Extensions", "Extensões")} aria-pressed={extensionsOpen} onclick={() => showExtensions(!extensionsOpen)}><WorkspaceHeaderIcon name="extensions" /></button>
-        <button class:active={inspectorOpen && !stageTakeover} class="inspector-button" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen && !stageTakeover} onclick={() => { if (stageTakeover) { showWorkflowBoard(false); showExtensions(false); if (!inspectorOpen) toggleInspector(); } else toggleInspector(); }}><WorkspaceHeaderIcon name="inspector" /></button>
-        <button class:active={boardOpen} class="inspector-button" type="button" title={tr("Workflow board", "Board de workflow")} aria-label={tr("Workflow board", "Board de workflow")} aria-pressed={boardOpen} onclick={() => showWorkflowBoard(!boardOpen)}><WorkspaceHeaderIcon name="workflow" /></button>
+        <button class:active={extensionsOpen} class="inspector-button" data-tour="extensions" type="button" title={tr("Extensions", "Extensões")} aria-label={tr("Extensions", "Extensões")} aria-pressed={extensionsOpen} onclick={() => showExtensions(!extensionsOpen)}><WorkspaceHeaderIcon name="extensions" /></button>
+        <button class:active={inspectorOpen && !stageTakeover} class="inspector-button" data-tour="inspector" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen && !stageTakeover} onclick={() => { if (stageTakeover) { showWorkflowBoard(false); showExtensions(false); if (!inspectorOpen) toggleInspector(); } else toggleInspector(); }}><WorkspaceHeaderIcon name="inspector" /></button>
+        <button class:active={boardOpen} class="inspector-button" data-tour="board" type="button" title={tr("Workflow board", "Board de workflow")} aria-label={tr("Workflow board", "Board de workflow")} aria-pressed={boardOpen} onclick={() => showWorkflowBoard(!boardOpen)}><WorkspaceHeaderIcon name="workflow" /></button>
       {/if}
       {#if headerControl === null}
       <div class="header-utilities">
-        <button class:active={settingsOpen} class="settings-button" type="button" title={tr("Workspace settings", "Ajustes do Workspace")} aria-label={tr("Workspace settings", "Ajustes do Workspace")} aria-expanded={settingsOpen} onclick={() => settingsOpen ? closeSettings() : void openSettings()}><WorkspaceHeaderIcon name="settings" /></button>
+        <button class:active={settingsOpen} class="settings-button" data-tour="settings" type="button" title={tr("Workspace settings", "Ajustes do Workspace")} aria-label={tr("Workspace settings", "Ajustes do Workspace")} aria-expanded={settingsOpen} onclick={() => settingsOpen ? closeSettings() : void openSettings()}><WorkspaceHeaderIcon name="settings" /></button>
         <button class="compact-mode" type="button" title={tr("Return to Orb", "Voltar ao Orb")} aria-label={tr("Return to Orb", "Voltar ao Orb")} onclick={() => void returnToOrb()}><WorkspaceHeaderIcon name="orb" /></button>
       </div>
       {/if}
@@ -2564,7 +2595,7 @@
         <strong>{tr("Agents", "Agentes")}</strong>
         <span>{orderedSessions.length}</span>
       {/if}
-      <div class="session-launcher" bind:this={launcherRoot}>
+      <div class="session-launcher" data-tour="new-chat" bind:this={launcherRoot}>
         <button class:active={launcherOpen} type="button" aria-label={launcherOpen ? tr("Close session launcher", "Fechar iniciador de sessões") : tr("New or resume chat", "Novo chat ou retomar")} title={launcherOpen ? tr("Close session launcher", "Fechar iniciador de sessões") : tr("New or resume chat", "Novo chat ou retomar")} aria-controls="workspace-session-launcher" aria-expanded={launcherOpen} onclick={() => void toggleLauncher()}><LumeIcon name="plus" size={16} /></button>
         {#if launcherOpen}
           <div id="workspace-session-launcher" class="session-launcher-popover" use:floatLauncher transition:sessionLauncherTransition={{ duration: 190, radius: 12 }} role="group" aria-label={tr("Open session", "Abrir sessão")}>
@@ -2631,7 +2662,7 @@
     {/if}
     </div>
 
-    <nav class:releasing={sidebarReleaseIntent} class="session-list" aria-label={tr("Agent sessions", "Sessões de agentes")} ondragover={trackSidebarRelease} ondrop={dropSidebarRelease}>
+    <nav class:releasing={sidebarReleaseIntent} class="session-list" data-tour="agents" aria-label={tr("Agent sessions", "Sessões de agentes")} ondragover={trackSidebarRelease} ondrop={dropSidebarRelease}>
       {#if loading}
         {#each [1, 2, 3] as item}
           <div class="session-skeleton" aria-hidden="true"><i></i><span></span></div>
@@ -2948,6 +2979,10 @@
               <span><strong>{tr("Open sessions in", "Abrir sessões em")}</strong></span>
               <LumeSelect ariaLabel={tr("Session destination", "Destino das sessões")} value={preferences.launchTarget} options={[{ value: "auto", label: "Auto" }, { value: "terminal", label: "Terminal" }, { value: "vscode", label: "VS Code" }]} minWidth={112} onValueChange={(value) => void updatePreference("launchTarget", value as Preferences["launchTarget"])} />
             </label>
+            <div class="workspace-setting-row">
+              <span><strong>{tr("Workspace tour", "Tour do Workspace")}</strong><small>{tr("Where things are, in a minute", "Onde fica cada coisa, em um minuto")}</small></span>
+              <button class="setting-action" type="button" onclick={startTour}>{tr("Show again", "Ver de novo")}</button>
+            </div>
             {/if}
             </div>
           </details>
@@ -3173,6 +3208,7 @@
       class:drag-active={draggingSessionId !== null}
       class:header-relocating={headerRelocatingSessionId !== null}
       class="workbench"
+      data-tour="workbench"
       aria-label={tr("Workspace layout", "Layout do Workspace")}
       style:grid-template-columns={workbenchColumns()}
       ondragover={trackWorkspaceDrop}
@@ -3393,6 +3429,9 @@
   {#if automationRequired}
     <MacosAutomationDialog {language} onClose={() => { automationRequired = false; }} />
   {/if}
+  {#if tourOpen}
+    <WorkspaceTour {language} onPrepare={prepareTourStep} onDone={finishTour} />
+  {/if}
 </main>
 
 <style>
@@ -3509,6 +3548,8 @@
   .compact-settings { display: grid; }
   .workspace-setting-row { width: 100%; max-width: 100%; min-width: 0; min-height: 53px; display: flex; align-items: center; gap: 14px; overflow: hidden; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 62%, transparent); }
   .workspace-setting-row:last-child { border-bottom: 0; }
+  .setting-action { height: 26px; padding: 0 10px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-strong); background: var(--workspace-raised); font: 650 9px/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
+  .setting-action:hover { border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); color: var(--workspace-accent); }
   .workspace-setting-row > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
   .workspace-setting-row > span strong { color: var(--workspace-strong); font-size: 10px; font-weight: 730; }.workspace-setting-row > span small { color: var(--workspace-muted); font-size: 8px; line-height: 1.35; }
   .workspace-switch { position: relative; width: 34px; height: 20px; flex: 0 0 auto; appearance: none; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); cursor: pointer; transition: border-color 140ms ease, background 180ms ease; }

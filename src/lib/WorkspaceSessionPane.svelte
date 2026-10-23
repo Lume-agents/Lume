@@ -2563,7 +2563,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   {/if}
 
   <div class="conversation-shell" class:under-composer={!composerInIntroPosition} style:--composer-overlap={composerInIntroPosition ? "0px" : `${composerHeight}px`}>
-  <div class="conversation" role="region" aria-label={tr("Conversation", "Conversa")} bind:this={conversationElement} onscroll={trackConversationScroll}>
+  <div class="conversation" data-tour="conversation" role="region" aria-label={tr("Conversation", "Conversa")} bind:this={conversationElement} onscroll={trackConversationScroll}>
     <div class="conversation-content" bind:this={conversationContentElement}>
     {#if canLoadEarlier}
       <button class="load-earlier-chat" type="button" disabled={historyLoading} onclick={() => void revealEarlierMessages()}>
@@ -2575,6 +2575,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       {#if feedItem.kind === "trace"}
         <div
           class="workspace-event-trace"
+          data-tour="events"
           in:slide={{ duration: motionDuration(175), easing: cubicOut }}
           out:slide={{ duration: motionDuration(120), easing: cubicOut }}
         >
@@ -2867,7 +2868,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       <SessionEnvironmentMenu sessionId={session.id} {language} />
     </div>
   {/if}
-  <form bind:this={composerElement} bind:clientHeight={composerHeight} class:fresh={composerInIntroPosition} class:crossfade-out={composerTransition === "out"} class:crossfade-in={composerTransition === "in"} class:unavailable={!canCompose} class="composer" onpaste={(event) => void pasteAttachments(event)} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
+  <form bind:this={composerElement} data-tour="composer" bind:clientHeight={composerHeight} class:fresh={composerInIntroPosition} class:crossfade-out={composerTransition === "out"} class:crossfade-in={composerTransition === "in"} class:unavailable={!canCompose} class="composer" onpaste={(event) => void pasteAttachments(event)} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
     {#if composerInIntroPosition}
       <div class="composer-welcome"><LumeMascot status="idle" awake size={45} /><strong>{tr("Hello. What shall we work on?", "Olá. No que vamos trabalhar?")}</strong></div>
     {/if}

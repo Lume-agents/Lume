@@ -33,6 +33,7 @@ await build({
 });
 
 function fixture() {
+  try { localStorage.setItem("lume:tour:workspace:v1", "seen"); } catch {}
   const now = Date.now();
   const remote = { nodeId: "node-casa", relayUrl: "https://relay.example", identity: { algorithm: "Ed25519", publicKey: "k", fingerprint: "f" }, deviceId: "d1", pairedAt: now };
   const paired = window.__paired = [];

@@ -39,6 +39,8 @@ try {
   const call = (method, params) => send(method, params, sessionId);
   await call("Runtime.enable");
   await call("Page.enable");
+  // The runners' own setting decides this otherwise, and macOS and Windows ones ask for reduced motion.
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   const evaluate = async (expression) => {
     const result = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);

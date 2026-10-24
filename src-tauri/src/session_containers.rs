@@ -7,7 +7,6 @@ use crate::{
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    path::{Component, Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -225,30 +224,39 @@ fn valid_name(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
+/// A path as the agent's shell wrote it: `/srv/app` or `C:/app`. It is read as text, not through `Path`, so it
+/// means the same on every platform (on Windows `/srv/app` is not "absolute" to `Path`, yet it is a Linux path).
+fn absolute_root(value: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = value.strip_prefix('/') {
+        return Some(("/", rest));
+    }
+    let bytes = value.as_bytes();
+    (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/')
+        .then(|| value.split_at(3))
+}
+
 fn clean_path(value: &str, directory: Option<&str>) -> Option<String> {
     if value.contains('$') || value.contains('`') {
         return None;
     }
     let value = value.replace('\\', "/");
-    let path = Path::new(&value);
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
+    let joined = if absolute_root(&value).is_some() {
+        value
     } else {
-        Path::new(directory?).join(path)
+        format!("{}/{}", directory?.replace('\\', "/").trim_end_matches('/'), value)
     };
-    let mut clean = PathBuf::new();
-    for component in joined.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                clean.pop();
+    let (root, rest) = absolute_root(&joined)?;
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
             }
-            c => clean.push(c.as_os_str()),
+            other => parts.push(other),
         }
     }
-    clean
-        .is_absolute()
-        .then(|| clean.to_string_lossy().trim_end_matches('/').to_owned())
+    Some(format!("{root}{}", parts.join("/")).trim_end_matches('/').to_owned())
 }
 
 /// Shell separators outside quotes, not occurrences of "docker" inside echo/cat/log output.
@@ -857,6 +865,16 @@ mod tests {
         ] {
             assert!(selectors(text, None, 0).is_empty(), "{text}");
         }
+    }
+
+    #[test]
+    fn paths_are_read_as_text_the_same_way_on_every_platform() {
+        assert_eq!(clean_path("/work/project/../app/./src", None).as_deref(), Some("/work/app/src"));
+        assert_eq!(clean_path("sub/dir", Some("/work/project/")).as_deref(), Some("/work/project/sub/dir"));
+        assert_eq!(clean_path("C:\\work\\x\\..\\y", None).as_deref(), Some("C:/work/y"));
+        assert_eq!(clean_path("relative", Some("not-absolute")), None);
+        assert_eq!(clean_path("relative", None), None);
+        assert_eq!(clean_path("$HOME/app", Some("/work")), None);
     }
 
     #[test]

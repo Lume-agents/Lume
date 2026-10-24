@@ -27,6 +27,13 @@
   <div class="scroll">
     <h2>{client.tr("Appearance", "Aparência")}</h2>
     <div class="group">
+      <button class="row toggle" type="button" onclick={() => set("followDesktop", !client.appearance.followDesktop)}>
+        <span><strong>{client.tr("Same as the computer", "Igual ao computador")}</strong><small>{client.tr("Use Lume's appearance on your desktop", "Usar a aparência do Lume no computador")}</small></span>
+        <i class:on={client.appearance.followDesktop} class="switch"></i>
+      </button>
+    </div>
+    {#if !client.appearance.followDesktop}
+    <div class="group spaced">
       <div class="block">
         <span class="label">{client.tr("Theme", "Tema")}</span>
         <div class="themes">
@@ -70,6 +77,9 @@
           {#each codeFonts as font (font.value)}<option value={font.value}>{pt ? font.labelPt : font.label}</option>{/each}
         </select>
       </label>
+    </div>
+    {/if}
+    <div class="group spaced">
       <div class="row">
         <span class="label">{client.tr("Text size", "Tamanho do texto")}</span>
         <div class="segmented">
@@ -142,6 +152,7 @@
   h1 { margin: 0; color: var(--workspace-strong); font-size: 24px; font-weight: 760; letter-spacing: -.02em; }
   .scroll { min-height: 0; padding: 4px 14px 28px; overflow-y: auto; }
   h2 { margin: 20px 6px 8px; color: var(--workspace-faint); font-size: 12px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+  .group.spaced { margin-top: 10px; }
   .group { overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 18px; background: var(--workspace-raised); }
   .row, .block { width: 100%; min-height: 56px; padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 0; border-bottom: 1px solid var(--workspace-line); color: var(--workspace-strong); background: transparent; text-align: left; }
   .block { display: grid; justify-content: stretch; }

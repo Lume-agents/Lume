@@ -4,6 +4,9 @@
   import type { HubSession } from "$lib/hubProtocol";
   import { displayText } from "$lib/i18n";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import FileTypeIcon from "$lib/FileTypeIcon.svelte";
+  import { agentSlashCommands, filterSlashCommands, slashCommandQuery, slashCommandText, type SlashCommand } from "$lib/slashCommands";
+  import type { CodexThreadModelSettings, PathMention } from "$lib/lume";
   import type { MobileClient } from "./client.svelte";
   import { MAX_IMAGES, clipboardImageFiles, prepareImage, readNativeClipboardImage, type PreparedImage } from "./images";
 
@@ -15,6 +18,17 @@
   let selections = $state<Record<string, string>>({});
   let answering = $state(false);
   let deciding = $state<string | null>(null);
+  let commands = $state<SlashCommand[]>([]);
+  let commandsFor = "";
+  let mentions = $state<PathMention[]>([]);
+  // Raw, so the debounced search can tell whether its token is still the current one.
+  let mention = $state.raw<{ start: number; end: number; query: string } | null>(null);
+  let mentionTimer: ReturnType<typeof setTimeout> | undefined;
+  let models = $state<CodexThreadModelSettings | null>(null);
+  let modelSheet = $state(false);
+  let pickedModel = $state("");
+  let pickedEffort = $state("");
+  let savingModel = $state(false);
 
   const id = $derived(session.id);
   const draft = $derived(client.drafts[id] ?? "");
@@ -34,6 +48,90 @@
     : canTakeControl ? client.tr("Take control and continue", "Assumir e continuar")
     : running ? (delivery === "steer" ? client.tr("Steer this turn", "Direcionar este turno") : client.tr("Next prompt", "Próximo prompt"))
     : client.tr("Message", "Mensagem"));
+
+  const slashQuery = $derived(slashCommandQuery(draft));
+  const shownCommands = $derived(filterSlashCommands(commands, slashQuery).slice(0, 30));
+  const currentModel = $derived(models?.models.find((option) => option.model === models?.model));
+  const pickedOption = $derived(models?.models.find((option) => option.model === pickedModel));
+
+  // The agent's commands load the first time `/` is typed in this chat; only the ones that need no desktop panel stay.
+  $effect(() => {
+    if (!slashQuery || !canPrompt || commandsFor === id) return;
+    commandsFor = id;
+    void client.slashCommands(id)
+      .then((list) => { commands = agentSlashCommands(list, session.agent).filter((command) => !command.action || command.action === "model"); })
+      .catch(() => { commandsFor = ""; });
+  });
+
+  $effect(() => {
+    const sessionId = id;
+    models = null;
+    if (!canPrompt) return;
+    void client.modelSettings(sessionId).then((value) => { if (sessionId === id) models = value; });
+  });
+
+  function effortLabel(value: string) {
+    return ({ minimal: client.tr("Minimal", "Mínimo"), low: client.tr("Low", "Baixo"), medium: client.tr("Medium", "Médio"), high: client.tr("High", "Alto"), xhigh: client.tr("Extra high", "Muito alto"), max: client.tr("Max", "Máximo") } as Record<string, string>)[value] ?? value;
+  }
+
+  function pickCommand(command: SlashCommand) {
+    if (command.action === "model") {
+      setDraft("");
+      openModels();
+      return;
+    }
+    setDraft(slashCommandText(command));
+    textarea?.focus();
+  }
+
+  /** An `@` right before the caret searches the project's files and folders. */
+  function trackMention() {
+    const caret = textarea?.selectionStart ?? draft.length;
+    const match = draft.slice(0, caret).match(/(^|\s)@([^\s@]*)$/);
+    clearTimeout(mentionTimer);
+    if (!match || !canPrompt) {
+      mention = null;
+      mentions = [];
+      return;
+    }
+    const token = { start: caret - match[2].length - 1, end: caret, query: match[2] };
+    mention = token;
+    mentionTimer = setTimeout(async () => {
+      try {
+        const results = await client.searchPaths(id, token.query);
+        if (mention === token) mentions = results.slice(0, 20);
+      } catch {
+        mentions = [];
+      }
+    }, 160);
+  }
+
+  function pickMention(item: PathMention) {
+    if (!mention) return;
+    const text = `@${item.path}${item.isDirectory && !item.path.endsWith("/") ? "/" : ""} `;
+    const caret = mention.start + text.length;
+    setDraft(draft.slice(0, mention.start) + text + draft.slice(mention.end));
+    mention = null;
+    mentions = [];
+    requestAnimationFrame(() => { textarea?.focus(); textarea?.setSelectionRange(caret, caret); grow(); });
+  }
+
+  function openModels() {
+    if (!models) return;
+    pickedModel = models.model;
+    pickedEffort = models.reasoningEffort ?? currentModel?.defaultReasoningEffort ?? "";
+    modelSheet = true;
+  }
+
+  async function applyModel() {
+    savingModel = true;
+    const next = await client.setModelSettings(id, pickedModel, pickedEffort);
+    savingModel = false;
+    if (next) {
+      models = next;
+      modelSheet = false;
+    }
+  }
 
   function setDraft(value: string) {
     client.drafts = { ...client.drafts, [id]: value };
@@ -173,10 +271,40 @@
   {/if}
 
   {#if canPrompt}
-    {#if running && deliveries.includes("steer") && deliveries.includes("queue")}
-      <div class="delivery" role="group" aria-label={client.tr("While the agent works", "Enquanto o agente trabalha")}>
-        <button class:on={delivery === "queue"} type="button" onclick={() => (client.deliveries = { ...client.deliveries, [id]: "queue" })}>{client.tr("Queue", "Fila")}</button>
-        <button class:on={delivery === "steer"} type="button" onclick={() => (client.deliveries = { ...client.deliveries, [id]: "steer" })}>{client.tr("Steer now", "Direcionar agora")}</button>
+    {#if shownCommands.length}
+      <div class="suggestions" role="listbox" aria-label={client.tr("Commands", "Comandos")} transition:fly={{ y: 8, duration: 140, easing: cubicOut }}>
+        {#each shownCommands as command (`${command.source}:${command.prefix}${command.name}`)}
+          <button type="button" role="option" aria-selected="false" onclick={() => pickCommand(command)}>
+            <code>{command.prefix}{command.name}</code>
+            <span>{command.description}</span>
+          </button>
+        {/each}
+      </div>
+    {:else if mention && mentions.length}
+      <div class="suggestions" role="listbox" aria-label={client.tr("Files and folders", "Arquivos e pastas")} transition:fly={{ y: 8, duration: 140, easing: cubicOut }}>
+        {#each mentions as item (item.path)}
+          <button class="path" type="button" role="option" aria-selected="false" onclick={() => pickMention(item)}>
+            {#if item.isDirectory}<LumeIcon name="folder" size={15} />{:else}<FileTypeIcon path={item.path} size={15} />{/if}
+            <span>{item.path}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+    {#if (running && deliveries.includes("steer") && deliveries.includes("queue")) || models}
+      <div class="tools">
+        {#if models}
+          <button class="model-chip" type="button" onclick={openModels}>
+            <span>{currentModel?.displayName ?? models.model}</span>
+            {#if models.reasoningEffort}<small>{effortLabel(models.reasoningEffort)}</small>{/if}
+            <LumeIcon name="chevron-down" size={12} />
+          </button>
+        {/if}
+        {#if running && deliveries.includes("steer") && deliveries.includes("queue")}
+          <div class="delivery" role="group" aria-label={client.tr("While the agent works", "Enquanto o agente trabalha")}>
+            <button class:on={delivery === "queue"} type="button" onclick={() => (client.deliveries = { ...client.deliveries, [id]: "queue" })}>{client.tr("Queue", "Fila")}</button>
+            <button class:on={delivery === "steer"} type="button" onclick={() => (client.deliveries = { ...client.deliveries, [id]: "steer" })}>{client.tr("Steer now", "Direcionar agora")}</button>
+          </div>
+        {/if}
       </div>
     {/if}
     {#if attached.length}
@@ -199,7 +327,8 @@
         aria-label={placeholder}
         {placeholder}
         disabled={sending}
-        oninput={(event) => { setDraft(event.currentTarget.value); grow(); }}
+        oninput={(event) => { setDraft(event.currentTarget.value); grow(); trackMention(); }}
+        onclick={trackMention}
         onpaste={(event) => void paste(event)}
       ></textarea>
       <button class="send" type="submit" disabled={!canSend} aria-label={sending ? client.tr("Sending prompt", "Enviando prompt") : client.tr("Send prompt", "Enviar prompt")}>
@@ -212,6 +341,34 @@
       : client.tr("Prompts are off for this phone. Turn them on in Lume on your computer.", "Os prompts estão desligados para este celular. Ative no Lume do computador.")}</p>
   {/if}
 </div>
+
+{#if modelSheet && models}
+  <div class="dialog-backdrop" transition:fade={{ duration: 150 }} onclick={(event) => { if (event.target === event.currentTarget) modelSheet = false; }} role="presentation">
+    <div class="dialog sheet" role="dialog" aria-modal="true" aria-labelledby="model-title" transition:fly={{ y: 30, duration: 200, easing: cubicOut }}>
+      <strong id="model-title">{client.tr("Model", "Modelo")}</strong>
+      <div class="model-list">
+        {#each models.models as option (option.model)}
+          <button class:on={pickedModel === option.model} type="button" onclick={() => { pickedModel = option.model; if (!option.supportedReasoningEfforts.some((effort) => effort.value === pickedEffort)) pickedEffort = option.defaultReasoningEffort; }}>
+            <span><b>{option.displayName}</b>{#if option.description}<small>{option.description}</small>{/if}</span>
+            {#if pickedModel === option.model}<LumeIcon name="check" size={16} />{/if}
+          </button>
+        {/each}
+      </div>
+      {#if pickedOption?.supportedReasoningEfforts.length}
+        <span class="sheet-label">{client.tr("Reasoning effort", "Esforço de raciocínio")}</span>
+        <div class="efforts">
+          {#each pickedOption.supportedReasoningEfforts as effort (effort.value)}
+            <button class:on={pickedEffort === effort.value} type="button" onclick={() => (pickedEffort = effort.value)}>{effortLabel(effort.value)}</button>
+          {/each}
+        </div>
+      {/if}
+      <div class="dialog-actions">
+        <button type="button" onclick={() => (modelSheet = false)}>{client.tr("Cancel", "Cancelar")}</button>
+        <button class="primary" type="button" disabled={savingModel} onclick={() => void applyModel()}>{savingModel ? client.tr("Saving…", "Salvando…") : client.tr("Apply", "Aplicar")}</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if takeover}
   <div class="dialog-backdrop" transition:fade={{ duration: 150 }} onclick={(event) => { if (event.target === event.currentTarget) takeover = false; }} role="presentation">
@@ -252,6 +409,26 @@
   .options span { display: grid; gap: 2px; }
   .options small { color: var(--workspace-muted); font-size: 12.5px; }
   .answer { height: 42px; border: 0; border-radius: 12px; color: #fff; background: var(--workspace-accent); font-weight: 720; }
+  .suggestions { max-height: 38vh; padding: 5px; display: grid; gap: 2px; overflow-y: auto; border: 1px solid var(--workspace-line); border-radius: 16px; background: var(--workspace-raised); box-shadow: 0 -8px 26px rgba(0, 0, 0, .18); }
+  .suggestions button { min-height: 44px; padding: 7px 10px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; border: 0; border-radius: 11px; color: var(--workspace-strong); background: transparent; text-align: left; }
+  .suggestions button:active { background: var(--workspace-subtle); }
+  .suggestions code { color: var(--workspace-accent); font: 700 13.5px var(--lume-font-code, monospace); }
+  .suggestions span { min-width: 0; overflow: hidden; color: var(--workspace-muted); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+  .suggestions .path span { color: var(--workspace-strong); font: 13px var(--lume-font-code, monospace); direction: rtl; text-align: left; }
+  .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .model-chip { height: 34px; padding: 0 11px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-strong); background: var(--workspace-raised); font-size: 13px; font-weight: 680; }
+  .model-chip small { color: var(--workspace-muted); font-size: 12px; font-weight: 600; }
+  .sheet { max-height: 80vh; overflow-y: auto; }
+  .model-list { display: grid; gap: 4px; }
+  .model-list button { min-height: 52px; padding: 8px 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-strong); background: transparent; text-align: left; }
+  .model-list button.on { border-color: var(--workspace-accent); background: var(--workspace-accent-soft); color: var(--workspace-accent); }
+  .model-list span { display: grid; gap: 2px; }
+  .model-list b { color: var(--workspace-strong); font-size: 14.5px; }
+  .model-list small { color: var(--workspace-muted); font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+  .sheet-label { margin-top: 6px; color: var(--workspace-muted); font-size: 12.5px; font-weight: 700; }
+  .efforts { display: flex; flex-wrap: wrap; gap: 6px; }
+  .efforts button { height: 36px; padding: 0 13px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: transparent; font-size: 13px; font-weight: 680; }
+  .efforts button.on { border-color: var(--workspace-accent); color: var(--workspace-accent); background: var(--workspace-accent-soft); }
   .delivery { display: inline-flex; justify-self: start; gap: 2px; padding: 3px; border-radius: 11px; background: var(--workspace-subtle); }
   .delivery button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 12.5px; font-weight: 680; }
   .delivery button.on { color: var(--workspace-strong); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(0, 0, 0, .18); }

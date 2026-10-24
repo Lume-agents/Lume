@@ -1,6 +1,8 @@
 import type { HubCommand, HubCommandResponse, HubSession, HubSnapshot } from "$lib/hubProtocol";
 import type { PromptDelivery, WorkflowGroupDefinition, WorkflowRun } from "$lib/domain";
 import type { WorkflowBoardBackend } from "$lib/workflowBoardBackend";
+import type { AgentSlashCommand } from "$lib/slashCommands";
+import type { CodexThreadModelSettings, PathMention } from "$lib/lume";
 import { decodeBytes, decryptPayload, encodeBytes, encryptPayload, keyFromSecret, randomBytes, type Envelope } from "./crypto";
 import { isNativeShell, nativePlatform, plugin, realtimePlugin, updaterPlugin, type MonitoringStatus, type RealtimeState } from "./native";
 import { pairingIntentUrl, parsePairingTarget, suggestedDeviceName, type PairingTarget } from "./pairing";
@@ -38,8 +40,23 @@ export type MobileAppearance = {
   uiFont: string;
   codeFont: string;
   textSize: "small" | "default" | "large";
+  /** Use the computer's look (theme, accent, surfaces, fonts, mode) instead of the choices above. */
+  followDesktop: boolean;
 };
-const defaultAppearance: MobileAppearance = { theme: "lume", mode: "system", darkBase: "theme", lightBase: "theme", accentColor: "", uiFont: "", codeFont: "", textSize: "default" };
+/** The desktop preferences that make up its look (control.rs, get_desktop_appearance). */
+export type DesktopAppearance = {
+  appearanceTheme: string;
+  accentColor?: string | null;
+  accentOpacity?: number;
+  darkBase: string;
+  lightBase: string;
+  customDarkSurfaces?: unknown;
+  customLightSurfaces?: unknown;
+  uiFont: string;
+  codeFont: string;
+  darkMode?: boolean | null;
+};
+const defaultAppearance: MobileAppearance = { theme: "lume", mode: "system", darkBase: "theme", lightBase: "theme", accentColor: "", uiFont: "", codeFont: "", textSize: "default", followDesktop: false };
 function storedAppearance(): MobileAppearance {
   try { return { ...defaultAppearance, ...JSON.parse(read(keys.appearance) || "{}") }; } catch { return { ...defaultAppearance }; }
 }
@@ -81,6 +98,8 @@ export class MobileClient {
   biometric = $state(Boolean(read(keys.biometric)));
   notifications = $state(read(keys.notifications) === "on");
   appearance = $state<MobileAppearance>(storedAppearance());
+  desktopAppearance = $state<DesktopAppearance | null>(null);
+  private desktopAppearanceAt = 0;
   background = $state(read(keys.background) === "on");
 
   // Updates of the mobile app itself.
@@ -142,6 +161,19 @@ export class MobileClient {
   setAppearance(patch: Partial<MobileAppearance>) {
     this.appearance = { ...this.appearance, ...patch };
     write(keys.appearance, JSON.stringify(this.appearance));
+    if (patch.followDesktop) void this.loadDesktopAppearance(true);
+  }
+
+  /** The computer's look, asked again at most every half minute while the phone follows it. */
+  async loadDesktopAppearance(force = false) {
+    if (!this.appearance.followDesktop || !this.paired) return;
+    if (!force && Date.now() - this.desktopAppearanceAt < 30_000) return;
+    this.desktopAppearanceAt = Date.now();
+    try {
+      this.desktopAppearance = (await this.command({ type: "get_desktop_appearance" }, { refresh: false })).data as DesktopAppearance;
+    } catch {
+      // Older desktops do not know the command; the phone keeps its own look.
+    }
   }
 
   setLanguage(language: Language) {
@@ -321,6 +353,7 @@ export class MobileClient {
       const [snapshot, device] = await Promise.all([this.api("/api/v1/snapshot"), this.api("/api/v1/me")]);
       this.device = device;
       this.applySnapshot(snapshot);
+      void this.loadDesktopAppearance();
       this.cached = false;
       this.connection = { state: "online", label: this.tr("Connected", "Conectado") };
       this.hideBanner("connection");
@@ -1107,6 +1140,46 @@ export class MobileClient {
         return () => this.runListeners.delete(callback);
       },
     };
+  }
+
+  private slashRequests = new Map<string, Promise<AgentSlashCommand[]>>();
+
+  /** The agent's commands and skills, asked once per session (a failure is retried next time). */
+  slashCommands(sessionId: string): Promise<AgentSlashCommand[]> {
+    let request = this.slashRequests.get(sessionId);
+    if (!request) {
+      request = this.command({ type: "list_slash_commands", sessionId }, { refresh: false })
+        .then((response) => (response.data as AgentSlashCommand[]) ?? [])
+        .catch((error) => { this.slashRequests.delete(sessionId); throw error; });
+      this.slashRequests.set(sessionId, request);
+    }
+    return request;
+  }
+
+  async searchPaths(sessionId: string, query: string): Promise<PathMention[]> {
+    const response = await this.command({ type: "search_paths", sessionId, query }, { refresh: false });
+    return (response.data as PathMention[]) ?? [];
+  }
+
+  async modelSettings(sessionId: string): Promise<CodexThreadModelSettings | null> {
+    try {
+      return (await this.command({ type: "get_model_settings", sessionId }, { refresh: false })).data as CodexThreadModelSettings;
+    } catch {
+      return null;
+    }
+  }
+
+  async setModelSettings(sessionId: string, model: string, effort: string): Promise<CodexThreadModelSettings | null> {
+    try {
+      return (await this.command({ type: "set_model_settings", sessionId, model, effort }, { refresh: false })).data as CodexThreadModelSettings;
+    } catch (error) {
+      this.showBanner((error as Error).message, "error");
+      return null;
+    }
+  }
+
+  async subagentTimeline(sessionId: string, activityId: string) {
+    return ((await this.command({ type: "get_subagent_timeline", sessionId, activityId }, { refresh: false })).data ?? []) as import("$lib/domain").SessionActivity[];
   }
 
   async saveWorkflowGroup(group: WorkflowGroupDefinition) {

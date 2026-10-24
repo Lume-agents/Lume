@@ -23,9 +23,12 @@
   let boardOpen = $state(false);
   let systemDark = $state(typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)").matches : true);
 
-  const dark = $derived(client.appearance.mode === "system" ? systemDark : client.appearance.mode === "dark");
-  // The desktop's appearance code, fed with the phone's choices.
-  const look = $derived(appearanceAttributes({
+  // The phone's own look, or the computer's when it follows it.
+  const desktop = $derived(client.appearance.followDesktop ? client.desktopAppearance : null);
+  const dark = $derived(desktop
+    ? (desktop.darkMode ?? systemDark)
+    : client.appearance.mode === "system" ? systemDark : client.appearance.mode === "dark");
+  const look = $derived(appearanceAttributes((desktop ?? {
     appearanceTheme: client.appearance.theme,
     accentColor: client.appearance.accentColor || undefined,
     accentOpacity: 100,
@@ -33,7 +36,7 @@
     lightBase: client.appearance.lightBase,
     uiFont: client.appearance.uiFont,
     codeFont: client.appearance.codeFont,
-  } as unknown as Preferences));
+  }) as unknown as Preferences));
   const chatSession = $derived(chatId ? client.sessions.find((session) => session.id === chatId) ?? null : null);
 
   function openChat(id: string) {

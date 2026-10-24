@@ -5,7 +5,7 @@
   import type { HubSession } from "$lib/hubProtocol";
   import { buildConversationEntries, buildConversationFeed, fileChangesForFinalResponses } from "$lib/sessionConversation";
   import { displayFileChangePath, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
-  import { activityThinkingLabel, activityThinkingState, formatAgentDuration, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
+  import { activityDisplayTitle, activityThinkingLabel, activityThinkingState, formatAgentDuration, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
   import { interruptNoticeText } from "$lib/interruptNotice";
   import { renderWorkspaceMarkdownWithFileBadges } from "$lib/workspaceFileReferences.js";
   import { renderFileTypeIconHtml } from "$lib/fileTypeIcons";
@@ -33,6 +33,7 @@
   let expandedFiles = $state<string[]>([]);
   let lightbox = $state<{ src: string; alt: string } | null>(null);
   let clock = $state(Date.now());
+  let subagent = $state<{ activity: SessionActivity; events: SessionActivity[] | null; error: string } | null>(null);
   const openedAt = Date.now();
 
   function reportedFiles(activity: SessionActivity): string[] {
@@ -74,6 +75,20 @@
   const usage = $derived(usageGaugeGroups(session?.rateLimits ?? [], client.language).flatMap((group) => group.gauges));
   const tightest = $derived(usage.length ? usage.reduce((low, gauge) => gauge.remaining < low.remaining ? gauge : low) : null);
   const canStop = $derived(Boolean(session && client.scopes.includes("terminate") && (session.capabilities?.canInterrupt || session.capabilities?.canTerminate) && ["running", "permission_required"].includes(session.status)));
+
+  // Subagents Codex and Oh My Pi start keep their own thread; each opens its timeline in a sheet.
+  const subagents = $derived(chatActivities.filter((activity: SessionActivity) => activity.kind === "subagent"));
+
+  async function openSubagent(activity: SessionActivity) {
+    if (!session) return;
+    subagent = { activity, events: null, error: "" };
+    try {
+      const events = await client.subagentTimeline(session.id, activity.id);
+      if (subagent?.activity.id === activity.id) subagent = { activity, events, error: "" };
+    } catch (error) {
+      if (subagent?.activity.id === activity.id) subagent = { activity, events: [], error: (error as Error).message };
+    }
+  }
 
   function render(key: string, value: string) {
     return markdownCache.render(key, value, (source) => renderWorkspaceMarkdownWithFileBadges(source, renderFileTypeIconHtml, session?.workingDirectory));
@@ -142,7 +157,16 @@
   </header>
 
   {#if session}
-    <div class="bookmarks"><WorkspaceWorkBookmarks {session} language={client.language} /></div>
+    <div class="bookmarks"><WorkspaceWorkBookmarks {session} language={client.language} hasSubagents={subagents.length > 0} /></div>
+    {#if subagents.length}
+      <div class="subagents" aria-label={client.tr("Subagents", "Subagentes")}>
+        {#each subagents as item (item.id)}
+          <button class="subagent status-{item.status}" type="button" onclick={() => void openSubagent(item)}>
+            <i></i>{activityDisplayTitle(item, client.language)}
+          </button>
+        {/each}
+      </div>
+    {/if}
     <div class="feed-shell">
       <div class="feed" bind:this={feedElement} onscroll={trackScroll} role="region" aria-label={client.tr("Conversation", "Conversa")}>
         <div class="feed-content">
@@ -260,6 +284,31 @@
   {/if}
 </section>
 
+{#if subagent && session}
+  <div class="sheet-backdrop" transition:fade={{ duration: 150 }} onclick={(event) => { if (event.target === event.currentTarget) subagent = null; }} role="presentation">
+    <div class="sheet" role="dialog" aria-modal="true" aria-label={activityDisplayTitle(subagent.activity, client.language)} transition:fly={{ y: 40, duration: 220, easing: cubicOut }}>
+      <header>
+        <strong>{activityDisplayTitle(subagent.activity, client.language)}</strong>
+        <button type="button" aria-label={client.tr("Close", "Fechar")} onclick={() => (subagent = null)}><LumeIcon name="close" size={16} /></button>
+      </header>
+      <div class="sheet-body">
+        {#if subagent.events === null}
+          <p class="sheet-note">{client.tr("Loading what it did…", "Carregando o que ele fez…")}</p>
+        {:else if subagent.error}
+          <p class="sheet-note">{subagent.error}</p>
+        {:else if !subagent.events.length}
+          <p class="sheet-note">{client.tr("Nothing recorded yet.", "Nada registrado ainda.")}</p>
+        {:else}
+          <ActivityTraceGroup activities={subagent.events} active={subagent.activity.status === "running"} plain language={client.language} workingDirectory={session.workingDirectory} />
+          {#each subagent.events.filter((event) => event.kind === "message" && event.detail).slice(-1) as reply (reply.id)}
+            <div class="markdown-content subagent-reply">{@html render(`subagent:${reply.id}`, reply.detail ?? "")}</div>
+          {/each}
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if lightbox}
   <ImageLightbox src={lightbox.src} alt={lightbox.alt} language={client.language} onclose={() => (lightbox = null)} />
 {/if}
@@ -284,6 +333,20 @@
   .usage.low { --tone: #d0645c; }
   .stop { width: 38px; height: 38px; display: grid; place-items: center; flex: 0 0 auto; border: 1px solid color-mix(in srgb, #d0645c 40%, var(--workspace-line)); border-radius: 12px; color: #d76e66; background: color-mix(in srgb, #d0645c 8%, transparent); }
   .bookmarks:empty { display: none; }
+  .subagents { padding: 8px 12px 0; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  .subagent { height: 32px; padding: 0 11px; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-radius: 999px; color: var(--workspace-strong); background: var(--workspace-raised); font-size: 12.5px; font-weight: 650; }
+  .subagent i { width: 7px; height: 7px; border-radius: 50%; background: var(--workspace-faint); }
+  .subagent.status-running i { background: #6ea6d6; box-shadow: 0 0 0 3px rgba(110, 166, 214, .2); }
+  .subagent.status-completed i { background: #57b380; }
+  .subagent.status-failed i { background: #d06e66; }
+  .sheet-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; align-items: end; background: rgba(4, 9, 6, .55); }
+  .sheet { max-height: 82vh; display: grid; grid-template-rows: auto minmax(0, 1fr); border: 1px solid var(--workspace-line); border-bottom: 0; border-radius: 22px 22px 0 0; background: var(--workspace-bg); }
+  .sheet header { padding: 14px 12px 10px 18px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--workspace-line); }
+  .sheet header strong { flex: 1; color: var(--workspace-strong); font-size: 16px; }
+  .sheet header button { width: 36px; height: 36px; display: grid; place-items: center; border: 0; border-radius: 11px; color: var(--workspace-muted); background: transparent; }
+  .sheet-body { min-height: 0; padding: 12px 14px calc(var(--safe-bottom) + 18px); display: grid; align-content: start; gap: 12px; overflow-y: auto; }
+  .sheet-note { margin: 0; color: var(--workspace-muted); font-size: 14px; }
+  .subagent-reply { padding-top: 6px; border-top: 1px solid var(--workspace-line); }
   .bookmarks { padding: 0 12px; }
   .feed-shell { position: relative; min-height: 0; flex: 1 1 auto !important; }
   .feed { height: 100%; padding: 14px 14px 18px; display: flex; flex-direction: column-reverse; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }

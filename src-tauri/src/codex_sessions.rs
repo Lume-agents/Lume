@@ -53,13 +53,25 @@ struct ObservedFile {
     token_totals: Option<TokenTotals>,
     prompt_token_start: Option<TokenTotals>,
     prompt_started_at: Option<i64>,
+    last_chat_message: Option<ObservedChatMessage>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
+struct ObservedChatMessage {
+    kind: &'static str,
+    fingerprint: u64,
+    response_item: bool,
+    phase: Option<String>,
+    created_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 struct TokenTotals {
     total: u64,
     input: u64,
     output: u64,
+    context: Option<u64>,
+    context_window: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -111,6 +123,10 @@ struct RecordPayload {
     last_agent_message: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    phase: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -226,6 +242,7 @@ fn initialize(root: &Path, state: &AppState, app: &AppHandle) -> HashMap<PathBuf
             token_totals: None,
             prompt_token_start: None,
             prompt_started_at: None,
+            last_chat_message: None,
         };
         if was_modified_recently(&file_metadata) {
             let (running, recovered_events) = bootstrap_session(&path, &mut file);
@@ -266,6 +283,7 @@ fn bootstrap_session(path: &Path, file: &mut ObservedFile) -> (bool, Vec<HookEve
             }
             continue;
         }
+        observe_container_input(&record.payload, file);
         if record.kind != "event_msg" {
             continue;
         }
@@ -410,6 +428,7 @@ fn poll_path(
             token_totals: None,
             prompt_token_start: None,
             prompt_started_at: None,
+            last_chat_message: None,
         };
         if let Some(event) = session_started_event(&file) {
             let _ = event_server::publish_event(state, app, event);
@@ -430,6 +449,7 @@ fn poll_path(
         file.token_totals = None;
         file.prompt_token_start = None;
         file.prompt_started_at = None;
+        file.last_chat_message = None;
         file.session = read_session_metadata(path);
         if let Some(event) = session_started_event(file) {
             let _ = event_server::publish_event(state, app, event);
@@ -473,7 +493,24 @@ fn publish_appended_events(
 fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Vec<HookEvent> {
     let mut events = Vec::new();
     for record in records {
+        if record.payload.r#type.as_deref() == Some("exec_command_begin") {
+            observe_container_input(&record.payload, file);
+        }
         let created_at = record_timestamp_millis(&record);
+        if let Some((kind, title, text)) = rollout_chat_message(&record) {
+            if let Some(event) = chat_message_event(file, &record, kind, title, &text, created_at) {
+                events.push(event);
+            }
+            continue;
+        }
+        // A tool, reasoning item or lifecycle boundary separates two real messages.
+        // Only adjacent representations of the same message may be paired as an echo.
+        if record.kind != "turn_context"
+            && !(record.kind == "event_msg"
+                && record.payload.r#type.as_deref() == Some("token_count"))
+        {
+            file.last_chat_message = None;
+        }
         if record.kind == "response_item" {
             match record.payload.r#type.as_deref() {
                 Some("function_call" | "custom_tool_call") => {
@@ -522,7 +559,9 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
             continue;
         }
         if record.payload.r#type.as_deref() == Some("task_started") {
-            file.prompt_token_start = file.token_totals;
+            // A brand-new rollout has a known zero baseline. A resumed file without a
+            // previous usage record does not: never count its lifetime total as one prompt.
+            file.prompt_token_start = file.token_totals.or_else(|| (file.offset == 0).then(TokenTotals::default));
             file.prompt_started_at = Some(created_at);
         } else if record.payload.r#type.as_deref() == Some("task_complete") {
             if let Some(event) = completed_prompt_token_usage_event(file, created_at) {
@@ -587,30 +626,6 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
             }
             continue;
         }
-        if matches!(
-            record.payload.r#type.as_deref(),
-            Some("user_message" | "agent_message")
-        ) {
-            if let Some(message) = record
-                .payload
-                .message
-                .as_deref()
-                .map(str::trim)
-                .filter(|message| !message.is_empty())
-            {
-                let (kind, title) = if record.payload.r#type.as_deref() == Some("user_message") {
-                    ("prompt", "Prompt enviado")
-                } else {
-                    ("message", "Resposta do agente")
-                };
-                if let Some(event) =
-                    activity_event_for(file, kind, title, message, record.timestamp.as_deref())
-                {
-                    events.push(event);
-                }
-            }
-            continue;
-        }
         let (kind, label, last_response) = match record.payload.r#type.as_deref() {
             Some("task_started") => (HookEventKind::Running, "Rodando", None),
             Some("task_complete") => (
@@ -632,7 +647,8 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
 }
 
 fn token_totals(payload: &RecordPayload) -> Option<TokenTotals> {
-    let usage = payload.info.as_ref()?.get("total_token_usage")?;
+    let info = payload.info.as_ref()?;
+    let usage = info.get("total_token_usage")?;
     Some(TokenTotals {
         total: usage.get("total_tokens")?.as_u64()?,
         input: usage
@@ -643,6 +659,8 @@ fn token_totals(payload: &RecordPayload) -> Option<TokenTotals> {
             .get("output_tokens")
             .and_then(Value::as_u64)
             .unwrap_or_default(),
+        context: info.get("last_token_usage").and_then(|last| last.get("total_tokens")).and_then(Value::as_u64),
+        context_window: info.get("model_context_window").and_then(Value::as_u64).filter(|limit| *limit > 0),
     })
 }
 
@@ -669,6 +687,8 @@ fn completed_prompt_token_usage_event(file: &ObservedFile, completed_at: i64) ->
         "totalTokens": total,
         "inputTokens": end.input.saturating_sub(start.input),
         "outputTokens": end.output.saturating_sub(start.output),
+        "contextTokens": end.context.unwrap_or_default(),
+        "contextWindow": end.context.and(end.context_window),
         "createdAt": completed_at,
     })
     .to_string();
@@ -726,6 +746,7 @@ fn remember_tool(
     file: &mut ObservedFile,
     created_at: i64,
 ) -> Option<HookEvent> {
+    observe_container_input(payload, file);
     let original_name = payload.name.as_deref()?;
     let call_id = payload.call_id.as_ref()?;
     let original_detail = tool_input_text(payload);
@@ -733,7 +754,7 @@ fn remember_tool(
         .then(|| {
             original_detail
                 .as_deref()
-                .and_then(nested_work_tracking_tool)
+                .and_then(|source| nested_work_tracking_tool(source).or_else(|| nested_patch_tool(source)))
         })
         .flatten();
     let (name, detail) = nested
@@ -1069,6 +1090,23 @@ pub(crate) fn nested_work_tracking_tool(source: &str) -> Option<(&'static str, S
         "update_plan",
         "todo_write",
     ];
+    nested_tool_call(source, &TOOLS)
+}
+
+/// A patch inside the orchestration tool is still a file edit, not a shell command.
+pub(crate) fn nested_patch_tool(source: &str) -> Option<(&'static str, String)> {
+    let (name, argument) = nested_tool_call(source, &["apply_patch"])?;
+    // Decode only literal JSON arguments; never evaluate JavaScript or interpolate templates.
+    let value: Value = serde_json::from_str(&argument).ok()?;
+    Some((name, tool_input_value_text(&value)?))
+}
+
+fn nested_tool_call(source: &str, tools: &[&'static str]) -> Option<(&'static str, String)> {
+    nested_tool_calls(source, tools).into_iter().next()
+}
+
+pub(crate) fn nested_tool_calls(source: &str, tools: &[&'static str]) -> Vec<(&'static str, String)> {
+    let mut calls = Vec::new();
     let bytes = source.as_bytes();
     let mut index = 0;
     let mut quote = None;
@@ -1121,9 +1159,11 @@ pub(crate) fn nested_work_tracking_tool(source: &str) -> Option<(&'static str, S
             index += 2;
             continue;
         }
-        if source[index..].starts_with("tools.") {
+        // This scanner advances by bytes, including inside valid Unicode identifiers/regexes.
+        if bytes[index..].starts_with(b"tools.") && (index == 0 || !(bytes[index - 1].is_ascii_alphanumeric()
+            || matches!(bytes[index - 1], b'_' | b'$' | b'.') || bytes[index - 1] >= 128)) {
             let name_start = index + "tools.".len();
-            for tool in TOOLS {
+            for &tool in tools {
                 let name_end = name_start + tool.len();
                 if source.get(name_start..name_end) != Some(tool) {
                     continue;
@@ -1133,14 +1173,36 @@ pub(crate) fn nested_work_tracking_tool(source: &str) -> Option<(&'static str, S
                     open += 1;
                 }
                 if bytes.get(open) == Some(&b'(') {
-                    return extract_javascript_call_argument(source, open)
-                        .map(|arguments| (tool, arguments));
+                    if let Some(arguments) = extract_javascript_call_argument(source, open) {
+                        calls.push((tool, arguments));
+                        if calls.len() == 64 { return calls; }
+                    }
                 }
             }
         }
         index += 1;
     }
-    None
+    calls
+}
+
+fn observe_container_input(payload: &RecordPayload, file: &ObservedFile) {
+    let Some(session) = &file.session else { return };
+    if payload.r#type.as_deref() == Some("exec_command_begin") {
+        if let Some(parts) = payload.command.as_ref().and_then(Value::as_array).and_then(|parts| parts.iter().map(Value::as_str).collect::<Option<Vec<_>>>()) {
+            let command = shell_words::join(parts);
+            crate::session_containers::observe_input(AgentKind::Codex, &session.id, &serde_json::json!({"cmd":command}), payload.cwd.as_deref().or(session.cwd.as_deref()));
+        }
+        return;
+    }
+    if !matches!(payload.r#type.as_deref(), Some("function_call" | "custom_tool_call")) { return; }
+    let Some(name) = payload.name.as_deref() else { return };
+    if !matches!(normalized_tool_name(name), "exec" | "exec_command" | "shell" | "terminal") { return; }
+    if let Some(arguments) = payload.arguments.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok()) {
+        crate::session_containers::observe_input(AgentKind::Codex, &session.id, &arguments, session.cwd.as_deref());
+    }
+    if let Some(input) = &payload.input {
+        crate::session_containers::observe_input(AgentKind::Codex, &session.id, input, session.cwd.as_deref());
+    }
 }
 
 fn extract_javascript_call_argument(source: &str, open: usize) -> Option<String> {
@@ -1202,6 +1264,115 @@ fn structured_goal_output_text(value: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Public CLI messages are persisted as response items on newer Codex versions.
+/// System/developer messages and encrypted reasoning are never conversation text.
+fn rollout_chat_message(record: &CodexRecord) -> Option<(&'static str, &'static str, String)> {
+    let (kind, title, text) = match (record.kind.as_str(), record.payload.r#type.as_deref()) {
+        ("event_msg", Some("user_message")) => {
+            ("prompt", "Prompt enviado", record.payload.message.clone()?)
+        }
+        ("event_msg", Some("agent_message")) => (
+            "message",
+            "Resposta do agente",
+            record.payload.message.clone()?,
+        ),
+        ("response_item", Some("message")) => {
+            let (kind, title, block_type) = match record.payload.role.as_deref()? {
+                "user" => ("prompt", "Prompt enviado", "input_text"),
+                "assistant" => ("message", "Resposta do agente", "output_text"),
+                _ => return None,
+            };
+            let text = match record.payload.content.as_ref()? {
+                Value::String(text) => text.clone(),
+                Value::Array(blocks) => blocks
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some(block_type))
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => return None,
+            };
+            (kind, title, text)
+        }
+        _ => return None,
+    };
+    let text = text.trim();
+    if text.is_empty() || (kind == "prompt" && is_injected_prompt_text(text)) {
+        return None;
+    }
+    Some((kind, title, text.to_string()))
+}
+
+/// Codex stores project instructions and environment updates as user-role messages.
+/// Match their complete transport wrappers, not ordinary prompts mentioning these files.
+pub(crate) fn is_injected_prompt_text(text: &str) -> bool {
+    let text = text.trim();
+    let environment = |text: &str| {
+        text.starts_with("<environment_context>") && text.ends_with("</environment_context>")
+    };
+    if environment(text) {
+        return true;
+    }
+    let Some((header, body)) = text.split_once('\n') else {
+        return false;
+    };
+    let header = header.trim_end();
+    if !(header == "# AGENTS.md instructions"
+        || header.starts_with("# AGENTS.md instructions for "))
+        || !body.trim_start().starts_with("<INSTRUCTIONS>")
+    {
+        return false;
+    }
+    let Some((_, remainder)) = body.split_once("</INSTRUCTIONS>") else {
+        return false;
+    };
+    let remainder = remainder.trim();
+    remainder.is_empty() || environment(remainder)
+}
+
+fn chat_message_event(
+    file: &mut ObservedFile,
+    record: &CodexRecord,
+    kind: &'static str,
+    title: &'static str,
+    text: &str,
+    created_at: i64,
+) -> Option<HookEvent> {
+    let response_item = record.kind == "response_item";
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let fingerprint = hasher.finish();
+    let phase = record.payload.phase.as_deref();
+    if file.last_chat_message.as_ref().is_some_and(|previous| {
+        previous.response_item != response_item
+            && previous.kind == kind
+            && previous.fingerprint == fingerprint
+            && (previous.created_at - created_at).abs() <= 5_000
+            && (previous.phase.is_none() || phase.is_none() || previous.phase.as_deref() == phase)
+    }) {
+        file.last_chat_message = None;
+        return None;
+    }
+    let mut event = activity_event_for(file, kind, title, text, record.timestamp.as_deref())?;
+    if response_item {
+        if let (Some(id), Some(activity), Some(session)) = (
+            record.payload.id.as_deref(),
+            event.activity.as_mut(),
+            file.session.as_ref(),
+        ) {
+            activity.id = format!("codex-rollout:{}:{id}", session.id);
+        }
+    }
+    file.last_chat_message = Some(ObservedChatMessage {
+        kind,
+        fingerprint,
+        response_item,
+        phase: record.payload.phase.clone(),
+        created_at,
+    });
+    Some(event)
 }
 
 fn activity_event_for(
@@ -1493,6 +1664,7 @@ fn load_subagent_timeline_from_root(
         token_totals: None,
         prompt_token_start: None,
         prompt_started_at: None,
+        last_chat_message: None,
     };
     let mut activities: Vec<SessionActivity> = Vec::new();
     let mut indices: HashMap<String, usize> = HashMap::new();
@@ -1510,8 +1682,8 @@ fn load_subagent_timeline_from_root(
             latest_turn_started = created_at;
             latest_public_message = None;
         }
-        if record.kind == "event_msg" && event_type == Some("agent_message") {
-            latest_public_message = record.payload.message.clone();
+        if let Some(("message", _, text)) = rollout_chat_message(&record) {
+            latest_public_message = Some(text);
         }
         let completed_response =
             if record.kind == "event_msg" && event_type == Some("task_complete") {
@@ -1672,6 +1844,7 @@ mod tests {
             token_totals: None,
             prompt_token_start: None,
             prompt_started_at: None,
+            last_chat_message: None,
         }
     }
 
@@ -1681,6 +1854,36 @@ mod tests {
             std::process::id(),
             now_millis()
         ))
+    }
+
+    #[test]
+    #[ignore = "read-only smoke against an explicitly supplied local rollout and Docker daemon"]
+    fn local_container_inventory_smoke() {
+        let path = PathBuf::from(std::env::var_os("LUME_TEST_CONTAINER_ROLLOUT").expect("explicit rollout required"));
+        let mut observed = observed_file(SessionSource::Cli);
+        observed.session = read_session_metadata(&path);
+        assert!(observed.session.is_some());
+        let _ = bootstrap_session(&path, &mut observed);
+        let session = observed.session.unwrap();
+        let owner = crate::session_environments::EnvironmentOwner {
+            session_id: "smoke-session".into(), native_id: Some(session.id), agent: AgentKind::Codex,
+            roots: vec![], working_directory: session.cwd, container_commands: vec![],
+        };
+        let mut owners = vec![owner];
+        if let Some(other) = std::env::var_os("LUME_TEST_OTHER_ROLLOUT") {
+            let other = PathBuf::from(other);
+            let mut observed = observed_file(SessionSource::Cli);
+            observed.session = read_session_metadata(&other);
+            let _ = bootstrap_session(&other, &mut observed);
+            let session = observed.session.unwrap();
+            owners.push(crate::session_environments::EnvironmentOwner { session_id: "other-session".into(), native_id: Some(session.id), agent: AgentKind::Codex, roots: vec![], working_directory: session.cwd, container_commands: vec![] });
+        }
+        let rows = crate::session_containers::ContainerInventory::default().snapshot(&owners).expect("read local Docker metadata");
+        assert!(!rows.is_empty(), "no container matched explicit recorded Docker commands");
+        for row in rows {
+            assert!(!row.can_stop);
+            println!("{}: {} [{}] ports={:?}", row.session_id, row.name, row.kind, row.ports.iter().map(|port| port.port).collect::<Vec<_>>());
+        }
     }
 
     #[test]
@@ -1715,6 +1918,21 @@ mod tests {
     }
 
     #[test]
+    fn the_first_prompt_of_a_new_cli_also_records_its_context() {
+        let mut file = observed_file(SessionSource::Cli);
+        let events = events_from_records(vec![
+            record(r#"{"type":"event_msg","payload":{"type":"task_started"}}"#),
+            record(r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":4200},"last_token_usage":{"total_tokens":4200},"model_context_window":128000}}}"#),
+            record(r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#),
+        ], &mut file);
+        let activity = events.iter().filter_map(|event| event.activity.as_ref()).find(|activity| activity.kind == "token_usage").unwrap();
+        let usage: crate::domain::PromptTokenUsage = serde_json::from_str(activity.detail.as_deref().unwrap()).unwrap();
+        assert_eq!(usage.total_tokens, 4_200);
+        assert_eq!(usage.context_tokens, 4_200);
+        assert_eq!(usage.context_window, Some(128_000));
+    }
+
+    #[test]
     fn lifecycle_records_become_realtime_vscode_events() {
         let mut file = observed_file(SessionSource::Vscode);
         let records = vec![
@@ -1746,7 +1964,7 @@ mod tests {
                     r#"{"timestamp":"2026-09-21T12:01:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
                 ),
                 record(
-                    r#"{"timestamp":"2026-09-21T12:01:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":160,"input_tokens":125,"output_tokens":35}}}}"#,
+                    r#"{"timestamp":"2026-09-21T12:01:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":160,"input_tokens":125,"output_tokens":35},"last_token_usage":{"total_tokens":55},"model_context_window":128000}}}"#,
                 ),
                 record(
                     r#"{"timestamp":"2026-09-21T12:01:12Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
@@ -1766,6 +1984,8 @@ mod tests {
         assert_eq!(usage.total_tokens, 60);
         assert_eq!(usage.input_tokens, 45);
         assert_eq!(usage.output_tokens, 15);
+        assert_eq!(usage.context_tokens, 55);
+        assert_eq!(usage.context_window, Some(128_000));
     }
 
     #[test]
@@ -1836,6 +2056,187 @@ mod tests {
     }
 
     #[test]
+    fn modern_cli_prompt_and_commentary_arrive_before_any_tool() {
+        let mut file = observed_file(SessionSource::Cli);
+        let prompt = record(
+            r#"{"timestamp":"2026-10-22T10:00:00Z","type":"response_item","payload":{"type":"message","id":"user-1","role":"user","content":[{"type":"input_text","text":"Confira o workspace"}]}}"#,
+        );
+        let prompt_events = events_from_records(vec![prompt], &mut file);
+        assert_eq!(
+            prompt_events.len(),
+            1,
+            "the prompt must not wait for a tool event"
+        );
+        let activity = prompt_events[0].activity.as_ref().expect("prompt");
+        assert_eq!(activity.kind, "prompt");
+        assert_eq!(activity.detail.as_deref(), Some("Confira o workspace"));
+
+        let commentary = record(
+            r#"{"timestamp":"2026-10-22T10:00:01Z","type":"response_item","payload":{"type":"message","id":"assistant-1","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Vou conferir o layout."},{"type":"output_text","text":"Depois revisarei os eventos."}]}}"#,
+        );
+        let events = events_from_records(vec![commentary], &mut file);
+        assert_eq!(events.len(), 1);
+        let message = events[0].activity.as_ref().expect("public commentary");
+        assert_eq!(message.kind, "message");
+        assert_eq!(
+            message.detail.as_deref(),
+            Some("Vou conferir o layout.\nDepois revisarei os eventos.")
+        );
+        assert_eq!(message.created_at - activity.created_at, 1_000);
+    }
+
+    #[test]
+    fn modern_cli_messages_do_not_expose_system_or_private_content() {
+        let mut file = observed_file(SessionSource::Cli);
+        let records = [
+            r#"{"type":"response_item","payload":{"type":"message","role":"system","content":[{"type":"input_text","text":"private system context"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"private developer context"}]}}"#,
+            r#"{"type":"response_item","payload":{"type":"reasoning","encrypted_content":"private reasoning","summary":[]}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"thinking","text":"private block"},{"type":"output_text","text":"Atualização pública"}]}}"#,
+        ].into_iter().map(record).collect();
+        let events = events_from_records(records, &mut file);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]
+                .activity
+                .as_ref()
+                .and_then(|activity| activity.detail.as_deref()),
+            Some("Atualização pública")
+        );
+    }
+
+    #[test]
+    fn codex_user_role_context_is_not_a_prompt_but_real_requests_still_are() {
+        let mut file = observed_file(SessionSource::Vscode);
+        let context = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nProject rules\n</INSTRUCTIONS>\n<environment_context>\n<cwd>/work/lume</cwd>\n</environment_context>";
+        let environment = "<environment_context>\n<cwd>/work/lume</cwd>\n</environment_context>";
+        let real_requests = [
+            "oi".to_string(),
+            "Explique o AGENTS.md e <environment_context>.".to_string(),
+            format!("{context}\n\nExplique essas instruções."),
+        ];
+        let records = [context, environment]
+            .into_iter()
+            .chain(real_requests.iter().map(String::as_str))
+            .map(|text| {
+                serde_json::from_value(serde_json::json!({
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "user", "content": [
+                        {"type": "input_text", "text": text}
+                    ]}
+                }))
+                .expect("user-role record")
+            })
+            .collect();
+        let events = events_from_records(records, &mut file);
+        let prompts: Vec<_> = events
+            .iter()
+            .filter_map(|event| event.activity.as_ref())
+            .map(|activity| (activity.kind.as_str(), activity.detail.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            prompts,
+            real_requests
+                .iter()
+                .map(|text| ("prompt", text.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn modern_and_legacy_echoes_pair_across_reads_without_losing_repeated_messages() {
+        for modern_first in [true, false] {
+            for (role, event_type, block_type) in [
+                ("user", "user_message", "input_text"),
+                ("assistant", "agent_message", "output_text"),
+            ] {
+                let mut file = observed_file(SessionSource::Cli);
+                let modern = record(&serde_json::json!({
+                    "timestamp":"2026-10-22T10:00:00Z", "type":"response_item",
+                    "payload":{"type":"message", "id":"item-1", "role":role, "content":[{"type":block_type,"text":"Mesmo texto"}]}
+                }).to_string());
+                let legacy = record(
+                    &serde_json::json!({
+                        "timestamp":"2026-10-22T10:00:00.100Z", "type":"event_msg",
+                        "payload":{"type":event_type,"message":"Mesmo texto"}
+                    })
+                    .to_string(),
+                );
+                let (first, echo) = if modern_first {
+                    (modern.clone(), legacy)
+                } else {
+                    (legacy, modern.clone())
+                };
+                assert_eq!(events_from_records(vec![first], &mut file).len(), 1);
+                assert!(
+                    events_from_records(vec![echo], &mut file).is_empty(),
+                    "the other representation is not a new message"
+                );
+                let mut repeated = modern;
+                repeated.timestamp = Some("2026-10-22T10:00:01Z".into());
+                repeated.payload.id = Some("item-2".into());
+                assert_eq!(
+                    events_from_records(vec![repeated], &mut file).len(),
+                    1,
+                    "another native item with the same text is still a real message"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tools_and_explicit_phases_separate_real_messages_from_echoes() {
+        let mut file = observed_file(SessionSource::Cli);
+        let records = vec![
+            record(
+                r#"{"timestamp":"2026-10-22T10:00:00Z","type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"Conferindo"}}"#,
+            ),
+            record(
+                r#"{"timestamp":"2026-10-22T10:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"tool-1","arguments":"{\"cmd\":\"pwd\"}"}}"#,
+            ),
+            record(
+                r#"{"timestamp":"2026-10-22T10:00:02Z","type":"response_item","payload":{"type":"message","id":"new-message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Conferindo"}]}}"#,
+            ),
+            record(
+                r#"{"timestamp":"2026-10-22T10:00:03Z","type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Conferindo"}}"#,
+            ),
+        ];
+        let events = events_from_records(records, &mut file);
+        let kinds = events
+            .iter()
+            .map(|event| event.activity.as_ref().expect("activity").kind.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(kinds, vec!["message", "command", "message", "message"]);
+    }
+
+    #[test]
+    fn appended_modern_cli_messages_publish_without_a_tool_record() {
+        use std::io::Write;
+        let path = temporary_rollout("modern-messages");
+        fs::write(&path, "{\"timestamp\":\"2026-10-22T10:00:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Prompt imediato\"}]}}\n").expect("prompt append");
+        let mut file = observed_file(SessionSource::Cli);
+        let (records, offset) = read_records(&path, 0).expect("prompt read");
+        assert_eq!(events_from_records(records, &mut file).len(), 1);
+        let mut writer = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("rollout");
+        writer.write_all(b"{\"timestamp\":\"2026-10-22T10:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"Public update\"}]}}\n").expect("commentary append");
+        let (records, _) = read_records(&path, offset).expect("commentary read");
+        let events = events_from_records(records, &mut file);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0]
+                .activity
+                .as_ref()
+                .and_then(|activity| activity.detail.as_deref()),
+            Some("Public update")
+        );
+        drop(writer);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn buffered_rollout_tools_and_messages_keep_the_original_timeline() {
         let mut file = observed_file(SessionSource::Vscode);
         let records = vec![
@@ -1884,6 +2285,52 @@ mod tests {
         );
         assert_eq!(session.activities[2].created_at, original_time + 2_000);
         assert_eq!(session.activities[2].status, "completed");
+    }
+
+    #[test]
+    fn unicode_exec_sources_do_not_stop_subsequent_public_commentary() {
+        let mut file = observed_file(SessionSource::Cli);
+        let records = vec![
+            record(
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call","id":"exec-unicode","name":"exec","input":"const expressão = /ações/; text(expressão);","call_id":"call-unicode"}}"#,
+            ),
+            record(
+                r#"{"type":"response_item","payload":{"type":"message","id":"commentary-1","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Vou ajustar o botão."}]}}"#,
+            ),
+            record(
+                r#"{"type":"response_item","payload":{"type":"message","id":"commentary-2","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Vou manter a transição discreta."}]}}"#,
+            ),
+        ];
+        assert!(!is_work_tracking_tool(&records[0].payload));
+        let events = events_from_records(records, &mut file);
+        let messages: Vec<_> = events
+            .iter()
+            .filter_map(|event| event.activity.as_ref())
+            .filter(|activity| activity.kind == "message")
+            .map(|activity| activity.detail.as_deref().unwrap())
+            .collect();
+        assert_eq!(messages, ["Vou ajustar o botão.", "Vou manter a transição discreta."]);
+        assert_eq!(
+            nested_work_tracking_tool("const ação = /ações/; await tools.todo_write({tasks: []});"),
+            Some(("todo_write", "{tasks: []}".into()))
+        );
+    }
+
+    #[test]
+    fn orchestration_patch_keeps_each_file_diff_for_the_floating_card() {
+        let patch = "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-oldA\n+newA\n*** Update File: src/b.ts\n@@\n-oldB\n+newB\n*** End Patch";
+        let source = format!("text(await tools.apply_patch({}));", serde_json::to_string(patch).unwrap());
+        let payload: CodexRecord = serde_json::from_value(serde_json::json!({
+            "type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "edit", "input": source}
+        })).unwrap();
+        let mut file = observed_file(SessionSource::Cli);
+        let events = events_from_records(vec![payload], &mut file);
+        let activity = events[0].activity.as_ref().unwrap();
+        assert_eq!(activity.kind, "file");
+        assert_eq!(activity.files, ["src/a.ts", "src/b.ts"]);
+        assert_eq!(activity.detail.as_deref(), Some(patch));
+        assert!(nested_patch_tool("const sample = 'tools.apply_patch(\"fake\")';").is_none());
+        assert!(nested_patch_tool("await tools.apply_patch(dynamicValue);").is_none());
     }
 
     #[test]

@@ -845,6 +845,12 @@ impl AppState {
                         } else {
                             Vec::new()
                         },
+                        working_directory: session.working_directory.clone(),
+                        container_commands: session.activities.iter()
+                            .filter(|activity| activity.kind == "command" && activity.status == "running")
+                            .filter_map(|activity| activity.detail.as_deref())
+                            .filter(|detail| detail.contains("docker"))
+                            .map(|detail| detail.split("\n\n").next().unwrap_or("").to_owned()).collect(),
                     })
                     .collect()
             })
@@ -2078,6 +2084,7 @@ impl AppState {
         total_tokens: u64,
         input_tokens: u64,
         output_tokens: u64,
+        context_window: Option<u64>,
     ) -> Result<(), String> {
         if thread_id.trim().is_empty() || turn_id.trim().is_empty() {
             return Ok(());
@@ -2099,7 +2106,8 @@ impl AppState {
                 total_tokens,
                 input_tokens,
                 output_tokens,
-                context_tokens: 0,
+                context_tokens: total_tokens,
+                context_window,
                 created_at: now_millis(),
             },
         );
@@ -2739,9 +2747,11 @@ impl AppState {
 
         apply_metadata(session, &event);
         for activity in &event.activities {
+            observe_environment_command(session, activity);
             remember_activity(session, activity.clone());
         }
         if let Some(activity) = event.activity.as_ref() {
+            observe_environment_command(session, activity);
             remember_activity(session, activity.clone());
         }
         session.updated_at = now;
@@ -3916,6 +3926,14 @@ impl AppState {
     }
 }
 
+fn observe_environment_command(session: &AgentSession, activity: &SessionActivity) {
+    // Observe input before the result is appended; output/markdown is never execution evidence.
+    if activity.kind != "command" || activity.status != "running" { return; }
+    let Some(command) = activity.detail.as_deref().filter(|detail| detail.contains("docker")) else { return; };
+    crate::session_containers::observe_input(session.agent.clone(), session.native_session_id.as_deref().unwrap_or(&session.id),
+        &serde_json::Value::String(command.to_owned()), session.working_directory.as_deref());
+}
+
 fn session_from_event(event: &HookEvent, now: i64) -> AgentSession {
     let project = event.project.clone().unwrap_or_else(|| {
         event
@@ -3980,6 +3998,14 @@ fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) 
     }
     if activity.kind == "prompt" {
         normalize_lume_prompt_activity(&mut activity);
+        if session.agent == AgentKind::Codex
+            && activity
+                .detail
+                .as_deref()
+                .is_some_and(crate::codex_sessions::is_injected_prompt_text)
+        {
+            return;
+        }
         let incoming_key = activity
             .detail
             .as_deref()
@@ -4104,6 +4130,13 @@ fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) 
 
 fn distinct_codex_message_items(left: &str, right: &str) -> bool {
     if left == right {
+        return false;
+    }
+    // A turn-completion summary is an echo of the native message, not a separate item.
+    if [left, right]
+        .iter()
+        .any(|id| id.starts_with("codex:") && id.split(':').nth(2) == Some("response"))
+    {
         return false;
     }
     if left.starts_with("codex-rollout:") && right.starts_with("codex-rollout:") {
@@ -6820,6 +6853,57 @@ mod tests {
                 .filter(|activity| activity.kind == "message")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn codex_new_chat_context_and_completion_echo_do_not_duplicate_the_conversation() {
+        let mut session = session_from_event(&started_event("chat", 4242), 1);
+        session.agent = AgentKind::Codex;
+        session.control_origin = SessionControlOrigin::Lume;
+        let context = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nRules\n</INSTRUCTIONS>\n<environment_context>\n<cwd>/work/lume</cwd>\n</environment_context>";
+        let reply = "Oi! O que vamos fazer hoje?";
+        for (id, kind, created_at, detail) in [
+            ("local:chat:1000", "prompt", 1_000, "oi"),
+            ("codex-rollout:chat:context", "prompt", 3_113, context),
+            ("codex:chat:prompt:3244", "prompt", 3_244, "oi"),
+            ("codex:chat:turn:t:item:msg-1", "message", 5_160, reply),
+            ("codex:chat:response:5478", "message", 5_478, reply),
+            ("local:chat:10000", "prompt", 10_000, "oi"),
+            ("codex:chat:turn:t2:item:msg-2", "message", 11_000, reply),
+            ("codex:chat:response:11400", "message", 11_400, reply),
+        ] {
+            remember_activity(
+                &mut session,
+                SessionActivity {
+                    id: id.into(),
+                    kind: kind.into(),
+                    title: kind.into(),
+                    detail: Some(detail.into()),
+                    status: "completed".into(),
+                    created_at,
+                    files: Vec::new(),
+                    attachments: Vec::new(),
+                    append_detail: false,
+                },
+            );
+        }
+        assert_eq!(
+            session
+                .activities
+                .iter()
+                .map(|activity| (
+                    activity.kind.as_str(),
+                    activity.detail.as_deref().unwrap(),
+                    activity.created_at
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("prompt", "oi", 1_000),
+                ("message", reply, 5_160),
+                ("prompt", "oi", 10_000),
+                ("message", reply, 11_000)
+            ]
         );
     }
 

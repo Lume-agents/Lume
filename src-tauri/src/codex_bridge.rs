@@ -3111,7 +3111,7 @@ fn intercept_server_message(
         }
     }
     if method == "thread/tokenUsage/updated" {
-        if let Some((thread_id, turn_id, total_tokens, input_tokens, output_tokens)) =
+        if let Some((thread_id, turn_id, total_tokens, input_tokens, output_tokens, context_window)) =
             turn_token_usage_from_message(&value)
         {
             let recorded = state.record_codex_turn_token_usage(
@@ -3120,13 +3120,10 @@ fn intercept_server_message(
                 total_tokens,
                 input_tokens,
                 output_tokens,
+                context_window,
             );
-            let finished = !matches!(
-                state.session_status(&session_id(thread_id), Some(thread_id)),
-                Ok(Some(SessionStatus::Running))
-            );
-            if recorded.is_ok() && finished {
-                crate::protocol::emit_sessions_changed(app);
+            if recorded.is_ok() {
+                crate::protocol::emit_session_changed(app, &session_id(thread_id), Some(thread_id));
             }
         }
     }
@@ -3159,7 +3156,7 @@ fn intercept_server_message(
     Ok(None)
 }
 
-fn turn_token_usage_from_message(value: &Value) -> Option<(&str, &str, u64, u64, u64)> {
+fn turn_token_usage_from_message(value: &Value) -> Option<(&str, &str, u64, u64, u64, Option<u64>)> {
     let params = value.get("params")?;
     let usage = params.get("tokenUsage")?.get("last")?;
     Some((
@@ -3174,6 +3171,7 @@ fn turn_token_usage_from_message(value: &Value) -> Option<(&str, &str, u64, u64,
             .get("outputTokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        params.get("tokenUsage")?.get("modelContextWindow").and_then(Value::as_u64).filter(|limit| *limit > 0),
     ))
 }
 
@@ -3774,13 +3772,15 @@ fn codex_item_activity(
             let original_detail =
                 first_value_text(item, &["arguments", "result", "contentItems", "error"]);
             let nested = (normalized_codex_tool_name(original_tool) == "exec")
-                .then(|| nested_tool_source(item).and_then(nested_work_tracking_tool))
+                .then(|| nested_tool_source(item).and_then(|source| nested_work_tracking_tool(source).or_else(|| crate::codex_sessions::nested_patch_tool(source))))
                 .flatten();
             let (tool, detail) = nested
                 .map(|(name, arguments)| (name, Some(arguments)))
                 .unwrap_or((original_tool, original_detail));
             let normalized_tool = normalized_codex_tool_name(tool);
-            let title = if normalized_tool == "update_plan" {
+            let title = if normalized_tool == "apply_patch" {
+                "Alteração de arquivo".into()
+            } else if normalized_tool == "update_plan" {
                 "Plano atualizado".into()
             } else if item_type == "mcpToolCall" && server.is_empty() {
                 format!("MCP · {tool}")
@@ -3792,7 +3792,9 @@ fn codex_item_activity(
                 format!("{server} · {tool}")
             };
             (
-                if normalized_tool == "update_plan" {
+                if normalized_tool == "apply_patch" {
+                    "file"
+                } else if normalized_tool == "update_plan" {
                     "plan"
                 } else {
                     "tool"
@@ -5267,6 +5269,7 @@ mod tests {
                 "threadId": "thread-1",
                 "turnId": "turn-2",
                 "tokenUsage": {
+                    "modelContextWindow": 128_000,
                     "last": {
                         "totalTokens": 4_200,
                         "inputTokens": 3_000,
@@ -5277,7 +5280,7 @@ mod tests {
         });
         let usage = turn_token_usage_from_message(&notification).expect("token usage");
 
-        assert_eq!(usage, ("thread-1", "turn-2", 4_200, 3_000, 1_200));
+        assert_eq!(usage, ("thread-1", "turn-2", 4_200, 3_000, 1_200, Some(128_000)));
     }
 
     #[test]

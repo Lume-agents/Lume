@@ -114,6 +114,7 @@ export interface PromptTokenUsage {
   outputTokens: number;
   /** What the conversation held when the prompt ended; 0 when the agent does not report it. */
   contextTokens?: number;
+  contextWindow?: number;
   createdAt: number;
 }
 
@@ -150,7 +151,7 @@ export interface AgentRateLimit {
 
 export interface SessionActivity {
   id: string;
-  kind: "prompt" | "queued_prompt" | "codex_queued_prompt" | "message" | "activity" | "analysis" | "plan" | "plan_document" | "command" | "file" | "test" | "tool" | "subagent" | "permission" | "question" | "warning" | "interrupt";
+  kind: "prompt" | "queued_prompt" | "codex_queued_prompt" | "message" | "activity" | "analysis" | "plan" | "plan_document" | "command" | "file" | "test" | "tool" | "subagent" | "permission" | "question" | "warning" | "error" | "interrupt";
   title: string;
   detail?: string;
   status: "running" | "completed" | "failed" | "waiting" | "interrupted";

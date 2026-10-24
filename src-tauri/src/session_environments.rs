@@ -6,7 +6,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     io::Read,
     process::{Command, Stdio},
@@ -29,6 +28,8 @@ pub(crate) struct EnvironmentOwner {
     pub native_id: Option<String>,
     pub agent: AgentKind,
     pub roots: Vec<u32>,
+    pub working_directory: Option<String>,
+    pub container_commands: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -67,6 +68,7 @@ struct Inventory {
     records: HashMap<String, SessionEnvironment>,
     refreshed: Option<Instant>,
     error: Option<String>,
+    containers: crate::session_containers::ContainerInventory,
 }
 
 #[derive(Default)]
@@ -150,6 +152,29 @@ impl EnvironmentMonitor {
                         record.can_stop = false;
                     }
                     inventory.error = Some(error);
+                }
+            }
+            match inventory.containers.snapshot(owners) {
+                Ok(containers) => {
+                    inventory.records.retain(|id, _| !id.starts_with("docker-"));
+                    let available = MAX_RECORDS.saturating_sub(inventory.records.len());
+                    for container in containers.into_iter().take(available) {
+                        inventory.records.insert(container.id.clone(), container);
+                    }
+                }
+                Err(error) => {
+                    for record in inventory
+                        .records
+                        .values_mut()
+                        .filter(|record| record.id.starts_with("docker-"))
+                    {
+                        record.status = "unknown".into();
+                        record.can_stop = false;
+                    }
+                    inventory.error = Some(match inventory.error.take() {
+                        Some(previous) => format!("{previous}\n{error}"),
+                        None => error,
+                    });
                 }
             }
             inventory.refreshed = Some(Instant::now());
@@ -245,8 +270,10 @@ fn owner_for<'a>(
     pid: Pid,
     system: &System,
     owners: &'a [EnvironmentOwner],
-) -> Option<&'a EnvironmentOwner> {
-    let process = system.process(pid)?;
+) -> Result<Option<&'a EnvironmentOwner>, ()> {
+    let Some(process) = system.process(pid) else {
+        return Ok(None);
+    };
     // Native Codex attaches this identity to tool subprocesses, including detached servers.
     let tags = process
         .environ()
@@ -261,7 +288,7 @@ fn owner_for<'a>(
         let matches = owners
             .iter()
             .filter(|owner| {
-                tags.iter().any(|(key, value)| {
+                tags.iter().all(|(key, value)| {
                     if *key == "CODEX_THREAD_ID" {
                         owner.agent == AgentKind::Codex
                             && owner.native_id.as_deref() == Some(*value)
@@ -272,7 +299,11 @@ fn owner_for<'a>(
             })
             .collect::<Vec<_>>();
         // An explicit but unknown/ambiguous thread must not fall through to another chat.
-        return (matches.len() == 1).then(|| matches[0]);
+        return if matches.len() == 1 {
+            Ok(Some(matches[0]))
+        } else {
+            Err(())
+        };
     }
     let mut current = pid;
     let mut visited = HashSet::new();
@@ -280,17 +311,23 @@ fn owner_for<'a>(
         if !visited.insert(current) {
             break;
         }
-        let process = system.process(current)?;
-        current = process.parent()?;
+        let Some(parent) = system.process(current).and_then(|process| process.parent()) else {
+            break;
+        };
+        current = parent;
         let matches = owners
             .iter()
             .filter(|owner| owner.roots.contains(&current.as_u32()))
             .collect::<Vec<_>>();
         if !matches.is_empty() {
-            return (matches.len() == 1).then(|| matches[0]);
+            return if matches.len() == 1 {
+                Ok(Some(matches[0]))
+            } else {
+                Err(())
+            };
         }
     }
-    None
+    Ok(None)
 }
 
 fn reconcile(
@@ -319,9 +356,19 @@ fn reconcile(
         let id = format!("env-{}-{}", listener.pid, process.start_time());
         let prior = records.get(&id);
         let owner = owner_for(pid, system, owners);
-        let session_id = owner
-            .map(|owner| owner.session_id.clone())
-            .or_else(|| prior.map(|prior| prior.session_id.clone()));
+        let session_id = match owner {
+            Ok(Some(owner)) => Some(owner.session_id.clone()),
+            // A detached listener with the exact same PID/start time keeps a previously proven link.
+            Ok(None) => prior
+                .filter(|record| {
+                    owners
+                        .iter()
+                        .any(|owner| owner.session_id == record.session_id)
+                })
+                .map(|record| record.session_id.clone()),
+            // Explicit unknown/contradictory tags must not reactivate an old attribution.
+            Err(()) => None,
+        };
         let Some(session_id) = session_id else {
             continue;
         };
@@ -345,9 +392,9 @@ fn reconcile(
             .entry(id.clone())
             .or_insert_with(|| SessionEnvironment {
                 id: id.clone(),
-                session_id,
-                name,
-                kind,
+                session_id: session_id.clone(),
+                name: name.clone(),
+                kind: kind.clone(),
                 process_id: listener.pid,
                 started_at: process.start_time(),
                 observed_at: now_millis(),
@@ -356,6 +403,10 @@ fn reconcile(
                 ports: Vec::new(),
                 can_stop: true,
             });
+        // The CLI may have been unidentified when this listener was first observed.
+        entry.session_id = session_id;
+        entry.name = name;
+        entry.kind = kind;
         if !seen.contains(&id) {
             entry.ports.clear();
         }
@@ -375,6 +426,9 @@ fn reconcile(
         seen.insert(id);
     }
     for (id, record) in records.iter_mut() {
+        if id.starts_with("docker-") {
+            continue;
+        }
         if !seen.contains(id) && record.status != "stopped" {
             // Loss of the listener with the same live process can mean a transient restart.
             let still_alive = system
@@ -383,7 +437,7 @@ fn reconcile(
                     process.start_time() == record.started_at
                         && process.status() != ProcessStatus::Zombie
                 });
-            record.status = if still_alive { "idle" } else { "stopped" }.into();
+            record.status = if still_alive { "unknown" } else { "stopped" }.into();
             record.can_stop = false;
             if !still_alive && record.stopped_at.is_none() {
                 record.stopped_at = Some(now_millis());
@@ -406,7 +460,7 @@ fn reconcile(
     }
 }
 
-fn service_identity(name: &str, args: &[std::ffi::OsString]) -> (String, String) {
+pub(super) fn service_identity(name: &str, args: &[std::ffi::OsString]) -> (String, String) {
     let lower = name.trim_end_matches(".exe").to_lowercase();
     let command = args
         .iter()
@@ -449,8 +503,24 @@ fn service_identity(name: &str, args: &[std::ffi::OsString]) -> (String, String)
         lower.as_str(),
         "postgres" | "mysqld" | "mariadbd" | "redis-server" | "mongod"
     );
+    let fallback = if lower == "mainthread" {
+        let script = args
+            .iter()
+            .skip(1)
+            .filter_map(|arg| std::path::Path::new(arg).file_name()?.to_str())
+            .find(|arg| {
+                [".js", ".mjs", ".cjs", ".ts"]
+                    .iter()
+                    .any(|extension| arg.ends_with(extension))
+            });
+        script
+            .map(|script| format!("Node.js · {script}"))
+            .unwrap_or_else(|| "Node.js".into())
+    } else {
+        name.into()
+    };
     (
-        label.unwrap_or(name).into(),
+        label.map(str::to_owned).unwrap_or(fallback),
         if database {
             "database"
         } else if label.is_some() {
@@ -462,7 +532,7 @@ fn service_identity(name: &str, args: &[std::ffi::OsString]) -> (String, String)
     )
 }
 
-fn browser_url(address: &str, port: u16, kind: &str) -> Option<String> {
+pub(super) fn browser_url(address: &str, port: u16, kind: &str) -> Option<String> {
     if kind != "web" {
         return None;
     }
@@ -487,8 +557,10 @@ fn split_endpoint(value: &str) -> Option<(String, u16)> {
     (port != 0).then(|| (address.trim_matches(['[', ']']).into(), port))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn bounded_output(command: &mut Command, empty_exit_is_no_matches: bool) -> Result<String, String> {
+pub(super) fn bounded_output(
+    command: &mut Command,
+    empty_exit_is_no_matches: bool,
+) -> Result<String, String> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -916,6 +988,8 @@ mod tests {
             native_id: Some("fixture-thread".into()),
             agent: AgentKind::Codex,
             roots: vec![],
+            working_directory: None,
+            container_commands: vec![],
         }];
         let (mut owned, port) = spawn_fixture(Some("fixture-thread"));
         let (mut unrelated, _) = spawn_fixture(None);
@@ -969,6 +1043,73 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn corrected_ownership_replaces_the_previous_session_and_conflicts_disable_stopping() {
+        let (fixture, _) = spawn_fixture(Some("reassignment-thread"));
+        let owner = EnvironmentOwner {
+            session_id: "correct-chat".into(),
+            native_id: Some("reassignment-thread".into()),
+            agent: AgentKind::Codex,
+            roots: vec![],
+            working_directory: None,
+            container_commands: vec![],
+        };
+        let monitor = EnvironmentMonitor::default();
+        let initial = monitor.snapshot(&[owner.clone()]).unwrap();
+        let record = initial
+            .environments
+            .iter()
+            .find(|row| row.process_id == fixture.0.id())
+            .unwrap();
+        {
+            let mut inventory = monitor.0.lock().unwrap();
+            inventory.records.get_mut(&record.id).unwrap().session_id = "wrong-chat".into();
+            inventory.refreshed = None;
+        }
+        let updated = monitor.snapshot(&[owner.clone()]).unwrap();
+        assert_eq!(
+            updated
+                .environments
+                .iter()
+                .find(|row| row.id == record.id)
+                .unwrap()
+                .session_id,
+            "correct-chat"
+        );
+        let mut conflicting = owner.clone();
+        conflicting.session_id = "other-chat".into();
+        monitor.0.lock().unwrap().refreshed = None;
+        let updated = monitor.snapshot(&[owner, conflicting]).unwrap();
+        let row = updated
+            .environments
+            .iter()
+            .find(|row| row.id == record.id)
+            .unwrap();
+        assert_eq!(row.status, "unknown");
+        assert!(!row.can_stop);
+    }
+
+    #[test]
+    fn generic_node_thread_names_use_the_executed_script() {
+        assert_eq!(
+            service_identity(
+                "MainThread",
+                &["node".into(), "/work/backend/server.mjs".into()]
+            )
+            .0,
+            "Node.js · server.mjs"
+        );
+        assert_eq!(
+            service_identity(
+                "MainThread",
+                &["node".into(), "-e".into(), "console.log(1)".into()]
+            )
+            .0,
+            "Node.js"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn ambiguous_threads_and_agent_listeners_are_not_assigned() {
         let (_fixture, _) = spawn_fixture(Some("ambiguous-thread"));
         let owner = EnvironmentOwner {
@@ -976,6 +1117,8 @@ mod tests {
             native_id: Some("ambiguous-thread".into()),
             agent: AgentKind::Codex,
             roots: vec![],
+            working_directory: None,
+            container_commands: vec![],
         };
         let mut duplicate = owner.clone();
         duplicate.session_id = "second".into();

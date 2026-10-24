@@ -81,7 +81,7 @@
   async function browse(url: string) { try { await openUrl(url); } catch (value) { showError(value); } }
   function status(environment: SessionEnvironment) {
     switch (environment.status) {
-      case "running": return tr("Port open", "Porta aberta");
+      case "running": return environment.id.startsWith("docker-") ? tr("Container running", "Contêiner em execução") : tr("Port open", "Porta aberta");
       case "stopping": return tr("Stopping…", "Parando…");
       case "idle": return tr("No open port", "Sem porta aberta");
       case "stopped": return tr("Stopped", "Parado");
@@ -144,9 +144,9 @@
                   <button type="button" class="port-link" data-tooltip={tr("Open in browser", "Abrir no navegador")} onclick={() => void browse(port.url!)}><span>:{port.port}</span><LumeIcon name="external" size={11} /></button>
                 {:else}<span class="port-label">:{port.port}</span>{/if}
               {/each}
-              <span class="environment-pid">PID {environment.processId}</span>
+              <span class="environment-pid">{environment.id.startsWith("docker-") ? tr("Docker · read-only", "Docker · somente leitura") : `PID ${environment.processId}`}</span>
             </div>
-            {#if environment.status !== "stopped"}
+            {#if environment.status !== "stopped" && !environment.id.startsWith("docker-")}
               <button class="stop-environment" type="button" disabled={!environment.canStop || busy === environment.id}
                 aria-label={tr(`Stop ${environment.name}`, `Parar ${environment.name}`)} title={tr("Stop this process", "Parar este processo")}
                 onclick={() => void stop(environment)}>

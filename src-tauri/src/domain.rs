@@ -236,6 +236,9 @@ pub struct PromptTokenUsage {
     /// 0 when the agent does not report it.
     #[serde(default)]
     pub context_tokens: u64,
+    /// Effective context limit reported by the provider; never inferred from token spending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     pub created_at: i64,
 }
 

@@ -52,6 +52,7 @@ pub mod relay_e2e;
 pub mod relay_link;
 mod repository;
 mod session_environments;
+mod session_containers;
 mod session_filters;
 mod state;
 mod store;

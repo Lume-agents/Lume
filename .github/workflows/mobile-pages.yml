@@ -4,12 +4,15 @@ on:
   push:
     branches: [main]
     paths:
+      - "mobile/**"
       - "mobile-pwa/**"
-      - "src/lib/markdown.js"
-      - "src/lib/responseDedup.js"
+      # The phone app is built from the Workspace's own modules, so a change to any of them changes it.
+      - "src/lib/**"
+      - "vite.mobile.config.js"
       - "scripts/validate-mobile-assets.mjs"
       - "tests/response-dedup.test.mjs"
       - "package.json"
+      - "package-lock.json"
       - ".github/workflows/mobile-pages.yml"
   workflow_dispatch:
 
@@ -34,7 +37,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Validate mobile assets
+      - run: npm ci
+      - name: Build and validate the mobile app
         run: npm run check:mobile
       - uses: actions/configure-pages@v5
         with:

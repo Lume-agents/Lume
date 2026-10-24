@@ -30,8 +30,6 @@
   // does (a desktop that will not stack it above the Orb, or one that cannot place it), the card is drawn here.
   let gaveUp = $state(false);
   const external = $derived(detached && !gaveUp && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
-  const pt = $derived(language === "pt-BR");
-  const last = $derived(index === steps.length - 1);
 
   const step: TourStep = $derived(steps[index]);
   const padding = 7;
@@ -169,17 +167,6 @@
   {:else}
     <div class:soft={external} class="scrim"></div>
   {/if}
-  {#if external}
-    <!-- The card is in its own window; these controls keep the tour usable from the Orb itself, whatever that window does. -->
-    <div class="bar" role="group" aria-label={pt ? "Tour" : "Tour"}>
-      <span class="bar-title"><b>{index + 1}/{steps.length}</b>{pt ? step.title[1] : step.title[0]}</span>
-      <span class="bar-actions">
-        {#if index > 0}<button type="button" onclick={() => act("back")}>{pt ? "Voltar" : "Back"}</button>{/if}
-        <button class="primary" type="button" onclick={() => act("next")}>{last ? (pt ? "Concluir" : "Done") : (pt ? "Próximo" : "Next")}</button>
-        <button class="skip" type="button" aria-label={pt ? "Fechar o tour" : "Close the tour"} onclick={() => act("skip")}>✕</button>
-      </span>
-    </div>
-  {/if}
   {#if !external}
     <TourCard bind:element={card} {step} {index} total={steps.length} {language} {dark} style={`position: absolute; left: ${position.x}px; top: ${position.y}px; transition: left 380ms cubic-bezier(.16, 1, .3, 1), top 380ms cubic-bezier(.16, 1, .3, 1);`} onBack={() => act("back")} onNext={() => act("next")} onSkip={() => act("skip")} onMediaReady={() => follow(120)} />
   {/if}
@@ -191,13 +178,6 @@
   .scrim { position: absolute; inset: 0; background: rgba(6, 12, 9, .56); }
   .scrim.soft { background: rgba(6, 12, 9, .22); }
   .spotlight.soft { box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--tour-accent) 75%, transparent), 0 0 0 9999px rgba(6, 12, 9, .34); }
-  .bar { position: absolute; z-index: 2; right: 10px; bottom: 10px; left: 10px; padding: 8px 8px 8px 12px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--tour-line); border-radius: 14px; color: var(--tour-text); background: var(--tour-raised); box-shadow: 0 10px 30px rgba(5, 12, 8, .35); }
-  .bar-title { min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 7px; overflow: hidden; color: var(--tour-strong); font: 700 12.5px/1.2 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
-  .bar-title b { color: var(--tour-accent); font-size: 10.5px; letter-spacing: .04em; }
-  .bar-actions { display: flex; flex: 0 0 auto; gap: 5px; }
-  .bar button { height: 30px; padding: 0 11px; border: 0; border-radius: 9px; color: var(--tour-muted); background: var(--tour-subtle); font: 680 12px/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
-  .bar button.primary { color: #fff; background: var(--tour-accent); }
-  .bar button.skip { width: 30px; padding: 0; }
   .spotlight { position: absolute; border-radius: 14px; box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--tour-accent) 75%, transparent), 0 0 0 9999px rgba(6, 12, 9, .56); pointer-events: none; transition: left 380ms cubic-bezier(.16, 1, .3, 1), top 380ms cubic-bezier(.16, 1, .3, 1), width 380ms cubic-bezier(.16, 1, .3, 1), height 380ms cubic-bezier(.16, 1, .3, 1); }
   .spotlight::after { position: absolute; inset: -1.5px; border-radius: inherit; box-shadow: 0 0 0 0 color-mix(in srgb, var(--tour-accent) 45%, transparent); content: ""; animation: tour-pulse 1.8s ease-out infinite; }
   @keyframes tour-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--tour-accent) 45%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }

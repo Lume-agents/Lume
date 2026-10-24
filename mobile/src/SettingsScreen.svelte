@@ -4,7 +4,7 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import type { MobileAppearance, MobileClient } from "./client.svelte";
 
-  let { client } = $props<{ client: MobileClient }>();
+  let { client }: { client: MobileClient } = $props();
 
   const pt = $derived(client.language === "pt-BR");
   const scopeNames = $derived([

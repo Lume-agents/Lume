@@ -4,7 +4,7 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import type { MobileClient } from "./client.svelte";
 
-  let { client } = $props<{ client: MobileClient }>();
+  let { client }: { client: MobileClient } = $props();
 </script>
 
 {#if client.banner}

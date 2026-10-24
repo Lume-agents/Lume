@@ -7,9 +7,10 @@
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
+  import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import { sessionName, type MobileClient } from "./client.svelte";
 
-  let { client, onOpenChat } = $props<{ client: MobileClient; onOpenChat: (id: string) => void }>();
+  let { client, onOpenChat, onOpenBoard }: { client: MobileClient; onOpenChat: (id: string) => void; onOpenBoard: () => void } = $props();
 
   let open = $state<string[]>([]);
 
@@ -55,7 +56,10 @@
 </script>
 
 <section class="screen">
-  <header class="top"><h1>{client.tr("Workflows", "Workflows")}</h1></header>
+  <header class="top">
+    <h1>{client.tr("Workflows", "Workflows")}</h1>
+    <button class="open-board" type="button" onclick={onOpenBoard}><WorkspaceHeaderIcon name="workflow" size={18} />{client.tr("Open board", "Abrir board")}</button>
+  </header>
   <div class="scroll">
     {#each workflows as { group, run } (group.id)}
       {@const order = analyzeChain(group).order}
@@ -137,7 +141,8 @@
 
 <style>
   .screen { --role-planner: #6aa0d6; --role-implementer: #56bd8a; --role-reviewer: #dba653; --role-tester: #a583d8; --role-researcher: #58b6c5; --role-custom: #93a39b; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .top { padding: calc(var(--safe-top) + 14px) 18px 8px; }
+  .top { padding: calc(var(--safe-top) + 14px) 18px 8px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .open-board { height: 38px; padding: 0 14px; display: inline-flex; align-items: center; gap: 7px; border: 0; border-radius: 12px; color: #fff; background: var(--workspace-accent); font-size: 13.5px; font-weight: 700; }
   h1 { margin: 0; color: var(--workspace-strong); font-size: 24px; font-weight: 760; letter-spacing: -.02em; }
   .scroll { min-height: 0; padding: 4px 12px 24px; display: grid; align-content: start; gap: 10px; overflow-y: auto; }
   .workflow { border: 1px solid var(--workspace-line); border-radius: 18px; background: var(--workspace-raised); }

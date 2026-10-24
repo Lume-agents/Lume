@@ -2217,6 +2217,31 @@ fn takeover_launch_request(
     })
 }
 
+/// Adds, replaces or removes a workflow group from another device (the phone's board), the same way the
+/// desktop's board saves it: through the preferences, which every open window then reloads.
+fn save_workflow_group(
+    app: &AppHandle,
+    state: &AppState,
+    group: Option<crate::domain::WorkflowGroupDefinition>,
+    remove: Option<&str>,
+) -> Result<(), String> {
+    let mut preferences = state.preferences()?;
+    if let Some(id) = remove {
+        preferences.workflow_groups.retain(|item| item.id != id);
+    }
+    if let Some(group) = group {
+        match preferences.workflow_groups.iter_mut().find(|item| item.id == group.id) {
+            Some(existing) => *existing = group,
+            None => preferences.workflow_groups.push(group),
+        }
+    }
+    crate::validate_workflow_groups(&preferences)?;
+    state.save_preferences(&preferences)?;
+    let _ = app.emit("lume://preferences-changed", &preferences);
+    protocol::emit_workflows_changed(app);
+    Ok(())
+}
+
 pub fn execute_hub_command(
     app: &AppHandle,
     state: &AppState,
@@ -2368,6 +2393,49 @@ pub fn execute_hub_command(
                 })
                 .map(Some)
         }
+        protocol::HubCommand::ListSlashCommands { session_id } => {
+            session_slash_commands(app, state, bridge, &session_id).and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string())).map(Some)
+        }
+        protocol::HubCommand::SearchPaths { session_id, query } => {
+            crate::repository_directory(state, &session_id)
+                .and_then(|directory| crate::path_mentions::search(&directory, &query, 40)).and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string())).map(Some)
+        }
+        protocol::HubCommand::GetModelSettings { session_id } => {
+            session_model_settings(app, state, bridge, &session_id).and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string())).map(Some)
+        }
+        protocol::HubCommand::SetModelSettings { session_id, model, effort } => {
+            set_session_model_settings(app, state, bridge, &session_id, &model, &effort).and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string())).map(Some)
+        }
+        protocol::HubCommand::GetSubagentTimeline { session_id, activity_id } => {
+            crate::subagent_timeline(state, &session_id, &activity_id).and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string())).map(Some)
+        }
+        protocol::HubCommand::GetWorkflowRoleContract { role } => {
+            serde_json::to_value(role.default_contract()).map_err(|error| error.to_string()).map(Some)
+        }
+        protocol::HubCommand::PreviewWorkflowContext { group, connection_id, objective } => state
+            .bounded_sessions(200)
+            .and_then(|sessions| {
+                let limit = state.preferences()?.workflow_settings.max_context_tokens as usize;
+                crate::context_builder::build_context_package_with_limit(&group.0, &connection_id, &objective, None, &sessions, limit)
+            }).and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string())).map(Some),
+        protocol::HubCommand::SaveWorkflowGroup { group } => save_workflow_group(app, state, Some(group.0), None).map(|_| None),
+        protocol::HubCommand::DeleteWorkflowGroup { workflow_id } => {
+            save_workflow_group(app, state, None, Some(&workflow_id)).map(|_| None)
+        }
+        protocol::HubCommand::GetDesktopAppearance {} => state.preferences().map(|preferences| {
+            Some(serde_json::json!({
+                "appearanceTheme": preferences.appearance_theme,
+                "accentColor": preferences.accent_color,
+                "accentOpacity": preferences.accent_opacity,
+                "darkBase": preferences.dark_base,
+                "lightBase": preferences.light_base,
+                "customDarkSurfaces": preferences.custom_dark_surfaces,
+                "customLightSurfaces": preferences.custom_light_surfaces,
+                "uiFont": preferences.ui_font,
+                "codeFont": preferences.code_font,
+                "darkMode": preferences.dark_mode,
+            }))
+        }),
         protocol::HubCommand::ReportMobileVersion { version } => {
             if protocol::is_version_newer(&version, env!("CARGO_PKG_VERSION")) {
                 crate::reveal_main_window(app);

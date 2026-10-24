@@ -7,7 +7,7 @@
   import type { MobileClient } from "./client.svelte";
   import { MAX_IMAGES, clipboardImageFiles, prepareImage, readNativeClipboardImage, type PreparedImage } from "./images";
 
-  let { client, session } = $props<{ client: MobileClient; session: HubSession }>();
+  let { client, session }: { client: MobileClient; session: HubSession } = $props();
 
   let textarea = $state<HTMLTextAreaElement | null>(null);
   let fileInput = $state<HTMLInputElement | null>(null);

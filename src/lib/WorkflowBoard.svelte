@@ -1,13 +1,12 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import type { Preferences, WorkflowContextPolicy, WorkflowContextSelection, WorkflowGroupDefinition, WorkflowRole, WorkflowStepDefinition, WorkflowConnectionDefinition, WorkflowContextPackage, WorkflowRun } from "$lib/domain";
   import type { HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import { localize } from "$lib/i18n";
-  import { loadWorkflowRoleContract, loadWorkflowRun, startWorkflowRun, approveWorkflowHandoff, advanceWorkflowRun, pauseWorkflowRun, resumeWorkflowRun, retryWorkflowStep, skipWorkflowStep, cancelWorkflowRun, previewWorkflowContext } from "$lib/lume";
+  import { desktopWorkflowBackend, type WorkflowBoardBackend } from "$lib/workflowBoardBackend";
   import { BOARD_CARD_WIDTH, BOARD_CARD_HEIGHT, analyzeChain, checkConnection, connectionRefusalMessage, problemMessage, newGroup, newStep, preserveRoleOverrides, defaultRole, defaultContextSelection, addStep, updateStep, removeStep, addConnection, updateConnection, removeConnection, insertStep, edgeGeometry, cardRect, cardAt, placeCard, toBoardPoint, zoomAround, fitView, normalizeLayout, stepVisualState, connectionWaitsForApproval, type BoardPoint, type BoardLayout, type BoardView } from "$lib/workflowBoard";
   import { WorkflowBoardSaveQueue } from "$lib/workflowBoardPersistence";
   import { activityFeed, lastResponse, stepActivity } from "$lib/boardActivity";
@@ -23,12 +22,14 @@
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
 
-  let { sessions, preferences, language, active, keyboardEnabled = true, onSaveGroup, onDeleteGroup, onOpenChat, onClose, onFinishSidebarDrag, draggingSessionId = null, onSidebarDragOverBoard }: {
+  let { sessions, preferences, language, active, keyboardEnabled = true, backend = desktopWorkflowBackend, onSaveGroup, onDeleteGroup, onOpenChat, onClose, onFinishSidebarDrag, draggingSessionId = null, onSidebarDragOverBoard }: {
     sessions: HubSession[];
     preferences: Preferences;
     language: Language;
     active: boolean;
     keyboardEnabled?: boolean;
+    /** Where the board's requests go: the desktop app, or the phone's gateway. */
+    backend?: WorkflowBoardBackend;
     onSaveGroup: (group: WorkflowGroupDefinition) => Promise<void>;
     onDeleteGroup: (id: string) => Promise<void>;
     onOpenChat: (session: HubSession) => void;
@@ -402,7 +403,7 @@
     adding = true;
     try {
       const role = defaultRole(group.steps.length);
-      const contract = await loadWorkflowRoleContract(role);
+      const contract = await backend.roleContract(role);
       const latest = groups.find((item) => item.id === id);
       if (!latest || disposed) return;
       const step = newStep(session.nativeSessionId, role, contract);
@@ -428,7 +429,7 @@
     const revision = ++roleRevision;
     changingRole = true;
     try {
-      const [previous, contract] = await Promise.all([loadWorkflowRoleContract(selectedStep.role), loadWorkflowRoleContract(role)]);
+      const [previous, contract] = await Promise.all([backend.roleContract(selectedStep.role), backend.roleContract(role)]);
       if (revision !== roleRevision || disposed || activeId !== groupId || !group || locked) return;
       const current = group.steps.find((step) => step.id === id);
       if (current) edit(updateStep(group, id, { role, ...preserveRoleOverrides(current, previous, contract) }));
@@ -530,7 +531,7 @@
     previewLoading = true;
     try {
       const sourceResultId = run?.steps.find((step) => step.stepId === selectedConnection.fromStepId)?.resultId;
-      const next = await previewWorkflowContext(group, selectedConnection.id, objective, sourceResultId);
+      const next = await backend.previewContext(group, selectedConnection.id, objective, sourceResultId);
       if (revision === previewRevision && !disposed) preview = next;
     } catch (error) { if (revision === previewRevision) notify(errorMessage(error)); }
     finally { if (revision === previewRevision) previewLoading = false; }
@@ -546,9 +547,34 @@
     event.preventDefault();
     event.stopPropagation();
   }
+  // Two fingers on the canvas zoom around the point between them, as maps do on a phone.
+  const touches = new Map<number, BoardPoint>();
+  let pinch: { distance: number; center: BoardPoint; view: BoardView } | null = null;
+  function touchPoint(event: PointerEvent): BoardPoint {
+    const bounds = viewport?.getBoundingClientRect();
+    return { x: event.clientX - (bounds?.left ?? 0), y: event.clientY - (bounds?.top ?? 0) };
+  }
+  function pinchShape() {
+    const [a, b] = [...touches.values()];
+    return { distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), center: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } };
+  }
+  function releaseTouch(event: PointerEvent) {
+    touches.delete(event.pointerId);
+    if (touches.size < 2) pinch = null;
+  }
   function beginPan(event: PointerEvent) {
     if (event.button !== 0 && event.button !== 1) return;
     if (event.button === 0 && event.target instanceof Element && event.target.closest("button, input, textarea, select, [data-board-card], [data-board-edge]")) return;
+    if (event.pointerType === "touch") {
+      touches.set(event.pointerId, touchPoint(event));
+      if (touches.size === 2) {
+        capture(event);
+        flushPatch();
+        gesture = null;
+        pinch = { ...pinchShape(), view: { ...view } };
+        return;
+      }
+    }
     capture(event);
     gesture = { kind: "pan", pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, origin: { x: view.x, y: view.y } };
     if (!connectionSource) choose(null);
@@ -578,6 +604,15 @@
   }
   function movePointer(event: PointerEvent) {
     if (!viewport) return;
+    if (touches.has(event.pointerId)) {
+      touches.set(event.pointerId, touchPoint(event));
+      if (pinch && touches.size === 2) {
+        const now = pinchShape();
+        const moved = { ...pinch.view, x: pinch.view.x + now.center.x - pinch.center.x, y: pinch.view.y + now.center.y - pinch.center.y };
+        queuePatch({ view: zoomAround(moved, now.center, pinch.view.zoom * (now.distance / pinch.distance)) });
+        return;
+      }
+    }
     if (connectionSource) {
       connectionPoint = boardPoint(event.clientX, event.clientY);
       connectionTarget = cardAt(connectionPoint, layout.positions, group?.steps.map((step) => step.id) ?? []);
@@ -630,10 +665,17 @@
     // A fit click can land before ResizeObserver publishes the new window size.
     const width = viewport?.clientWidth ?? viewportWidth;
     const height = viewport?.clientHeight ?? viewportHeight;
-    const panelSpace = selectedStep || pickerOpen ? Math.min(310, width * 0.45) : 0;
+    const panelSpace = (selectedStep || pickerOpen) && width > 640 ? Math.min(310, width * 0.45) : 0;
     const positions = group?.steps.map((step) => layout.positions[step.id]).filter((point): point is BoardPoint => Boolean(point)) ?? [];
     patchLayout({ view: fitView(positions, width - panelSpace, height - 160) });
   }
+  // On a phone the board opens framed on the whole workflow; the desktop keeps the view left last time.
+  const fittedOnPhone = new Set<string>();
+  $effect(() => {
+    if (!active || !group || !viewportWidth || viewportWidth > 560 || fittedOnPhone.has(group.id)) return;
+    fittedOnPhone.add(group.id);
+    queueMicrotask(fit);
+  });
   /** The wheel zooms around the cursor; the canvas is moved by dragging its background. */
   function wheel(event: WheelEvent) {
     if (!active || !viewport) return;
@@ -705,7 +747,7 @@
   }
   async function refreshRun(id: string) {
     runLoading = true;
-    try { acceptRun(await loadWorkflowRun(id)); }
+    try { acceptRun(await backend.loadRun(id)); }
     catch (error) { if (id === activeId && !disposed) notify(errorMessage(error)); }
     finally { if (id === activeId && !disposed) runLoading = false; }
   }
@@ -722,7 +764,7 @@
     const runObjective = objective;
     await perform(async () => {
       await queue.flush();
-      return startWorkflowRun(definition, runObjective);
+      return backend.startRun(definition, runObjective);
     });
   }
 
@@ -756,7 +798,7 @@
     reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     ready = true;
     let stop: (() => void) | undefined;
-    void listen<WorkflowRun>("lume://workflow-run-changed", ({ payload }) => acceptRun(payload))
+    void backend.onRunChanged((changed) => acceptRun(changed))
       .then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; })
       .catch((error) => { if (!disposed) notify(errorMessage(error)); });
     return () => { if (patchFrame) cancelAnimationFrame(patchFrame); writeLayout(); disposed = true; stop?.(); if (storageTimer) clearTimeout(storageTimer); };
@@ -891,8 +933,8 @@
     style:background-position={view.x + "px " + view.y + "px"}
     onpointerdown={beginPan}
     onpointermove={movePointer}
-    onpointerup={endPointer}
-    onpointercancel={cancelGesture}
+    onpointerup={(event) => { releaseTouch(event); endPointer(event); }}
+    onpointercancel={(event) => { releaseTouch(event); cancelGesture(); }}
     onlostpointercapture={cancelGesture}
     ondragover={dragOver}
     ondrop={drop}
@@ -949,7 +991,7 @@
             {:else}<LumeIcon name="arrow-right" size={13} />{/if}
           </button>
           {#if waiting && run?.status === "waiting_for_approval"}
-            <button class="edge-approve" type="button" disabled={actionLoading || run.recovering} title={tr("Approve this handoff", "Aprovar esta passagem")} aria-label={tr("Approve this handoff", "Aprovar esta passagem")} onpointerdown={(event) => event.stopPropagation()} onclick={() => void perform(() => approveWorkflowHandoff(activeId))}><LumeIcon name="check" size={13} /></button>
+            <button class="edge-approve" type="button" disabled={actionLoading || run.recovering} title={tr("Approve this handoff", "Aprovar esta passagem")} aria-label={tr("Approve this handoff", "Aprovar esta passagem")} onpointerdown={(event) => event.stopPropagation()} onclick={() => void perform(() => backend.approve(activeId))}><LumeIcon name="check" size={13} /></button>
           {/if}
           {#if cargo.length}<span class="edge-cargo" class:waiting class:traveling aria-hidden="true">{#each cargo as item (item)}<b>{item}</b>{/each}</span>{/if}
         </div>
@@ -1222,12 +1264,12 @@
             <button class="primary" type="button" disabled={actionLoading || runLoading || changingRole || adding || !objective.trim() || Boolean(chain?.problems.length) || Boolean(blockedStep)} onclick={() => void execute()}><LumeIcon name="send" size={14} />{actionLoading ? tr("Starting…", "Iniciando…") : finished ? tr("Run again", "Executar novamente") : tr("Run", "Executar")}</button>
           {:else}
             {#if run.recovering}<small>{tr("Waiting for the original agent", "Aguardando o agente original")}</small>{/if}
-            {#if run.status === "waiting_for_approval"}<button class="primary" type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => approveWorkflowHandoff(activeId))}>{tr("Approve handoff", "Aprovar handoff")}</button>
-            {:else if run.status === "ready"}<button class="primary" type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => advanceWorkflowRun(activeId))}>{tr("Run next", "Executar próxima")}</button>
-            {:else if run.status === "paused"}<button class="primary" type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => resumeWorkflowRun(activeId))}>{tr("Resume", "Retomar")}</button>
-            {:else if run.status === "failed"}<button class="primary" type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => retryWorkflowStep(activeId))}>{tr("Retry", "Tentar novamente")}</button><button type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => skipWorkflowStep(activeId))}>{tr("Skip", "Ignorar")}</button>{/if}
-            {#if ["running", "ready", "waiting_for_approval"].includes(run.status)}<button type="button" disabled={actionLoading} onclick={() => void perform(() => pauseWorkflowRun(activeId))}>{tr("Pause", "Pausar")}</button>{/if}
-            <button class="danger" type="button" disabled={actionLoading} onclick={() => void perform(() => cancelWorkflowRun(activeId))}><LumeIcon name="stop" size={13} />{tr("Stop", "Parar")}</button>
+            {#if run.status === "waiting_for_approval"}<button class="primary" type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => backend.approve(activeId))}>{tr("Approve handoff", "Aprovar handoff")}</button>
+            {:else if run.status === "ready"}<button class="primary" type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => backend.advance(activeId))}>{tr("Run next", "Executar próxima")}</button>
+            {:else if run.status === "paused"}<button class="primary" type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => backend.resume(activeId))}>{tr("Resume", "Retomar")}</button>
+            {:else if run.status === "failed"}<button class="primary" type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => backend.retry(activeId))}>{tr("Retry", "Tentar novamente")}</button><button type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => backend.skip(activeId))}>{tr("Skip", "Ignorar")}</button>{/if}
+            {#if ["running", "ready", "waiting_for_approval"].includes(run.status)}<button type="button" disabled={actionLoading} onclick={() => void perform(() => backend.pause(activeId))}>{tr("Pause", "Pausar")}</button>{/if}
+            <button class="danger" type="button" disabled={actionLoading} onclick={() => void perform(() => backend.cancel(activeId))}><LumeIcon name="stop" size={13} />{tr("Stop", "Parar")}</button>
           {/if}
         </div>
       </div>
@@ -1621,6 +1663,16 @@
     .run-actions { margin-left: auto; }
     .workflow-name { width: 95px; }
     .board-navigation { right: 12px; }
+  }
+  /* A phone (Lume Mobile runs this board): the toolbar scrolls across the top, the view controls sit under it,
+     and the step panel slides up from the bottom instead of covering the canvas from the side. */
+  @media (max-width: 560px) {
+    .board-toolbar { top: 8px; right: 8px; left: 8px; max-width: none; overflow-x: auto; scrollbar-width: none; }
+    .board-toolbar::-webkit-scrollbar { display: none; }
+    .board-navigation { top: 62px; right: 8px; }
+    .board-panel { top: auto; right: 0; bottom: 0; left: 0; width: auto; max-height: 72%; border-width: 1px 0 0; border-radius: 22px 22px 0 0; z-index: 8; }
+    .board-run, .board-sim { bottom: 8px; width: calc(100% - 16px); }
+    .board-timeline { padding: 70px 8px 150px; }
   }
   @media (prefers-reduced-motion: reduce) {
     .card-attention, .card-activity.live i, .board-card.working, .live .pipe-core, .trail-item, .trail-item.running .trail-icon { animation: none; }

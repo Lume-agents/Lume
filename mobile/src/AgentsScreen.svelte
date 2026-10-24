@@ -9,7 +9,7 @@
   import type { HubSession } from "$lib/hubProtocol";
   import { sessionName, type MobileClient } from "./client.svelte";
 
-  let { client, onOpenChat } = $props<{ client: MobileClient; onOpenChat: (id: string) => void }>();
+  let { client, onOpenChat }: { client: MobileClient; onOpenChat: (id: string) => void } = $props();
 
   type Filter = "all" | "active" | "attention" | "done";
   let filter = $state<Filter>("all");

@@ -1,5 +1,6 @@
 import type { HubCommand, HubCommandResponse, HubSession, HubSnapshot } from "$lib/hubProtocol";
-import type { PromptDelivery } from "$lib/domain";
+import type { PromptDelivery, WorkflowGroupDefinition, WorkflowRun } from "$lib/domain";
+import type { WorkflowBoardBackend } from "$lib/workflowBoardBackend";
 import { decodeBytes, decryptPayload, encodeBytes, encryptPayload, keyFromSecret, randomBytes, type Envelope } from "./crypto";
 import { isNativeShell, nativePlatform, plugin, realtimePlugin, updaterPlugin, type MonitoringStatus, type RealtimeState } from "./native";
 import { pairingIntentUrl, parsePairingTarget, suggestedDeviceName, type PairingTarget } from "./pairing";
@@ -45,7 +46,8 @@ function storedAppearance(): MobileAppearance {
 export type Phase = "starting" | "pair" | "empty" | "loading" | "app" | "failed";
 export type Device = { id: string; name: string; scopes: string[] };
 export type Banner = { message: string; kind: "info" | "error" | "success"; source: string };
-type CommandInput = HubCommand | { type: "take_control_session"; sessionId: string; prompt: string; attachments: PreparedImage[] };
+// The hub protocol's commands, plus the ones the desktop added for the phone (see protocol.rs).
+type CommandInput = HubCommand | { type: string; [field: string]: unknown };
 
 function compareVersions(left: string | undefined, right: string | undefined) {
   const parts = (value: string | undefined) => String(value || "").split("-")[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
@@ -117,6 +119,8 @@ export class MobileClient {
   private rateLimitRefreshes = new Map<string, number>();
   private manifestUrl: string | null = null;
   private manifestSha: string | null = null;
+  private runListeners = new Set<(run: WorkflowRun) => void>();
+  private runVersions = new Map<string, number>();
 
   constructor() {
     const params = new URLSearchParams(location.hash.slice(1) || location.search);
@@ -373,6 +377,13 @@ export class MobileClient {
     }
     this.tracked = true;
     this.snapshot = snapshot;
+    // The board listens for run changes; on the phone they arrive with each snapshot.
+    for (const record of snapshot.workflowHistory ?? []) {
+      const version = record.run.updatedAt;
+      if ((this.runVersions.get(record.run.id) ?? 0) >= version) continue;
+      this.runVersions.set(record.run.id, version);
+      for (const listener of this.runListeners) listener(record.run);
+    }
     void this.coordinateCompanionUpdates(snapshot);
   }
 
@@ -1063,6 +1074,47 @@ export class MobileClient {
     if (Date.now() - (this.rateLimitRefreshes.get(session.agent) || 0) < 60_000) return;
     this.rateLimitRefreshes.set(session.agent, Date.now());
     try { await this.command({ type: "refresh_rate_limits", agent: session.agent }); } catch { this.rateLimitRefreshes.delete(session.agent); }
+  }
+
+  /** The board's requests, sent through the gateway: the same board as the Workspace runs on the phone. */
+  get workflowBackend(): WorkflowBoardBackend {
+    const data = async <T>(command: CommandInput, refresh = false) => (await this.command(command, { refresh })).data as T;
+    const run = (type: "approve_workflow_handoff" | "advance_workflow" | "pause_workflow" | "resume_workflow" | "retry_workflow_step" | "skip_workflow_step" | "cancel_workflow") =>
+      async (workflowId: string) => {
+        if (!(await this.verify())) throw new Error(this.tr("Device verification was not completed.", "A verificação do aparelho não foi concluída."));
+        return data<WorkflowRun>({ type, workflowId }, true);
+      };
+    return {
+      roleContract: (role) => data({ type: "get_workflow_role_contract", role } as CommandInput),
+      previewContext: (group, connectionId, objective) => data({ type: "preview_workflow_context", group, connectionId, objective } as CommandInput),
+      loadRun: async (workflowId) => (this.snapshot?.workflowHistory ?? [])
+        .filter((record) => record.run.workflowId === workflowId)
+        .sort((left, right) => right.run.updatedAt - left.run.updatedAt)[0]?.run ?? null,
+      startRun: async (group, objective) => {
+        if (!(await this.verify())) throw new Error(this.tr("Device verification was not completed.", "A verificação do aparelho não foi concluída."));
+        await this.command({ type: "save_workflow_group", group } as CommandInput, { refresh: false });
+        return data<WorkflowRun>({ type: "start_workflow", workflowId: group.id, objective }, true);
+      },
+      approve: run("approve_workflow_handoff"),
+      advance: run("advance_workflow"),
+      pause: run("pause_workflow"),
+      resume: run("resume_workflow"),
+      retry: run("retry_workflow_step"),
+      skip: run("skip_workflow_step"),
+      cancel: run("cancel_workflow"),
+      onRunChanged: async (callback) => {
+        this.runListeners.add(callback);
+        return () => this.runListeners.delete(callback);
+      },
+    };
+  }
+
+  async saveWorkflowGroup(group: WorkflowGroupDefinition) {
+    await this.command({ type: "save_workflow_group", group } as CommandInput);
+  }
+
+  async deleteWorkflowGroup(workflowId: string) {
+    await this.command({ type: "delete_workflow_group", workflowId } as CommandInput);
   }
 
   async workflow(type: "approve_workflow_handoff" | "advance_workflow" | "pause_workflow" | "resume_workflow" | "retry_workflow_step" | "skip_workflow_step" | "cancel_workflow", workflowId: string) {

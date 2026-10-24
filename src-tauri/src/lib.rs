@@ -472,7 +472,7 @@ async fn stop_session_environment(
     .map_err(|error| error.to_string())?
 }
 
-fn repository_directory(state: &AppState, session_id: &str) -> Result<String, String> {
+pub(crate) fn repository_directory(state: &AppState, session_id: &str) -> Result<String, String> {
     let session = state.connected_session(session_id)?;
     let kind = match session.agent {
         AgentKind::Codex => Some(IntegrationKind::Codex),
@@ -647,21 +647,26 @@ async fn get_subagent_timeline(
     session_id: String,
     activity_id: String,
 ) -> Result<Vec<SessionActivity>, String> {
-    if session_id.starts_with("omp:") {
-        let (parent_id, child_id) = state.omp_subagent_thread(&session_id, &activity_id)?;
-        return Ok(tauri::async_runtime::spawn_blocking(move || {
-            omp_sessions::load_subagent_timeline(&parent_id, &child_id)
-        })
-        .await
-        .map_err(|error| error.to_string())??);
-    }
-    let (parent_thread_id, child_thread_id) =
-        state.codex_subagent_thread(&session_id, &activity_id)?;
+    let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        codex_sessions::load_subagent_timeline(&parent_thread_id, &child_thread_id)
+        subagent_timeline(&state, &session_id, &activity_id)
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// What a subagent did, read from its own thread (Codex and Oh My Pi keep one per subagent).
+pub(crate) fn subagent_timeline(
+    state: &AppState,
+    session_id: &str,
+    activity_id: &str,
+) -> Result<Vec<SessionActivity>, String> {
+    if session_id.starts_with("omp:") {
+        let (parent_id, child_id) = state.omp_subagent_thread(session_id, activity_id)?;
+        return omp_sessions::load_subagent_timeline(&parent_id, &child_id);
+    }
+    let (parent_thread_id, child_thread_id) = state.codex_subagent_thread(session_id, activity_id)?;
+    codex_sessions::load_subagent_timeline(&parent_thread_id, &child_thread_id)
 }
 
 #[tauri::command]
@@ -1976,7 +1981,7 @@ fn workflow_has_cycle(group: &domain::WorkflowGroupDefinition) -> bool {
         .any(|step| visit(&step.id, &edges, &mut visiting, &mut visited))
 }
 
-fn validate_workflow_groups(preferences: &Preferences) -> Result<(), String> {
+pub(crate) fn validate_workflow_groups(preferences: &Preferences) -> Result<(), String> {
     let settings = &preferences.workflow_settings;
     if !(1..=100).contains(&settings.max_transitions) {
         return Err("Workflow transitions must be between 1 and 100".into());

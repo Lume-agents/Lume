@@ -13,12 +13,14 @@
   import SettingsScreen from "./SettingsScreen.svelte";
   import MobileNav from "./MobileNav.svelte";
   import Banner from "./Banner.svelte";
+  import WorkflowBoard from "$lib/WorkflowBoard.svelte";
 
   const client = new MobileClient();
   type Tab = "agents" | "workflows" | "settings";
 
   let tab = $state<Tab>("agents");
   let chatId = $state<string | null>(null);
+  let boardOpen = $state(false);
   let systemDark = $state(typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)").matches : true);
 
   const dark = $derived(client.appearance.mode === "system" ? systemDark : client.appearance.mode === "dark");
@@ -76,6 +78,7 @@
     const app = plugin<any>("App");
     const back = app?.addListener?.("backButton", () => {
       if (chatId) closeChat();
+      else if (boardOpen) boardOpen = false;
       else if (tab !== "agents") tab = "agents";
       else void app.exitApp?.();
     });
@@ -101,12 +104,28 @@
       {#if tab === "agents"}
         <AgentsScreen {client} onOpenChat={openChat} />
       {:else if tab === "workflows"}
-        <WorkflowsScreen {client} onOpenChat={openChat} />
+        <WorkflowsScreen {client} onOpenChat={openChat} onOpenBoard={() => (boardOpen = true)} />
       {:else}
         <SettingsScreen {client} />
       {/if}
       <MobileNav {client} {tab} onSelect={(next) => (tab = next)} />
     </div>
+    {#if boardOpen}
+      <div class="board-layer" transition:fly={{ y: 30, duration: 220, easing: cubicOut, opacity: 0 }}>
+        <WorkflowBoard
+          sessions={client.sessions}
+          preferences={{ workflowGroups: client.snapshot?.workflowGroups ?? [] } as unknown as Preferences}
+          language={client.language}
+          active={boardOpen && !chatId}
+          backend={client.workflowBackend}
+          onSaveGroup={(group) => client.saveWorkflowGroup(group)}
+          onDeleteGroup={(id) => client.deleteWorkflowGroup(id)}
+          onOpenChat={(session) => openChat(session.id)}
+          onClose={() => (boardOpen = false)}
+          onFinishSidebarDrag={() => {}}
+        />
+      </div>
+    {/if}
     {#if chatId}
       <div class="chat-layer" transition:fly={{ x: 40, duration: 220, easing: cubicOut, opacity: 0 }}>
         <ChatScreen {client} session={chatSession} onBack={closeChat} />
@@ -122,5 +141,6 @@
   .mobile-app { position: fixed; inset: 0; overflow: hidden; }
   .tabs { position: absolute; inset: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; transition: transform 240ms cubic-bezier(.16, 1, .3, 1), filter 240ms ease; }
   .tabs.behind { transform: translateX(-12%); filter: brightness(.82); pointer-events: none; }
+  .board-layer { position: absolute; z-index: 4; inset: 0; padding-top: var(--safe-top); background: var(--workspace-bg); }
   .chat-layer { position: absolute; z-index: 5; inset: 0; background: var(--workspace-bg); box-shadow: -18px 0 40px rgba(0, 0, 0, .28); }
 </style>

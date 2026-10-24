@@ -5,7 +5,7 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import type { MobileClient } from "./client.svelte";
 
-  let { client } = $props<{ client: MobileClient }>();
+  let { client }: { client: MobileClient } = $props();
 
   // svelte-ignore state_referenced_locally
   let manualGateway = $state(client.apiBase || ""); // The form starts from the last gateway, then is the person's.

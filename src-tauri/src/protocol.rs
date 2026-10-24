@@ -14,7 +14,7 @@ use crate::{
     domain::{
         AgentKind, AgentSession, InternalService, PermissionAction, PromptAttachmentInput,
         PromptDelivery, QuestionAnswer, SessionActivity, SessionControlOrigin, SessionSource,
-        SessionStatus, WorkflowGroupDefinition, WorkflowHistoryRecord,
+        SessionStatus, WorkflowGroupDefinition, WorkflowHistoryRecord, WorkflowRole,
     },
     state::{now_millis, visible_subagent_ids},
 };
@@ -1280,6 +1280,55 @@ pub enum HubCommand {
     ReportMobileVersion {
         version: String,
     },
+    /// The agent's slash commands and skills, for the phone's composer.
+    ListSlashCommands {
+        session_id: String,
+    },
+    /// Files and folders in the session's project, for `@` mentions.
+    SearchPaths {
+        session_id: String,
+        query: String,
+    },
+    GetModelSettings {
+        session_id: String,
+    },
+    SetModelSettings {
+        session_id: String,
+        model: String,
+        effort: String,
+    },
+    GetSubagentTimeline {
+        session_id: String,
+        activity_id: String,
+    },
+    GetWorkflowRoleContract {
+        role: WorkflowRole,
+    },
+    PreviewWorkflowContext {
+        group: WorkflowGroupPayload,
+        connection_id: String,
+        objective: String,
+    },
+    /// Creates or replaces a workflow built on the phone's board.
+    SaveWorkflowGroup {
+        group: WorkflowGroupPayload,
+    },
+    DeleteWorkflowGroup {
+        workflow_id: String,
+    },
+    /// The desktop's appearance, so the phone can follow it.
+    GetDesktopAppearance {},
+}
+
+/// A workflow group sent by a client. Commands compare by value; the definition compares by its JSON.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct WorkflowGroupPayload(pub WorkflowGroupDefinition);
+
+impl PartialEq for WorkflowGroupPayload {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(&self.0).ok() == serde_json::to_value(&other.0).ok()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1402,6 +1451,44 @@ impl HubCommandRequest {
             | HubCommand::RetryWorkflowStep { workflow_id }
             | HubCommand::SkipWorkflowStep { workflow_id }
             | HubCommand::CancelWorkflow { workflow_id } => {
+                validate_identifier("workflow_id", workflow_id, 256)?;
+            }
+            HubCommand::ListSlashCommands { session_id }
+            | HubCommand::GetModelSettings { session_id } => {
+                validate_identifier("session_id", session_id, 256)?;
+            }
+            HubCommand::SearchPaths { session_id, query } => {
+                validate_identifier("session_id", session_id, 256)?;
+                if query.len() > 256 {
+                    return Err(ProtocolError::new("query_too_long", "A busca é longa demais"));
+                }
+            }
+            HubCommand::SetModelSettings { session_id, model, effort } => {
+                validate_identifier("session_id", session_id, 256)?;
+                validate_identifier("model", model, 128)?;
+                if effort.len() > 32 {
+                    return Err(ProtocolError::new("effort_invalid", "O esforço informado é inválido"));
+                }
+            }
+            HubCommand::GetSubagentTimeline { session_id, activity_id } => {
+                validate_identifier("session_id", session_id, 256)?;
+                validate_identifier("activity_id", activity_id, 512)?;
+            }
+            HubCommand::GetWorkflowRoleContract { .. } | HubCommand::GetDesktopAppearance {} => {}
+            HubCommand::PreviewWorkflowContext { group, connection_id, objective } => {
+                validate_identifier("workflow_id", &group.0.id, 256)?;
+                validate_identifier("connection_id", connection_id, 256)?;
+                if objective.len() > 16 * 1024 {
+                    return Err(ProtocolError::new("objective_too_long", "O objetivo é longo demais"));
+                }
+            }
+            HubCommand::SaveWorkflowGroup { group } => {
+                validate_identifier("workflow_id", &group.0.id, 256)?;
+                if group.0.steps.len() > 24 || group.0.connections.len() > 48 {
+                    return Err(ProtocolError::new("workflow_too_large", "O workflow tem etapas demais"));
+                }
+            }
+            HubCommand::DeleteWorkflowGroup { workflow_id } => {
                 validate_identifier("workflow_id", workflow_id, 256)?;
             }
             HubCommand::ReportMobileVersion { version } => {
@@ -2530,6 +2617,23 @@ mod tests {
             request.validate().expect_err("inválido").code,
             "prompt_empty"
         );
+    }
+
+    #[test]
+    fn the_phone_can_ask_for_composer_data_and_save_workflows() {
+        for body in [
+            r#"{"requestId":"a","type":"list_slash_commands","sessionId":"codex:thread-1"}"#,
+            r#"{"requestId":"b","type":"search_paths","sessionId":"codex:thread-1","query":"src/li"}"#,
+            r#"{"requestId":"c","type":"set_model_settings","sessionId":"codex:thread-1","model":"gpt-5.5","effort":"high"}"#,
+            r#"{"requestId":"d","type":"get_desktop_appearance"}"#,
+            r#"{"requestId":"e","type":"get_workflow_role_contract","role":"reviewer"}"#,
+            r#"{"requestId":"f","type":"save_workflow_group","group":{"id":"flow","terminalGroupId":"board-flow","steps":[],"connections":[]}}"#,
+        ] {
+            let request: HubCommandRequest = serde_json::from_str(body).expect(body);
+            request.validate().expect(body);
+        }
+        let empty: HubCommandRequest = serde_json::from_str(r#"{"requestId":"g","type":"search_paths","sessionId":"","query":"x"}"#).expect("parses");
+        assert!(empty.validate().is_err());
     }
 
     #[test]

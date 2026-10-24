@@ -3,7 +3,7 @@
   import type { MobileClient } from "./client.svelte";
 
   type Tab = "agents" | "workflows" | "settings";
-  let { client, tab, onSelect } = $props<{ client: MobileClient; tab: Tab; onSelect: (tab: Tab) => void }>();
+  let { client, tab, onSelect }: { client: MobileClient; tab: Tab; onSelect: (tab: Tab) => void } = $props();
 
   const attention = $derived(client.sessions.filter((session) => session.status === "permission_required" || session.pendingQuestion).length);
   // Runs that wait on the person (an approval) or are under way.

@@ -25,7 +25,7 @@
   import { sessionName, type MobileClient } from "./client.svelte";
   import Composer from "./Composer.svelte";
 
-  let { client, session, onBack } = $props<{ client: MobileClient; session: HubSession | null; onBack: () => void }>();
+  let { client, session, onBack }: { client: MobileClient; session: HubSession | null; onBack: () => void } = $props();
 
   const markdownCache = new BoundedRenderCache(64, 5 * 1024 * 1024);
   let feedElement = $state<HTMLElement | null>(null);

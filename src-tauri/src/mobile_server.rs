@@ -1140,6 +1140,7 @@ fn route_core(
                 )
             }
             protocol::HubCommand::RefreshRateLimits { .. } => MobileScope::Monitor,
+            // Running, editing and steering workflows starts agents, as a prompt does.
             protocol::HubCommand::StartWorkflow { .. }
             | protocol::HubCommand::ApproveWorkflowHandoff { .. }
             | protocol::HubCommand::AdvanceWorkflow { .. }
@@ -1147,13 +1148,17 @@ fn route_core(
             | protocol::HubCommand::ResumeWorkflow { .. }
             | protocol::HubCommand::RetryWorkflowStep { .. }
             | protocol::HubCommand::SkipWorkflowStep { .. }
-            | protocol::HubCommand::CancelWorkflow { .. } => {
-                return json_error(
-                    403,
-                    "desktop_only",
-                    "Workflow controls are only available on the desktop",
-                )
-            }
+            | protocol::HubCommand::CancelWorkflow { .. }
+            | protocol::HubCommand::SaveWorkflowGroup { .. }
+            | protocol::HubCommand::DeleteWorkflowGroup { .. } => MobileScope::Prompt,
+            protocol::HubCommand::ListSlashCommands { .. }
+            | protocol::HubCommand::SearchPaths { .. }
+            | protocol::HubCommand::GetModelSettings { .. }
+            | protocol::HubCommand::SetModelSettings { .. } => MobileScope::Prompt,
+            protocol::HubCommand::GetSubagentTimeline { .. }
+            | protocol::HubCommand::GetWorkflowRoleContract { .. }
+            | protocol::HubCommand::PreviewWorkflowContext { .. }
+            | protocol::HubCommand::GetDesktopAppearance {} => MobileScope::Monitor,
             protocol::HubCommand::ReportMobileVersion { .. } => MobileScope::Monitor,
         };
         if !device.scopes.contains(&required_scope) {

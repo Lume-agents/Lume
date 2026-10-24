@@ -1,5 +1,7 @@
 import type { AgentSession, SessionActivity } from "$lib/domain";
 import type { Language } from "$lib/i18n";
+// @ts-expect-error Node runs the same source in the focused alert tests.
+import { isUsageLimitActivity, isUsageLimitText } from "./agentNotices.ts";
 
 export type AgentAlertTone = "info" | "warning" | "error";
 
@@ -39,12 +41,8 @@ function isMcpFailure(activity: SessionActivity) {
   return activity.status === "failed" && /(?:^|\b)mcp(?:\b|\s*[·:])/i.test(`${activity.title} ${activity.detail ?? ""}`);
 }
 
-function isUsageLimitText(text: string) {
-  return /(?:rate|usage|token)[_\s-]+limit|quota|limit[_\s-]+(?:reached|exceeded)|limite\s+(?:de uso|atingido|excedido)/i.test(text);
-}
-
 function isUsageLimitFailure(activity: SessionActivity) {
-  return activity.status === "failed" && isUsageLimitText(`${activity.title} ${activity.detail ?? ""}`);
+  return isUsageLimitActivity(activity);
 }
 
 function failedActivityMessage(session: AgentSession, activity: SessionActivity, language: Language) {
@@ -138,6 +136,7 @@ export function collectAgentAlerts(
     }
 
     for (const activity of session.activities.filter((activity) => activity.kind === "warning").slice(-12)) {
+      if (isUsageLimitActivity(activity)) continue;
       add({
         id: `warning:${session.id}:${activity.id}`,
         message: compact(activity.detail || activity.title, 180),
@@ -149,10 +148,12 @@ export function collectAgentAlerts(
     }
 
     const recentFailures = session.activities
-      .filter((activity) => activity.status === "failed" && now - activity.createdAt <= RECENT_FAILURE_WINDOW)
-      .slice(-3);
+      .filter((activity) => (activity.status === "failed" || isUsageLimitActivity(activity)) && now - activity.createdAt <= RECENT_FAILURE_WINDOW)
+      .slice(-3).reverse();
     for (const activity of recentFailures) {
       const usageFailure = isUsageLimitFailure(activity);
+      if (usageFailure && !usageActive) continue;
+      if (usageFailure && [...alerts.values()].some((alert) => alert.usageInfo?.agent === session.agent && alert.usageInfo.remaining === 0)) continue;
       add({
         id: usageFailure ? `usage:failure:${session.agent}:${session.nativeSessionId ?? session.id}:${activity.id}` : `activity:${session.id}:${activity.id}`,
         message: failedActivityMessage(session, activity, language),
@@ -160,10 +161,15 @@ export function collectAgentAlerts(
         duration: isMcpFailure(activity) || isUsageLimitFailure(activity) ? 0 : 9_000,
         occurredAt: activity.createdAt,
         priority: isUsageLimitFailure(activity) ? 100 : isMcpFailure(activity) ? 95 : 75,
+        ...(usageFailure ? {
+          usage: true,
+          pinned: true,
+          usageInfo: { agent: session.agent, agentLabel: session.agentLabel, windowLabel: tr(language, "current window", "janela atual"), remaining: 0 },
+        } : {}),
       });
     }
 
-    const latestFailure = recentFailures.at(-1);
+    const latestFailure = recentFailures[0];
     if (session.status === "failed" && !latestFailure) {
       add({
         id: `${isUsageLimitText(session.statusLabel) ? "usage:" : ""}session:${session.id}:failed:${session.statusLabel}`,

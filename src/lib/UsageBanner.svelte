@@ -48,15 +48,14 @@
 {/if}
 
 <style>
-  .usage-banner { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 1px; border-bottom: 1px solid var(--workspace-line, rgba(127, 127, 127, .25)); background: var(--workspace-line, rgba(127, 127, 127, .25)); }
-  .usage-row { --tone: #c78d35; position: relative; flex: 1 1 260px; min-width: 0; padding: 7px 12px; display: flex; align-items: center; gap: 9px; overflow: hidden; color: var(--workspace-strong, var(--dropdown-text, inherit)); background: color-mix(in srgb, var(--tone) 11%, var(--workspace-pane, var(--dropdown-bg, transparent))); }
+  .usage-banner { width: min(440px, 100%); min-width: 0; margin: 0 auto 8px; align-self: center; flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; }
+  .usage-row { --tone: #c78d35; position: relative; min-width: 0; padding: 8px 10px; display: flex; align-items: center; gap: 9px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--tone) 28%, var(--workspace-line, transparent)); border-radius: 10px; color: var(--workspace-strong, var(--dropdown-text, inherit)); background: color-mix(in srgb, var(--tone) 8%, var(--workspace-pane, var(--dropdown-bg, transparent))); }
   .usage-row.tone-error { --tone: #c45f5b; }
-  .usage-row::before { position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--tone); content: ""; }
   .usage-row > :global(.lume-icon:last-child) { color: var(--tone); }
   .usage-text { min-width: 0; flex: 1 1 auto; display: grid; gap: 1px; }
   .usage-text strong { font-size: 12px; font-weight: 700; line-height: 1.2; }
   .usage-text small { overflow: hidden; color: var(--workspace-muted, inherit); opacity: .85; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
-  .usage-meter { position: relative; width: 74px; height: 5px; flex: 0 0 auto; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--tone) 22%, transparent); }
+  .usage-meter { position: relative; width: 54px; height: 5px; flex: 0 1 54px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, var(--tone) 22%, transparent); }
   .usage-meter i { position: absolute; inset: 0 auto 0 0; width: max(var(--usage-left), 4%); border-radius: inherit; background: var(--tone); transition: width 360ms cubic-bezier(.16, 1, .3, 1); }
   .usage-close { width: 20px; height: 20px; padding: 0; display: grid; flex: 0 0 auto; place-items: center; border: 0; border-radius: 6px; color: inherit; background: transparent; opacity: .6; }
   .usage-close:hover { opacity: 1; background: color-mix(in srgb, var(--tone) 18%, transparent); }

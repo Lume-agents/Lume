@@ -165,3 +165,18 @@ console.log("content lines tests passed");
   assert.match(fileDiffChunk(detail, "src/b.ts"), /-b/);
   assert.equal(fileDiffChunk(detail, "/work/app/src/c.ts"), null);
 }
+
+// Codex uses both native changes arrays and path-keyed rollout patch payloads.
+for (const detail of [
+  JSON.stringify([{ path: "src/a.ts", diff: "@@ -1 +1 @@\n-oldA\n+newA" }, { path: "src/b.ts", diff: "@@ -1 +1 @@\n-oldB\n+newB" }]),
+  JSON.stringify({ changes: { "src/a.ts": { unified_diff: "@@ -1 +1 @@\n-oldA\n+newA" }, "src/b.ts": { unified_diff: "@@ -1 +1 @@\n-oldB\n+newB" } } }),
+]) {
+  const ownDiff = fileDiffChunk(detail, "/work/app/src/b.ts");
+  assert.match(ownDiff, /newB/);
+  assert.doesNotMatch(ownDiff, /newA/);
+  assert.ok(parseReviewDiff(ownDiff).some((line) => line.kind === "added" && line.content === "newB"));
+  assert.equal(fileDiffChunk(detail, "src/unknown.ts"), null);
+}
+
+const completedPatch = "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch\n\nSuccess. Updated the following files:\nM src/a.ts";
+assert.doesNotMatch(fileDiffChunk(completedPatch, "src/a.ts"), /Success|Updated the following/);

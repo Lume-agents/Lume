@@ -43,7 +43,7 @@ function patchDiffChunks(detail: string) {
   return starts.map((start, index) => detail
     .slice(start, starts[index + 1] ?? detail.length)
     .replace(/^\*\*\* Begin Patch\s*/m, "")
-    .replace(/\s*\*\*\* End Patch\s*$/m, "")
+    .replace(/^\*\*\* End Patch(?:\r?\n|$)[\s\S]*$/m, "")
     .trim());
 }
 
@@ -61,16 +61,16 @@ function structuredDiffChunks(detail: string) {
     return [];
   }
   const chunks: string[] = [];
-  const visit = (candidate: unknown): void => {
+  const visit = (candidate: unknown, keyedPath?: string): void => {
     if (Array.isArray(candidate)) {
-      candidate.forEach(visit);
+      candidate.forEach((item) => visit(item));
       return;
     }
     if (!candidate || typeof candidate !== "object") return;
     const record = candidate as Record<string, unknown>;
-    const path = [record.path, record.filePath, record.filename]
+    const path = [record.path, record.filePath, record.filename, keyedPath]
       .find((item): item is string => typeof item === "string" && item.trim().length > 0);
-    const diff = [record.unifiedDiff, record.diff, record.patch]
+    const diff = [record.unifiedDiff, record.unified_diff, record.diff, record.patch]
       .find((item): item is string => typeof item === "string" && item.trim().length > 0);
     if (path && diff) {
       const normalized = diff.trim();
@@ -79,8 +79,8 @@ function structuredDiffChunks(detail: string) {
         : `*** Update File: ${path}\n${normalized}`);
     }
     for (const [key, nested] of Object.entries(record)) {
-      if (key === "diff" || key === "patch" || key === "unifiedDiff") continue;
-      visit(nested);
+      if (["diff", "patch", "unifiedDiff", "unified_diff"].includes(key)) continue;
+      visit(nested, key);
     }
   };
   visit(value);
@@ -334,5 +334,5 @@ export function fileDiffChunk(detail: string, path: string): string | null {
     const header = (added && added !== "/dev/null" ? added : chunk.match(/^--- (.+)$/m)?.[1]) ?? chunk.match(/^diff --git a\/.+? b\/(.+)$/m)?.[1] ?? chunk.match(/^\*\*\* (?:Update|Add|Delete) File:\s*(.+)$/m)?.[1];
     return header ? sameFile(header) : false;
   });
-  return matching ?? (chunks.length === 1 ? chunks[0] : null);
+  return matching ?? null;
 }

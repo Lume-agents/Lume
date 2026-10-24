@@ -3,6 +3,8 @@ import type { Language } from "$lib/i18n";
 // Node executes this module directly in the focused presentation test; Vite resolves the same source in the app.
 // @ts-expect-error TypeScript's bundler mode disallows the explicit source extension used by Node.
 import { gitActivityInfo, gitEventTitle } from "./gitEvents.ts";
+// @ts-expect-error Node runs the same source in the focused presentation tests.
+import { isUsageLimitActivity } from "./agentNotices.ts";
 
 export type ActivityCategory = "edit" | "git" | "read" | "search" | "test" | "command" | "tool" | "plan" | "skill" | "instruction";
 export type ActivityThinkingState = "working" | "searching" | "solving" | "listening" | "connecting" | "weaving" | "composing" | "breathing" | "shaping";
@@ -98,12 +100,14 @@ export function activityThinkingLabel(state: ActivityThinkingState, language: La
 }
 
 export function isPresentableTraceActivity(activity: SessionActivity): boolean {
+  if (isUsageLimitActivity(activity)) return false;
   if (["prompt", "message", "analysis", "interrupt", "queued_prompt", "codex_queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return !/^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
 }
 
 export function isHiddenAgentActivity(activity: SessionActivity): boolean {
+  if (isUsageLimitActivity(activity)) return true;
   if (["plan", "plan_document", "queued_prompt", "codex_queued_prompt", "warning"].includes(activity.kind)) return true;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return /^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);

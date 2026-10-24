@@ -2,6 +2,7 @@
   import { onMount, tick, untrack } from "svelte";
   import { fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
+  import { sessionContextUsage } from "$lib/contextUsage";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import type { InteractiveQuestion, PendingQuestion, PermissionAction, QuestionAnswer, SessionActivity, SessionResult } from "$lib/domain";
@@ -614,19 +615,15 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let plusMenuOpen = $state(false);
   let plusMenuElement = $state<HTMLElement | null>(null);
   const supportsMcp = $derived(["codex", "claude_code", "opencode"].includes(session.agent) && session.source !== "web");
-  // Claude reports what the conversation held after each prompt; a window above 200k means the 1M model.
-  const contextTokens = $derived(
-    session.agent === "claude_code"
-      ? [...(session.promptTokenUsage ?? [])].reverse().find((usage) => (usage.contextTokens ?? 0) > 0)?.contextTokens ?? 0
-      : 0,
-  );
-  const contextWindow = $derived(contextTokens > 200_000 ? 1_000_000 : 200_000);
-  const contextPercent = $derived(contextTokens ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0);
-  const contextLevel = $derived(contextPercent >= 92 ? "danger" : contextPercent >= 75 ? "warn" : "ok");
+  const contextUsage = $derived(sessionContextUsage(session));
+  const contextTokens = $derived(contextUsage?.tokens ?? 0);
+  const contextWindow = $derived(contextUsage?.window ?? 0);
+  const contextPercent = $derived(contextUsage?.percent ?? 0);
+  const contextLevel = $derived(contextUsage?.level ?? "ok");
   function compactTokens(value: number) {
     return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value >= 1_000 ? `${Math.round(value / 1_000)}k` : String(value);
   }
-  const contextLabel = $derived(contextTokens
+  const contextLabel = $derived(contextUsage
     ? tr(`Context: ${compactTokens(contextTokens)} of ${compactTokens(contextWindow)} (${contextPercent}%)`, `Contexto: ${compactTokens(contextTokens)} de ${compactTokens(contextWindow)} (${contextPercent}%)`)
     : "");
   $effect(() => {
@@ -2503,7 +2500,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         {/if}
       </div>
   </header>
-  <UsageBanner alerts={usageNotices} {language} onDismiss={archiveAgentAlert} />
 
   {#if subagents.length}
     <SubagentPortals {session} children={subagents} {language} />
@@ -2721,7 +2717,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   </div>
 
   {#if !followingTail}
-    <button class="latest-button" type="button" onclick={scrollToLatest} aria-label={tr("Scroll to latest", "Ir para o final")} title={tr("Scroll to latest", "Ir para o final")}>
+    <button class="latest-button" type="button" onclick={scrollToLatest} aria-label={tr("Scroll to latest", "Ir para o final")} title={tr("Scroll to latest", "Ir para o final")} transition:fly={{ y: 10, duration: motionDuration(180), easing: cubicOut }}>
       <LumeIcon name="arrow-down" size={16} />
     </button>
   {/if}
@@ -2872,6 +2868,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     {#if composerInIntroPosition}
       <div class="composer-welcome"><LumeMascot status="idle" awake size={45} /><strong>{tr("Hello. What shall we work on?", "Olá. No que vamos trabalhar?")}</strong></div>
     {/if}
+    <UsageBanner alerts={usageNotices} {language} onDismiss={archiveAgentAlert} />
     {#if queuedPrompts.length}
       <div class="queue-tray">
         <span><i>{queuedPrompts.length}</i><b>{nextQueuedPrompt?.kind === "codex_queued_prompt" ? tr("Codex CLI · read only", "CLI do Codex · somente leitura") : tr("Queued", "Na fila")}</b><small>{nextQueuedPrompt?.detail || nextQueuedPrompt?.title}</small></span>
@@ -2986,7 +2983,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             </div>
           {/if}
         </div>
-        {#if contextTokens}
+        {#if contextUsage}
           <span class="context-meter {contextLevel}" role="img" aria-label={contextLabel} title={contextLabel} style:--context={contextPercent}>
             <svg viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="7.5" /><circle class="fill" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="{contextPercent} 100" /></svg>
             <b>{contextPercent}%</b>
@@ -3392,7 +3389,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .controls-loading i { width: 12px; height: 12px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 650ms linear infinite; }
   .controls-saving { margin: 10px 0 0; color: var(--workspace-muted); font-size: 8px; }
   .agent-controls-popover input:disabled { opacity: .45; cursor: default; }
-  .conversation-shell { position: relative; min-width: 0; min-height: 0; display: flex; flex: 1 1 auto; overflow: hidden; }
+  /* Event popovers stay above messages, never above the sibling composer or header. */
+  .conversation-shell { position: relative; z-index: 0; isolation: isolate; min-width: 0; min-height: 0; display: flex; flex: 1 1 auto; overflow: hidden; }
   .conversation { --chat-edge-gutter: clamp(28px, 5cqw, 54px); min-width: 0; min-height: 0; width: 100%; padding: 25px var(--chat-edge-gutter) calc(26px + var(--composer-overlap, 0px)); display: flex; flex-direction: column-reverse; flex: 1 1 auto; overflow: auto; overflow-anchor: none; overscroll-behavior: none; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   .conversation-content { width: 100%; max-width: 1040px; min-width: 0; margin-inline: auto; display: flex; flex-direction: column; gap: 15px; flex: 1 0 auto; }
   .conversation-shell.under-composer .conversation { background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--workspace-pane) 13%, transparent) 30%, color-mix(in srgb, var(--workspace-pane) 69%, transparent) 60%, color-mix(in srgb, var(--workspace-pane) 74%, transparent) 64%) right bottom / 9px calc(var(--composer-overlap) + 34px) no-repeat; }
@@ -3498,7 +3496,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .agent-typing { width: fit-content; min-height: 46px; padding: 0 3px; display: flex; align-items: center; gap: 10px; color: #4e98ca; }
   .agent-typing .typing-label { color: transparent; background: linear-gradient(90deg, #67837a 10%, #5aa1ce 44%, #a3d2ef 53%, #5aa1ce 62%, #67837a 90%); background-size: 240% 100%; background-clip: text; font-size: 12px; font-weight: 720; letter-spacing: -.01em; animation: thinking-label-shimmer 1.75s linear infinite; }
   .typing-elapsed { padding-left: 9px; border-left: 1px solid var(--workspace-line); color: var(--workspace-muted); font-size: 10px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .latest-button { position: absolute; right: 18px; bottom: calc(30px + var(--composer-overlap, 0px)); z-index: 3; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 5px 16px rgba(17, 35, 27, .09); cursor: pointer; animation: latest-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
+  .latest-button { position: absolute; right: 18px; bottom: calc(30px + var(--composer-overlap, 0px)); z-index: 3; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 5px 16px rgba(17, 35, 27, .09); cursor: pointer; }
   .latest-button:hover { transform: translateY(-1px); }
   .environment-dock { position: absolute; left: 18px; z-index: 4; }
   .session-pane.has-environments .conversation { padding-bottom: calc(66px + var(--composer-overlap, 0px)); }
@@ -3727,7 +3725,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer button:hover:not(:disabled) :global(.send-plane-icon) { transform: translate(1px, -1px); }.composer button :global(.send-plane-icon) { transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .send-spinner { width: 13px; height: 13px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 650ms linear infinite; }
   @keyframes pane-arrive { from { opacity: .4; transform: translateY(5px); } }
-  @keyframes latest-arrive { from { opacity: 0; transform: translateY(5px); } }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes plane-takeoff { 0% { opacity: 1; transform: translate(0, 0) rotate(0); } 20% { opacity: 1; transform: translate(-2px, 2px) rotate(-5deg); } 68% { opacity: 1; transform: translate(12px, -12px) rotate(3deg); } 100% { opacity: 0; transform: translate(26px, -26px) rotate(7deg); } }
   @keyframes status-pulse { 0%, 45% { box-shadow: 0 0 0 0 rgba(78, 152, 202, .28); } 80%, 100% { box-shadow: 0 0 0 4px rgba(78, 152, 202, 0); } }

@@ -23,10 +23,17 @@ export function cleanPromptTransport(value?: string): string {
 
 const syntheticPromptPrefixes = ["<task-notification>", "<system-reminder>", "<command-", "<local-command-"];
 
-/** Claude Code records its own notices (a finished background command, a reminder) as user messages. */
+/** Providers also record notices and injected project/environment context with the user role. */
 export function isSyntheticPromptText(value?: string): boolean {
-  const text = String(value ?? "").trimStart();
-  return syntheticPromptPrefixes.some((prefix) => text.startsWith(prefix));
+  const text = String(value ?? "").trim();
+  if (syntheticPromptPrefixes.some((prefix) => text.startsWith(prefix))) return true;
+  const environment = (content: string) => content.startsWith("<environment_context>") && content.endsWith("</environment_context>");
+  if (environment(text)) return true;
+  if (!/^# AGENTS\.md instructions(?: for [^\n]+)?\r?\n\s*<INSTRUCTIONS>/.test(text)) return false;
+  const end = text.indexOf("</INSTRUCTIONS>");
+  if (end < 0) return false;
+  const remainder = text.slice(end + "</INSTRUCTIONS>".length).trim();
+  return !remainder || environment(remainder);
 }
 
 /** Lume stores a copy of each attachment as `<millis>-<index>-<name>`; the name it keeps for the copy. */

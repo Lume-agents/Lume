@@ -72,6 +72,8 @@ function mergeAttachments(target: SessionActivity, source: SessionActivity) {
 
 function distinctCodexMessageItems(left: SessionActivity, right: SessionActivity): boolean {
   if (left.id === right.id) return false;
+  // The bridge's completion summary repeats the native item; it is not another item ID.
+  if ([left.id, right.id].some((id) => id.startsWith("codex:") && id.split(":")[2] === "response")) return false;
   if (left.id.startsWith("codex-rollout:") && right.id.startsWith("codex-rollout:")) return true;
   if (left.id.startsWith("codex:") && right.id.startsWith("codex:")) {
     // Legacy and turn-qualified IDs can refer to the same native item.
@@ -86,7 +88,10 @@ export function buildConversationEntries(
   activityChanges: (activity: SessionActivity) => FileChangeSummary[],
 ): ConversationEntry[] {
   let sequence = 0;
-  const sortedActivities = [...activities].sort((left, right) => left.createdAt - right.createdAt);
+  // Exclude transport context before calculating prompt boundaries as well as before rendering.
+  const sortedActivities = activities
+    .filter((activity) => activity.kind !== "prompt" || !isSyntheticPromptText(activity.detail))
+    .sort((left, right) => left.createdAt - right.createdAt);
   const supersededNotices = supersededNoticeIds(sortedActivities);
   const uniquePrompts: SessionActivity[] = [];
   let messageSinceLastPrompt = false;
@@ -129,7 +134,6 @@ export function buildConversationEntries(
   const entries: ConversationEntry[] = [];
   for (const activity of sortedActivities) {
     if (["queued_prompt", "codex_queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
-    if (activity.kind === "prompt" && isSyntheticPromptText(activity.detail)) continue;
     if (activity.kind === "message" && (isResumeFiller(activity.detail) || supersededNotices.has(activity.id))) continue;
     if (activity.kind === "prompt") {
       let duplicateIndex = -1;

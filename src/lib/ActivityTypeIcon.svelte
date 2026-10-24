@@ -18,14 +18,13 @@
     <path d="m8 12 2.5 2.5 5.5-5.5" />
   {:else if category === "edit"}
     <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 16l5.7-5.7 2 2L11 18H9z" />
-  {:else if category === "read"}
-    <path d="M12 5C9.5 3.5 7 3.5 4 4v14c3-.5 5.5-.5 8 1 2.5-1.5 5-1.5 8-1V4c-3-.5-5.5-.5-8 1ZM12 5v14" />
+  {:else if category === "read" || category === "analysis"}
+    <path d="M8 16.5a4.5 4.5 0 0 1-3.6-7.2A4.5 4.5 0 0 1 11.8 5a4.5 4.5 0 0 1 7.6 4.3A4.5 4.5 0 0 1 16 16.5Z" />
+    <circle cx="5.5" cy="19" r="1.1" />
+    <circle cx="2.8" cy="21.5" r=".6" fill="currentColor" stroke="none" />
   {:else if category === "search"}
     <circle cx="10.5" cy="10.5" r="5.5" />
     <path d="m15 15 4.5 4.5" />
-  {:else if category === "analysis"}
-    <path d="M7 7.5a6.5 6.5 0 0 1 10 0M6 13a6 6 0 0 0 12 0M9 19h6" />
-    <circle cx="12" cy="10" r="2" />
   {:else if category === "git"}
     <path d="M6 3v12" />
     <circle cx="18" cy="6" r="2.6" />
@@ -34,9 +33,7 @@
   {:else if category === "plan"}
     <path d="M5 3.5h14v17H5zM8 8h8M8 12h8M8 16h5" />
   {:else}
-    <rect x="1.8" y="14.6" width="10" height="5" rx="2.5" transform="rotate(-45 6.8 17.1)" />
-    <path d="m9.2 11.2 3.6 3.6M11 13l6.4-6.4" />
-    <path d="m17 6.4 2.7-2.7.6.6-2.7 2.7z" fill="currentColor" stroke-width="1" />
+    <path d="M14.2 3.8a5.5 5.5 0 0 0-6.5 7.6l-4.1 4.1a2.8 2.8 0 0 0 4 4l4.1-4.1a5.5 5.5 0 0 0 7.6-6.5l-3.6 3.6-4.2-4.2Z" />
   {/if}
 </svg>
 

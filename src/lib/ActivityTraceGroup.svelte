@@ -42,11 +42,14 @@
   const visibleRuns: ActivityRun[] = $derived(plain
     ? groupConsecutiveTraceActivities(visibleActivities)
     : visibleActivities.map((activity: SessionActivity) => ({ id: activity.id, category: activity.kind === "analysis" ? "analysis" : activityCategory(activity), activities: [activity] })));
+  const hasTimeline = $derived(visibleRuns.length > 1
+    || (plain && visibleRuns.some((run) => activityRunFiles(run).length > 0)));
   let expanded = $state(true);
   let expandedRuns = $state<string[]>([]);
   let collapsedFileRuns = $state<string[]>([]);
   let selectedFileKey = $state("");
   let fileCardAbove = $state(false);
+  let fileCardMaxHeight = $state(360);
   let initialized = false;
   let wasActive = false;
 
@@ -104,11 +107,17 @@
       selectedFileKey = "";
       return;
     }
-    // Near the bottom of the chat the card would sit under the composer: it opens upward instead.
-    const trigger = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    const chat = (event.currentTarget as HTMLElement).closest(".conversation")?.getBoundingClientRect();
-    const bottom = (chat?.bottom ?? window.innerHeight) - 120;
-    fileCardAbove = trigger.bottom + 380 > bottom && trigger.top - 380 > (chat?.top ?? 0);
+    const trigger = event.currentTarget as HTMLElement;
+    const anchor = (trigger.closest(".file-node") ?? trigger).getBoundingClientRect();
+    const chat = trigger.closest(".conversation")?.getBoundingClientRect();
+    const composer = trigger.closest(".session-pane")?.querySelector(".composer")?.getBoundingClientRect();
+    // Use the actual visible chat, including a resized composer or its usage banner.
+    const top = (chat?.top ?? 0) + 8;
+    const bottom = Math.min(chat?.bottom ?? window.innerHeight, composer?.top ?? window.innerHeight) - 8;
+    const below = Math.max(0, bottom - anchor.bottom - 3);
+    const above = Math.max(0, Math.min(anchor.top, bottom) - top - 3);
+    fileCardAbove = below < 360 && above > below;
+    fileCardMaxHeight = Math.min(360, fileCardAbove ? above : below);
     selectedFileKey = key;
   }
 
@@ -131,7 +140,7 @@
 
 <svelte:window onpointerdown={closeFileCard} onkeydown={(event) => { if (event.key === "Escape" && selectedFileKey) selectedFileKey = ""; }} />
 
-<section class:active={isWorking} class:open={expanded} class:plain class="activity-cluster">
+<section class:active={isWorking} class:open={expanded} class:plain class:has-timeline={hasTimeline} class="activity-cluster">
   <button
     class="cluster-summary"
     type="button"
@@ -201,7 +210,7 @@
                         {#if card.added || card.removed}<span class="file-node-stats"><b class="added">+{card.added}</b><b class="removed">−{card.removed}</b></span>{/if}
                       </button>
                       {#if opens && selectedFileKey === fileKey}
-                        <div class:above={fileCardAbove} class="file-card" role="dialog" aria-label={path} in:fly={{ y: -4, duration: motionDuration(150), easing: cubicOut }} out:fade={{ duration: motionDuration(90) }}>
+                        <div class:above={fileCardAbove} class="file-card" style:--file-card-max-height={`${fileCardMaxHeight}px`} role="dialog" aria-label={path} in:fly={{ y: -4, duration: motionDuration(150), easing: cubicOut }} out:fade={{ duration: motionDuration(90) }}>
                           <header>
                             <FileTypeIcon {path} />
                             <strong title={path}>{shownPath}</strong>
@@ -349,12 +358,12 @@
 
 <style>
   svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.55; stroke-linecap: round; stroke-linejoin: round; }
-  .activity-cluster { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; overflow: hidden; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .18)); border-radius: 10px; background: color-mix(in srgb, var(--workspace-subtle, #eef4f0) 62%, transparent); transition: border-color 80ms ease, background 80ms ease; }
+  .activity-cluster { --activity-rail-x: 18px; --activity-rail-color: color-mix(in srgb, var(--workspace-accent, #428066) 23%, transparent); box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; overflow: hidden; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .18)); border-radius: 10px; background: color-mix(in srgb, var(--workspace-subtle, #eef4f0) 62%, transparent); transition: border-color 80ms ease, background 80ms ease; }
   .activity-cluster.active { border-color: color-mix(in srgb, #4e91bf 24%, transparent); }
   .activity-cluster.plain, .activity-cluster.plain.active { border: 0; border-radius: 0; background: transparent; }
   .activity-cluster.plain .cluster-summary { padding-inline: 6px; border-radius: 7px; background: transparent; }
   .activity-cluster.plain .cluster-mark, .activity-cluster.plain .cluster-summary > small { background: transparent; }
-  .activity-cluster.plain .activity-list { padding-left: 13px; }
+  .activity-cluster.plain { --activity-rail-x: 16px; }
   .activity-cluster.plain .activity-row pre { border: 0; border-radius: 0; background: transparent; }
   .cluster-summary { width: 100%; min-height: var(--activity-summary-height, 39px); padding: 6px 8px; display: flex; align-items: center; gap: 8px; border: 0; color: var(--workspace-muted, #65776e); background: transparent; cursor: pointer; text-align: left; }
   .activity-row > summary::-webkit-details-marker { display: none; }
@@ -366,11 +375,19 @@
   .cluster-summary > small { min-width: 17px; height: 17px; padding: 0 4px; display: grid; place-items: center; border-radius: 9px; color: #778980; background: rgba(76, 105, 91, .07); font: 700 var(--chat-tiny-font-size, 7px) var(--lume-font-ui, Inter, sans-serif); }
   .cluster-chevron, .row-chevron { flex: 0 0 auto; color: #89968f; transition: transform 140ms ease; }
   .activity-cluster.open .cluster-chevron, .activity-row[open] > summary .row-chevron, .grouped-row.open .row-chevron { transform: rotate(180deg); }
-  .activity-list { min-height: 0; height: auto; padding: 2px 9px 8px 21px; display: flex; flex-direction: column; align-items: stretch; overflow: visible; }
+  .activity-list { position: relative; min-height: 0; height: auto; padding: 2px 9px 8px var(--activity-rail-x); display: flex; flex-direction: column; align-items: stretch; overflow: visible; }
+  .has-timeline .activity-list::before { position: absolute; left: var(--activity-rail-x); top: calc((18px - var(--activity-summary-height, 39px)) / 2); width: 1px; height: calc((var(--activity-summary-height, 39px) - 18px) / 2 + 2px); background: var(--activity-rail-color); content: ""; pointer-events: none; }
   .load-earlier-activities { min-height: 27px; margin: 2px 4px 3px 0; border: 0; border-bottom: 1px solid rgba(75, 114, 94, .1); color: #778a80; background: transparent; font: 700 var(--chat-tiny-font-size, 7px) var(--lume-font-ui, Inter, sans-serif); cursor: pointer; text-align: left; }
   .load-earlier-activities:hover { color: #3f7f61; }
-  .activity-row { position: relative; min-width: 0; min-height: var(--activity-row-height, 34px); height: auto; display: block; flex: 0 0 auto; overflow: visible; border-left: 1px solid color-mix(in srgb, var(--workspace-accent, #428066) 23%, transparent); }
-  .activity-row:last-child { border-left-color: transparent; }
+  .activity-row { position: relative; min-width: 0; min-height: var(--activity-row-height, 34px); height: auto; display: block; flex: 0 0 auto; overflow: visible; }
+  .has-timeline .activity-row::before, .has-timeline .load-earlier-activities::before { position: absolute; top: 0; bottom: 0; left: 0; width: 1px; background: var(--activity-rail-color); content: ""; pointer-events: none; }
+  .has-timeline .activity-row:last-child::before { bottom: auto; height: calc(var(--activity-row-height, 34px) / 2); }
+  /* Expanded file rows own their rail segments, so the endpoint follows the final file's height. */
+  .has-timeline .file-tree-row:has(> .file-tree)::before { bottom: auto; height: calc(var(--activity-row-height, 34px) / 2); }
+  .has-timeline .file-tree-row:has(> .file-tree) > .event-trigger { position: relative; }
+  .has-timeline .file-tree-row:has(> .file-tree) > .event-trigger::after { position: absolute; top: calc(var(--activity-row-height, 34px) / 2); bottom: 0; left: 0; width: 1px; background: var(--activity-rail-color); content: ""; pointer-events: none; }
+  .has-timeline .load-earlier-activities::before { top: -2px; bottom: -3px; }
+  .load-earlier-activities { position: relative; padding-left: 16px; }
   .activity-row > summary, .reasoning-summary, .event-trigger { box-sizing: border-box; width: 100%; min-width: 0; min-height: var(--activity-row-height, 34px); height: auto; padding: 4px 2px 4px 16px; display: flex; align-items: center; gap: 8px; color: var(--workspace-muted, #61736a); list-style: none; }
   .activity-row > summary, .event-trigger { cursor: pointer; }
   .event-trigger { border: 0; background: transparent; text-align: left; }
@@ -396,6 +413,8 @@
   .file-tree-files { min-width: 0; display: grid; gap: 1px; }
   .file-node { position: relative; min-width: 0; padding-left: 10px; color: var(--workspace-muted, #61736a); animation: file-node-arrive 280ms cubic-bezier(.16, 1, .3, 1) both; animation-delay: var(--file-delay); }
   .file-node::before { position: absolute; top: 0; left: -17px; width: 20px; height: 50%; border-bottom: 1px solid color-mix(in srgb, var(--workspace-accent, #428066) 23%, transparent); border-left: 1px solid color-mix(in srgb, var(--workspace-accent, #428066) 23%, transparent); border-bottom-left-radius: 6px; content: ""; }
+  .has-timeline .file-node:not(:last-child)::after, .has-timeline .file-tree-row:not(:last-child) .file-node:last-child::after { position: absolute; top: calc(50% - 6px); bottom: -1px; left: -17px; width: 1px; background: var(--activity-rail-color); content: ""; pointer-events: none; }
+  .has-timeline .file-tree-row:not(:last-child) .file-node:last-child::after { bottom: -7px; }
   .file-node-trigger { min-width: 0; min-height: 26px; padding: 3px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 6px; color: inherit; background: transparent; text-align: left; cursor: pointer; }
   .file-node-trigger:hover:not(:disabled), .file-node-trigger:focus-visible { color: var(--workspace-accent, #428066); background: var(--workspace-subtle, #eef4f0); }
   .file-node-trigger:disabled { cursor: default; }
@@ -404,7 +423,7 @@
   .activity-cluster:has(.file-card) { position: relative; z-index: 8; overflow: visible; }
   .activity-row:has(.file-card) { position: relative; z-index: 8; }
   /* Floats over the conversation under the file it belongs to, so opening it does not push the chat around. */
-  .file-card { position: absolute; z-index: 6; top: calc(100% + 3px); left: 8px; max-height: 360px; width: min(560px, calc(100cqw - 90px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .14)); border-radius: 11px; color: var(--workspace-text, #4f6258); background: linear-gradient(var(--workspace-raised, #fff), var(--workspace-raised, #fff)), var(--workspace-bg, #fff); box-shadow: 0 14px 36px rgba(18, 36, 27, .18), 0 2px 6px rgba(18, 36, 27, .08); }
+  .file-card { position: absolute; z-index: 6; top: calc(100% + 3px); left: 8px; max-height: var(--file-card-max-height, 360px); width: min(560px, calc(100cqw - 90px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--workspace-line, rgba(65, 94, 80, .14)); border-radius: 11px; color: var(--workspace-text, #4f6258); background: linear-gradient(var(--workspace-raised, #fff), var(--workspace-raised, #fff)), var(--workspace-bg, #fff); box-shadow: 0 14px 36px rgba(18, 36, 27, .18), 0 2px 6px rgba(18, 36, 27, .08); }
   .file-card.above { top: auto; bottom: calc(100% + 3px); }
   .file-card header { min-width: 0; padding: 7px 7px 7px 10px; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--workspace-line, rgba(65, 94, 80, .12)); }
   .file-card header strong { min-width: 0; flex: 1; overflow: hidden; color: var(--workspace-strong, #52665c); font: 700 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.3 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); text-overflow: ellipsis; white-space: nowrap; }

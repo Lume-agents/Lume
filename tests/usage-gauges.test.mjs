@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { sessionContextUsage } from "../src/lib/contextUsage.ts";
 import { expectedUsageLimitCount, rateWindowLabel, stacksUsageGauges, usageGaugeGroups } from "../src/lib/usageGauges.ts";
 
 const reset = Date.UTC(2026, 9, 9, 17, 30);
@@ -59,3 +60,20 @@ assert.equal(stacksUsageGauges("claude_code", 2), false);
 assert.equal(stacksUsageGauges("claude_code", 3), true);
 
 console.log("usage gauges ok");
+
+const codexContext = (samples) => sessionContextUsage({ agent: "codex", promptTokenUsage: samples });
+assert.deepEqual(codexContext([{ totalTokens: 1_000_000, contextTokens: 64_000, contextWindow: 128_000 }]),
+  { tokens: 64_000, window: 128_000, percent: 50, level: "ok" });
+assert.equal(codexContext([{ contextTokens: 50_000 }]), null, "Codex's limit must not be guessed");
+assert.equal(codexContext([{ contextWindow: 128_000 }]), null, "an unknown footprint is not shown as zero");
+assert.equal(codexContext([{ contextTokens: 95_000, contextWindow: 100_000 }]).level, "danger");
+assert.equal(codexContext([{ contextTokens: 80_000, contextWindow: 100_000 }]).level, "warn");
+assert.equal(codexContext([
+  { contextTokens: 95_000, contextWindow: 100_000 },
+  { contextTokens: 0, contextWindow: 100_000 },
+]).percent, 0, "after compaction, a zero footprint is not replaced by the old full context");
+assert.equal(sessionContextUsage({ agent: "claude_code", promptTokenUsage: [{ contextTokens: 100_000 }] }).percent, 50);
+assert.equal(sessionContextUsage({ agent: "claude_code", promptTokenUsage: [{ contextTokens: 500_000 }] }).window, 1_000_000);
+assert.equal(codexContext([{ contextTokens: 150_000, contextWindow: 100_000 }]).percent, 100);
+assert.equal(sessionContextUsage(null), null);
+console.log("provider context usage ok");

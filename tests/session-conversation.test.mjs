@@ -28,6 +28,20 @@ const session = (overrides = {}) => ({
 const entriesFor = (activities, overrides = {}, changes = () => []) =>
   buildConversationEntries(session(overrides), activities, changes);
 
+test("Claude limit notices never become tools or synthetic replies, even without a prompt", () => {
+  for (const notice of [
+    activity("claude-error", "error", 10, "You've hit your session limit", { status: "failed", title: "Erro do Claude" }),
+    activity("legacy-claude-limit", "tool", 10, "", { title: "You've hit your session limit" }),
+    activity("claude-api-notice", "message", 10, "You’ve hit your session limit"),
+  ]) {
+    assert.deepEqual(buildConversationFeed(entriesFor([notice], { agent: "claude_code" })), []);
+  }
+  const explained = activity("explanation", "message", 10, "The CLI says ‘You've hit your session limit’. Wait for the reset.");
+  assert.equal(buildConversationFeed(entriesFor([explained])).length, 1, "ordinary discussion of a usage error remains visible");
+  const failedCommand = activity("failed-test", "command", 10, "Assertion failed: expected 'You've hit your session limit'", { title: "npm run test", status: "failed" });
+  assert.equal(buildConversationFeed(entriesFor([failedCommand]))[0].kind, "trace", "real tool output mentioning a limit remains in the timeline");
+});
+
 test("messages interrupt tool groups in the provider's timeline", () => {
   const activities = [
     activity("prompt", "prompt", 10),
@@ -217,6 +231,44 @@ test("Claude's own notices are not shown as something the user sent", () => {
     activity("answer", "message", 30, "Os testes passaram"),
   ]);
   assert.deepEqual(entries.map((entry) => entry.activity.id), ["typed", "answer"]);
+});
+
+test("a new Lume Codex chat hides injected context and reconciles native completion echoes", () => {
+  const context = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nProject rules\n</INSTRUCTIONS>\n<environment_context>\n<cwd>/work/lume</cwd>\n</environment_context>";
+  const activities = [
+    activity("local:chat:1000", "prompt", 1_000, "oi"),
+    activity("codex-rollout:chat:context", "prompt", 3_113, context),
+    activity("codex:chat:prompt:3244", "prompt", 3_244, "oi"),
+    activity("codex:chat:turn:t:item:msg-1", "message", 5_160, "Oi! O que vamos fazer hoje?"),
+    activity("codex:chat:response:5478", "message", 5_478, "Oi! O que vamos fazer hoje?"),
+  ];
+  const original = structuredClone(activities);
+  const entries = entriesFor(activities);
+  assert.deepEqual(entries.map((entry) => [entry.activity.kind, entry.activity.detail]), [
+    ["prompt", "oi"],
+    ["message", "Oi! O que vamos fazer hoje?"],
+  ]);
+  assert.deepEqual(activities, original, "rendering saved history must not mutate it");
+
+  const nextTurn = entriesFor([
+    ...activities,
+    activity("local:chat:10000", "prompt", 10_000, "oi"),
+    activity("codex:chat:turn:t2:item:msg-2", "message", 11_000, "Oi! O que vamos fazer hoje?"),
+    activity("codex:chat:response:11400", "message", 11_400, "Oi! O que vamos fazer hoje?"),
+  ]);
+  assert.deepEqual(nextTurn.map((entry) => entry.activity.kind), ["prompt", "message", "prompt", "message"]);
+});
+
+test("injected environment records do not hide real requests about project instructions", () => {
+  const environment = "<environment_context>\n<cwd>/work/lume</cwd>\n</environment_context>";
+  const rules = "# AGENTS.md instructions for /work/lume\n\n<INSTRUCTIONS>\nRules\n</INSTRUCTIONS>";
+  const entries = entriesFor([
+    activity("environment", "prompt", 10, environment),
+    activity("rules", "prompt", 20, rules),
+    activity("question", "prompt", 30, "Explique o AGENTS.md e <environment_context>."),
+    activity("pasted", "prompt", 40, `${rules}\n\nExplique essas instruções.`),
+  ]);
+  assert.deepEqual(entries.map((entry) => entry.activity.id), ["question", "pasted"]);
 });
 
 test("the resume filler the CLI writes does not split a prompt from its own copy", () => {

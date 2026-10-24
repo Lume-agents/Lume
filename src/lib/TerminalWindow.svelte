@@ -2,6 +2,7 @@
   import { onMount, tick, untrack } from "svelte";
   import { fade, fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
+  import { sessionContextUsage } from "$lib/contextUsage";
   import { emit, emitTo, listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -1063,19 +1064,15 @@
     return ({ connected: tr("Connected", "Conectado"), needs_auth: tr("Needs sign-in", "Precisa de login"), failed: tr("Failed", "Falhou"), disabled: tr("Disabled", "Desativado") } as Record<string, string>)[status] ?? tr("Not checked", "Não verificado");
   }
 
-  // Context held by a Claude conversation, as of its last prompt; a window above 200k means the 1M model.
-  const contextTokens = $derived(
-    session?.agent === "claude_code"
-      ? [...(session.promptTokenUsage ?? [])].reverse().find((usage) => (usage.contextTokens ?? 0) > 0)?.contextTokens ?? 0
-      : 0,
-  );
-  const contextWindow = $derived(contextTokens > 200_000 ? 1_000_000 : 200_000);
-  const contextPercent = $derived(contextTokens ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0);
-  const contextLevel = $derived(contextPercent >= 92 ? "danger" : contextPercent >= 75 ? "warn" : "ok");
+  const contextUsage = $derived(sessionContextUsage(session));
+  const contextTokens = $derived(contextUsage?.tokens ?? 0);
+  const contextWindow = $derived(contextUsage?.window ?? 0);
+  const contextPercent = $derived(contextUsage?.percent ?? 0);
+  const contextLevel = $derived(contextUsage?.level ?? "ok");
   function compactTokens(value: number) {
     return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value >= 1_000 ? `${Math.round(value / 1_000)}k` : String(value);
   }
-  const contextLabel = $derived(contextTokens
+  const contextLabel = $derived(contextUsage
     ? tr(`Context: ${compactTokens(contextTokens)} of ${compactTokens(contextWindow)} (${contextPercent}%)`, `Contexto: ${compactTokens(contextTokens)} de ${compactTokens(contextWindow)} (${contextPercent}%)`)
     : "");
   const canCompact = $derived(Boolean(
@@ -3489,7 +3486,6 @@
           {/if}
         </span>
       </header>
-      <UsageBanner alerts={usageNotices} {language} {reducedMotion} onDismiss={dismissAgentAlert} />
 
       {#if activePlan || goal}
         <aside class:collapsed={!workTrayExpanded} class="work-tray" aria-label={tr("Agent work status", "Status do trabalho do agente")} transition:slide={{ duration: 160 }}>
@@ -4289,6 +4285,7 @@
         </div>
       {/if}
 
+      <UsageBanner alerts={usageNotices} {language} {reducedMotion} onDismiss={dismissAgentAlert} />
       <form
         class="terminal-composer"
         inert={modalOpen}
@@ -4498,7 +4495,7 @@
                   {/if}
                 </div>
               {/if}
-              {#if contextTokens}
+              {#if contextUsage}
                 <span class="context-meter {contextLevel}" role="img" aria-label={contextLabel} title={contextLabel}>
                   <svg viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="7.5" /><circle class="fill" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="{contextPercent} 100" /></svg>
                   <b>{contextPercent}%</b>

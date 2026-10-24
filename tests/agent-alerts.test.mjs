@@ -89,8 +89,29 @@ const usageFailure = collectAgentAlerts([{
 }], "pt-BR", now);
 assert.equal(usageFailure[0].priority, 100);
 assert.match(usageFailure[0].message, /atingiu o limite/);
+assert.equal(usageFailure[0].usageInfo.remaining, 0);
 workspaceDismissals.dismiss(usageFailure[0].id);
 assert.ok(get(orbDismissals).includes(usageFailure[0].id), "actual quota failures must also stay dismissed across views");
+
+for (const notice of [
+  { kind: "error", title: "Erro do Claude", detail: "You've hit your session limit · resets in 2h", status: "failed" },
+  { kind: "tool", title: "You've hit your session limit", status: "completed" },
+  { kind: "message", title: "Claude", detail: "You’ve hit your session limit", status: "completed" },
+]) {
+  const limitedClaude = { ...session, agent: "claude_code", agentLabel: "Claude Code", activities: [{ ...notice, id: "claude-limit", createdAt: now - 25, files: [] }] };
+  const notices = collectAgentAlerts([limitedClaude], "pt-BR", now);
+  assert.equal(notices.length, 1, "a limit notice without a prompt must still reach the usage banner");
+  assert.equal(notices[0].usage, true);
+  assert.equal(notices[0].usageInfo.remaining, 0);
+  assert.deepEqual(collectAgentAlerts([{ ...limitedClaude, status: "waiting_for_input" }], "pt-BR", now, { usageScope: "active" }), [], "an idle account must not raise a global banner from an old provider notice");
+  const withAccountLimit = collectAgentAlerts([{ ...limitedClaude, rateLimits: claudeIdle.rateLimits }], "pt-BR", now);
+  assert.equal(withAccountLimit.length, 1, "the provider error and account meter describe the same limit");
+  const withStaleMeter = collectAgentAlerts([{ ...limitedClaude, rateLimits: [{ ...claudeIdle.rateLimits[0], usedPercent: 91 }] }], "pt-BR", now);
+  assert.ok(withStaleMeter.some((alert) => alert.usageInfo?.remaining === 0), "a stale non-exhausted meter must not hide an actual provider limit");
+}
+
+const approachingLimit = collectAgentAlerts([{ ...session, activities: [{ id: "near-limit", kind: "warning", title: "Usage warning", detail: "You are approaching your session limit", status: "warning", createdAt: now - 25, files: [] }] }], "en", now);
+assert.equal(approachingLimit[0].usageInfo, undefined, "a warning without a measured percentage must not invent an exhausted meter");
 
 const cliWarning = collectAgentAlerts([{
   ...session,

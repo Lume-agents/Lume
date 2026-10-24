@@ -1,4 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { isTourDemoId } from "$lib/tourDemoSession";
+
+/** Every request goes through here; the tour's example chat has no agent behind it, so asking about it fails like a closed session does. */
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (isTourDemoId(args?.sessionId)) return Promise.reject(new Error("This is an example chat."));
+  return tauriInvoke<T>(command, args);
+}
 import { listen } from "@tauri-apps/api/event";
 import type {
   HubCommandRequest,

@@ -94,11 +94,23 @@
     loop();
   }
 
+  function giveUp() {
+    if (gaveUp) return;
+    gaveUp = true;
+    void invoke("close_tour_card").catch(() => {});
+    void tick().then(() => follow(120));
+  }
+
   /** Lines the card window up with the highlight and hands it the step to show. */
   async function placeCard() {
     // The card window adds a margin around the card for its shadow.
     const width = (step.media || step.demo ? 400 : 340) + 36;
-    await invoke("place_tour_card", { anchorY: rect ? rect.y + rect.height / 2 : null, width }).catch(() => {});
+    // A desktop that cannot make or place the window says so right away, and the card is drawn here instead.
+    const placed = await invoke("place_tour_card", { anchorY: rect ? rect.y + rect.height / 2 : null, width }).then(() => true, () => false);
+    if (!placed) {
+      giveUp();
+      return;
+    }
     await emit(TOUR_CARD_EVENT, { step, index, total: steps.length, language, dark });
   }
 
@@ -143,12 +155,12 @@
     const unlisten = external
       ? [listen<TourAction>(TOUR_ACTION_EVENT, (event) => act(event.payload)), listen(TOUR_READY_EVENT, () => { cardAlive = true; void placeCard(); })]
       : [];
+    // The window is made as the tour opens, not after the first step settles: a webview can take a few seconds to
+    // start (Windows especially), and the card gives up on it only after that.
+    if (external) void Promise.all(unlisten).then(() => placeCard());
     const waiting = external ? window.setTimeout(() => {
-      if (cardAlive) return;
-      gaveUp = true;
-      void invoke("close_tour_card").catch(() => {});
-      tick().then(() => follow(120));
-    }, (window as unknown as { __lumeTourCardWait?: number }).__lumeTourCardWait ?? 2500) : 0;
+      if (!cardAlive) giveUp();
+    }, (window as unknown as { __lumeTourCardWait?: number }).__lumeTourCardWait ?? 8000) : 0;
     return () => {
       window.clearTimeout(waiting);
       cancelAnimationFrame(frame);

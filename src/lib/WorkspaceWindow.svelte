@@ -40,6 +40,7 @@
   import WorkspaceExtensions from "$lib/WorkspaceExtensions.svelte";
   import GuidedTour from "$lib/GuidedTour.svelte";
   import { boardTour, boardTourKey, workspaceTour, workspaceTourKey } from "$lib/tours";
+  import { tourDemoSession } from "$lib/tourDemoSession";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
@@ -150,7 +151,11 @@
     previousMaximizedPaneId: string | null;
   };
 
-  let sessions = $state<HubSession[]>([]);
+  let liveSessions = $state<HubSession[]>([]);
+  // With no chat open, the Workspace tour shows an example one so every step has something to point at.
+  let tourDemo = $state<HubSession | null>(null);
+  let tourDemoRestore: { primaryId: string | null; secondaryId: string | null; tertiaryId: string | null; focusedPaneId: string | null } | null = null;
+  const sessions = $derived(tourDemo ? [tourDemo, ...liveSessions] : liveSessions);
   let externalWriterConflicts = $state<Record<string, ExternalWriterConflict>>({});
   // Only what is needed to paint the loading screen in the user's own look is remembered locally.
   const appearanceSnapshotKey = "lume:appearance-snapshot:v1";
@@ -1623,7 +1628,7 @@
     sessionContextError = "";
     try {
       const finalName = await renameSession(session.id, requested);
-      sessions = sessions.map((item) => item.id === session.id ? { ...item, sessionName: finalName } : item);
+      liveSessions = liveSessions.map((item) => item.id === session.id ? { ...item, sessionName: finalName } : item);
       sessionContextMenu = null;
       sessionRenameDraft = "";
     } catch (reason) {
@@ -1685,7 +1690,7 @@
   async function refreshSessionsAfterContextAction() {
     try {
       const snapshot = await loadHubSnapshot();
-      sessions = snapshot.sessions;
+      liveSessions = snapshot.sessions;
       internalServices = snapshot.internalServices ?? [];
       reconcileSelection();
     } catch {
@@ -1895,14 +1900,51 @@
     catch { return true; /* Without storage the tour would show every time; it stays in Settings. */ }
   }
 
+  // The first time the Workspace opens, a short tour shows where things are: once the chats have loaded, so a chat
+  // that was already open is never mistaken for an empty Workspace.
+  $effect(() => {
+    if (loading || activeTour || tourSeen(workspaceTourKey)) return;
+    const timer = window.setTimeout(() => {
+      if (activeTour) return;
+      enterTourDemo();
+      activeTour = "workspace";
+    }, 900);
+    return () => window.clearTimeout(timer);
+  });
+
+  /** Opens the example chat in the first pane when none is open, remembering the panes to put back afterwards. */
+  function enterTourDemo() {
+    if (primary || tourDemo) return;
+    tourDemoRestore = { primaryId, secondaryId, tertiaryId, focusedPaneId };
+    tourDemo = tourDemoSession(language);
+    primaryId = tourDemo.id;
+    secondaryId = null;
+    tertiaryId = null;
+    focusedPaneId = tourDemo.id;
+  }
+
+  function leaveTourDemo() {
+    if (!tourDemo) return;
+    const restore = tourDemoRestore;
+    tourDemo = null;
+    tourDemoRestore = null;
+    primaryId = restore?.primaryId ?? null;
+    secondaryId = restore?.secondaryId ?? null;
+    tertiaryId = restore?.tertiaryId ?? null;
+    focusedPaneId = restore?.focusedPaneId ?? primaryId;
+    persistWorkspaceLayout();
+  }
+
   function startTour(kind: "workspace" | "board") {
     closeSettings();
     if (kind === "board") showWorkflowBoard(true);
+    else enterTourDemo();
     window.clearTimeout(boardTourTimer);
     activeTour = kind;
   }
 
   function finishTour() {
+    leaveTourDemo();
     try { localStorage.setItem(activeTour === "board" ? boardTourKey : workspaceTourKey, "seen"); }
     catch { /* The tour shows again next time when storage is unavailable. */ }
     activeTour = null;
@@ -1911,7 +1953,7 @@
   /** Each step points at something on screen: overlays that would cover it are closed first. */
   function prepareTourStep() {
     if (activeTour === "board") { if (!boardOpen) showWorkflowBoard(true); }
-    else if (boardOpen) showWorkflowBoard(false);
+    else { if (boardOpen) showWorkflowBoard(false); enterTourDemo(); }
     if (extensionsOpen) showExtensions(false);
     if (settingsOpen) closeSettings();
     headerControl = null;
@@ -2316,8 +2358,6 @@
     syncSidebarWidth(narrowSidebar);
     narrowSidebar.addEventListener("change", syncSidebarWidth);
     restoreWorkspaceLayout();
-    // The first time the Workspace opens, a short tour shows where things are.
-    const tourTimer = tourSeen(workspaceTourKey) ? 0 : window.setTimeout(() => { if (!activeTour) activeTour = "workspace"; }, 900);
     try { streamMessages = localStorage.getItem(workspaceStreamMessagesKey) !== "false"; }
     catch { /* Use the default when local storage is unavailable. */ }
     try { workspaceBackgroundImage = localStorage.getItem(workspaceBackgroundImageKey) ?? ""; }
@@ -2418,7 +2458,7 @@
         const snapshot = await loadHubSnapshot();
         if (!disposed) {
           const hadOpenPane = hasOpenWorkspacePane(sessions, [primaryId, secondaryId, tertiaryId]);
-          sessions = snapshot.sessions;
+          liveSessions = snapshot.sessions;
           internalServices = snapshot.internalServices ?? [];
           if (!rateLimitRefreshRequested && sessions.some((session) => session.agent === "codex")) {
             rateLimitRefreshRequested = true;
@@ -2539,7 +2579,6 @@
       disposed = true;
       startup.dispose();
       if (refreshTimer) clearTimeout(refreshTimer);
-      window.clearTimeout(tourTimer);
       window.clearTimeout(boardTourTimer);
       narrowSidebar.removeEventListener("change", syncSidebarWidth);
       colorScheme.removeEventListener("change", syncSystemTheme);

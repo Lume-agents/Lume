@@ -3895,7 +3895,7 @@
                 <div class="integration-row browser-row">
                   <span class="agent-avatar agent-browser"><BrandIcon name="browsers" size={21} /></span>
                   <div>
-                    <strong>Chrome, Edge & Brave</strong>
+                    <strong>{tr("Browsers", "Navegadores")}</strong>
                     <span>{tr("Load the folder as an unpacked extension.", "Carregue a pasta como extensão descompactada.")}</span>
                   </div>
                   <button type="button" onclick={openBrowserCompanion}>{tr("Open folder", "Abrir pasta")}</button>

@@ -252,13 +252,12 @@
   .ap-segment button:disabled { opacity: .55; cursor: default; }
   .ap-swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
   .ap-swatches.muted { opacity: .55; }
-  .ap-swatches button { padding: 6px 4px 5px; display: grid; justify-items: center; gap: 5px; border: 1px solid transparent; border-radius: 10px; color: var(--ap-muted); background: transparent; font: inherit; font-size: 10px; font-weight: 650; cursor: pointer; transition: border-color 140ms ease, color 140ms ease, background 140ms ease; }
-  .ap-swatches button:hover { color: var(--ap-text); background: color-mix(in srgb, var(--ap-muted) 9%, transparent); }
-  .ap-swatches button.on { color: var(--ap-text); border-color: var(--ap-accent); background: color-mix(in srgb, var(--ap-accent) 10%, transparent); }
-  .ap-swatches i { width: 34px; height: 22px; border: 1px solid color-mix(in srgb, var(--ap-text) 16%, transparent); border-radius: 7px; background: linear-gradient(135deg, var(--s) 0 62%, var(--a) 62% 100%); }
+  .ap-swatches button { min-width: 0; min-height: 62px; padding: 6px; display: grid; grid-template-rows: 30px minmax(1.2em, auto); justify-items: center; align-content: start; gap: 5px; border: 1px solid transparent; border-radius: 9px; color: var(--ap-muted); background: transparent; font: inherit; font-size: 10px; font-weight: 650; line-height: 1.2; text-align: center; cursor: pointer; transition: border-color 140ms ease, color 140ms ease, background 140ms ease; }
+  .ap-swatches button:hover { color: var(--ap-text); background: color-mix(in srgb, var(--ap-muted) 6%, transparent); }
+  .ap-swatches button.on { color: var(--ap-text); border-color: color-mix(in srgb, var(--ap-accent) 68%, var(--ap-line)); background: color-mix(in srgb, var(--ap-accent) 6%, transparent); }
+  .ap-swatches i { display: block; box-sizing: border-box; width: 100%; max-width: 72px; height: 30px; overflow: hidden; border: 0; border-radius: 6px; background: linear-gradient(135deg, var(--s) 0 60%, var(--a) 60% 100%); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ap-text) 16%, transparent); }
   .ap-presets { display: flex; flex-wrap: wrap; gap: 8px; }
-  .ap-presets button { width: 40px; height: 28px; padding: 0; border: 2px solid transparent; border-radius: 9px; box-shadow: inset 0 0 0 1px rgba(128, 128, 128, .28); cursor: pointer; transition: border-color 140ms ease, transform 160ms ease; }
-  .ap-presets button:hover { transform: translateY(-1px); }
+  .ap-presets button { box-sizing: border-box; width: 40px; height: 28px; padding: 0; border: 1px solid color-mix(in srgb, var(--ap-line) 78%, transparent); border-radius: 7px; background-clip: padding-box; cursor: pointer; transition: border-color 140ms ease; }
   .ap-presets button.on { border-color: var(--ap-accent); }
   .ap-rows { display: grid; }
   .ap-row { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border-top: 1px solid var(--ap-line); }

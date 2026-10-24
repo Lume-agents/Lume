@@ -2566,6 +2566,7 @@
   style:--lume-accent-strong={appearance.accentCss}
   style:--workspace-background-color={workspaceCanvasColor}
   style:--workspace-background-opacity={`${workspaceCanvasOpacity}%`}
+  style:background={stageTakeover ? "var(--workspace-bg)" : `${backdropPaint || "linear-gradient(var(--workspace-chat-background), var(--workspace-chat-background))"}, var(--workspace-bg)`}
 >
   <SystemBannerStack items={systemBanners} language={preferences.language} dismissLabel={tr("Dismiss", "Fechar")} />
   {#each workspaceResizeEdges as direction}
@@ -2875,7 +2876,6 @@
         <header>
           <span>
             <strong>{tr("Settings", "Ajustes")}</strong>
-            <small>{tr("Workspace and Lume preferences", "Preferências do Workspace e do Lume")}</small>
           </span>
           <button type="button" aria-label={tr("Close settings", "Fechar ajustes")} onclick={closeSettings}>
             <LumeIcon name="close" size={16} />
@@ -3057,7 +3057,7 @@
             </div>
             <div class="integration-row">
               <span class="integration-icon"><BrandIcon name="browsers" size={18} /></span>
-              <span><strong>Chrome, Edge & Brave</strong><small>{tr("Browser companion extension", "Extensão companion do navegador")}</small></span>
+              <span><strong>{tr("Browsers", "Navegadores")}</strong><small>{tr("Browser companion extension", "Extensão companion do navegador")}</small></span>
               <button type="button" onclick={() => void revealBrowserCompanion()}>{tr("Open", "Abrir")}</button>
             </div>
             {/if}
@@ -3537,7 +3537,7 @@
   .edge-northeast, .edge-northwest, .edge-southeast, .edge-southwest { width: 9px; height: 9px; }
   .edge-northeast { top: 0; right: 0; cursor: nesw-resize; }.edge-northwest { top: 0; left: 0; cursor: nwse-resize; }
   .edge-southeast { right: 0; bottom: 0; cursor: nwse-resize; }.edge-southwest { bottom: 0; left: 0; cursor: nesw-resize; }
-  .sidebar { min-width: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); overflow: hidden; border-right: 1px solid var(--workspace-line); background: var(--workspace-sidebar); }
+  .sidebar { min-width: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); overflow: hidden; border-right: 1px solid var(--workspace-line); border-radius: 0 14px 14px 0; background: var(--workspace-sidebar); }
   .brand-header { position: relative; z-index: 24; min-width: 0; padding: 0 13px 11px; display: grid; gap: 1px; border-bottom: 1px solid var(--workspace-line); user-select: none; }
   .brand-top { min-width: 0; height: 52px; display: flex; align-items: center; gap: 10px; cursor: grab; }
   .brand-top:active { cursor: grabbing; }
@@ -3784,13 +3784,13 @@
   .workspace-stage.review-open.review-wide { grid-template-columns: 0px 0px minmax(0, 1fr); }
   .workspace-stage.review-wide .workbench { visibility: hidden; }
   .workspace-stage.maximized { grid-template-columns: minmax(0, 1fr) 0px 0px; }
-  .inspector-shell { min-width: 0; min-height: 0; height: 100%; overflow: hidden; pointer-events: none; }
+  .inspector-shell { min-width: 0; min-height: 0; height: 100%; overflow: hidden; border-radius: 14px 0 0 14px; pointer-events: none; }
   .inspector-shell.open { pointer-events: auto; }
   .inspector-content { min-width: 0; width: 100%; height: 100%; }
   .review-shell { min-width: 0; min-height: 0; height: 100%; overflow: hidden; border-left: 0 solid transparent; pointer-events: none; }
   .review-shell.open { border-left-width: 1px; border-left-color: var(--workspace-line); pointer-events: auto; }
   .review-content { min-width: 0; width: 100%; height: 100%; }
-  .workbench { position: relative; width: 100%; max-width: 100%; min-width: 0; min-height: 0; isolation: isolate; contain: inline-size; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; background: var(--workspace-chat-background); }
+  .workbench { position: relative; width: 100%; max-width: 100%; min-width: 0; min-height: 0; isolation: isolate; contain: inline-size; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; background: transparent; }
   .board-chat-layer { display: contents; }
   /* The board covers the chats: they stay mounted (scroll and drafts survive) but stop painting and animating. */
   .board-chat-layer.covered { visibility: hidden; }

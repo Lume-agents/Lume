@@ -11,6 +11,9 @@
       #lume-launch { position: fixed; z-index: 2147483647; left: 0; top: 0; width: 78px; height: 44px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid rgba(54, 92, 70, 0.38); border-radius: 22px; color: #263d35; background: #e6ead7; box-shadow: inset 0 0 0 1px rgba(247, 242, 220, 0.62), 0 5px 16px rgba(35, 62, 49, 0.12); pointer-events: none; transition: opacity 240ms ease; }
       #lume-launch[data-theme="dark"] { color: #dfe8e3; border-color: rgba(190, 209, 200, 0.13); background: #1b221f; box-shadow: none; }
       #lume-launch.leaving { opacity: 0; }
+      #lume-launch .launch-border { position: absolute; inset: -1px; padding: 1.5px; border-radius: inherit; -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; pointer-events: none; }
+      #lume-launch .launch-border::before { position: absolute; inset: -100%; background: conic-gradient(from 0deg, transparent 0deg 250deg, currentColor 325deg, transparent 360deg); content: ""; animation: lume-launch-orbit 2.4s linear infinite; }
+      #lume-launch.leaving .launch-border::before { animation-play-state: paused; }
       #lume-launch svg { width: 32px; height: 32px; flex: 0 0 auto; overflow: visible; }
       #lume-launch .body { fill: #8b9490; }
       #lume-launch .belly { fill: rgba(255, 255, 255, 0.34); }
@@ -26,13 +29,15 @@
       @keyframes lume-launch-breathe { 50% { transform: translateY(1px); } }
       @keyframes lume-launch-zzz { 50% { opacity: 0.45; transform: translate(1px, -1px); } }
       @keyframes lume-launch-dot { 50% { opacity: 1; } }
-      @media (prefers-reduced-motion: reduce) { #lume-launch .dino, #lume-launch .zzz, #lume-launch .dots i { animation: none; } }
+      @keyframes lume-launch-orbit { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { #lume-launch .dino, #lume-launch .zzz, #lume-launch .dots i, #lume-launch .launch-border::before { animation: none; } }
     </style>
   </head>
   <body data-sveltekit-preload-data="hover">
     <!-- The Orb's own first frame: a sleeping Lume in its capsule, painted before any script runs, so
          opening the app never shows an empty window. The Orb takes over (see launchSplash.ts). -->
     <div id="lume-launch" aria-hidden="true">
+      <span class="launch-border"></span>
       <svg viewBox="0 0 32 32" shape-rendering="crispEdges">
         <g class="dino">
           <path class="body" d="M4 16h3v-2h3V9h3V6h11v2h3v8h-9v2h4v4h-5v4h-4v-5h-3v5H7v-5H5v-2H3v-4h1z" />

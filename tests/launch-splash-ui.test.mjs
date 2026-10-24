@@ -60,9 +60,20 @@ try {
   assert.equal(await evaluate("document.getElementById('lume-launch').dataset.theme"), "dark", "it keeps the colors of the last launch");
   assert.equal(await evaluate("getComputedStyle(document.getElementById('lume-launch')).backgroundColor"), "rgb(27, 34, 31)");
   assert.ok(await evaluate("!!document.querySelector('#lume-launch .zzz') && document.querySelectorAll('#lume-launch .dots i').length === 3"), "asleep, with a loading badge");
+  const border = "getComputedStyle(document.querySelector('#lume-launch .launch-border'), '::before')";
+  assert.equal(await evaluate(`${border}.animationName`), "lume-launch-orbit", "the loading highlight travels around the capsule border");
+  const beforeRotation = await evaluate(`${border}.transform`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.notEqual(await evaluate(`${border}.transform`), beforeRotation, "the loading border is moving");
 
   await open("/", { theme: "light" });
   assert.equal(await evaluate("getComputedStyle(document.getElementById('lume-launch')).backgroundColor"), "rgb(230, 234, 215)");
+  assert.equal(await evaluate(`${border}.animationName`), "lume-launch-orbit");
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+  assert.equal(await evaluate(`${border}.animationName`), "none", "reduced motion keeps a static loading border");
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+  await evaluate("document.getElementById('lume-launch').classList.add('leaving')");
+  assert.equal(await evaluate(`${border}.animationPlayState`), "paused", "the border stops when startup is complete");
 
   await open("/", { desktop: false });
   assert.equal(await evaluate("document.getElementById('lume-launch')"), null, "the web and Android builds do not show it");

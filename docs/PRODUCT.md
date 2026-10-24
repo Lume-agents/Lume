@@ -65,7 +65,7 @@ O conteúdo detalhado da permissão permanece apenas na memória enquanto a deci
 - O Companion web aceita prompts somente quando a página está esperando entrada; a confirmação de envio exige o protocolo v2 do Companion, e versões antigas não consomem nem marcam prompts como enviados. Queue/steer durante uma resposta em execução não está disponível. O Lume bloqueia o envio enquanto ocupado em vez de exibir uma fila que a página não consegue garantir.
 - Gemini CLI legado para ambientes empresariais, Google Cloud e uso por API; monitoramento por processo apenas, sem envio, retomada, encerramento ou hooks globais. Como `~/.gemini/settings.json` também é usado pelo Gemini Code Assist para ferramentas e MCP, a migração remove apenas hooks antigos do Lume desse arquivo, com backup e preservação das demais configurações.
 - VS Code como IDE inicial.
-- Chrome, Edge e Brave por uma extensão Chromium local.
+- Navegadores por uma extensão Chromium local.
 
 Integrações profundas respondem permissões diretamente. Integrações somente observáveis mostram o pedido e levam o usuário à origem, sem simular suporte inexistente.
 

@@ -508,6 +508,8 @@ export type ExtensionItem = {
   enabled?: boolean | null;
   version?: string | null;
   source?: string | null;
+  iconUrl?: string | null;
+  iconDarkUrl?: string | null;
 };
 
 export type AgentExtensions = {
@@ -527,7 +529,14 @@ export type CatalogPlugin = {
   marketplace: string;
   category?: string | null;
   installs?: number | null;
+  downloads?: number | null;
+  rating?: number | null;
+  updatedAt?: number | null;
+  iconUrl?: string | null;
+  iconDarkUrl?: string | null;
   installed: boolean;
+  githubRepository?: string | null;
+  githubStars?: number | null;
 };
 
 export type PluginActionResult = {
@@ -544,6 +553,10 @@ export async function listAgentExtensions(project?: string): Promise<AgentExtens
 /** The plugins an agent's marketplaces offer; cached for a few minutes unless `refresh`. */
 export async function listExtensionCatalog(agent: string, refresh = false): Promise<CatalogPlugin[]> {
   return invoke<CatalogPlugin[]>("list_extension_catalog", { agent, refresh });
+}
+
+export async function getExtensionGithubStars(repositories: string[]): Promise<{ repository: string; stars: number | null }[]> {
+  return invoke("get_extension_github_stars", { repositories });
 }
 
 /** Installs, removes or toggles a plugin through the agent's own CLI. */

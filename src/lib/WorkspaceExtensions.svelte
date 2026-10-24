@@ -1,15 +1,20 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import type { Language } from "$lib/i18n";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import ActivityTypeIcon from "$lib/ActivityTypeIcon.svelte";
+  import LumeSelect from "$lib/LumeSelect.svelte";
+  import PluginImage from "$lib/PluginImage.svelte";
+  import { hasCatalogMetric, isOfficialMarketplace, sortExtensionCatalog, type CatalogSort } from "$lib/extensionCatalog";
   import { renderSafeMarkdown } from "$lib/markdown.js";
   import {
     listAgentExtensions,
     listExtensionCatalog,
+    getExtensionGithubStars,
     manageAgentPlugin,
     readExtensionFile,
     revealExtensionPath,
@@ -39,9 +44,13 @@
   let selected = $state<ExtensionItem | null>(null);
   let preview = $state<{ id: string; text: string; error?: string } | null>(null);
   let catalogs = $state<Record<string, CatalogPlugin[]>>({});
+  let repositoryStars = $state<Record<string, number | null>>({});
+  const requestedRepositories = new Set<string>();
   let catalogLoading = $state(false);
   let catalogError = $state("");
   let catalogLimit = $state(catalogPage);
+  let catalogSort = $state<CatalogSort>("popular");
+  let catalogRequest = 0;
   let busy = $state("");
   let notice = $state<{ tone: "ok" | "error"; text: string } | null>(null);
   let pending = $state<{ agent: string; plugin: string; command: string; sha256: string } | null>(null);
@@ -54,8 +63,18 @@
   const visibleItems = $derived((agent?.items ?? []).filter((item) => (kindFilter === "all" || item.kind === kindFilter) && matches(`${item.name} ${item.description} ${item.source ?? ""}`)));
   const sections = $derived(kinds.map((kind) => ({ kind, items: visibleItems.filter((item) => item.kind === kind) })).filter((section) => section.items.length));
   const counts = $derived(Object.fromEntries(kinds.map((kind) => [kind, (agent?.items ?? []).filter((item) => item.kind === kind).length])) as Record<ExtensionKind, number>);
-  const catalog = $derived(agent ? catalogs[agent.agent] ?? null : null);
-  const catalogMatches = $derived((catalog ?? []).filter((plugin) => matches(`${plugin.name} ${plugin.description} ${plugin.category ?? ""} ${plugin.marketplace}`)));
+  const catalog = $derived(agent ? catalogs[agent.agent]?.map((plugin) => ({ ...plugin, githubStars: plugin.githubRepository ? repositoryStars[plugin.githubRepository] : undefined })) ?? null : null);
+  const hasUsageCounts = $derived((catalog ?? []).some((plugin) => hasCatalogMetric(plugin.installs) || hasCatalogMetric(plugin.downloads)));
+  const hasRepositories = $derived((catalog ?? []).some((plugin) => plugin.githubRepository));
+  const catalogMatches = $derived(sortExtensionCatalog((catalog ?? []).filter((plugin) => matches(`${plugin.name} ${plugin.description} ${plugin.category ?? ""} ${plugin.marketplace}`)), catalogSort === "popular" && !hasUsageCounts && hasRepositories ? "stars" : catalogSort, language));
+  const sortOptions = $derived([
+    { value: "popular", label: !hasUsageCounts && hasRepositories ? tr("Most GitHub stars", "Mais estrelados no GitHub") : tr("Most installed", "Mais instalados"), description: hasUsageCounts ? undefined : hasRepositories ? tr("Repository stars, not plugin installs. Unknown counts are listed last.", "Estrelas do repositório, não instalações do plugin. Contagens indisponíveis ficam por último.") : tr("No counts provided; alphabetical order is used.", "Sem contagens informadas; a ordem alfabética é usada.") },
+    ...((catalog ?? []).some((plugin) => hasCatalogMetric(plugin.downloads)) ? [{ value: "downloads", label: tr("Most downloaded", "Mais baixados") }] : []),
+    ...(hasUsageCounts && hasRepositories ? [{ value: "stars", label: tr("Most GitHub stars", "Mais estrelados no GitHub") }] : []),
+    { value: "name", label: tr("Name (A–Z)", "Nome (A–Z)") },
+    ...((catalog ?? []).some((plugin) => hasCatalogMetric(plugin.updatedAt)) ? [{ value: "recent", label: tr("Most recent", "Mais recentes") }] : []),
+    ...((catalog ?? []).some((plugin) => hasCatalogMetric(plugin.rating)) ? [{ value: "rating", label: tr("Best rated", "Melhor avaliados") }] : []),
+  ]);
   const installedPluginIds = $derived(new Set((agent?.items ?? []).filter((item) => item.kind === "plugin").map((item) => item.id.replace(/^plugin:/, ""))));
 
   function tr(english: string, portuguese: string) {
@@ -82,9 +101,13 @@
   }
 
   function installsLabel(count?: number | null) {
-    if (!count) return "";
+    if (count == null) return "";
     const short = count >= 1000 ? `${(count / 1000).toLocaleString(language, { maximumFractionDigits: 1 })}${pt ? " mil" : "k"}` : count.toLocaleString(language);
     return short;
+  }
+
+  function dateLabel(stamp: number) {
+    return Number.isFinite(new Date(stamp).getTime()) ? new Intl.DateTimeFormat(language, { dateStyle: "medium" }).format(stamp) : "";
   }
 
   function pluginId(item: ExtensionItem) {
@@ -108,29 +131,56 @@
   async function loadCatalog(refresh = false) {
     if (!agent?.managesPlugins || (catalogs[agent.agent] && !refresh)) return;
     const target = agent.agent;
+    const request = ++catalogRequest;
     catalogLoading = true;
     catalogError = "";
     try {
-      catalogs = { ...catalogs, [target]: await listExtensionCatalog(target, refresh) };
+      const plugins = await listExtensionCatalog(target, refresh);
+      catalogs = { ...catalogs, [target]: plugins };
+      void loadRepositoryStars(plugins);
     } catch (error) {
-      catalogError = String(error);
+      if (request === catalogRequest) catalogError = String(error);
     } finally {
-      catalogLoading = false;
+      if (request === catalogRequest) catalogLoading = false;
     }
   }
 
+  async function loadRepositoryStars(plugins: CatalogPlugin[]) {
+    const repositories = [...new Set(plugins.flatMap((plugin) => plugin.githubRepository ? [plugin.githubRepository] : []))]
+      .filter((repository) => !requestedRepositories.has(repository)).slice(0, 40);
+    if (!repositories.length) return;
+    repositories.forEach((repository) => requestedRepositories.add(repository));
+    try {
+      const counts = await getExtensionGithubStars(repositories);
+      repositoryStars = { ...repositoryStars, ...Object.fromEntries(counts.map(({ repository, stars }) => [repository, stars])) };
+    } catch { /* Optional public metadata: an offline GitHub must never hide the native catalog. */ }
+  }
+
+  async function openRepository(repository: string) {
+    try { await openUrl(`https://github.com/${repository}`); }
+    catch (error) { notice = { tone: "error", text: String(error) }; }
+  }
+
   function chooseAgent(id: string) {
+    catalogRequest += 1;
+    catalogLoading = false;
+    catalogError = "";
     agentId = id;
     selected = null;
     kindFilter = "all";
     catalogLimit = catalogPage;
+    catalogSort = "popular";
     if (tab === "catalog") void loadCatalog();
   }
 
   function chooseTab(next: "installed" | "catalog") {
+    catalogRequest += 1;
+    catalogLoading = false;
+    catalogError = "";
     tab = next;
     selected = null;
     catalogLimit = catalogPage;
+    catalogSort = "popular";
     if (next === "catalog") void loadCatalog();
   }
 
@@ -212,6 +262,12 @@
   {/if}
 {/snippet}
 
+{#snippet officialBadge(source: string)}
+  <span class="official-badge" title={tr(`Official catalog: ${source}. This identifies the source, not a security review or plugin authorship.`, `Catálogo oficial: ${source}. Identifica a origem, não uma auditoria de segurança ou a autoria do plugin.`)}>
+    {tr("Official", "Oficial")}
+  </span>
+{/snippet}
+
 <section class="extensions" aria-label={tr("Extensions", "Extensões")} in:fade={{ duration: 160 }} out:fade={{ duration: 110 }}>
   <header class="extensions-bar">
     <span class="extensions-title">
@@ -269,7 +325,7 @@
         <p class="problems"><LumeIcon name="warning" size={13} />{agent.problems.join(" · ")}</p>
       {/if}
       {#if !sections.length}
-        <div class="state">{needle ? tr("Nothing matches this search.", "Nada corresponde a esta busca.") : tr(`${agent.label} has no extensions yet. The catalog has plugins to start with.`, `${agent.label} ainda não tem extensões. O catálogo tem plugins para começar.`)}</div>
+        <div class="state">{needle ? tr("Nothing matches this search.", "Nada corresponde a esta busca.") : agent.managesPlugins ? tr(`${agent.label} has no extensions yet. The catalog has plugins to start with.`, `${agent.label} ainda não tem extensões. O catálogo tem plugins para começar.`) : tr(`No extensions detected for ${agent.label}.`, `Nenhuma extensão detectada para ${agent.label}.`)}</div>
       {/if}
       {#each sections as section (section.kind)}
         <section class="kind-section">
@@ -278,8 +334,9 @@
             {#each section.items as item (item.id)}
               <button class:selected={selected?.id === item.id} class:off={item.enabled === false} class="ext-card kind-{item.kind}" type="button" onclick={() => void select(item)}>
                 <span class="card-head">
-                  <span class="card-icon">{@render kindIcon(item.kind)}</span>
+                  <span class="card-icon"><PluginImage url={item.iconUrl} darkUrl={item.iconDarkUrl}>{@render kindIcon(item.kind)}</PluginImage></span>
                   <strong title={item.name}>{item.name}</strong>
+                  {#if item.kind === "plugin" && isOfficialMarketplace(agent.agent, item.source)}{@render officialBadge(item.source!)}{/if}
                   {#if item.enabled === false}<span class="chip muted">{tr("Off", "Desativado")}</span>{/if}
                 </span>
                 <span class="card-text">{item.description || (item.kind === "plugin" ? item.source : "") || tr("No description", "Sem descrição")}</span>
@@ -295,29 +352,52 @@
         </section>
       {/each}
     {:else if !agent.managesPlugins}
-      <div class="state">{agent.cli ? tr(`${agent.label} does not install plugins from a catalog. Its installed extensions are under Installed.`, `${agent.label} não instala plugins por catálogo. As extensões dele estão em Instalados.`) : tr(`Install the ${agent.label} CLI to browse its plugins.`, `Instale a CLI do ${agent.label} para ver os plugins dele.`)}</div>
+      <div class="state">{agent.cli ? tr(`Lume does not yet manage a catalog for ${agent.label}. Its detected extensions are under Installed.`, `O Lume ainda não gerencia um catálogo para ${agent.label}. As extensões detectadas estão em Instalados.`) : tr(`Install the ${agent.label} CLI to browse its plugins.`, `Instale a CLI do ${agent.label} para ver os plugins dele.`)}</div>
     {:else if catalogLoading && !catalog}
       <div class="state"><span class="spinner" aria-hidden="true"></span>{tr(`Asking ${agent.label} for its marketplaces…`, `Pedindo ao ${agent.label} os marketplaces…`)}</div>
     {:else if catalogError}
       <div class="state error">{catalogError}</div>
     {:else if catalog}
-      <p class="catalog-summary">{catalogMatches.length} plugins · {tr(`installed with the ${agent.label} CLI`, `instalação pela CLI do ${agent.label}`)}</p>
+      <div class="catalog-toolbar">
+        <p class="catalog-summary">{catalogMatches.length} plugins · {tr(`installed with the ${agent.label} CLI`, `instalação pela CLI do ${agent.label}`)}</p>
+        <LumeSelect value={catalogSort} options={sortOptions} ariaLabel={tr("Sort plugins", "Ordenar plugins")} variant="heading" minWidth={155} menuMinWidth={190} onValueChange={(value) => { catalogSort = value as CatalogSort; catalogLimit = catalogPage; }} />
+      </div>
+      {#if agent.agent === "antigravity"}
+        <p class="catalog-summary">{tr("Official marketplace cached by Antigravity. Use /plugins in its CLI to synchronize new entries.", "Marketplace oficial em cache pelo Antigravity. Use /plugins na CLI para sincronizar novas opções.")}</p>
+      {/if}
       {#if !catalogMatches.length}
         <div class="state">{needle ? tr("No plugin matches this search.", "Nenhum plugin corresponde a esta busca.") : tr("The marketplaces have no plugins to offer.", "Os marketplaces não têm plugins para oferecer.")}</div>
       {/if}
       <div class="card-grid">
         {#each catalogMatches.slice(0, catalogLimit) as plugin (plugin.id)}
-          {@const installed = plugin.installed || installedPluginIds.has(plugin.id)}
+          {@const installed = plugin.installed || installedPluginIds.has(plugin.id) || (agent.agent === "antigravity" && installedPluginIds.has(plugin.id.split("@")[0]))}
           <article class="ext-card catalog-card">
             <span class="card-head">
-              <span class="card-icon">{@render kindIcon("plugin")}</span>
+              <span class="card-icon"><PluginImage url={plugin.iconUrl} darkUrl={plugin.iconDarkUrl}>{@render kindIcon("plugin")}</PluginImage></span>
               <strong title={plugin.id}>{plugin.name}</strong>
-              <small class="marketplace" title={plugin.marketplace}>{plugin.marketplace}</small>
+              {#if isOfficialMarketplace(agent.agent, plugin.marketplace)}
+                {@render officialBadge(plugin.marketplace)}
+              {:else}
+                <small class="marketplace" title={plugin.marketplace}>{plugin.marketplace}</small>
+              {/if}
             </span>
             <span class="card-text">{plugin.description || tr("No description", "Sem descrição")}</span>
             <span class="card-meta">
               {#if plugin.category}<span class="chip">{plugin.category}</span>{/if}
-              {#if plugin.installs}<span class="installs" title={tr(`${plugin.installs.toLocaleString(language)} installs`, `${plugin.installs.toLocaleString(language)} instalações`)}><LumeIcon name="download" size={11} />{installsLabel(plugin.installs)}</span>{/if}
+              {#if hasCatalogMetric(plugin.downloads)}
+                <span class="installs" title={tr(`${plugin.downloads.toLocaleString(language)} downloads`, `${plugin.downloads.toLocaleString(language)} downloads`)}><LumeIcon name="download" size={11} />{installsLabel(plugin.downloads)} downloads</span>
+                {#if hasCatalogMetric(plugin.installs)}<span class="installs" title={tr(`${plugin.installs.toLocaleString(language)} installs`, `${plugin.installs.toLocaleString(language)} instalações`)}>{installsLabel(plugin.installs)} inst.</span>{/if}
+              {:else if hasCatalogMetric(plugin.installs)}
+                <span class="installs" title={tr(`${plugin.installs.toLocaleString(language)} installs`, `${plugin.installs.toLocaleString(language)} instalações`)}><LumeIcon name="download" size={11} />{installsLabel(plugin.installs)}</span>
+              {/if}
+              {#if hasCatalogMetric(plugin.rating)}<span class="plugin-rating" title={tr("Rating reported by the catalog", "Nota informada pelo catálogo")}>{tr("Rating", "Nota")} {plugin.rating.toLocaleString(language, { maximumFractionDigits: 2 })}</span>{/if}
+              {#if plugin.githubRepository && hasCatalogMetric(plugin.githubStars)}
+                <button class="repo-stars" type="button" title={tr(`${plugin.githubRepository}: ${plugin.githubStars.toLocaleString(language)} repository stars. A repository can contain several plugins.`, `${plugin.githubRepository}: ${plugin.githubStars.toLocaleString(language)} estrelas do repositório. Um repositório pode conter vários plugins.`)} onclick={() => void openRepository(plugin.githubRepository!)}>
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z" /></svg>
+                  {installsLabel(plugin.githubStars)} {tr("GitHub stars", "estrelas no GitHub")}
+                </button>
+              {/if}
+              {#if plugin.updatedAt && dateLabel(plugin.updatedAt)}<time datetime={new Date(plugin.updatedAt).toISOString()} title={tr("Updated or published on this date", "Atualizado ou publicado nesta data")}>{dateLabel(plugin.updatedAt)}</time>{/if}
               {#if installed}
                 <span class="installed-mark"><LumeIcon name="check" size={12} />{tr("Installed", "Instalado")}</span>
               {:else}
@@ -339,7 +419,7 @@
     {@const item = selected}
     <aside class="detail" aria-label={item.name} in:fly={{ x: 16, duration: 180, easing: cubicOut }} out:fly={{ x: 12, duration: 120 }}>
       <header>
-        <span class="card-icon">{@render kindIcon(item.kind, 17)}</span>
+        <span class="card-icon"><PluginImage url={item.iconUrl} darkUrl={item.iconDarkUrl}>{@render kindIcon(item.kind, 17)}</PluginImage></span>
         <span class="detail-title"><strong>{item.name}</strong><small>{kindLabel(item.kind, false)} · {scopeLabel(item.scope)}{item.version ? ` · v${item.version}` : ""}</small></span>
         <button class="bar-icon" type="button" aria-label={tr("Close", "Fechar")} onclick={() => (selected = null)}><LumeIcon name="close" size={14} /></button>
       </header>
@@ -449,12 +529,21 @@
   .chip.muted { color: var(--workspace-faint); }
   .install, .installed-mark { margin-left: auto; flex: 0 0 auto; }
   .installs { display: inline-flex; align-items: center; gap: 4px; }
+  .repo-stars { min-width: 0; padding: 2px 0; display: inline-flex; align-items: center; gap: 4px; border: 0; border-radius: 4px; color: var(--workspace-muted); background: transparent; font: inherit; line-height: 1.3; white-space: nowrap; cursor: pointer; }
+  .repo-stars svg { flex: 0 0 auto; }
+  .repo-stars:hover { color: var(--workspace-accent); text-decoration: underline; text-underline-offset: 3px; }
+  .repo-stars:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
   .marketplace { max-width: 45%; overflow: hidden; color: var(--workspace-faint); font: 600 9.5px/1 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
   .install { height: 24px; padding: 0 9px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font: 700 10.5px/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .install:hover:not(:disabled) { background: color-mix(in srgb, var(--workspace-accent) 18%, transparent); }
   .install:disabled { opacity: .55; cursor: default; }
   .installed-mark { display: inline-flex; align-items: center; gap: 4px; color: var(--workspace-accent); }
   .catalog-summary { margin: 0 0 11px; color: var(--workspace-faint); font: 600 11px/1 var(--lume-font-ui, Inter, sans-serif); }
+  .catalog-toolbar { min-width: 0; margin-bottom: 11px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
+  .catalog-toolbar .catalog-summary { margin: 0; line-height: 1.4; }
+  .official-badge { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; padding: 3px 5px; border-radius: 5px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font: 650 9px/1 var(--lume-font-ui, Inter, sans-serif); white-space: nowrap; }
+  .catalog-card .card-meta { min-height: 24px; flex-wrap: wrap; overflow: visible; row-gap: 6px; }
+  .catalog-card .card-meta > span, .catalog-card time { white-space: nowrap; }
   .show-more { margin: 14px auto 0; height: 30px; padding: 0 14px; display: block; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-muted); background: var(--workspace-raised); font: 650 11px/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .show-more:hover { color: var(--workspace-accent); }
   .state { min-height: 180px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--workspace-muted); font: 600 12px/1.5 var(--lume-font-ui, Inter, sans-serif); text-align: center; }

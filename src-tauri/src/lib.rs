@@ -1,5 +1,6 @@
 mod adapters;
 mod agent_extensions;
+mod extension_github;
 mod agent_commands;
 mod agent_mcp;
 mod agent_plugins;
@@ -1189,6 +1190,11 @@ async fn list_agent_extensions(
     tauri::async_runtime::spawn_blocking(move || agent_extensions::list(project.as_deref()))
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_extension_github_stars(repositories: Vec<String>) -> Vec<extension_github::RepositoryStars> {
+    extension_github::stars(repositories).await
 }
 
 #[tauri::command]
@@ -3488,6 +3494,7 @@ pub fn run() {
             tour_card::close_tour_card,
             list_agent_extensions,
             list_extension_catalog,
+            get_extension_github_stars,
             manage_agent_plugin,
             read_extension_file,
             reveal_extension_path,

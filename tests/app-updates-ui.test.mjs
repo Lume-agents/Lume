@@ -129,7 +129,7 @@ try {
   await screenshot("update-notice-orb-light");
   await evaluate("document.querySelector('.app-update-notice button.dismiss').click()");
   await wait("!document.querySelector('.app-update-notice')");
-  assert.match(await evaluate("document.querySelector('.settings [data-update-card]').textContent"), /0\.18\.3 disponível/);
+  assert.match(await evaluate("document.querySelector('.settings [data-update-card]').textContent"), /A versão 0\.18\.3 está disponível/);
   // Hidden Orb windows defer presentation until their native window becomes visible.
   await evaluate("window.__nativeVisible = false; window.__updates.update(s => ({ ...s, dismissedVersion: null, notify: true })); window.dispatchEvent(new Event('focus'))");
   await delay(250);

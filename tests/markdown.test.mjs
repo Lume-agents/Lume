@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { renderSafeMarkdown, stripInternalAgentMetadata } from "../src/lib/markdown.js";
 import { renderWorkspaceMarkdownWithFileBadges } from "../src/lib/workspaceFileReferences.js";
-import { renderSafeMarkdown as renderMobileMarkdown } from "../mobile-pwa/markdown.js";
+// Lume Mobile bundles this same module, so one renderer is the one both apps use.
+const renderMobileMarkdown = renderSafeMarkdown;
 
 const rendered = renderSafeMarkdown(`Resposta visível.
 

@@ -2016,7 +2016,7 @@ mod tests {
     }
 
     #[test]
-    fn paired_mobile_cannot_control_workflows_even_with_all_scopes() {
+    fn workflow_controls_need_the_prompt_scope() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");
         let gateway = MobileGateway::default();
         gateway.set_pairing_base_url("https://127.0.0.1:43122".into());
@@ -2024,36 +2024,35 @@ mod tests {
         let credentials = gateway
             .complete_pairing(&state, &offer.code, "Telefone")
             .expect("pareamento");
-        state
-            .set_mobile_device_scopes(
-                &credentials.device.id,
-                &[
-                    MobileScope::Monitor,
-                    MobileScope::Prompt,
-                    MobileScope::Approve,
-                    MobileScope::Terminate,
-                ],
-            )
-            .expect("escopos");
-
-        let response = route(
+        let start = |id: &str| {
             request(
                 "POST",
                 "/api/v1/commands",
                 Some(&credentials.token),
                 serde_json::json!({
-                    "requestId": "workflow-mobile-test",
+                    "requestId": id,
                     "type": "start_workflow",
                     "workflowId": "workflow-1",
                     "objective": "Do the work",
                 }),
-            ),
-            &state,
-            &gateway,
-        );
+            )
+        };
 
-        assert!(response.starts_with("HTTP/1.1 403"));
-        assert!(response.contains("desktop_only"));
+        // A phone that may only watch cannot start agents through a workflow.
+        let monitoring = route(start("workflow-mobile-watch"), &state, &gateway);
+        assert!(monitoring.starts_with("HTTP/1.1 403"));
+        assert!(monitoring.contains("scope_required"));
+
+        // With prompts allowed the gateway lets it through (no desktop app is open in this test).
+        state
+            .set_mobile_device_scopes(
+                &credentials.device.id,
+                &[MobileScope::Monitor, MobileScope::Prompt],
+            )
+            .expect("escopos");
+        let prompting = route(start("workflow-mobile-prompt"), &state, &gateway);
+        assert!(prompting.starts_with("HTTP/1.1 503"));
+        assert!(prompting.contains("desktop_unavailable"));
     }
 
     #[test]

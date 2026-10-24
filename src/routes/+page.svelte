@@ -3841,7 +3841,6 @@
               <summary class="settings-section-label">{tr("Agents", "Agentes")}</summary>
               <div class="settings-section-content">
                 <button class="setup-guide-link" type="button" onclick={() => void reopenOnboarding()}>{tr("Open the setup guide", "Abrir o guia de configuração")}</button>
-                <button class="setup-guide-link" type="button" onclick={() => { view = "sessions"; orbTourOpen = true; }}>{tr("Show the Orb tour", "Ver o tour do Orb")}</button>
                 <div class="agent-setup-host">
                   <AgentSetupCards
                     language={preferences.language}
@@ -3903,6 +3902,15 @@
                 {#if browserCompanionPath}
                   <p class="browser-path" transition:fade>{browserCompanionPath}</p>
                 {/if}
+              </div>
+            </details>
+            <details use:animatedDisclosure class="settings-section">
+              <summary class="settings-section-label">{tr("Tour", "Tour")}</summary>
+              <div class="settings-section-content">
+                <div class="setting-row">
+                  <div><strong>{tr("Orb tour", "Tour do Orb")}</strong><span>{tr("A short walk through the panel, terminals and workflows.", "Um passeio rápido pelo painel, os terminais e os workflows.")}</span></div>
+                  <button class="tour-replay" type="button" onclick={() => { view = "sessions"; orbTourOpen = true; }}>{tr("Show again", "Ver de novo")}</button>
+                </div>
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
@@ -4506,6 +4514,8 @@
   .panel.guide { min-height: 520px; }
   .panel.release-notes-open { min-height: 460px; }
   .agent-setup-host { --agent-setup-font: 10px; color: inherit; --workspace-accent: #3f9b69; }
+  .tour-replay { height: 28px; padding: 0 11px; flex: 0 0 auto; border: 1px solid var(--line, rgba(127, 140, 132, .3)); border-radius: 8px; color: inherit; background: transparent; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .tour-replay:hover { border-color: #3f9b69; color: #3f9b69; }
   .setup-guide-link { margin: 0 0 8px; padding: 0; border: 0; color: #3f9b69; background: transparent; font: inherit; font-size: 9px; font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
   .panel.onboarding > :not(.startup-chooser-layer) { display: none; }
   .startup-chooser-layer { position: absolute; z-index: 45; inset: 0; }

@@ -67,8 +67,8 @@
     return { duration: 340 };
   }
   async function pickOrbitRole(stepId: string, role: WorkflowRole) {
-    choose({ kind: "step", id: stepId });
-    if (selectedStep && selectedStep.role !== role) await changeRole(role);
+    orbitFor = null;
+    if (group?.steps.find((step) => step.id === stepId)?.role !== role) await changeRole(role, stepId);
   }
   const roles: WorkflowRole[] = ["planner", "implementer", "reviewer", "tester", "researcher", "custom"];
   let activeId = $state("");
@@ -451,14 +451,15 @@
   function editStep(patch: Partial<WorkflowStepDefinition>) {
     if (group && selectedStep && !locked) edit(updateStep(group, selectedStep.id, patch));
   }
-  async function changeRole(role: WorkflowRole) {
-    if (!group || !selectedStep || locked) return;
-    const id = selectedStep.id;
+  async function changeRole(role: WorkflowRole, stepId = selectedStep?.id) {
+    const target = group?.steps.find((step) => step.id === stepId);
+    if (!group || !target || locked) return;
+    const id = target.id;
     const groupId = group.id;
     const revision = ++roleRevision;
     changingRole = true;
     try {
-      const [previous, contract] = await Promise.all([backend.roleContract(selectedStep.role), backend.roleContract(role)]);
+      const [previous, contract] = await Promise.all([backend.roleContract(target.role), backend.roleContract(role)]);
       if (revision !== roleRevision || disposed || activeId !== groupId || !group || locked) return;
       const current = group.steps.find((step) => step.id === id);
       if (current) edit(updateStep(group, id, { role, ...preserveRoleOverrides(current, previous, contract) }));

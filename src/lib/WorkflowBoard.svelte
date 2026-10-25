@@ -38,7 +38,7 @@
     /** The sidebar agent being dragged, so the board can show it as a card under the cursor. */
     draggingSessionId?: string | null;
     onSidebarDragOverBoard?: (over: boolean) => void;
-    /** A phone: taps open a card, a held card only drags, the role picker orbits the card, and the toolbar is trimmed. */
+    /** A phone: taps open a card, a held card only drags, and the toolbar is trimmed. */
     touch?: boolean;
   } = $props();
 
@@ -608,7 +608,7 @@
     cardMoved = false;
     cardTapOnBadge = event.target instanceof Element && Boolean(event.target.closest(".card-role-fab"));
     // A finger that holds a card only drags it; the card opens on a tap, once the finger lifts.
-    if (touch) { orbitFor = null; if (selection) selection = null; }
+    if (touch || cardTapOnBadge) { orbitFor = null; if (selection) selection = null; }
     else choose({ kind: "step", id });
     capture(event);
     gesture = { kind: "card", pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, origin: { ...layout.positions[id] }, stepId: id };
@@ -661,7 +661,7 @@
     flushPatch();
     // Connecting can end the gesture itself, so the checks below use the snapshot taken above.
     if (current.kind === "connection" && connectionTarget) connectTo(connectionTarget);
-    if (touch && current.kind === "card" && current.stepId && !cardMoved) {
+    if ((touch || cardTapOnBadge) && current.kind === "card" && current.stepId && !cardMoved) {
       const id = current.stepId;
       cancelGesture();
       if (cardTapOnBadge) { choose(null); orbitDown = layout.positions[id].y * view.zoom + view.y < 170; orbitFor = id; }
@@ -1100,7 +1100,7 @@
           </span>
           <button class="card-port port-in" type="button" disabled={locked} aria-label={tr("Connect to ", "Conectar a ") + name(session)} title={tr("Connection input", "Entrada da conexão")} onclick={() => connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id })}><i></i></button>
           <button class="card-port port-out" data-tour="board-port" type="button" disabled={locked} aria-label={tr("Connect from ", "Conectar de ") + name(session)} title={tr("Drag to connect", "Arraste para conectar")} onpointerdown={(event) => beginConnection(event, step.id)} onclick={(event) => { if (event.detail === 0) keyboardConnect(step.id); }}><i></i></button>
-          {#if touch && orbitFor === step.id}
+          {#if orbitFor === step.id}
             <div class="role-orbit" use:orbitIn style:--card-role={"var(--role-" + step.role + ")"}>
               <div class="orbit-goo" aria-hidden="true" style:filter={"url(#" + markerId + "-goo)"}>
                 <i class="orbit-blob core"></i>
@@ -1503,7 +1503,7 @@
   .board-toolbar .close-board { margin-left: 6px; }
   .board-toolbar .close-board:hover .exit-icon { transform: translateX(1px); }
   .exit-icon { transition: transform 160ms ease; }
-  .shortcut-legend { position: absolute; z-index: 4; top: 66px; left: 20px; max-width: calc(100% - 300px); margin: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--workspace-muted); font-size: 10px; pointer-events: none; }
+  .shortcut-legend { position: absolute; z-index: 4; top: 66px; left: 20px; max-width: calc(100% - 300px); margin: 0; display: flex; flex-direction: column; gap: 5px; color: var(--workspace-muted); font-size: 10px; pointer-events: none; }
   .shortcut-legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
   .shortcut-legend kbd { padding: 1px 5px; border: 1px solid var(--workspace-line); border-radius: 4px; color: var(--workspace-strong); background: var(--hud-surface); font: 700 9px/1.4 "SFMono-Regular", Consolas, monospace; }
   @media (max-width: 860px) { .shortcut-legend { display: none; } }
@@ -1731,7 +1731,7 @@
   .workflow-board.touch .board-run.collapsed .workflow-name { display: none; }
   .run-collapse { width: 26px !important; height: 26px !important; margin-left: auto; padding: 0; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; }
   .run-collapse svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 180ms ease; }
-  .workflow-board.touch .role-tooltip { display: none; }
+  .workflow-board.touch .role-tooltip, .board-card:has(.role-orbit) .role-tooltip { display: none; }
   .board-card:has(.role-orbit) { z-index: 30; }
   .role-orbit { position: absolute; z-index: 6; left: 50%; top: 0; width: 0; height: 0; pointer-events: none; }
   .orbit-goo { position: absolute; left: -130px; top: -130px; width: 260px; height: 260px; pointer-events: none; }

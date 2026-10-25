@@ -23,6 +23,6 @@
 
 <style>
   .connection-badges { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
-  .badge { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: #fff; background: #2f9e6e; box-shadow: 0 0 0 2px color-mix(in srgb, #2f9e6e 24%, transparent); }
-  .badge svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .badge { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: #fff; background: #2f9e6e; box-shadow: 0 0 0 2px color-mix(in srgb, #2f9e6e 24%, transparent); }
+  .badge svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 </style>

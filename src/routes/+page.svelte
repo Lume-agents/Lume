@@ -3100,7 +3100,7 @@
             <strong>Lume</strong>
             <span>{activeCount === 1 ? tr("1 active agent", "1 agente ativo") : tr(`${activeCount} active agents`, `${activeCount} agentes ativos`)}</span>
           </div>
-          <ConnectionBadges language={preferences.language} />
+          <ConnectionBadges language={preferences.language} large />
         </div>
         <div class="header-actions">
           <button class:opening={openingWorkspace} class="workspace-button" data-tour="orb-workspace" type="button" title={tr("Open Workspace", "Abrir Workspace")} disabled={openingWorkspace} aria-busy={openingWorkspace} onclick={() => void showWorkspaceWindow()} aria-label={tr("Open Workspace", "Abrir Workspace")}>

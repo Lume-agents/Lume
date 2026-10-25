@@ -51,8 +51,8 @@
   let cardTapOnBadge = false;
   let runCollapsed = $state(false);
   function orbitSpot(index: number) {
-    const angle = ((15 + index * (150 / Math.max(1, roles.length - 1))) * Math.PI) / 180;
-    return { x: Math.round(Math.cos(angle) * 74), y: Math.round(-Math.sin(angle) * 74 * (orbitDown ? -0.9 : 1)) };
+    const angle = ((10 + index * (160 / Math.max(1, roles.length - 1))) * Math.PI) / 180;
+    return { x: Math.round(Math.cos(angle) * 88), y: Math.round(-Math.sin(angle) * 88 * (orbitDown ? -0.9 : 1)) };
   }
   /** Opens the bubbles one frame after they mount, so they travel out of the badge instead of appearing in place. */
   function orbitIn(node: HTMLElement) {
@@ -664,7 +664,7 @@
     if ((touch || cardTapOnBadge) && current.kind === "card" && current.stepId && !cardMoved) {
       const id = current.stepId;
       cancelGesture();
-      if (cardTapOnBadge) { choose(null); orbitDown = layout.positions[id].y * view.zoom + view.y < 170; orbitFor = id; }
+      if (cardTapOnBadge) { choose(null); orbitDown = layout.positions[id].y * view.zoom + view.y < 190; orbitFor = id; }
       else choose({ kind: "step", id });
       return;
     }
@@ -992,7 +992,6 @@
     <div class="board-world" style:transform={"translate(" + view.x + "px," + view.y + "px) scale(" + view.zoom + ")"}>
       <svg class="board-edges" xmlns="http://www.w3.org/2000/svg" aria-label={tr("Workflow connections", "Conexões do workflow")}>
         <defs>
-          <filter id={markerId + "-goo"} x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="5" result="blur" /><feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -8" /></filter>
           <marker id={markerId + "-active"} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1 7 4 1 7" fill="none" stroke="var(--workspace-accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></marker>
           {#each edges as { connection, geometry } (connection.id)}
             {@const fromRole = group?.steps.find((step) => step.id === connection.fromStepId)?.role ?? "custom"}
@@ -1102,13 +1101,8 @@
           <button class="card-port port-out" data-tour="board-port" type="button" disabled={locked} aria-label={tr("Connect from ", "Conectar de ") + name(session)} title={tr("Drag to connect", "Arraste para conectar")} onpointerdown={(event) => beginConnection(event, step.id)} onclick={(event) => { if (event.detail === 0) keyboardConnect(step.id); }}><i></i></button>
           {#if orbitFor === step.id}
             <div class="role-orbit" use:orbitIn style:--card-role={"var(--role-" + step.role + ")"}>
-              <div class="orbit-goo" aria-hidden="true" style:filter={"url(#" + markerId + "-goo)"}>
-                <i class="orbit-blob core"></i>
-                {#each roles as role, index (role)}<i class="orbit-blob" style:--ox={orbitSpot(index).x + "px"} style:--oy={orbitSpot(index).y + "px"} style:--role-color={"var(--role-" + role + ")"}></i>{/each}
-              </div>
-              <span class="orbit-core" aria-hidden="true"><WorkflowRoleIcon role={step.role} /></span>
               {#each roles as role, index (role)}
-                <button class="orbit-role" class:current={role === step.role} type="button" style:--ox={orbitSpot(index).x + "px"} style:--oy={orbitSpot(index).y + "px"} style:--i={index} aria-label={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} title={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} onpointerdown={(event) => event.stopPropagation()} onclick={() => void pickOrbitRole(step.id, role)}><WorkflowRoleIcon {role} /></button>
+                <button class="orbit-role" class:current={role === step.role} type="button" style:--card-role={"var(--role-" + role + ")"} style:--ox={orbitSpot(index).x + "px"} style:--oy={orbitSpot(index).y + "px"} aria-label={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} title={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} onpointerdown={(event) => event.stopPropagation()} onclick={() => void pickOrbitRole(step.id, role)}><span class="role-option-fab" aria-hidden="true"><i class="role-symbol"><WorkflowRoleIcon {role} /></i></span></button>
               {/each}
             </div>
           {/if}
@@ -1734,16 +1728,10 @@
   .workflow-board.touch .role-tooltip, .board-card:has(.role-orbit) .role-tooltip { display: none; }
   .board-card:has(.role-orbit) { z-index: 30; }
   .role-orbit { position: absolute; z-index: 6; left: 50%; top: 0; width: 0; height: 0; pointer-events: none; }
-  .orbit-goo { position: absolute; left: -130px; top: -130px; width: 260px; height: 260px; pointer-events: none; }
-  .orbit-blob { position: absolute; left: 50%; top: 50%; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%; background: var(--role-color, var(--card-role)); transform: translate(0, 0) scale(.6); opacity: 0; transition: transform 460ms cubic-bezier(.34, 1.56, .64, 1), opacity 120ms ease; }
-  .orbit-blob.core { width: 38px; height: 38px; margin: -19px 0 0 -19px; background: var(--card-role); opacity: 1; transform: none; }
-  .role-orbit:global(.open) .orbit-blob:not(.core) { opacity: 1; transform: translate(var(--ox), var(--oy)) scale(1); }
-  .orbit-core { position: absolute; left: 0; top: 0; width: 38px; height: 38px; margin: -19px 0 0 -19px; display: grid; place-items: center; color: #fff; pointer-events: none; }
-  .orbit-core :global(svg) { width: 18px; height: 18px; }
-  .orbit-role { position: absolute; left: 0; top: 0; width: 34px; height: 34px; margin: -17px 0 0 -17px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; color: #fff; background: transparent; pointer-events: none; opacity: 0; transform: translate(0, 0) scale(.6); transition: transform 460ms cubic-bezier(.34, 1.56, .64, 1), opacity 160ms ease; }
-  .orbit-role :global(svg) { width: 17px; height: 17px; }
+  .orbit-role { position: absolute; left: 0; top: 0; width: 36px; height: 36px; margin: -18px 0 0 -18px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; pointer-events: none; opacity: 0; transform: translate(0, 0) scale(.5); transition: transform 380ms cubic-bezier(.34, 1.56, .64, 1), opacity 160ms ease; }
+  .orbit-role .role-symbol :global(.workflow-role-icon) { width: 18px; height: 18px; }
   .role-orbit:global(.open) .orbit-role { opacity: 1; pointer-events: auto; transform: translate(var(--ox), var(--oy)) scale(1); }
-  .orbit-role.current { box-shadow: 0 0 0 2px #fff, 0 0 0 4px color-mix(in srgb, var(--card-role) 60%, transparent); }
+  .orbit-role.current .role-option-fab { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 22%, transparent), 0 5px 10px rgba(24, 58, 41, .2), 0 0 0 5px color-mix(in srgb, var(--card-role) 26%, transparent); }
   .orbit-role:active { transform: translate(var(--ox), var(--oy)) scale(.92); }
   @media (max-width: 820px) {
     .board-toolbar { gap: 3px; left: 12px; max-width: calc(100% - 200px); }

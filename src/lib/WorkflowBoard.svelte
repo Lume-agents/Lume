@@ -49,8 +49,10 @@
   let orbitDown = $state(false);
   let cardMoved = false;
   let cardTapOnBadge = false;
+  let orbitWasOpen = false;
   let runCollapsed = $state(false);
-  function orbitSpot(index: number) {
+  function orbitSpot(position: number) {
+    const index = roles.length - 1 - position;
     const angle = ((10 + index * (160 / Math.max(1, roles.length - 1))) * Math.PI) / 180;
     return { x: Math.round(Math.cos(angle) * 88), y: Math.round(-Math.sin(angle) * 88 * (orbitDown ? -0.9 : 1)) };
   }
@@ -607,6 +609,7 @@
     if (connectionSource && !gesture) { event.stopPropagation(); connectTo(id); return; }
     cardMoved = false;
     cardTapOnBadge = event.target instanceof Element && Boolean(event.target.closest(".card-role-fab"));
+    orbitWasOpen = orbitFor === id;
     // A finger that holds a card only drags it; the card opens on a tap, once the finger lifts.
     if (touch || cardTapOnBadge) { orbitFor = null; if (selection) selection = null; }
     else choose({ kind: "step", id });
@@ -664,7 +667,7 @@
     if ((touch || cardTapOnBadge) && current.kind === "card" && current.stepId && !cardMoved) {
       const id = current.stepId;
       cancelGesture();
-      if (cardTapOnBadge) { choose(null); orbitDown = layout.positions[id].y * view.zoom + view.y < 190; orbitFor = id; }
+      if (cardTapOnBadge) { choose(null); if (orbitWasOpen) return; orbitDown = layout.positions[id].y * view.zoom + view.y < 190; orbitFor = id; }
       else choose({ kind: "step", id });
       return;
     }
@@ -1055,7 +1058,7 @@
         {@const live = stepActivity(reactive ? shown : undefined, run?.steps.find((item) => item.stepId === step.id), language, now)}
         {@const awaiting = stepAwaitsApproval(step.id)}
         {@const trail = reactive && (state === "running" || shown?.status === "running") ? activityFeed(shown, language, 3) : []}
-        <article data-tour="board-card" class="board-card" class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
+        <article data-tour="board-card" class="board-card" class:orbiting={orbitFor === step.id} class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
           <button class="card-body" type="button" onpointerdown={(event) => beginCard(event, step.id)} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleName(step.role)}>
             <span class="card-role-fab" title={step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role)} aria-hidden="true">
               <i class="role-symbol"><WorkflowRoleIcon role={step.role} /></i>
@@ -1437,14 +1440,14 @@
   .moving .card-body { cursor: grabbing; }
   .card-role-fab { position: absolute; z-index: 2; top: -18px; left: 50%; width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--card-role) 42%, transparent); border-radius: 50%; color: var(--card-role); background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .96) 0 13%, rgba(255, 255, 255, .34) 31%, transparent 52%), linear-gradient(145deg, #fbfdfc 12%, color-mix(in srgb, var(--card-role) 14%, #e7eeea) 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 22%, transparent), 0 5px 10px rgba(24, 58, 41, .2), 0 1px 2px rgba(24, 58, 41, .16), 0 0 0 3px color-mix(in srgb, var(--card-role) 10%, transparent); transform: translateX(-50%); transition: box-shadow 170ms ease, transform 170ms cubic-bezier(.2, .8, .2, 1); }
   :global(.workspace.dark) .card-role-fab { background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .22) 0 13%, transparent 46%), linear-gradient(145deg, color-mix(in srgb, var(--card-role) 20%, #2c3631), #1e2623 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 5px 12px rgba(0, 0, 0, .45), 0 0 0 3px color-mix(in srgb, var(--card-role) 16%, transparent); }
-  .board-card:hover .card-role-fab, .board-card.selected .card-role-fab { transform: translateX(-50%) translateY(-2px); }
+  .board-card.selected .card-role-fab { transform: translateX(-50%) translateY(-2px); }
   .role-symbol { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; transform: scale(.9); font-style: normal; }
   .step-number { position: absolute; top: -3px; right: -5px; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; display: grid; place-items: center; border: 1px solid rgba(255, 255, 255, .86); border-radius: 999px; color: #fff; background: var(--card-role); box-shadow: 0 2px 5px rgba(20, 40, 30, .3); font: 800 8px/1 var(--lume-font-ui, Inter, sans-serif); font-variant-numeric: tabular-nums; }
   :global(.workspace.dark) .step-number { border-color: rgba(24, 35, 29, .9); }
-  .role-tooltip { position: absolute; bottom: calc(100% + 7px); left: 50%; min-width: max-content; padding: 5px 9px; display: grid; gap: 1px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-raised); box-shadow: var(--hud-shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 4px) scale(.96); transition: opacity 130ms ease, transform 150ms cubic-bezier(.2, .8, .2, 1); }
+  .role-tooltip { position: absolute; bottom: calc(100% + 7px); left: 50%; min-width: max-content; padding: 5px 9px; display: grid; gap: 1px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-raised); box-shadow: var(--hud-shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 0); transition: opacity 120ms ease; }
   .role-tooltip strong { font-size: 10px; font-weight: 700; }
   .role-tooltip small { color: var(--workspace-muted); font-size: 9px; }
-  .board-card:hover .role-tooltip { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  .board-card:hover .role-tooltip { opacity: 1; }
   .board-card.moving .role-tooltip { opacity: 0; }
   .card-body > * { flex-shrink: 0; }
   .card-avatar { display: grid; }
@@ -1725,8 +1728,8 @@
   .workflow-board.touch .board-run.collapsed .workflow-name { display: none; }
   .run-collapse { width: 26px !important; height: 26px !important; margin-left: auto; padding: 0; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; }
   .run-collapse svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 180ms ease; }
-  .workflow-board.touch .role-tooltip, .board-card:has(.role-orbit) .role-tooltip { display: none; }
-  .board-card:has(.role-orbit) { z-index: 30; }
+  .workflow-board.touch .role-tooltip, .board-card.orbiting .role-tooltip { display: none; }
+  .board-card.orbiting { z-index: 30; }
   .role-orbit { position: absolute; z-index: 6; left: 50%; top: 0; width: 0; height: 0; pointer-events: none; }
   .orbit-role { position: absolute; left: 0; top: 0; width: 36px; height: 36px; margin: -18px 0 0 -18px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: transparent; pointer-events: none; opacity: 0; transform: translate(0, 0) scale(.5); transition: transform 380ms cubic-bezier(.34, 1.56, .64, 1), opacity 160ms ease; }
   .orbit-role .role-symbol :global(.workflow-role-icon) { width: 18px; height: 18px; }

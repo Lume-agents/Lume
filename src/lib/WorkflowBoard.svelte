@@ -22,7 +22,7 @@
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
 
-  let { sessions, preferences, language, active, keyboardEnabled = true, backend = desktopWorkflowBackend, onSaveGroup, onDeleteGroup, onOpenChat, onClose, onFinishSidebarDrag, draggingSessionId = null, onSidebarDragOverBoard }: {
+  let { sessions, preferences, language, active, keyboardEnabled = true, backend = desktopWorkflowBackend, onSaveGroup, onDeleteGroup, onOpenChat, onClose, onFinishSidebarDrag, draggingSessionId = null, onSidebarDragOverBoard, touch = false }: {
     sessions: HubSession[];
     preferences: Preferences;
     language: Language;
@@ -38,10 +38,31 @@
     /** The sidebar agent being dragged, so the board can show it as a card under the cursor. */
     draggingSessionId?: string | null;
     onSidebarDragOverBoard?: (over: boolean) => void;
+    /** A phone: taps open a card, a held card only drags, the role picker orbits the card, and the toolbar is trimmed. */
+    touch?: boolean;
   } = $props();
 
   const storageKey = "lume:workflow-board:v1";
   const markerId = "board-arrow-" + crypto.randomUUID();
+  // Touch: the card whose role bubbles are open, whether the finger moved the card, and whether it started on the role badge.
+  let orbitFor = $state<string | null>(null);
+  let orbitDown = $state(false);
+  let cardMoved = false;
+  let cardTapOnBadge = false;
+  let runCollapsed = $state(false);
+  function orbitSpot(index: number) {
+    const angle = ((15 + index * (150 / Math.max(1, roles.length - 1))) * Math.PI) / 180;
+    return { x: Math.round(Math.cos(angle) * 74), y: Math.round(-Math.sin(angle) * 74 * (orbitDown ? -0.9 : 1)) };
+  }
+  /** Opens the bubbles one frame after they mount, so they travel out of the badge instead of appearing in place. */
+  function orbitIn(node: HTMLElement) {
+    const frame = requestAnimationFrame(() => requestAnimationFrame(() => node.classList.add("open")));
+    return { destroy: () => cancelAnimationFrame(frame) };
+  }
+  async function pickOrbitRole(stepId: string, role: WorkflowRole) {
+    choose({ kind: "step", id: stepId });
+    if (selectedStep && selectedStep.role !== role) await changeRole(role);
+  }
   const roles: WorkflowRole[] = ["planner", "implementer", "reviewer", "tester", "researcher", "custom"];
   let activeId = $state("");
   let layouts = $state<Record<string, BoardLayout>>({});
@@ -367,6 +388,7 @@
   }
   function choose(selectionNext: typeof selection) {
     selection = selectionNext;
+    orbitFor = null;
     pickerOpen = false;
     insertingConnectionId = null;
     edgeMenu = null;
@@ -564,6 +586,7 @@
   }
   function beginPan(event: PointerEvent) {
     if (event.button !== 0 && event.button !== 1) return;
+    orbitFor = null;
     if (event.button === 0 && event.target instanceof Element && event.target.closest("button, input, textarea, select, [data-board-card], [data-board-edge]")) return;
     if (event.pointerType === "touch") {
       touches.set(event.pointerId, touchPoint(event));
@@ -582,7 +605,11 @@
   function beginCard(event: PointerEvent, id: string) {
     if (event.button !== 0 || !layout.positions[id]) return;
     if (connectionSource && !gesture) { event.stopPropagation(); connectTo(id); return; }
-    choose({ kind: "step", id });
+    cardMoved = false;
+    cardTapOnBadge = event.target instanceof Element && Boolean(event.target.closest(".card-role-fab"));
+    // A finger that holds a card only drags it; the card opens on a tap, once the finger lifts.
+    if (touch) { orbitFor = null; if (selection) selection = null; }
+    else choose({ kind: "step", id });
     capture(event);
     gesture = { kind: "card", pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, origin: { ...layout.positions[id] }, stepId: id };
   }
@@ -621,6 +648,7 @@
     const dx = event.clientX - gesture.start.x;
     const dy = event.clientY - gesture.start.y;
     if (gesture.kind === "card") {
+      if (Math.abs(dx) > 6 || Math.abs(dy) > 6) cardMoved = true;
       const bounds = viewport.getBoundingClientRect();
       cardOutside = event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
     }
@@ -633,6 +661,13 @@
     flushPatch();
     // Connecting can end the gesture itself, so the checks below use the snapshot taken above.
     if (current.kind === "connection" && connectionTarget) connectTo(connectionTarget);
+    if (touch && current.kind === "card" && current.stepId && !cardMoved) {
+      const id = current.stepId;
+      cancelGesture();
+      if (cardTapOnBadge && !locked) { choose(null); orbitDown = layout.positions[id].y * view.zoom + view.y < 170; orbitFor = id; }
+      else choose({ kind: "step", id });
+      return;
+    }
     if (current.kind === "card" && current.stepId && cardOutside) {
       // Dropping a card outside the canvas takes it out of the workflow; a running workflow only gets its card back.
       if (locked) patchLayout({ positions: { ...layout.positions, [current.stepId]: current.origin } });
@@ -917,7 +952,7 @@
 {/snippet}
 
 
-<section class="workflow-board" class:entered hidden={!shown} inert={!active} aria-label={tr("Workflow board", "Board de workflow")} data-testid="workflow-board" ondragover={dragOver} ondragleave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) endDragOver(); }} ondrop={drop}>
+<section class="workflow-board" class:touch class:entered hidden={!shown} inert={!active} aria-label={tr("Workflow board", "Board de workflow")} data-testid="workflow-board" ondragover={dragOver} ondragleave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) endDragOver(); }} ondrop={drop}>
   <div
     class="board-viewport"
     data-tour="board-canvas"
@@ -942,6 +977,7 @@
     <div class="board-world" style:transform={"translate(" + view.x + "px," + view.y + "px) scale(" + view.zoom + ")"}>
       <svg class="board-edges" xmlns="http://www.w3.org/2000/svg" aria-label={tr("Workflow connections", "Conexões do workflow")}>
         <defs>
+          <filter id={markerId + "-goo"} x="-50%" y="-50%" width="200%" height="200%" color-interpolation-filters="sRGB"><feGaussianBlur in="SourceGraphic" stdDeviation="5" result="blur" /><feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -8" /></filter>
           <marker id={markerId + "-active"} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1 7 4 1 7" fill="none" stroke="var(--workspace-accent)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></marker>
           {#each edges as { connection, geometry } (connection.id)}
             {@const fromRole = group?.steps.find((step) => step.id === connection.fromStepId)?.role ?? "custom"}
@@ -1049,6 +1085,18 @@
           </span>
           <button class="card-port port-in" type="button" disabled={locked} aria-label={tr("Connect to ", "Conectar a ") + name(session)} title={tr("Connection input", "Entrada da conexão")} onclick={() => connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id })}><i></i></button>
           <button class="card-port port-out" data-tour="board-port" type="button" disabled={locked} aria-label={tr("Connect from ", "Conectar de ") + name(session)} title={tr("Drag to connect", "Arraste para conectar")} onpointerdown={(event) => beginConnection(event, step.id)} onclick={(event) => { if (event.detail === 0) keyboardConnect(step.id); }}><i></i></button>
+          {#if touch && orbitFor === step.id}
+            <div class="role-orbit" use:orbitIn style:--card-role={"var(--role-" + step.role + ")"}>
+              <div class="orbit-goo" aria-hidden="true" style:filter={"url(#" + markerId + "-goo)"}>
+                <i class="orbit-blob core"></i>
+                {#each roles as role, index (role)}<i class="orbit-blob" style:--ox={orbitSpot(index).x + "px"} style:--oy={orbitSpot(index).y + "px"} style:--role-color={"var(--role-" + role + ")"}></i>{/each}
+              </div>
+              <span class="orbit-core" aria-hidden="true"><WorkflowRoleIcon role={step.role} /></span>
+              {#each roles as role, index (role)}
+                <button class="orbit-role" class:current={role === step.role} type="button" style:--ox={orbitSpot(index).x + "px"} style:--oy={orbitSpot(index).y + "px"} style:--i={index} aria-label={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} title={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} onpointerdown={(event) => event.stopPropagation()} onclick={() => void pickOrbitRole(step.id, role)}><WorkflowRoleIcon {role} /></button>
+              {/each}
+            </div>
+          {/if}
         </article>
       {/each}
       {#if dragSession && dragPoint}
@@ -1083,7 +1131,7 @@
   {/if}
 
   <header class="board-toolbar">
-    <span class="board-title"><WorkspaceHeaderIcon name="workflow" size={19} /><strong>Workflow</strong></span>
+    {#if !touch}<span class="board-title"><WorkspaceHeaderIcon name="workflow" size={19} /><strong>Workflow</strong></span>{/if}
     <span class="board-mode" data-tour="board-mode" role="group" aria-label={tr("View", "Visualização")}>
       <button class:on={boardMode === "board"} type="button" aria-pressed={boardMode === "board"} onclick={() => setBoardMode("board")}>{tr("Board", "Board")}</button>
       <button class:on={boardMode === "timeline"} type="button" aria-pressed={boardMode === "timeline"} onclick={() => setBoardMode("timeline")}>{tr("Timeline", "Linha do tempo")}</button>
@@ -1093,10 +1141,10 @@
     <button class:confirm={confirmingDelete} class="delete-workflow" type="button" disabled={!group || locked || deleting} title={confirmingDelete ? tr("Click again to delete this workflow", "Clique de novo para excluir este workflow") : tr("Delete workflow", "Excluir workflow")} aria-label={confirmingDelete ? tr("Confirm deleting this workflow", "Confirmar exclusão deste workflow") : tr("Delete workflow", "Excluir workflow")} onclick={requestDeleteGroup}><LumeIcon name="trash" size={15} />{#if confirmingDelete}<span>{tr("Delete?", "Excluir?")}</span>{/if}</button>
     <span class="toolbar-divider"></span>
     {#if simulatorAvailable}<button class="sim-toggle" class:active={Boolean(demo)} type="button" title={tr("Preview card and pipe states", "Visualizar estados dos cards e canos")} aria-pressed={Boolean(demo)} onclick={toggleDemo}><LumeIcon name="bolt" size={14} />{tr("Simulate", "Simular")}</button>{/if}
-    <button class="add-agent" type="button" disabled={locked || adding} onclick={() => openPicker()}><LumeIcon name="plus" size={14} />{tr("Agent", "Agente")}</button>
+    {#if !touch}<button class="add-agent" type="button" disabled={locked || adding} onclick={() => openPicker()}><LumeIcon name="plus" size={14} />{tr("Agent", "Agente")}</button>{/if}
     <span class="save-state" aria-live="polite">{saving ? tr("Saving…", "Salvando…") : saveFailed ? tr("Not saved", "Não salvo") : ""}</span>
     {#if saveFailed}<button type="button" title={tr("Retry saving", "Tentar salvar novamente")} aria-label={tr("Retry saving", "Tentar salvar novamente")} onclick={() => void retrySave()}><LumeIcon name="refresh" size={15} /></button>{/if}
-    <span class="exit-hint"><kbd>Esc</kbd>{tr("Back to chats", "Voltar aos chats")}</span>
+    {#if !touch}<span class="exit-hint"><kbd>Esc</kbd>{tr("Back to chats", "Voltar aos chats")}</span>{/if}
     <button class="close-board" type="button" title={tr("Back to chats", "Voltar aos chats")} aria-label={tr("Back to chats", "Voltar aos chats")} onclick={onClose}><svg class="exit-icon" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 3v18M21 3l-4.4 1.7v14.6L21 21" /><circle cx="7.4" cy="6.4" r="1.7" /><path d="M7 9.2l1.4 4.6M7.6 10.5l3.4 1.6M7.4 10.2 4.4 11.8M8.4 13.8l2.7 3 .3 3.9M8.4 13.8l-2.9 2.6-1.3 3.5" /></svg></button>
   </header>
 
@@ -1206,12 +1254,12 @@
     {/if}
   {/if}
 
-  <div class="board-navigation" role="group" aria-label={tr("Canvas view", "Vista do canvas")}>
+  {#if !touch}<div class="board-navigation" role="group" aria-label={tr("Canvas view", "Vista do canvas")}>
     <button type="button" aria-label={tr("Zoom out", "Diminuir zoom")} title={tr("Zoom out", "Diminuir zoom")} onclick={() => zoom(1 / 1.2)}><span aria-hidden="true">−</span></button>
     <button class="zoom-label" type="button" title={tr("Reset zoom", "Restaurar zoom")} aria-label={tr("Reset zoom", "Restaurar zoom")} onclick={() => patchLayout({ view: zoomAround(view, { x: viewportWidth / 2, y: viewportHeight / 2 }, 1) })}>{Math.round(view.zoom * 100)}%</button>
     <button type="button" aria-label={tr("Zoom in", "Aumentar zoom")} title={tr("Zoom in", "Aumentar zoom")} onclick={() => zoom(1.2)}><LumeIcon name="plus" size={14} /></button>
     <span></span><button type="button" aria-label={tr("Fit to view", "Ajustar à tela")} title={tr("Fit to view", "Ajustar à tela")} onclick={fit}><LumeIcon name="maximize" size={15} /></button>
-  </div>
+  </div>{/if}
   {#if connectionSource}<p class="connection-hint">{targetCheck && !targetCheck.ok ? connectionRefusalMessage(targetCheck.reason, language === "pt-BR") : tr("Choose another card to connect · Esc to cancel", "Escolha outro card para conectar · Esc para cancelar")}</p>{/if}
 
   {#if demo && group && demoCells}
@@ -1248,9 +1296,9 @@
       </div>
     </aside>
   {:else if group}
-    <footer class="board-run" data-tour="board-run" data-status={run?.status ?? "draft"}>
+    <footer class="board-run" class:collapsed={touch && runCollapsed} data-tour="board-run" data-status={run?.status ?? "draft"}>
       <span class="run-track" aria-hidden="true"><i style:--progress={(run ? run.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length / Math.max(1, group.steps.length) * 100 : 0) + "%"}></i></span>
-      <div class="run-heading"><span class="run-state"><i></i><strong>{runLoading ? tr("Loading run…", "Carregando execução…") : run ? runStatus(run.status) : tr("Ready to build", "Pronto para montar")}</strong></span><span class="run-progress">{run ? run.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length : chain?.order.length ?? 0}/{group.steps.length} {tr("steps", "etapas")}</span><input class="workflow-name" aria-label={tr("Workflow name", "Nome do workflow")} value={groupName(group)} maxlength="80" onchange={(event) => patchLayout({ name: event.currentTarget.value.trim() || undefined })} /></div>
+      <div class="run-heading"><span class="run-state"><i></i><strong>{runLoading ? tr("Loading run…", "Carregando execução…") : run ? runStatus(run.status) : tr("Ready to build", "Pronto para montar")}</strong></span>{#if touch}<button class="run-collapse" type="button" aria-expanded={!runCollapsed} aria-label={runCollapsed ? tr("Expand run panel", "Expandir painel de execução") : tr("Collapse run panel", "Recolher painel de execução")} onclick={() => (runCollapsed = !runCollapsed)}><svg viewBox="0 0 20 20" aria-hidden="true" style:transform={runCollapsed ? "rotate(180deg)" : "none"}><path d="m5 8 5 5 5-5" /></svg></button>{/if}<span class="run-progress">{run ? run.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length : chain?.order.length ?? 0}/{group.steps.length} {tr("steps", "etapas")}</span><input class="workflow-name" aria-label={tr("Workflow name", "Nome do workflow")} value={groupName(group)} maxlength="80" onchange={(event) => patchLayout({ name: event.currentTarget.value.trim() || undefined })} /></div>
       {#if chain?.problems.length}
         <button class="chain-problem" type="button" onclick={() => { problemStepIds = chain!.problems[0].stepIds; fit(); }}><LumeIcon name="warning" size={13} />{problemMessage(chain.problems[0], language === "pt-BR")}</button>
       {:else if blockedStep && !locked}
@@ -1652,6 +1700,29 @@
   .run-actions small { flex-basis: 100%; font-size: 10px; color: var(--workspace-muted); text-align: right; }
   .chain-problem { min-width: 0; padding: 0; display: flex; align-items: flex-start; gap: 6px; border: 0; color: var(--board-warning); background: transparent; text-align: left; font-size: 10px; line-height: 1.4; }
   .run-error { margin: 0; max-height: 44px; overflow: auto; color: var(--board-danger); font-size: 10px; line-height: 1.5; }
+  /* Touch: the toolbar clears the notch and the Dynamic Island, and the role bubbles orbit the badge of the tapped card. */
+  .workflow-board.touch .board-toolbar { top: max(10px, env(safe-area-inset-top, 0px)); left: max(10px, env(safe-area-inset-left, 0px)); right: max(10px, env(safe-area-inset-right, 0px)); max-width: none; overflow-x: auto; scrollbar-width: none; }
+  .workflow-board.touch .board-toolbar::-webkit-scrollbar { display: none; }
+  .workflow-board.touch .board-run { width: calc(100% - max(16px, env(safe-area-inset-left, 0px) + env(safe-area-inset-right, 0px) + 16px)); bottom: max(8px, env(safe-area-inset-bottom, 0px)); }
+  .workflow-board.touch .board-run.collapsed { padding-bottom: 8px; }
+  .workflow-board.touch .board-run.collapsed > :not(.run-track):not(.run-heading) { display: none; }
+  .workflow-board.touch .board-run.collapsed .workflow-name { display: none; }
+  .run-collapse { width: 26px !important; height: 26px !important; margin-left: auto; padding: 0; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; }
+  .run-collapse svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 180ms ease; }
+  .workflow-board.touch .role-tooltip { display: none; }
+  .board-card:has(.role-orbit) { z-index: 30; }
+  .role-orbit { position: absolute; z-index: 6; left: 50%; top: 0; width: 0; height: 0; pointer-events: none; }
+  .orbit-goo { position: absolute; left: -130px; top: -130px; width: 260px; height: 260px; pointer-events: none; }
+  .orbit-blob { position: absolute; left: 50%; top: 50%; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%; background: var(--role-color, var(--card-role)); transform: translate(0, 0) scale(.6); opacity: 0; transition: transform 460ms cubic-bezier(.34, 1.56, .64, 1), opacity 120ms ease; }
+  .orbit-blob.core { width: 38px; height: 38px; margin: -19px 0 0 -19px; background: var(--card-role); opacity: 1; transform: none; }
+  .role-orbit:global(.open) .orbit-blob:not(.core) { opacity: 1; transform: translate(var(--ox), var(--oy)) scale(1); }
+  .orbit-core { position: absolute; left: 0; top: 0; width: 38px; height: 38px; margin: -19px 0 0 -19px; display: grid; place-items: center; color: #fff; pointer-events: none; }
+  .orbit-core :global(svg) { width: 18px; height: 18px; }
+  .orbit-role { position: absolute; left: 0; top: 0; width: 34px; height: 34px; margin: -17px 0 0 -17px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; color: #fff; background: transparent; pointer-events: none; opacity: 0; transform: translate(0, 0) scale(.6); transition: transform 460ms cubic-bezier(.34, 1.56, .64, 1), opacity 160ms ease; }
+  .orbit-role :global(svg) { width: 17px; height: 17px; }
+  .role-orbit:global(.open) .orbit-role { opacity: 1; pointer-events: auto; transform: translate(var(--ox), var(--oy)) scale(1); }
+  .orbit-role.current { box-shadow: 0 0 0 2px #fff, 0 0 0 4px color-mix(in srgb, var(--card-role) 60%, transparent); }
+  .orbit-role:active { transform: translate(var(--ox), var(--oy)) scale(.92); }
   @media (max-width: 820px) {
     .board-toolbar { gap: 3px; left: 12px; max-width: calc(100% - 200px); }
     .board-title strong, .save-state { display: none; }

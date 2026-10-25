@@ -13,6 +13,7 @@
   import SettingsScreen from "./SettingsScreen.svelte";
   import MobileNav from "./MobileNav.svelte";
   import Banner from "./Banner.svelte";
+  import RotateHint from "./RotateHint.svelte";
   import WorkflowBoard from "$lib/WorkflowBoard.svelte";
 
   const client = new MobileClient();
@@ -120,6 +121,7 @@
           preferences={{ workflowGroups: client.snapshot?.workflowGroups ?? [] } as unknown as Preferences}
           language={client.language}
           active={boardOpen && !chatId}
+          touch
           backend={client.workflowBackend}
           onSaveGroup={(group) => client.saveWorkflowGroup(group)}
           onDeleteGroup={(id) => client.deleteWorkflowGroup(id)}
@@ -127,6 +129,7 @@
           onClose={() => (boardOpen = false)}
           onFinishSidebarDrag={() => {}}
         />
+        <RotateHint {client} />
       </div>
     {/if}
     {#if chatId}
@@ -144,6 +147,6 @@
   .mobile-app { position: fixed; inset: 0; overflow: hidden; }
   .tabs { position: absolute; inset: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; transition: transform 240ms cubic-bezier(.16, 1, .3, 1), filter 240ms ease; }
   .tabs.behind { transform: translateX(-12%); filter: brightness(.82); pointer-events: none; }
-  .board-layer { position: absolute; z-index: 4; inset: 0; padding-top: var(--safe-top); background: var(--workspace-bg); }
+  .board-layer { position: absolute; z-index: 4; inset: 0; background: var(--workspace-bg); }
   .chat-layer { position: absolute; z-index: 5; inset: 0; background: var(--workspace-bg); box-shadow: -18px 0 40px rgba(0, 0, 0, .28); }
 </style>

@@ -10,6 +10,8 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { appUpdates, appUpdateAction, startAppUpdatesOwner } from "$lib/appUpdateRuntime";
   import UpdateBanner from "$lib/UpdateBanner.svelte";
+  import ConnectionBadges from "$lib/ConnectionBadges.svelte";
+  import DevicePlatformIcon from "$lib/DevicePlatformIcon.svelte";
   import AppUpdateNotice from "$lib/AppUpdateNotice.svelte";
   import QRCode from "qrcode";
   import {
@@ -3098,6 +3100,7 @@
             <strong>Lume</strong>
             <span>{activeCount === 1 ? tr("1 active agent", "1 agente ativo") : tr(`${activeCount} active agents`, `${activeCount} agentes ativos`)}</span>
           </div>
+          <ConnectionBadges language={preferences.language} />
         </div>
         <div class="header-actions">
           <button class:opening={openingWorkspace} class="workspace-button" data-tour="orb-workspace" type="button" title={tr("Open Workspace", "Abrir Workspace")} disabled={openingWorkspace} aria-busy={openingWorkspace} onclick={() => void showWorkspaceWindow()} aria-label={tr("Open Workspace", "Abrir Workspace")}>
@@ -4256,6 +4259,7 @@
                     {#each pairedDevices as device (device.id)}
                       <article class="paired-device-card" data-mobile-device-id={device.id}>
                         <div class="paired-device-header">
+                          <DevicePlatformIcon name={device.name} size={26} />
                           <span class="paired-device-info">
                             <strong>{device.name}</strong>
                             <small>{dev && device.id === devMobileDeviceId ? tr("Development preview", "Demonstração do ambiente de desenvolvimento") : device.lastSeenAt ? relativeTime(device.lastSeenAt) : tr("Not used yet", "Ainda não utilizado")}</small>
@@ -4267,12 +4271,6 @@
                           {/if}
                         </div>
                         <div class="device-permissions">
-                          <div class="device-permission">
-                            <span class="permission-copy">
-                              <strong>{tr("View sessions", "Visualizar sessões")}</strong>
-                            </span>
-                            <span class="permission-state allowed">{tr("Always allowed", "Sempre permitido")}</span>
-                          </div>
                           {#each [
                             {
                               scope: "prompt" as MobileScope,

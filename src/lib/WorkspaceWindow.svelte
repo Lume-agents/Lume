@@ -8,6 +8,8 @@
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { appUpdates, startAppUpdatesPeer } from "$lib/appUpdateRuntime";
   import UpdateBanner from "$lib/UpdateBanner.svelte";
+  import ConnectionBadges from "$lib/ConnectionBadges.svelte";
+  import DevicePlatformIcon from "$lib/DevicePlatformIcon.svelte";
   import AppUpdateNotice from "$lib/AppUpdateNotice.svelte";
   import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
   import QRCode from "qrcode";
@@ -2622,6 +2624,7 @@
       <div class="brand-top">
         <span class="brand-mark"><BrandIcon name="lume" size={25} /></span>
         <span class="brand-copy"><strong>Lume</strong><small>Workspace</small></span>
+        <ConnectionBadges language={preferences.language} />
         <button class="sidebar-toggle" type="button" aria-label={sidebarCollapsed ? tr("Expand sidebar", "Expandir barra lateral") : tr("Collapse sidebar", "Recolher barra lateral")} title={sidebarCollapsed ? tr("Expand sidebar", "Expandir barra lateral") : tr("Collapse sidebar", "Recolher barra lateral")} onclick={() => void toggleSidebar()}><WorkspaceSidebarToggleIcon collapsed={sidebarCollapsed} /></button>
       </div>
     <div class:expanded={headerControl !== null} class="header-selectors">
@@ -3213,7 +3216,7 @@
             {/if}
             {#each pairedDevices as device (device.id)}
               <div class="device-card">
-                <header><span><strong>{device.name}</strong><small>{device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : tr("Not used yet", "Ainda não utilizado")}</small></span><button type="button" onclick={() => void removePairedDevice(device.id)}>{tr("Revoke", "Revogar")}</button></header>
+                <header><DevicePlatformIcon name={device.name} size={24} /><span><strong>{device.name}</strong><small>{device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : tr("Not used yet", "Ainda não utilizado")}</small></span><button type="button" onclick={() => void removePairedDevice(device.id)}>{tr("Revoke", "Revogar")}</button></header>
                 {#each [["prompt", tr("Send prompts", "Enviar prompts")], ["approve", tr("Manage approvals", "Gerenciar aprovações")], ["terminate", tr("Stop agents", "Encerrar agentes")]] as permission}
                   <label class="workspace-setting-row"><span><strong>{permission[1]}</strong></span><input class="workspace-switch" type="checkbox" checked={device.scopes.includes(permission[0] as MobileScope)} onchange={() => void toggleDeviceScope(device, permission[0] as MobileScope)} /></label>
                 {/each}

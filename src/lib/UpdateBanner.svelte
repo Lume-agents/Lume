@@ -30,9 +30,8 @@
 
 <section class="update-banner" class:dark class:notice data-update-card aria-label={pt ? "Atualizações do Lume" : "Lume updates"}>
   <div class="update-banner-main">
-    <span class="update-logo"><LumeLogo size={30} /></span>
+    <span class="update-logo"><LumeLogo size={40} /></span>
     <div class="update-banner-copy">
-      <strong>Lume</strong>
       <small>{pt ? "Versão atual" : "Current version"}</small>
       <span class="version">{update.currentVersion}</span>
     </div>
@@ -56,13 +55,12 @@
   .update-banner.notice { margin-top: 0; box-shadow: 0 14px 40px rgba(0, 0, 0, .16), 0 2px 8px rgba(0, 0, 0, .08); }
   .update-banner.dark { --update-surface: var(--workspace-pane, var(--lume-surface-dark, #18221f)); --update-text: var(--workspace-text, var(--lume-ink-dark, #e9f2eb)); --update-muted: var(--workspace-muted, var(--lume-ink-muted-dark, #a8b9ae)); --update-line: var(--workspace-line, var(--lume-line-dark, #344339)); }
   .update-banner-main { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; }
-  .update-logo { display: grid; place-items: center; flex: 0 0 auto; width: 48px; height: 48px; border-radius: 14px; background: color-mix(in srgb, var(--update-text) 9%, transparent); }
+  .update-logo { display: grid; place-items: center; flex: 0 0 auto; width: 40px; height: 40px; overflow: hidden; border-radius: 12px; background: color-mix(in srgb, var(--update-text) 9%, transparent); }
   .update-banner-copy { display: grid; gap: 1px; }
-  small { color: var(--update-muted); font-size: 9.5px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
-  .version { font-size: 19px; font-weight: 600; letter-spacing: -.01em; line-height: 1.2; }
+  small { color: var(--update-muted); font-size: 9px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
+  .version { font-size: 17.5px; font-weight: 600; letter-spacing: -.01em; line-height: 1.2; }
   .update-note { margin: 10px 0 0; }
   .update-banner-copy { flex: 1 1 110px; min-width: 0; }
-  strong { display: block; font-size: 15px; font-weight: 650; line-height: 1.3; letter-spacing: -.01em; overflow-wrap: anywhere; }
   p { margin: 2px 0 0; color: var(--update-muted); font-size: 11.5px; line-height: 1.45; }
   button { display: inline-flex; align-items: center; justify-content: center; min-height: 30px; padding: 6px 14px; border: 0; border-radius: 999px; color: var(--update-text); background: transparent; font: inherit; font-size: 12px; font-weight: 650; white-space: nowrap; cursor: pointer; transition: background 160ms ease, color 160ms ease, opacity 160ms ease; }
   button:hover:not(:disabled) { background: color-mix(in srgb, var(--update-accent) 12%, transparent); }

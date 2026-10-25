@@ -621,8 +621,12 @@
     capture(event);
     gesture = { kind: "card", pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, origin: { ...layout.positions[id] }, stepId: id };
   }
+  // The connection a drag took off its port: it comes back when the drag ends without a new one.
+  let detachedConnection: WorkflowConnectionDefinition | null = null;
   function beginConnection(event: PointerEvent, id: string) {
     if (event.button !== 0 || locked) return;
+    const existing = group?.connections.find((item) => item.fromStepId === id);
+    if (group && existing) { detachedConnection = existing; edit(removeConnection(group, existing.id)); }
     capture(event);
     connectionSource = id;
     connectionTarget = null;
@@ -633,7 +637,7 @@
   function connectTo(id: string) {
     if (!group || !connectionSource || locked) return;
     const result = checkConnection(group, connectionSource, id);
-    if (result.ok) edit(addConnection(group, connectionSource, id));
+    if (result.ok) { detachedConnection = null; edit(addConnection(group, connectionSource, id)); }
     else notify(connectionRefusalMessage(result.reason, language === "pt-BR"), "warning");
     cancelGesture();
   }
@@ -684,6 +688,11 @@
     cancelGesture();
   }
   function cancelGesture() {
+    if (detachedConnection && group) {
+      const lost = detachedConnection;
+      detachedConnection = null;
+      if (!group.connections.some((item) => item.fromStepId === lost.fromStepId)) edit({ ...group, connections: [...group.connections, lost] });
+    }
     flushPatch();
     const previous = gesture;
     gesture = null;

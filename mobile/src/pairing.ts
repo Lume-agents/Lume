@@ -42,7 +42,12 @@ export function pairingIntentUrl(target: PairingTarget) {
 }
 
 export function suggestedDeviceName() {
-  if (/iPhone|iPad/i.test(navigator.userAgent)) return "iPhone";
-  if (/Android/i.test(navigator.userAgent)) return "Android phone";
+  if (/iPad/i.test(navigator.userAgent)) return "iPad";
+  if (/iPhone/i.test(navigator.userAgent)) return "iPhone";
+  if (/Android/i.test(navigator.userAgent)) {
+    // The model is in the user agent ("Android 15; Pixel 9"); newer browsers report a bare "K" instead.
+    const model = /Android[^;)]*;\s*([^;)]+?)(?:\s+Build\/[^;)]*)?[;)]/i.exec(navigator.userAgent)?.[1]?.trim();
+    return model && model !== "K" && !/^(Linux|U)$/i.test(model) ? model : "Android phone";
+  }
   return "My phone";
 }

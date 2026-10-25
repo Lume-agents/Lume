@@ -4,17 +4,19 @@
 
   let { language, large = false }: { language: Language; large?: boolean } = $props();
   const pt = $derived(language === "pt-BR");
+  const phoneLabel = $derived(`${pt ? "Celular conectado" : "Phone connected"}: ${$connections.phones.join(", ")}`);
+  const computerLabel = $derived(`${pt ? "Outro computador conectado" : "Another computer connected"}: ${$connections.computers.join(", ")}`);
 </script>
 
-{#if $connections.phone || $connections.computer}
+{#if $connections.phones.length || $connections.computers.length}
   <span class="connection-badges" class:large>
-    {#if $connections.phone}
-      <span class="badge" role="img" title={pt ? "Celular conectado" : "Phone connected"} aria-label={pt ? "Celular conectado" : "Phone connected"}>
+    {#if $connections.phones.length}
+      <span class="badge" role="img" title={phoneLabel} aria-label={phoneLabel}>
         <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="3" width="8" height="14" rx="2" /><path d="M9 14.5h2" /></svg>
       </span>
     {/if}
-    {#if $connections.computer}
-      <span class="badge" role="img" title={pt ? "Outro computador conectado" : "Another computer connected"} aria-label={pt ? "Outro computador conectado" : "Another computer connected"}>
+    {#if $connections.computers.length}
+      <span class="badge" role="img" title={computerLabel} aria-label={computerLabel}>
         <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="4.5" width="13" height="8.5" rx="1.5" /><path d="M7.5 16h5M10 13v3" /></svg>
       </span>
     {/if}

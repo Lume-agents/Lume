@@ -3771,14 +3771,14 @@
   .session-title-row { min-width: 0; display: flex; align-items: center; gap: 6px; }
   .session-title-row strong { min-width: 0; flex: 0 1 auto; }
   .source-label { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; border-radius: 999px; color: var(--workspace-muted); background: color-mix(in srgb, var(--workspace-muted) 11%, transparent); font-size: 8px; font-weight: 720; letter-spacing: .045em; line-height: 1.25; text-transform: uppercase; }
-  .session-copy strong { color: var(--workspace-strong); font-size: 10px; font-weight: 720; letter-spacing: -.01em; }
-  .session-copy small { color: var(--workspace-muted); font-size: 8px; line-height: 1.3; }
+  .session-copy strong { color: var(--workspace-strong); font-size: 11px; font-weight: 720; letter-spacing: -.01em; }
+  .session-copy small { color: var(--workspace-muted); font-size: 9px; line-height: 1.3; }
   .session-copy .session-meta { display: flex; align-items: center; gap: 4px; }
   .session-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-meta .session-fork { flex: 0 0 auto; min-width: auto; display: inline-flex; color: var(--workspace-accent); }
   .session-environment-marker { position: absolute; right: 8px; bottom: 5px; z-index: 2; }
   .workspace.sidebar-collapsed .session-environment-marker { right: 0; bottom: 0; }
-  .session-copy em { display: flex; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 8px; font-style: normal; font-weight: 650; }
+  .session-copy em { display: flex; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 9px; font-style: normal; font-weight: 650; }
   .session-copy em i { width: 5px; height: 5px; border-radius: 50%; background: #8a9891; }
   .session-copy em.status-running i { background: #4d99cc; }.session-copy em.status-completed i { background: #4daa77; }.session-copy em.status-permission_required i { background: #d6a441; }.session-copy em.status-failed i { background: #c86662; }
   .session-copy em.status-running i { animation: live-pulse 1.8s ease-out infinite; }
@@ -3930,6 +3930,8 @@
     .inspector-shell.open { opacity: 1; transform: translateX(0); box-shadow: -16px 0 40px rgba(4, 15, 9, .16); }
     .workspace-stage.review-open { grid-template-columns: minmax(300px, 1fr) 0px minmax(420px, 48vw); }
   }
+  /* Small or low-resolution screens get a larger list, so names and folders stay readable. */
+  @media (max-width: 1366px), (max-height: 760px) { .session-copy strong { font-size: 12px; } .session-copy small, .session-copy em { font-size: 10px; } }
   @media (max-height: 640px) { .brand-top { height: 46px; }.session-heading { padding-top: 8px; }.session-tree-item { margin-bottom: 0; } }
   @media (prefers-reduced-motion: reduce) { .workspace-loading .empty-mark, .workspace-loading-bar::after { animation: none; } .workspace, .brand-copy, .session-copy, .session-icon :global(.thread-avatar), .session-status-dot, .session-row, .session-tree-item, .subagent-toggle :global(.lume-icon), .subagent-list-shell, .sidebar-toggle, .compact-mode, .settings-button, .session-filters button, .pane-divider::before, .appearance-option, .workspace-switch, .workspace-switch::after, .header-control-icon, .header-control-close, .workspace-stage, .session-launcher > button, .session-launcher > button :global(svg), .launcher-agent-row button, .launcher-resume-list button { transition: none; }.launcher-spinner { animation: none !important; }.session-copy em.status-running i, .session-context-menu, .header-selectors.expanded, .layout-drop-preview::before, .layout-drop-preview span, .subagent-row, .session-drag-preview { animation: none; } }
 </style>

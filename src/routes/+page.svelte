@@ -4904,7 +4904,7 @@
     cursor: pointer;
     transition: transform 130ms ease, background 130ms ease;
   }
-  .permission-actions button:hover { transform: translateY(-1px); background: white; }
+  .permission-actions button:hover { background: white; }
   .permission-actions button:active { transform: scale(0.97); }
   .permission-actions button { display: inline-flex; align-items: center; gap: 6px; }
   .permission-actions button:disabled:not(.loading) { opacity: .5; }
@@ -4938,7 +4938,6 @@
   .inline-composer textarea { min-width: 0; min-height: 52px; flex: 1; padding: 8px 9px; border: 1px solid rgba(85, 109, 99, 0.14); border-radius: 10px; color: #34423c; background: rgba(255, 255, 255, 0.48); font-size: 10px; line-height: 1.4; }
   .inline-composer textarea:focus { border-color: rgba(70, 111, 94, 0.42); box-shadow: 0 0 0 3px rgba(74, 118, 99, 0.06); }
   .inline-composer-controls > button { width: 30px; height: 30px; display: grid; flex: 0 0 auto; place-items: center; border: 0; border-radius: 9px; color: white; background: #496f60; cursor: pointer; transition: transform 140ms ease, opacity 140ms ease; }
-  .inline-composer-controls > button:hover:not(:disabled) { transform: translateY(-1px); }
   .inline-composer-controls > button:disabled { opacity: 0.35; cursor: default; }
   .inline-attachments { min-width: 0; display: flex; gap: 6px; overflow-x: auto; }
   .inline-attachments > span { position: relative; width: 44px; height: 44px; flex: 0 0 auto; overflow: hidden; border: 1px solid rgba(85, 109, 99, 0.14); border-radius: 9px; background: rgba(71, 98, 86, 0.05); }
@@ -4952,7 +4951,7 @@
   .terminate-agent-control button:disabled { opacity: 0.45; cursor: default; }
   .reset-settings-control { display: flex; align-items: center; gap: 6px; }
   .reset-settings-control > button { min-height: 27px; padding: 0 9px; border: 1px solid rgba(165, 76, 76, 0.45); border-radius: 8px; color: #a54c4c; background: transparent; font-size: 10px; font-weight: 750; cursor: pointer; transition: transform 130ms ease, background 130ms ease; }
-  .reset-settings-control > button:hover:not(:disabled) { transform: translateY(-1px); background: rgba(165, 76, 76, 0.1); }
+  .reset-settings-control > button:hover:not(:disabled) { background: rgba(165, 76, 76, 0.1); }
   .reset-settings-control.confirming { padding: 7px 8px; border: 1px solid rgba(165, 76, 76, 0.22); border-radius: 9px; background: rgba(165, 76, 76, 0.05); }
   .reset-settings-control.confirming span { min-width: 0; flex: 1; color: #8a4340; font-size: 9px; font-weight: 650; line-height: 1.35; }
   .reset-settings-control.confirming button { min-height: 24px; padding: 0 7px; border: 1px solid rgba(77, 91, 85, 0.3); border-radius: 7px; color: #4d5b55; background: transparent; font-size: 8px; font-weight: 750; cursor: pointer; transition: background 130ms ease; }
@@ -5062,7 +5061,7 @@
   .terminal-picker-copy small { min-width: 0; display: flex; align-items: center; gap: 4px; overflow: hidden; color: #89938f; font-size: 9px; white-space: nowrap; }
   .terminal-picker-copy small span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .terminal-picker-row > button { min-width: 52px; height: 28px; padding: 0 9px; border: 1px solid rgba(82, 105, 95, 0.16); border-radius: 9px; color: #4d6f61; background: rgba(255, 255, 255, 0.38); font-size: 9px; font-weight: 720; cursor: pointer; transition: transform 140ms ease, background 140ms ease; }
-  .terminal-picker-row > button:hover:not(:disabled) { transform: translateY(-1px); background: white; }
+  .terminal-picker-row > button:hover:not(:disabled) { background: white; }
   .terminal-picker-row > button:disabled { opacity: 0.5; cursor: default; }
   .board-empty { margin: 22px 0; color: #89938f; font-size: 9px; line-height: 1.45; }
 
@@ -5119,7 +5118,7 @@
   .integration-row strong { color: #35423d; font-size: 10px; }
   .integration-row div span { overflow: hidden; color: #89938f; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
   .integration-row button { min-width: 63px; height: 27px; padding: 0 8px; border: 1px solid rgba(82, 105, 95, 0.14); border-radius: 8px; color: #577064; background: transparent; font-size: 9px; font-weight: 680; cursor: pointer; transition: background 150ms ease, color 150ms ease, transform 150ms ease; }
-  .integration-row button:hover:not(:disabled) { transform: translateY(-1px); background: rgba(82, 112, 99, 0.06); }
+  .integration-row button:hover:not(:disabled) { background: rgba(82, 112, 99, 0.06); }
   .integration-row button.connected { border-color: transparent; color: #6d7e76; }
   .integration-row button:disabled { cursor: default; opacity: 0.5; }
   .integration-actions { display: flex; align-items: center; gap: 4px; }

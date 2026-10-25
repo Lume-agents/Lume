@@ -3757,7 +3757,6 @@
   .session-tree-item.connected-below { margin-bottom: 0; border-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
   .session-tree-item.connected.focused { background: color-mix(in srgb, var(--workspace-accent-soft) 72%, var(--workspace-sidebar)); }
   .session-row:hover { background: var(--workspace-subtle); }
-  .session-row:hover { transform: translateX(2px); }
   .session-row:active { cursor: grabbing; }
   .session-row.dragging { opacity: .48; transform: scale(.98); }
   .session-tree-item.focused .session-row:hover { background: color-mix(in srgb, var(--workspace-accent) 7%, transparent); }
@@ -3810,7 +3809,6 @@
   .session-context-command, .session-context-actions button { min-height: 32px; padding: 0 9px; border: 0; border-radius: 8px; color: var(--workspace-text); background: var(--workspace-subtle); font-size: 9px; cursor: pointer; }
   .session-context-command { display: flex; align-items: center; gap: 8px; text-align: left; transition: color 130ms ease, background 130ms ease, transform 130ms cubic-bezier(.16, 1, .3, 1); }
   .session-context-command:hover, .session-context-actions button:hover { color: var(--workspace-strong); background: var(--workspace-line); }
-  .session-context-command:hover { transform: translateX(1px); }
   .session-context-command.danger-command { color: #b45c58; }
   .session-context-command:disabled { opacity: .55; cursor: wait; transform: none; }
   .session-context-actions { display: flex; gap: 5px; }

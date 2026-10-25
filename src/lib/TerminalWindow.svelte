@@ -5114,7 +5114,7 @@
   .fast-mode-setting > div { min-width: 0; display: grid; gap: 3px; }
   .fast-mode-setting > div small { color: #7b8982; font: 550 var(--chat-tiny-font-size)/1.35 var(--lume-font-ui, Inter, sans-serif); }
   .fast-mode-toggle { min-width: 69px; height: 31px; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 1px solid rgba(78, 107, 93, .16); border-radius: 8px; color: #6f7e75; background: rgba(80, 107, 94, .055); font: 760 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); cursor: pointer; transition: border-color 140ms ease, color 140ms ease, background 140ms ease, transform 140ms ease; }
-  .fast-mode-toggle:hover:not(:disabled) { transform: translateY(-1px); border-color: rgba(54, 141, 95, .28); }
+  .fast-mode-toggle:hover:not(:disabled) { border-color: rgba(54, 141, 95, .28); }
   .fast-mode-toggle.active { border-color: rgba(53, 143, 96, .34); color: #347d58; background: rgba(57, 143, 99, .11); }
   .fast-mode-toggle:disabled { opacity: .48; cursor: default; }
   .fast-mode-toggle svg { width: 13px; height: 13px; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }

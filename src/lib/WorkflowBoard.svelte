@@ -1386,13 +1386,13 @@
   button:disabled { opacity: .45; cursor: default; }
   button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
   .edge-hub { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 50%; color: var(--workspace-muted); background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .5), transparent 55%), var(--workspace-raised); box-shadow: 0 3px 9px rgba(20, 38, 30, .22), 0 0 0 3px color-mix(in srgb, var(--workspace-raised) 70%, transparent); transition: color 120ms ease, border-color 120ms ease, transform 160ms cubic-bezier(.2, .8, .2, 1), box-shadow 160ms ease; }
-  .edge-hub:hover, .edge-hub.open { color: var(--workspace-accent); border-color: var(--workspace-accent); transform: scale(1.12); }
+  .edge-hub:hover, .edge-hub.open { color: var(--workspace-accent); border-color: var(--workspace-accent); box-shadow: 0 4px 12px rgba(20, 38, 30, .26), 0 0 0 4px color-mix(in srgb, var(--workspace-accent) 16%, transparent); }
   .edge-hub.open { box-shadow: 0 4px 12px rgba(20, 38, 30, .26), 0 0 0 4px color-mix(in srgb, var(--workspace-accent) 20%, transparent); }
-  .edge-cargo { position: absolute; top: calc(100% + 7px); left: 50%; display: flex; gap: 3px; padding: 3px; border: 1px solid var(--workspace-line); border-radius: 999px; background: color-mix(in srgb, var(--workspace-raised) 92%, transparent); box-shadow: 0 3px 9px rgba(20, 38, 30, .18); opacity: 0; transform: translate(-50%, -3px); transition: opacity 140ms ease, transform 140ms ease; pointer-events: none; white-space: nowrap; }
+  .edge-cargo { position: absolute; top: calc(100% + 7px); left: 50%; display: flex; gap: 3px; padding: 3px; border: 1px solid var(--workspace-line); border-radius: 999px; background: color-mix(in srgb, var(--workspace-raised) 92%, transparent); box-shadow: 0 3px 9px rgba(20, 38, 30, .18); opacity: 0; transform: translate(-50%, 0); transition: opacity 140ms ease; pointer-events: none; white-space: nowrap; }
   .edge-cargo b { padding: 1px 7px; border-radius: 999px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 9.5px; font-weight: 650; }
   .edge-cargo.traveling b { color: var(--workspace-accent); }
   .edge-cargo.waiting b { color: var(--board-warning); }
-  .edge-controls:hover .edge-cargo, .edge-controls.cargo-shown .edge-cargo { opacity: 1; transform: translate(-50%, 0); }
+  .edge-controls:hover .edge-cargo, .edge-controls.cargo-shown .edge-cargo { opacity: 1; }
   .feeding .pipe-energy-glow { opacity: .35; }
   .feeding .pipe-core { animation: pipe-breathe 3.2s ease-in-out infinite; }
   .edge-hub.waiting { color: var(--board-warning); border-color: var(--board-warning); }
@@ -1532,7 +1532,7 @@
   :global(.workspace.dark) .role-option-fab { background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .22) 0 13%, transparent 46%), linear-gradient(145deg, color-mix(in srgb, var(--card-role) 20%, #2c3631), #1e2623 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 4px 10px rgba(0, 0, 0, .4), 0 0 0 3px color-mix(in srgb, var(--card-role) 12%, transparent); }
   .role-option .role-symbol :global(.workflow-role-icon) { width: 18px; height: 18px; }
   .role-option-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .role-option:hover:not(:disabled) { border-color: color-mix(in srgb, var(--card-role) 45%, var(--workspace-line)); color: var(--workspace-strong); transform: translateY(-1px); }
+  .role-option:hover:not(:disabled) { border-color: color-mix(in srgb, var(--card-role) 45%, var(--workspace-line)); color: var(--workspace-strong); }
   .role-option:hover:not(:disabled) .role-option-fab { transform: translateY(-2px); }
   .role-option.selected { border-color: var(--card-role); color: var(--card-role); box-shadow: 0 0 0 3px color-mix(in srgb, var(--card-role) 18%, transparent); }
   .role-option.selected .role-option-fab { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 22%, transparent), 0 5px 10px rgba(24, 58, 41, .2), 0 0 0 5px color-mix(in srgb, var(--card-role) 22%, transparent); }
@@ -1735,6 +1735,7 @@
   .orbit-role .role-symbol :global(.workflow-role-icon) { width: 18px; height: 18px; }
   .role-orbit:global(.open) .orbit-role { opacity: 1; pointer-events: auto; transform: translate(var(--ox), var(--oy)) scale(1); }
   .orbit-role.current .role-option-fab { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 22%, transparent), 0 5px 10px rgba(24, 58, 41, .2), 0 0 0 5px color-mix(in srgb, var(--card-role) 26%, transparent); }
+  .orbit-role:hover .role-option-fab, .orbit-role:focus-visible .role-option-fab { border-color: var(--card-role); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 30%, transparent), 0 6px 12px rgba(24, 58, 41, .22), 0 0 0 5px color-mix(in srgb, var(--card-role) 24%, transparent); }
   .orbit-role:active { transform: translate(var(--ox), var(--oy)) scale(.92); }
   @media (max-width: 820px) {
     .board-toolbar { gap: 3px; left: 12px; max-width: calc(100% - 200px); }

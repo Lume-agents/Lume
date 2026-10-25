@@ -3324,7 +3324,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .pane-actions { display: flex; align-items: center; gap: 2px; }
   .agent-alerts { position: relative; flex: 0 0 auto; }
   .agent-alert-trigger { position: relative; width: 29px; height: 29px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 8px; color: #c99535; background: color-mix(in srgb, #c99535 9%, transparent); cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
-  .agent-alert-trigger:hover, .agent-alert-trigger.active { color: #dcaa48; background: color-mix(in srgb, #c99535 16%, var(--workspace-subtle)); transform: translateY(-1px); }
+  .agent-alert-trigger:hover, .agent-alert-trigger.active { color: #dcaa48; background: color-mix(in srgb, #c99535 16%, var(--workspace-subtle)); }
   .agent-alert-trigger > span { position: absolute; top: -3px; right: -3px; min-width: 14px; height: 14px; padding: 0 3px; display: grid; place-items: center; border: 2px solid var(--workspace-pane); border-radius: 8px; color: #fff8e5; background: #b77b25; font-size: 7px; font-weight: 820; line-height: 1; font-variant-numeric: tabular-nums; }
   .agent-alert-menu { position: absolute; z-index: 24; top: 36px; right: 0; width: min(310px, calc(100cqw - 20px)); max-height: min(330px, calc(100vh - 105px)); overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 18px 48px rgba(7, 20, 13, .22); animation: controls-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
   .agent-alert-menu > header { min-height: 39px; padding: 0 11px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--workspace-line); }
@@ -3337,7 +3337,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .agent-alert-menu article.tone-error > span { color: #c96761; background: color-mix(in srgb, #c96761 11%, transparent); }
   .agent-alert-menu p { margin: 1px 0 0; overflow-wrap: anywhere; color: var(--workspace-text); font-size: 9px; line-height: 1.45; }
   .pane-actions > button, .agent-controls > button, .text-zoom > button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 120ms ease, background 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
-  .pane-actions > button:hover, .agent-controls > button:hover, .agent-controls > button.active, .text-zoom > button:hover, .text-zoom > button.active { color: var(--workspace-accent); background: var(--workspace-subtle); transform: translateY(-1px); }
+  .pane-actions > button:hover, .agent-controls > button:hover, .agent-controls > button.active, .text-zoom > button:hover, .text-zoom > button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .pane-actions > button.active { color: var(--workspace-accent); background: var(--workspace-accent-soft); }
   .text-zoom { position: relative; }
   .text-zoom-popover { position: absolute; z-index: 12; top: 36px; right: 0; width: 136px; min-height: 40px; padding: 5px; display: grid; grid-template-columns: 30px 1fr 30px; align-items: center; gap: 3px; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 12px 30px rgba(8, 18, 13, .16); animation: controls-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
@@ -3497,7 +3497,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .agent-typing .typing-label { color: transparent; background: linear-gradient(90deg, #67837a 10%, #5aa1ce 44%, #a3d2ef 53%, #5aa1ce 62%, #67837a 90%); background-size: 240% 100%; background-clip: text; font-size: 12px; font-weight: 720; letter-spacing: -.01em; animation: thinking-label-shimmer 1.75s linear infinite; }
   .typing-elapsed { padding-left: 9px; border-left: 1px solid var(--workspace-line); color: var(--workspace-muted); font-size: 10px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .latest-button { position: absolute; right: 18px; bottom: calc(30px + var(--composer-overlap, 0px)); z-index: 3; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 5px 16px rgba(17, 35, 27, .09); cursor: pointer; }
-  .latest-button:hover { transform: translateY(-1px); }
   .environment-dock { position: absolute; left: 18px; z-index: 4; }
   .session-pane.has-environments .conversation { padding-bottom: calc(66px + var(--composer-overlap, 0px)); }
   .sources-scrim { position: absolute; z-index: 5; inset: 64px 0 0; padding: 0; border: 0; background: color-mix(in srgb, var(--workspace-pane) 28%, transparent); backdrop-filter: blur(1px); cursor: default; animation: sources-fade 150ms ease-out both; }
@@ -3559,7 +3558,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .writer-conflict-error { grid-column: 1 / -1; margin: 0; padding: 8px 10px; border-radius: 8px; color: var(--workspace-danger, #b96862); background: color-mix(in srgb, var(--workspace-danger, #b96862) 9%, transparent); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
   .writer-conflict-dialog footer { grid-column: 1 / -1; margin-top: 5px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
   .writer-conflict-dialog footer button { min-height: 34px; padding: 0 11px; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 720; cursor: pointer; transition: color 130ms ease, background 130ms ease, border-color 130ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
-  .writer-conflict-dialog footer button:hover:not(:disabled) { color: var(--workspace-strong); background: var(--workspace-subtle); transform: translateY(-1px); }
+  .writer-conflict-dialog footer button:hover:not(:disabled) { color: var(--workspace-strong); background: var(--workspace-subtle); }
   .writer-conflict-dialog footer .writer-conflict-primary { border-color: transparent; color: #f5fbf7; background: var(--workspace-accent); }
   .writer-conflict-dialog footer button:disabled { opacity: .55; cursor: default; }
   /* Only the field is solid. The form floats over the chat; the chat fades out behind it. */
@@ -3676,7 +3675,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .model-trigger span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer-tools .model-trigger:hover:not(:disabled), .composer-tools .model-trigger.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .composer-tools .model-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
-  .composer button:hover:not(:disabled) { transform: translateY(-1px) scale(1.03); }.composer button:disabled { opacity: .28; cursor: default; }
+  .composer button:disabled { opacity: .28; cursor: default; }
   .composer button.launching:disabled { opacity: 1; }
   .composer .agent-permission { max-width: 760px; margin: 0 auto 8px; padding: 11px 12px; display: grid; gap: 9px; border: 1px solid color-mix(in srgb, #d0a142 55%, var(--workspace-line)); border-radius: 13px; color: var(--workspace-text); background: color-mix(in srgb, #d0a142 11%, var(--workspace-raised)); }
   .agent-permission.risk-high { border-color: color-mix(in srgb, #d85c64 60%, var(--workspace-line)); background: color-mix(in srgb, #d85c64 9%, var(--workspace-raised)); }

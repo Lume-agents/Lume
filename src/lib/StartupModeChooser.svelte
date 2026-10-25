@@ -74,7 +74,7 @@
   header small { color: #6f7e76; font-size: 9px; }
   .mode-options { min-height: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; flex: 1; }
   .mode-option { min-width: 0; padding: 8px; display: grid; grid-template-rows: 108px auto; gap: 8px; overflow: hidden; border: 1px solid rgba(74, 104, 89, .16); border-radius: 14px; color: inherit; background: rgba(255, 255, 252, .72); text-align: left; cursor: pointer; transition: border-color 160ms ease, background 160ms ease, box-shadow 220ms cubic-bezier(.16, 1, .3, 1), transform 220ms cubic-bezier(.16, 1, .3, 1); }
-  .mode-option:hover, .mode-option:focus-visible { border-color: color-mix(in srgb, var(--lume-accent-strong) 45%, transparent); background: #fff; box-shadow: 0 12px 28px rgba(21, 45, 32, .09); outline: 0; transform: translateY(-2px); }
+  .mode-option:hover, .mode-option:focus-visible { border-color: color-mix(in srgb, var(--lume-accent-strong) 45%, transparent); background: #fff; box-shadow: 0 12px 28px rgba(21, 45, 32, .09); outline: 0; }
   .mode-option:active { transform: translateY(0) scale(.99); }
   .mode-option:disabled { cursor: wait; opacity: .72; }
   .mode-preview { position: relative; min-height: 0; height: 108px; overflow: hidden; border-radius: 10px; background: #eaf0eb; }

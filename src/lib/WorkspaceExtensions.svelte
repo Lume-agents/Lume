@@ -511,7 +511,7 @@
   .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: 8px; }
   .ext-card { min-width: 0; min-height: 104px; padding: 11px 12px 10px; display: grid; grid-template-rows: auto 1fr auto; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 12px; color: var(--workspace-text); background: var(--workspace-raised); text-align: left; font: inherit; transition: border-color 120ms ease, box-shadow 160ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
   button.ext-card { cursor: pointer; }
-  button.ext-card:hover { border-color: color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); box-shadow: 0 6px 18px rgba(20, 38, 30, .08); transform: translateY(-1px); }
+  button.ext-card:hover { border-color: color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); box-shadow: 0 6px 18px rgba(20, 38, 30, .08); }
   .ext-card.selected { border-color: color-mix(in srgb, var(--workspace-accent) 60%, var(--workspace-line)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 40%, transparent); }
   .ext-card.off { opacity: .66; }
   .card-head { min-width: 0; display: flex; align-items: center; gap: 8px; }

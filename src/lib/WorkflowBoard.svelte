@@ -1385,10 +1385,10 @@
   button { font: inherit; cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
   button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
-  .edge-hub { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 50%; color: var(--workspace-muted); background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .5), transparent 55%), var(--workspace-raised); box-shadow: 0 3px 9px rgba(20, 38, 30, .22), 0 0 0 3px color-mix(in srgb, var(--workspace-raised) 70%, transparent); transition: color 120ms ease, border-color 120ms ease, transform 160ms cubic-bezier(.2, .8, .2, 1), box-shadow 160ms ease; }
+  .edge-hub { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 50%; color: var(--workspace-muted); background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .5), transparent 55%), var(--workspace-raised); box-shadow: 0 3px 9px rgba(20, 38, 30, .22), 0 0 0 3px color-mix(in srgb, var(--workspace-raised) 70%, transparent); transition: color 120ms ease, border-color 120ms ease, box-shadow 160ms ease; }
   .edge-hub:hover, .edge-hub.open { color: var(--workspace-accent); border-color: var(--workspace-accent); box-shadow: 0 4px 12px rgba(20, 38, 30, .26), 0 0 0 4px color-mix(in srgb, var(--workspace-accent) 16%, transparent); }
   .edge-hub.open { box-shadow: 0 4px 12px rgba(20, 38, 30, .26), 0 0 0 4px color-mix(in srgb, var(--workspace-accent) 20%, transparent); }
-  .edge-cargo { position: absolute; top: calc(100% + 7px); left: 50%; display: flex; gap: 3px; padding: 3px; border: 1px solid var(--workspace-line); border-radius: 999px; background: color-mix(in srgb, var(--workspace-raised) 92%, transparent); box-shadow: 0 3px 9px rgba(20, 38, 30, .18); opacity: 0; transform: translate(-50%, 0); transition: opacity 140ms ease; pointer-events: none; white-space: nowrap; }
+  .edge-cargo { position: absolute; top: calc(100% + 7px); left: 50%; display: flex; gap: 3px; padding: 3px; border: 1px solid var(--workspace-line); border-radius: 999px; background: color-mix(in srgb, var(--workspace-raised) 92%, transparent); box-shadow: 0 3px 9px rgba(20, 38, 30, .18); opacity: 0; transform: translate(-50%, 0); pointer-events: none; white-space: nowrap; }
   .edge-cargo b { padding: 1px 7px; border-radius: 999px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 9.5px; font-weight: 650; }
   .edge-cargo.traveling b { color: var(--workspace-accent); }
   .edge-cargo.waiting b { color: var(--board-warning); }
@@ -1444,7 +1444,7 @@
   .role-symbol { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; transform: scale(.9); font-style: normal; }
   .step-number { position: absolute; top: -3px; right: -5px; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; display: grid; place-items: center; border: 1px solid rgba(255, 255, 255, .86); border-radius: 999px; color: #fff; background: var(--card-role); box-shadow: 0 2px 5px rgba(20, 40, 30, .3); font: 800 8px/1 var(--lume-font-ui, Inter, sans-serif); font-variant-numeric: tabular-nums; }
   :global(.workspace.dark) .step-number { border-color: rgba(24, 35, 29, .9); }
-  .role-tooltip { position: absolute; bottom: calc(100% + 7px); left: 50%; min-width: max-content; padding: 5px 9px; display: grid; gap: 1px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-raised); box-shadow: var(--hud-shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 0); transition: opacity 120ms ease; }
+  .role-tooltip { position: absolute; bottom: calc(100% + 7px); left: 50%; min-width: max-content; padding: 5px 9px; display: grid; gap: 1px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-raised); box-shadow: var(--hud-shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 0); }
   .role-tooltip strong { font-size: 10px; font-weight: 700; }
   .role-tooltip small { color: var(--workspace-muted); font-size: 9px; }
   .board-card:hover .role-tooltip { opacity: 1; }

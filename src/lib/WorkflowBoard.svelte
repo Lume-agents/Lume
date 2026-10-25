@@ -664,7 +664,7 @@
     if (touch && current.kind === "card" && current.stepId && !cardMoved) {
       const id = current.stepId;
       cancelGesture();
-      if (cardTapOnBadge && !locked) { choose(null); orbitDown = layout.positions[id].y * view.zoom + view.y < 170; orbitFor = id; }
+      if (cardTapOnBadge) { choose(null); orbitDown = layout.positions[id].y * view.zoom + view.y < 170; orbitFor = id; }
       else choose({ kind: "step", id });
       return;
     }
@@ -765,6 +765,21 @@
     } else if ((event.key === "Delete" || event.key === "Backspace") && selection) {
       event.preventDefault();
       removeSelected();
+    } else if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+      const onControl = target instanceof Element && Boolean(target.closest("button, a, [role='button'], [role='tab']"));
+      if (event.key === " " && !onControl && run && !actionLoading) {
+        if (["running", "ready", "waiting_for_approval"].includes(run.status)) { event.preventDefault(); void perform(() => backend.pause(activeId)); }
+        else if (run.status === "paused") { event.preventDefault(); void perform(() => backend.resume(activeId)); }
+      } else if (event.key === "Tab" && !event.shiftKey && !onControl) {
+        event.preventDefault();
+        setBoardMode(boardMode === "board" ? "timeline" : "board");
+      } else if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key) && !onControl && boardMode === "board" && group?.steps.length) {
+        const order = [...(chain?.order ?? []), ...group.steps.map((step) => step.id).filter((id) => !chain?.order.includes(id))];
+        const at = selection?.kind === "step" ? order.indexOf(selection.id) : -1;
+        const forward = event.key === "ArrowRight" || event.key === "ArrowDown";
+        const next = order[at < 0 ? (forward ? 0 : order.length - 1) : (at + (forward ? 1 : -1) + order.length) % order.length];
+        if (next) { event.preventDefault(); choose({ kind: "step", id: next }); }
+      }
     }
   }
 
@@ -1130,8 +1145,17 @@
     </div>
   {/if}
 
+  {#if !touch}
+    <p class="shortcut-legend" aria-label={tr("Keyboard shortcuts", "Atalhos de teclado")}>
+      <span><kbd>Esc</kbd>{tr("Back to chats", "Voltar aos chats")}</span>
+      <span><kbd>Space</kbd>{tr("Pause or resume", "Pausar ou retomar")}</span>
+      <span><kbd>←</kbd><kbd>→</kbd>{tr("Switch agent", "Trocar de agente")}</span>
+      <span><kbd>Tab</kbd>{tr("Board / Timeline", "Board / Linha do tempo")}</span>
+      <span><kbd>Del</kbd>{tr("Remove selected", "Remover selecionado")}</span>
+    </p>
+  {/if}
+
   <header class="board-toolbar">
-    {#if !touch}<span class="board-title"><WorkspaceHeaderIcon name="workflow" size={19} /><strong>Workflow</strong></span>{/if}
     <span class="board-mode" data-tour="board-mode" role="group" aria-label={tr("View", "Visualização")}>
       <button class:on={boardMode === "board"} type="button" aria-pressed={boardMode === "board"} onclick={() => setBoardMode("board")}>{tr("Board", "Board")}</button>
       <button class:on={boardMode === "timeline"} type="button" aria-pressed={boardMode === "timeline"} onclick={() => setBoardMode("timeline")}>{tr("Timeline", "Linha do tempo")}</button>
@@ -1144,7 +1168,6 @@
     {#if !touch}<button class="add-agent" type="button" disabled={locked || adding} onclick={() => openPicker()}><LumeIcon name="plus" size={14} />{tr("Agent", "Agente")}</button>{/if}
     <span class="save-state" aria-live="polite">{saving ? tr("Saving…", "Salvando…") : saveFailed ? tr("Not saved", "Não salvo") : ""}</span>
     {#if saveFailed}<button type="button" title={tr("Retry saving", "Tentar salvar novamente")} aria-label={tr("Retry saving", "Tentar salvar novamente")} onclick={() => void retrySave()}><LumeIcon name="refresh" size={15} /></button>{/if}
-    {#if !touch}<span class="exit-hint"><kbd>Esc</kbd>{tr("Back to chats", "Voltar aos chats")}</span>{/if}
     <button class="close-board" type="button" title={tr("Back to chats", "Voltar aos chats")} aria-label={tr("Back to chats", "Voltar aos chats")} onclick={onClose}><svg class="exit-icon" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 3v18M21 3l-4.4 1.7v14.6L21 21" /><circle cx="7.4" cy="6.4" r="1.7" /><path d="M7 9.2l1.4 4.6M7.6 10.5l3.4 1.6M7.4 10.2 4.4 11.8M8.4 13.8l2.7 3 .3 3.9M8.4 13.8l-2.9 2.6-1.3 3.5" /></svg></button>
   </header>
 
@@ -1473,8 +1496,6 @@
   .card-port i { width: 9px; height: 9px; border: 2px solid currentColor; border-radius: 50%; background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(20, 38, 30, .25); transition: transform 140ms ease, color 140ms ease; }
   .card-port:hover i, .card-port:focus-visible i { color: var(--workspace-accent); transform: scale(1.35); }
   .board-toolbar { position: absolute; z-index: 5; top: 16px; left: 18px; max-width: calc(100% - 270px); display: flex; align-items: center; gap: 7px; min-width: 0; padding: 6px 9px; border: 1px solid var(--workspace-line); border-radius: 16px; background: var(--hud-surface); box-shadow: var(--hud-shadow); }
-  .board-title { display: flex; align-items: center; gap: 7px; padding: 0 5px; color: var(--workspace-strong); }
-  .board-title strong { font-size: 12px; font-weight: 650; }
   .toolbar-divider { height: 19px; width: 1px; background: var(--workspace-line); }
   .board-toolbar button, .board-navigation button, .board-panel > header button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; }
   .board-toolbar button:hover, .board-navigation button:hover, .board-panel > header button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
@@ -1482,9 +1503,10 @@
   .board-toolbar .close-board { margin-left: 6px; }
   .board-toolbar .close-board:hover .exit-icon { transform: translateX(1px); }
   .exit-icon { transition: transform 160ms ease; }
-  .exit-hint { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--workspace-muted); font-size: 10px; white-space: nowrap; pointer-events: none; }
-  .exit-hint kbd { padding: 1px 5px; border: 1px solid var(--workspace-line); border-radius: 4px; color: var(--workspace-strong); font: 700 9px/1.4 "SFMono-Regular", Consolas, monospace; }
-  @media (max-width: 860px) { .exit-hint { display: none; } }
+  .shortcut-legend { position: absolute; z-index: 4; top: 66px; left: 20px; max-width: calc(100% - 300px); margin: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--workspace-muted); font-size: 10px; pointer-events: none; }
+  .shortcut-legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .shortcut-legend kbd { padding: 1px 5px; border: 1px solid var(--workspace-line); border-radius: 4px; color: var(--workspace-strong); background: var(--hud-surface); font: 700 9px/1.4 "SFMono-Regular", Consolas, monospace; }
+  @media (max-width: 860px) { .shortcut-legend { display: none; } }
   .board-toolbar .delete-workflow:hover:not(:disabled) { color: var(--board-danger); }
   .board-toolbar .delete-workflow:disabled { opacity: .4; }
   .board-toolbar .delete-workflow.confirm { width: auto; padding: 0 9px; display: flex; gap: 5px; color: var(--board-danger); background: color-mix(in srgb, var(--board-danger) 12%, transparent); font-size: 10px; font-weight: 700; }
@@ -1725,7 +1747,7 @@
   .orbit-role:active { transform: translate(var(--ox), var(--oy)) scale(.92); }
   @media (max-width: 820px) {
     .board-toolbar { gap: 3px; left: 12px; max-width: calc(100% - 200px); }
-    .board-title strong, .save-state { display: none; }
+    .save-state { display: none; }
     .board-toolbar :global(.lume-select) { min-width: 95px !important; }
     .board-run { width: calc(100% - 24px); }
     .board-panel { right: 12px; width: min(278px, calc(100% - 24px)); }

@@ -47,8 +47,8 @@
   // Touch: the card whose role bubbles are open, whether the finger moved the card, and whether it started on the role badge.
   let orbitFor = $state<string | null>(null);
   let orbitDown = $state(false);
-  let cardMoved = false;
-  let cardTapOnBadge = false;
+  let cardMoved = $state(false);
+  let cardTapOnBadge = $state(false);
   let orbitWasOpen = false;
   let runCollapsed = $state(false);
   function orbitSpot(position: number) {
@@ -656,7 +656,7 @@
     const dx = event.clientX - gesture.start.x;
     const dy = event.clientY - gesture.start.y;
     if (gesture.kind === "card") {
-      if (Math.abs(dx) > 6 || Math.abs(dy) > 6) cardMoved = true;
+      if (!cardMoved && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) cardMoved = true;
       const bounds = viewport.getBoundingClientRect();
       cardOutside = event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
     }
@@ -1063,9 +1063,9 @@
         {@const live = stepActivity(reactive ? shown : undefined, run?.steps.find((item) => item.stepId === step.id), language, now)}
         {@const awaiting = stepAwaitsApproval(step.id)}
         {@const trail = reactive && (state === "running" || shown?.status === "running") ? activityFeed(shown, language, 3) : []}
-        <article data-tour="board-card" class="board-card" class:orbiting={orbitFor === step.id} class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
+        <article data-tour="board-card" class="board-card" class:orbiting={orbitFor === step.id} class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id && (!cardTapOnBadge || cardMoved)} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
           <button class="card-body" type="button" onpointerdown={(event) => beginCard(event, step.id)} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleName(step.role)}>
-            <span class="card-role-fab" title={step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role)} aria-hidden="true">
+            <span class="card-role-fab" aria-hidden="true">
               <i class="role-symbol"><WorkflowRoleIcon role={step.role} /></i>
               {#if order >= 0}<span class="step-number">{order + 1}</span>{/if}
               <span class="role-tooltip"><strong>{step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role)}</strong>{#if order >= 0}<small>{tr("Step ", "Etapa ") + (order + 1) + tr(" of ", " de ") + (chain?.order.length ?? 0)}</small>{/if}</span>
@@ -1357,7 +1357,7 @@
     --hud-surface: var(--workspace-raised); --hud-shadow: 0 10px 28px rgba(20, 38, 30, .12), 0 1px 3px rgba(20, 38, 30, .1); }
   :global(.workspace.dark) .workflow-board { --board-danger: #ec9894; --board-warning: #e0b75b; --board-ok: #56bd8a; --role-planner: #6aa0d6; --role-implementer: #56bd8a; --role-reviewer: #dba653; --role-tester: #a583d8; --role-researcher: #58b6c5; --role-custom: #93a39b; --hud-shadow: 0 12px 30px rgba(0, 0, 0, .38), 0 1px 3px rgba(0, 0, 0, .4); }
   .workflow-board[hidden] { display: none; }
-  .board-viewport { position: absolute; inset: 0; overflow: hidden; outline: none; touch-action: none; background-image: radial-gradient(circle, color-mix(in srgb, var(--workspace-muted) 28%, transparent) 1px, transparent 1px); cursor: grab; }
+  .board-viewport { position: absolute; inset: 0; z-index: 0; isolation: isolate; overflow: hidden; outline: none; touch-action: none; background-image: radial-gradient(circle, color-mix(in srgb, var(--workspace-muted) 28%, transparent) 1px, transparent 1px); cursor: grab; }
   .board-viewport.panning { cursor: grabbing; }
   .board-viewport.connecting { cursor: crosshair; }
   .board-viewport.drop-active { box-shadow: inset 0 0 0 2px var(--workspace-accent), inset 0 0 60px color-mix(in srgb, var(--workspace-accent) 14%, transparent); }

@@ -61,6 +61,11 @@
     const frame = requestAnimationFrame(() => requestAnimationFrame(() => node.classList.add("open")));
     return { destroy: () => cancelAnimationFrame(frame) };
   }
+  /** Closing plays the opening backwards: the bubbles travel back into the badge before the layer goes away. */
+  function orbitOut(node: HTMLElement) {
+    node.classList.remove("open");
+    return { duration: 340 };
+  }
   async function pickOrbitRole(stepId: string, role: WorkflowRole) {
     choose({ kind: "step", id: stepId });
     if (selectedStep && selectedStep.role !== role) await changeRole(role);
@@ -1103,7 +1108,7 @@
           <button class="card-port port-in" type="button" disabled={locked} aria-label={tr("Connect to ", "Conectar a ") + name(session)} title={tr("Connection input", "Entrada da conexão")} onclick={() => connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id })}><i></i></button>
           <button class="card-port port-out" data-tour="board-port" type="button" disabled={locked} aria-label={tr("Connect from ", "Conectar de ") + name(session)} title={tr("Drag to connect", "Arraste para conectar")} onpointerdown={(event) => beginConnection(event, step.id)} onclick={(event) => { if (event.detail === 0) keyboardConnect(step.id); }}><i></i></button>
           {#if orbitFor === step.id}
-            <div class="role-orbit" use:orbitIn style:--card-role={"var(--role-" + step.role + ")"}>
+            <div class="role-orbit" use:orbitIn out:orbitOut style:--card-role={"var(--role-" + step.role + ")"}>
               {#each roles as role, index (role)}
                 <button class="orbit-role" class:current={role === step.role} type="button" style:--card-role={"var(--role-" + role + ")"} style:--ox={orbitSpot(index).x + "px"} style:--oy={orbitSpot(index).y + "px"} aria-label={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} title={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} onpointerdown={(event) => event.stopPropagation()} onclick={() => void pickOrbitRole(step.id, role)}><span class="role-option-fab" aria-hidden="true"><i class="role-symbol"><WorkflowRoleIcon {role} /></i></span></button>
               {/each}

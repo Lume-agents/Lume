@@ -2984,16 +2984,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             </div>
           {/if}
         </div>
-        {#if contextTokens}
-          <span class="context-meter {contextLevel}" role="img" aria-label={contextLabel} title={contextLabel} style:--context={contextPercent}>
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="7.5" /><circle class="fill" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="{contextPercent} 100" /></svg>
-            <b>{contextPercent}%</b>
-          </span>
-        {/if}
       {/if}
       {#if mcpOpen}
         <section class="slash-command-menu mcp-panel" aria-label="MCP" transition:slide={{ duration: 140, easing: cubicOut }}>
-          <div class="slash-command-heading">
+          <div class="slash-command-heading mcp-heading">
             <strong>MCP</strong>
             <small>{mcpLoading ? tr("Checking connections…", "Verificando conexões…") : tr(`${mcpServers.length} server${mcpServers.length === 1 ? "" : "s"}`, `${mcpServers.length} servidor${mcpServers.length === 1 ? "" : "es"}`)}</small>
             <span class="mcp-actions">
@@ -3091,6 +3085,12 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         ></textarea>
       </div>
       {#if promptIsRunning && canQueue}<span class="queue-label">{tr("Next", "Próximo")}</span>{/if}
+      {#if contextTokens}
+        <span class="context-meter {contextLevel}" role="img" aria-label={contextLabel} title={contextLabel} style:--context={contextPercent}>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="7.5" /><circle class="fill" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="{contextPercent} 100" /></svg>
+          <b>{contextPercent}%</b>
+        </span>
+      {/if}
       {#if promptIsRunning && session.capabilities.canInterrupt && !planeLaunching}
         <button class="stop-button" type="button" disabled={interrupting} onclick={() => void interruptAgentPrompt()} aria-label={tr("Interrupt prompt", "Interromper prompt")} title={tr("Interrupt prompt · Enter queues", "Interromper prompt · Enter adiciona à fila")}>
           {#if interrupting}<i class="send-spinner"></i>{:else}<LumeIcon name="stop" size={15} />{/if}
@@ -3268,10 +3268,13 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .github-ref-panel footer { margin-top: auto; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--workspace-line); color: var(--workspace-muted); background: var(--workspace-raised); }
   .github-ref-panel footer button { height: 26px; padding: 0 9px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
   .github-ref-panel footer button:hover { color: var(--workspace-accent); border-color: var(--workspace-accent); }
-  .mcp-actions { margin-left: auto; display: flex; gap: 2px; }
-  .mcp-actions button { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
-  .mcp-actions button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
-  .mcp-actions button:disabled { opacity: .4; }
+  .composer .mcp-heading { min-height: 40px; padding: 4px 6px 8px 10px; gap: 10px; }
+  .composer .mcp-heading strong { color: var(--workspace-strong); font-size: 13px; font-weight: 750; letter-spacing: 0; text-transform: none; }
+  .composer .mcp-heading small { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; color: var(--workspace-muted); font-size: 11px; font-weight: 600; }
+  .mcp-actions { margin-left: auto; display: flex; gap: 4px; }
+  .composer .mcp-actions button { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); cursor: pointer; transition: color 120ms ease, border-color 120ms ease, background 120ms ease; }
+  .composer .mcp-actions button:hover:not(:disabled) { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); background: var(--workspace-accent-soft); transform: none; }
+  .composer .mcp-actions button:disabled { opacity: .4; cursor: default; }
   .mcp-item + .mcp-item { border-top: 1px solid color-mix(in srgb, var(--workspace-line) 70%, transparent); }
   .composer .mcp-row { width: 100%; height: auto; min-height: 40px; padding: 6px 8px; display: flex; align-items: center; gap: 9px; border-radius: 8px; color: var(--workspace-text); background: transparent; text-align: left; }
   .composer .mcp-row:hover:not(:disabled) { transform: none; background: var(--workspace-accent-soft); }
@@ -3284,10 +3287,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .mcp-dot.checking { animation: controls-arrive 1s ease-in-out infinite alternate; }
   .mcp-main { min-width: 0; flex: 1; display: grid; gap: 1px; }
   .mcp-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-strong); font-size: var(--workspace-chat-small-size); font-weight: 700; }
-  .mcp-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); }
+  .mcp-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-faint); font-size: var(--workspace-chat-small-size); }
   .mcp-side { flex: 0 0 auto; display: grid; justify-items: end; gap: 1px; }
-  .mcp-side b { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 700; }
-  .mcp-side em { color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); font-style: normal; }
+  .mcp-side b { color: var(--workspace-muted); font-size: var(--workspace-chat-small-size); font-weight: 700; }
+  .mcp-side em { color: var(--workspace-faint); font-size: var(--workspace-chat-small-size); font-style: normal; }
   .mcp-tools { margin: 0 6px 6px 25px; padding: 0; display: grid; gap: 5px; list-style: none; }
   .mcp-tools li { min-width: 0; display: grid; gap: 1px; }
   .mcp-tools code { overflow: hidden; text-overflow: ellipsis; color: var(--workspace-accent); font: 700 var(--workspace-chat-tiny-size) "SFMono-Regular", Consolas, monospace; }

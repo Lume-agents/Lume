@@ -21,8 +21,8 @@
   /** The window takes the card's height, plus the margin its shadow needs. */
   async function fit() {
     if (!card) return;
-    const placed = await invoke<{ side: "left" | "right" }>("fit_tour_card", { height: card.offsetHeight + 36 }).catch(() => null);
-    if (placed) side = placed.side;
+    const placed = await invoke<{ side: "left" | "right" | "below" }>("fit_tour_card", { height: card.offsetHeight + 36 }).catch(() => null);
+    if (placed) side = placed.side === "below" ? null : placed.side;
   }
 
   function keydown(event: KeyboardEvent) {

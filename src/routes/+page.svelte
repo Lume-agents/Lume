@@ -352,9 +352,9 @@
     catch { /* It shows again next time when storage is unavailable. */ }
   }
 
-  /** Every stop points at the session view's header and footer, so the panel goes back to it with nothing open over it. */
-  function prepareOrbTourStep() {
-    view = "sessions";
+  /** The footer stops open their own screen; every other stop points at the session view with nothing open over it. */
+  function prepareOrbTourStep(id: string) {
+    view = id === "orb-terminals" ? "board" : id === "orb-inspector" ? "history" : id === "orb-settings" ? "settings" : "sessions";
     launcherOpen = false;
     paletteOpen = false;
   }

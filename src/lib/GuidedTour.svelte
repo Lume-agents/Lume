@@ -106,7 +106,7 @@
     // The card window adds a margin around the card for its shadow.
     const width = (step.media || step.demo ? 400 : 340) + 36;
     // A desktop that cannot make or place the window says so right away, and the card is drawn here instead.
-    const placed = await invoke("place_tour_card", { anchorY: rect ? rect.y + rect.height / 2 : null, width }).then(() => true, () => false);
+    const placed = await invoke("place_tour_card", { anchorY: rect ? rect.y + rect.height / 2 : null, anchorX: rect ? rect.x + rect.width / 2 : null, under: Boolean(step.under), width }).then(() => true, () => false);
     if (!placed) {
       giveUp();
       return;

@@ -13,6 +13,8 @@ export type TourStep = {
   demo?: TourDemoName;
   /** Small controls in a row (the header buttons) take the card below, clear of their neighbours. */
   below?: boolean;
+  /** In the Orb tour: the card window goes under the panel, level with the target, for the footer buttons. */
+  under?: boolean;
 };
 
 /** The Orb's tour card lives in its own window; these carry the step to it and the buttons back. */
@@ -52,9 +54,9 @@ export const orbTour: TourStep[] = [
   { id: "orb-sessions", targets: ["orb-sessions"], title: ["Your agents", "Seus agentes"], body: ["Each row is a session. Its color says whether it is working, ready for review or waiting for your approval. Click it to read the reply and answer.", "Cada linha é uma sessão. A cor diz se ela está trabalhando, pronta para revisão ou esperando a sua aprovação. Clique para ler a resposta e responder."] },
   { id: "orb-new", targets: ["orb-new"], below: true, title: ["Start a session", "Comece uma sessão"], body: ["Open an agent in a folder, or resume an earlier conversation.", "Abra um agente numa pasta ou retome uma conversa anterior."] },
   { id: "orb-search", targets: ["orb-search"], below: true, title: ["Command palette", "Paleta de comandos"], body: ["Find sessions and actions from the keyboard. The global shortcut brings the Orb up from anywhere.", "Encontre sessões e ações pelo teclado. O atalho global abre o Orb de qualquer lugar."] },
-  { id: "orb-terminals", targets: ["orb-terminals"], demo: "orb-dock", title: ["Terminals and workflows", "Terminais e workflows"], body: ["Open sessions as terminal windows. In Workflow mode they dock side by side and the work passes from one agent to the next.", "Abra as sessões como janelas de terminal. No modo Workflow elas se encaixam lado a lado e o trabalho passa de um agente para o próximo."] },
-  { id: "orb-inspector", targets: ["orb-inspector"], title: ["Inspector", "Inspector"], body: ["The focused session's context: its reply, changed files and repository.", "O contexto da sessão em foco: a resposta, os arquivos alterados e o repositório."] },
+  { id: "orb-terminals", targets: ["orb-terminals"], under: true, demo: "orb-dock", title: ["Terminals and workflows", "Terminais e workflows"], body: ["Open sessions as terminal windows. In Workflow mode they dock side by side and the work passes from one agent to the next.", "Abra as sessões como janelas de terminal. No modo Workflow elas se encaixam lado a lado e o trabalho passa de um agente para o próximo."] },
+  { id: "orb-inspector", targets: ["orb-inspector"], under: true, title: ["Inspector", "Inspector"], body: ["The focused session's context: its reply, changed files and repository.", "O contexto da sessão em foco: a resposta, os arquivos alterados e o repositório."] },
   { id: "orb-workspace", targets: ["orb-workspace"], below: true, title: ["Need more room?", "Precisa de mais espaço?"], body: ["The Workspace opens chats side by side, with the workflow board and extensions.", "O Workspace abre os chats lado a lado, com o board de workflow e as extensões."] },
   { id: "orb-collapse", targets: ["orb-collapse"], below: true, demo: "orb-capsule", title: ["Tuck it away", "Recolha"], body: ["Collapse the Orb into a small capsule. It lets you know when someone needs you, and you can drag it anywhere.", "Recolha o Orb numa cápsula pequena. Ela avisa quando alguém precisa de você, e dá para arrastá-la para qualquer lugar."] },
-  { id: "orb-settings", targets: ["orb-settings"], title: ["Settings", "Ajustes"], body: ["Agents, appearance, shortcuts and this tour again.", "Agentes, aparência, atalhos e este tour de novo."] },
+  { id: "orb-settings", targets: ["orb-settings"], under: true, title: ["Settings", "Ajustes"], body: ["Agents, appearance, shortcuts and this tour again.", "Agentes, aparência, atalhos e este tour de novo."] },
 ];

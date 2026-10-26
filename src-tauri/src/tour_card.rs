@@ -16,11 +16,18 @@ use crate::{overlay, state::AppState};
 pub const LABEL: &str = "tour-card";
 /// Space between the Orb and the card, and between the card and the screen edge (logical px).
 const GAP: f64 = 14.0;
+/// Margin the card page leaves around the card for its shadow, and the space between the panel and a card under it.
+const CARD_MARGIN: f64 = 18.0;
+const UNDER_GAP: f64 = 12.0;
 
 #[derive(Clone, Copy)]
 struct Placement {
     /// Height in the Orb window (logical px) the card lines up with; none centers it on the Orb.
     anchor_y: Option<f64>,
+    /// Position across the Orb window (logical px) the card centers on when it goes under the panel.
+    anchor_x: Option<f64>,
+    /// Whether the card goes under the panel instead of beside it (the footer buttons).
+    under: bool,
     /// The card window's size in logical px: the card plus the margin its shadow needs.
     width: f64,
     height: f64,
@@ -28,11 +35,16 @@ struct Placement {
 
 static PLACEMENT: Mutex<Placement> = Mutex::new(Placement {
     anchor_y: None,
+    anchor_x: None,
+    under: false,
     width: 376.0,
     height: 260.0,
 });
 /// Whether the card window is a layer-shell surface (it then takes its size from `resize_surface`).
 static LAYERED: Mutex<bool> = Mutex::new(false);
+/// The side the card took first. The Orb sits near the middle of the screen, where both sides have almost the same
+/// room, so choosing again on every step would flip it back and forth as the panel's width changes.
+static SIDE: Mutex<Option<&'static str>> = Mutex::new(None);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,21 +107,44 @@ fn arrange(app: &AppHandle) -> Result<TourCardSide, String> {
     let orb_right = orb_left + f64::from(size.width);
     let room_right = screen_width - orb_right;
     let room_left = orb_left;
-    let side = if room_right >= width + gap * 2.0 || room_right >= room_left {
-        "right"
+    let orb_bottom = orb_top + f64::from(size.height);
+    // Under the panel, centered on the footer button, when the screen has room below it.
+    let under = placement.under && orb_bottom + gap + height <= screen_height - gap;
+    let fits_right = room_right >= width + gap * 2.0;
+    let fits_left = room_left >= width + gap * 2.0;
+    let side = {
+        let mut kept = SIDE.lock().map_err(|_| "tour card lock")?;
+        let side = match *kept {
+            Some("right") if fits_right => "right",
+            Some("left") if fits_left => "left",
+            _ if fits_right || room_right >= room_left => "right",
+            _ => "left",
+        };
+        *kept = Some(side);
+        side
+    };
+    let (x, y, side) = if under {
+        let center = match placement.anchor_x {
+            Some(anchor) => orb_left + anchor * scale,
+            None => orb_left + f64::from(size.width) / 2.0,
+        };
+        let x = (center - width / 2.0).max(gap).min(screen_width - width - gap);
+        // The window carries a margin around the card for its shadow, so the card itself sits a short way below the panel.
+        let y = orb_bottom + (UNDER_GAP - CARD_MARGIN) * scale;
+        (x, y, "below")
     } else {
-        "left"
+        let x = if side == "right" {
+            (orb_right + gap).min(screen_width - width - gap)
+        } else {
+            (orb_left - gap - width).max(gap)
+        };
+        let center = match placement.anchor_y {
+            Some(anchor) => orb_top + anchor * scale,
+            None => orb_top + f64::from(size.height) / 2.0,
+        };
+        let y = (center - height / 2.0).max(gap).min(screen_height - height - gap);
+        (x, y, side)
     };
-    let x = if side == "right" {
-        (orb_right + gap).min(screen_width - width - gap)
-    } else {
-        (orb_left - gap - width).max(gap)
-    };
-    let center = match placement.anchor_y {
-        Some(anchor) => orb_top + anchor * scale,
-        None => orb_top + f64::from(size.height) / 2.0,
-    };
-    let y = (center - height / 2.0).max(gap).min(screen_height - height - gap);
     let (x, y) = (x.round() as i32, y.round() as i32);
 
     let card = card_window(app, monitor_ref, x, y)?;
@@ -126,16 +161,23 @@ fn arrange(app: &AppHandle) -> Result<TourCardSide, String> {
     Ok(TourCardSide { side })
 }
 
+// These commands are async on purpose: a synchronous command runs on the main thread, and building a window
+// from there deadlocks on Windows, so the card never appeared and the tour fell back to drawing it in the panel.
+
 /// Called by the Orb on every step: where the highlighted control sits, and how wide the card is.
 #[tauri::command]
-pub fn place_tour_card(
+pub async fn place_tour_card(
     app: AppHandle,
     anchor_y: Option<f64>,
+    anchor_x: Option<f64>,
+    under: bool,
     width: f64,
 ) -> Result<TourCardSide, String> {
     {
         let mut placement = PLACEMENT.lock().map_err(|_| "tour card lock")?;
         placement.anchor_y = anchor_y.filter(|value| value.is_finite());
+        placement.anchor_x = anchor_x.filter(|value| value.is_finite());
+        placement.under = under;
         placement.width = width.clamp(260.0, 520.0);
     }
     arrange(&app)
@@ -143,19 +185,22 @@ pub fn place_tour_card(
 
 /// Called by the card once it has laid out a step, with the height it needs.
 #[tauri::command]
-pub fn fit_tour_card(app: AppHandle, height: f64) -> Result<TourCardSide, String> {
+pub async fn fit_tour_card(app: AppHandle, height: f64) -> Result<TourCardSide, String> {
     PLACEMENT.lock().map_err(|_| "tour card lock")?.height = height.clamp(140.0, 720.0);
     arrange(&app)
 }
 
 #[tauri::command]
-pub fn close_tour_card(app: AppHandle) -> Result<(), String> {
+pub async fn close_tour_card(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(LABEL) {
         overlay::forget_window(LABEL);
         window.close().map_err(|error| error.to_string())?;
     }
     if let Ok(mut flag) = LAYERED.lock() {
         *flag = false;
+    }
+    if let Ok(mut side) = SIDE.lock() {
+        *side = None;
     }
     Ok(())
 }

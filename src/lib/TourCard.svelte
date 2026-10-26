@@ -80,7 +80,7 @@
 
 <style>
   .tour-card { --tour-accent: var(--workspace-accent, #428066); --tour-bg: var(--workspace-bg, #0f1512); --tour-line: var(--workspace-line, rgba(65, 94, 80, .16)); --tour-muted: var(--workspace-muted, #61736a); --tour-raised: var(--workspace-raised, #fff); --tour-strong: var(--workspace-strong, #1f2d26); --tour-subtle: var(--workspace-subtle, #eef4f0); --tour-text: var(--workspace-text, #4f6258);
-    position: relative; width: min(340px, calc(100vw - 28px)); box-sizing: border-box; border: 1px solid var(--tour-line); border-radius: 16px; color: var(--tour-text); background: var(--tour-raised); box-shadow: 0 24px 60px rgba(5, 12, 8, .34), 0 2px 8px rgba(5, 12, 8, .14); }
+    position: relative; width: min(340px, calc(100vw - 28px)); box-sizing: border-box; border: 1px solid var(--tour-line); border-radius: 16px; color: var(--tour-text); background: var(--tour-raised); box-shadow: 0 4px 14px rgba(5, 12, 8, .26), 0 1px 3px rgba(5, 12, 8, .14); }
   .tour-card.dark { --tour-accent: var(--workspace-accent, #4fae7e); --tour-line: var(--workspace-line, rgba(205, 222, 213, .12)); --tour-muted: var(--workspace-muted, #9aaba2); --tour-raised: var(--workspace-raised, #1f2924); --tour-strong: var(--workspace-strong, #eef5f1); --tour-subtle: var(--workspace-subtle, rgba(141, 206, 176, .09)); --tour-text: var(--workspace-text, #c3d2ca); }
   .tour-card.with-media { width: min(400px, calc(100vw - 28px)); }
   /* In its own window the card points back at the Orb, on whichever side it is. */

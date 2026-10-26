@@ -288,6 +288,10 @@ export async function loadRelayLumeNodeOverview(nodeId: string): Promise<RelayLu
   return invoke<RelayLumeNodeOverview>("get_relay_lume_node_overview", { nodeId });
 }
 
+export async function loadRelayLumeNodeHealth(nodeId: string): Promise<RemoteLumeNodeHealth> {
+  return invoke<RemoteLumeNodeHealth>("get_relay_lume_node_health", { nodeId });
+}
+
 export async function loadRelayLumeSession(nodeId: string, sessionId: string): Promise<RemoteConversation> {
   return invoke<RemoteConversation>("get_relay_lume_session", { nodeId, sessionId });
 }

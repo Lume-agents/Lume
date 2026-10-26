@@ -1710,6 +1710,16 @@ async fn get_relay_lume_node_overview(node_id: String) -> Result<serde_json::Val
     .map_err(|error| error.to_string())?
 }
 
+/// Only the computer's health through the Relay: whether it answers, without reading its sessions.
+#[tauri::command]
+async fn get_relay_lume_node_health(node_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_relay::query(&node_service::default_state_directory()?, &node_id, "health")
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// One session's conversation on a computer paired through the Relay, when its owner allows it.
 #[tauri::command]
 async fn get_relay_lume_session(node_id: String, session_id: String) -> Result<serde_json::Value, String> {
@@ -3588,6 +3598,7 @@ pub fn run() {
             pair_lume_relay_node,
             list_relay_lume_nodes,
             get_relay_lume_node_overview,
+            get_relay_lume_node_health,
             forget_relay_lume_node,
             get_relay_lume_session,
             get_node_share_conversations,

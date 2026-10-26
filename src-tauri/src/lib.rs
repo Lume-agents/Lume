@@ -645,6 +645,21 @@ async fn get_subagent_timeline(
     session_id: String,
     activity_id: String,
 ) -> Result<Vec<SessionActivity>, String> {
+    if session_id.starts_with("claude:") || activity_id.starts_with("claude:") {
+        let native_id = state
+            .connected_session(&session_id)?
+            .native_session_id
+            .ok_or_else(|| "The Claude conversation has no session id".to_string())?;
+        let agent_id = activity_id
+            .rsplit_once(":subagent:")
+            .map(|(_, agent)| agent.to_string())
+            .ok_or_else(|| "This is not a Claude subagent".to_string())?;
+        return tauri::async_runtime::spawn_blocking(move || {
+            integrations::claude_subagent_timeline(&native_id, &agent_id)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    }
     if session_id.starts_with("omp:") {
         let (parent_id, child_id) = state.omp_subagent_thread(&session_id, &activity_id)?;
         return Ok(tauri::async_runtime::spawn_blocking(move || {

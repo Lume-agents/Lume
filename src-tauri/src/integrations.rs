@@ -1659,6 +1659,103 @@ fn claude_work_activities_with(
     activities
 }
 
+/// The transcript of one Claude subagent: `<config>/projects/<project>/<session>/subagents/**/agent-<id>.jsonl`.
+fn find_claude_subagent_transcript(root: &Path, agent_id: &str) -> Option<PathBuf> {
+    let file_name = format!("agent-{agent_id}.jsonl");
+    let mut pending = vec![(root.join("subagents"), 0u8)];
+    while let Some((directory, depth)) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                if depth < 3 {
+                    pending.push((path, depth + 1));
+                }
+            } else if path.file_name().is_some_and(|name| name == file_name.as_str()) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn claude_config_root() -> Option<PathBuf> {
+    env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| {
+        env::var_os("HOME")
+            .or_else(|| env::var_os("USERPROFILE"))
+            .map(|home| PathBuf::from(home).join(".claude"))
+    })
+}
+
+fn safe_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) && !value.contains("..")
+}
+
+/// What a Claude subagent did, read from its own transcript: its tool calls and what it said.
+pub fn claude_subagent_timeline(session_id: &str, agent_id: &str) -> Result<Vec<SessionActivity>, String> {
+    if !safe_id(session_id) || !safe_id(agent_id) {
+        return Err("Invalid subagent identifier".into());
+    }
+    let projects = claude_config_root()
+        .map(|root| root.join("projects"))
+        .ok_or_else(|| "The Claude folder is unavailable".to_string())?;
+    let transcript = fs::read_dir(&projects)
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .find_map(|project| find_claude_subagent_transcript(&project.path().join(session_id), agent_id))
+        .ok_or_else(|| "The subagent transcript was not found".to_string())?;
+    let bytes = read_file_tail(&transcript, 4 * 1024 * 1024).ok_or_else(|| "The subagent transcript could not be read".to_string())?;
+    Ok(claude_subagent_activities(&bytes, session_id, agent_id))
+}
+
+fn claude_subagent_activities(bytes: &[u8], session_id: &str, agent_id: &str) -> Vec<SessionActivity> {
+    let mut activities = Vec::new();
+    for (line_index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        let Ok(entry) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if entry.pointer("/message/role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let created_at = record_timestamp(&entry).unwrap_or(line_index as i64);
+        let Some(blocks) = entry.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
+        for (block_index, block) in blocks.iter().enumerate() {
+            let id = format!("claude:{session_id}:subagent-timeline:{agent_id}:{line_index}:{block_index}");
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    let text = block.get("text").and_then(Value::as_str).unwrap_or("").trim();
+                    if !text.is_empty() {
+                        activities.push(work_activity(id, "message", "Response", Some(text.to_string()), created_at));
+                    }
+                }
+                Some("tool_use") => {
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("Tool");
+                    let input = block.get("input").unwrap_or(&Value::Null);
+                    let file = ["file_path", "path", "notebook_path"]
+                        .iter()
+                        .find_map(|key| input.get(*key).and_then(Value::as_str));
+                    let (kind, title) = match name {
+                        "Bash" => ("command", input.get("command").and_then(Value::as_str).unwrap_or("Bash").to_string()),
+                        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => ("file", file.unwrap_or(name).to_string()),
+                        _ => ("tool", file.map(str::to_string).unwrap_or_else(|| name.to_string())),
+                    };
+                    let mut activity = work_activity(id, kind, title.chars().take(240).collect::<String>(), json_text(input), created_at);
+                    if kind == "file" {
+                        activity.files = file.map(str::to_string).into_iter().collect();
+                    }
+                    activities.push(activity);
+                }
+                _ => {}
+            }
+        }
+    }
+    activities
+}
+
 fn work_activity(
     id: String,
     kind: &str,
@@ -3765,6 +3862,24 @@ mod tests {
         );
         assert!(claude_tasks_directory("../other").is_none());
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn claude_subagent_transcript_becomes_a_timeline() {
+        let transcript = concat!(
+            "{\"timestamp\":\"2026-10-26T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"look at it\"}}\n",
+            "{\"timestamp\":\"2026-10-26T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Read\",\"input\":{\"file_path\":\"/work/a.ts\"}},{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"Bash\",\"input\":{\"command\":\"npm test\"}}]}}\n",
+            "{\"timestamp\":\"2026-10-26T12:00:02Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"All good.\"}]}}\n",
+        );
+        let activities = claude_subagent_activities(transcript.as_bytes(), "s1", "a1");
+        assert_eq!(
+            activities.iter().map(|item| item.kind.as_str()).collect::<Vec<_>>(),
+            ["tool", "command", "message"]
+        );
+        assert_eq!(activities[0].title, "/work/a.ts");
+        assert_eq!(activities[1].title, "npm test");
+        assert_eq!(activities[2].detail.as_deref(), Some("All good."));
+        assert!(claude_subagent_timeline("../x", "a1").is_err());
     }
 
     #[test]

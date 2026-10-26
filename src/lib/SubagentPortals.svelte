@@ -18,6 +18,9 @@
   let panel = $state<HTMLDivElement | null>(null);
   let rail: HTMLDivElement;
   let timelineElement = $state<HTMLDivElement | null>(null);
+  // Providers that can read a subagent's own transcript; a Claude subagent's activity id starts with `claude:`.
+  const timelineAgents = ["codex", "omp", "claude_code"];
+  const childIdPrefix = $derived(session.agent === "claude_code" ? "claude" : session.agent);
   let portalOrigin = $state(32);
   let showLeftOverflow = $state(false);
   let showRightOverflow = $state(false);
@@ -165,7 +168,7 @@
   }
 
   async function refreshChild(child: WorkspaceSubagent) {
-    if (!["codex", "omp"].includes(session.agent) || !child.id.startsWith(`${session.agent}:`)) return;
+    if (!timelineAgents.includes(session.agent) || !child.id.startsWith(`${childIdPrefix}:`)) return;
     const requestSessionId = session.id;
     const requestKey = `${requestSessionId}:${child.id}`;
     if (inFlight.has(requestKey)) return;
@@ -189,7 +192,7 @@
   }
 
   function refreshVisible() {
-    if (!mounted || document.hidden || !["codex", "omp"].includes(session.agent)) return;
+    if (!mounted || document.hidden || !timelineAgents.includes(session.agent)) return;
     const now = Date.now();
     for (const child of children) {
       if (inFlight.size >= 2) break;
@@ -449,7 +452,7 @@
           <p class="timeline-empty">{tr("Loading activity…", "Carregando atividade…")}</p>
         {:else if errors[selectedChild.id]}
           <p class="timeline-empty">{tr("This timeline is not available yet.", "Esta timeline ainda não está disponível.")}</p>
-        {:else if (!["codex", "omp"].includes(session.agent))}
+        {:else if (!timelineAgents.includes(session.agent))}
           <div class="timeline-entry" role="listitem">
             <span class="entry-rail"><i></i></span>
             <span class="entry-icon"><ActivityTypeIcon category="tool" size={14} /></span>

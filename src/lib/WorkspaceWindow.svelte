@@ -267,6 +267,8 @@
   let streamMessages = $state(true);
   let workspaceBackgroundImage = $state("");
   let workspaceBackgroundImageOpacity = $state(100);
+  // Where the image sits when it is larger than the window: 0 is one edge, 100 the other.
+  let workspaceBackgroundImageOffset = $state({ x: 50, y: 50 });
   let agentMessageSurface = $state(true);
   let workspaceBackgroundInput = $state<HTMLInputElement | null>(null);
   let filter = $state<"all" | "active" | "attention">("all");
@@ -388,6 +390,7 @@
   const workspaceStreamMessagesKey = "lume:workspace-stream-messages:v1";
   const workspaceBackgroundImageKey = "lume:workspace-background-image:v1";
   const workspaceBackgroundImageOpacityKey = "lume:workspace-background-image-opacity:v1";
+  const workspaceBackgroundImageOffsetKey = "lume:workspace-background-image-offset:v1";
   const agentMessageSurfaceKey = "lume:workspace-agent-message-surface:v1";
 
   function setStreamMessages(enabled: boolean) {
@@ -455,6 +458,18 @@
     agentMessageSurface = enabled;
     try { localStorage.setItem(agentMessageSurfaceKey, String(enabled)); }
     catch { /* Keep the choice for this window. */ }
+  }
+
+  function setBackgroundImageOffset(axis: "x" | "y", value: number) {
+    workspaceBackgroundImageOffset = { ...workspaceBackgroundImageOffset, [axis]: Math.max(0, Math.min(100, Math.round(value))) };
+    try { localStorage.setItem(workspaceBackgroundImageOffsetKey, JSON.stringify(workspaceBackgroundImageOffset)); }
+    catch { /* Keep the selected position for this window. */ }
+  }
+
+  function resetBackgroundImageOffset() {
+    workspaceBackgroundImageOffset = { x: 50, y: 50 };
+    try { localStorage.removeItem(workspaceBackgroundImageOffsetKey); }
+    catch { /* The position still resets for this window. */ }
   }
 
   function setBackgroundImageOpacity(value: number) {
@@ -2218,6 +2233,7 @@
     if (await savePreferencePatch(structuredClone(defaultPreferences))) {
       removeBackgroundImage();
       workspaceBackgroundImageOpacity = 100;
+      resetBackgroundImageOffset();
       try { localStorage.removeItem(workspaceBackgroundImageOpacityKey); }
       catch { /* The image opacity still resets for this window. */ }
       resetConfirming = false;
@@ -2278,6 +2294,12 @@
       const savedOpacity = Number(localStorage.getItem(workspaceBackgroundImageOpacityKey) ?? "100");
       workspaceBackgroundImageOpacity = Number.isFinite(savedOpacity) ? Math.max(0, Math.min(100, savedOpacity)) : 100;
     } catch { /* Keep the default image opacity when local storage is unavailable. */ }
+    try {
+      const saved = JSON.parse(localStorage.getItem(workspaceBackgroundImageOffsetKey) || "null");
+      if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+        workspaceBackgroundImageOffset = { x: Math.max(0, Math.min(100, saved.x)), y: Math.max(0, Math.min(100, saved.y)) };
+      }
+    } catch { /* Keep the image centered when local storage is unavailable. */ }
     const colorScheme = window.matchMedia("(prefers-color-scheme: dark)");
     const syncSystemTheme = (event: MediaQueryListEvent | MediaQueryList) => {
       systemDark = event.matches;
@@ -2875,6 +2897,14 @@
                   oninput={(event) => setBackgroundImageOpacity(Number(event.currentTarget.value))}
                 />
               </label>
+              <div class="workspace-setting-row wallpaper-offset-setting" data-tooltip={tr("Moves the image when it is larger than the window", "Move a imagem quando ela é maior que a janela")}>
+                <span><strong>{tr("Image position", "Posição da imagem")}</strong><small>{workspaceBackgroundImageOffset.x}% · {workspaceBackgroundImageOffset.y}%</small></span>
+                <div class="wallpaper-offset-controls">
+                  <input class="settings-range" type="range" min="0" max="100" step="1" aria-label={tr("Horizontal position of the background image", "Posição horizontal da imagem de fundo")} value={workspaceBackgroundImageOffset.x} oninput={(event) => setBackgroundImageOffset("x", Number(event.currentTarget.value))} />
+                  <input class="settings-range" type="range" min="0" max="100" step="1" aria-label={tr("Vertical position of the background image", "Posição vertical da imagem de fundo")} value={workspaceBackgroundImageOffset.y} oninput={(event) => setBackgroundImageOffset("y", Number(event.currentTarget.value))} />
+                </div>
+                <button type="button" class="wallpaper-center" disabled={workspaceBackgroundImageOffset.x === 50 && workspaceBackgroundImageOffset.y === 50} onclick={resetBackgroundImageOffset}>{tr("Center", "Centralizar")}</button>
+              </div>
               <label class="workspace-setting-row" data-tooltip={tr("Keeps replies readable over the image", "Mantém as respostas legíveis sobre a imagem")}>
                 <span><strong>{tr("Agent message background", "Fundo nas mensagens do agente")}</strong></span>
                 <input class="workspace-switch" type="checkbox" checked={agentMessageSurface} onchange={(event) => setAgentMessageSurface(event.currentTarget.checked)} />
@@ -3192,6 +3222,7 @@
         class="workspace-wallpaper"
         style:background-image={`url("${workspaceBackgroundImage}")`}
         style:opacity={`${workspaceBackgroundImageOpacity / 100}`}
+        style:background-position={`${workspaceBackgroundImageOffset.x}% ${workspaceBackgroundImageOffset.y}%`}
         aria-hidden="true"
       ></div>
     {/if}
@@ -3503,6 +3534,11 @@
   .wallpaper-setting { position: relative; max-width: 100%; overflow: hidden; }
   .wallpaper-input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
   .wallpaper-preview { width: 38px; height: 29px; flex: 0 0 auto; border-radius: 7px; background-position: center; background-size: cover; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-strong) 15%, transparent); }
+  .wallpaper-offset-setting { flex-wrap: wrap; }
+  .wallpaper-offset-controls { min-width: 0; flex: 1 1 140px; display: grid; gap: 6px; }
+  .wallpaper-center { height: 26px; padding: 0 9px; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .wallpaper-center:hover:not(:disabled) { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 38%, var(--workspace-line)); }
+  .wallpaper-center:disabled { opacity: .4; cursor: default; }
   .wallpaper-actions { min-width: 0; display: flex; gap: 4px; flex: 0 1 auto; }
   .wallpaper-actions button { width: 28px; min-height: 28px; padding: 0; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, border-color 140ms ease, background 140ms ease; }
   .wallpaper-actions button:hover { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 38%, var(--workspace-line)); background: var(--workspace-subtle); }

@@ -3414,7 +3414,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .user-row.outgoing-replacement { display: none; }
   .user-row.targeted .user-message { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
   .agent-message { align-self: flex-start; padding: 3px 0 7px; }
-  :global(.workspace.agent-message-surface) .agent-message { padding: 11px 15px 9px; border: 1px solid var(--workspace-line); border-radius: 14px 14px 14px 4px; background: color-mix(in srgb, var(--workspace-raised) 90%, transparent); box-shadow: 0 6px 22px rgba(8, 18, 13, .08); backdrop-filter: blur(14px) saturate(1.1); }
+  :global(.workspace.agent-message-surface) .agent-message { padding: 11px 15px 9px; border: 1px solid var(--workspace-line); border-radius: 14px 14px 14px 4px; background: color-mix(in srgb, var(--workspace-raised) 93%, transparent); box-shadow: 0 6px 22px rgba(8, 18, 13, .08); }
   .analysis-message header { margin-bottom: 7px; display: flex; align-items: center; gap: 8px; }
   .analysis-message header strong { min-width: 0; flex: 1; color: var(--workspace-strong); font-size: var(--workspace-chat-small-size); font-weight: 750; }
   time { color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); font-variant-numeric: tabular-nums; }

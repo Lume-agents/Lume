@@ -341,21 +341,17 @@ pub fn submit_prompt(
             .native_session_id
             .clone()
             .ok_or_else(|| "A sessão do Codex não informou a thread".to_string())?;
-        let first_attempt = bridge.submit_prompt(
-            &thread_id,
-            &codex_prompt,
-            &image_paths,
-            profile.clone(),
-            state.clone(),
-            app.clone(),
-        );
+        let first_attempt = retry_while_writer_is_active(|| {
+            bridge.submit_prompt(
+                &thread_id,
+                &codex_prompt,
+                &image_paths,
+                profile.clone(),
+                state.clone(),
+                app.clone(),
+            )
+        });
         if let Err(error) = first_attempt {
-            if is_active_codex_writer(&error) {
-                return Err(
-                    "Essa CLI foi aberta fora do Lume. Reinicie a sessão pelo Lume para conseguir enviar mensagens pelo terminal."
-                        .into(),
-                );
-            }
             if !is_missing_codex_rollout(&error) {
                 return Err(error);
             }
@@ -467,6 +463,27 @@ fn is_missing_codex_rollout(error: &str) -> bool {
 
 fn is_active_codex_writer(error: &str) -> bool {
     error.to_ascii_lowercase().contains("active writer")
+}
+
+const ACTIVE_WRITER_MESSAGE: &str = "Esta conversa ainda está aberta em outra CLI do Codex, ou o Codex ainda não a liberou depois que ela fechou. Feche a CLI externa, aguarde alguns segundos e tente de novo.";
+
+/// Codex keeps a thread attached to its last writer for a while after a CLI closes, so a request that
+/// meets "active writer" is retried for a few seconds before it is reported as a conflict.
+fn retry_while_writer_is_active<T>(mut operation: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    const ATTEMPTS: u32 = 40;
+    let mut attempt = 0;
+    loop {
+        match operation() {
+            Err(error) if is_active_codex_writer(&error) => {
+                attempt += 1;
+                if attempt >= ATTEMPTS {
+                    return Err(ACTIVE_WRITER_MESSAGE.into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            other => return other,
+        }
+    }
 }
 
 pub fn interrupt_prompt(
@@ -897,12 +914,14 @@ pub fn set_session_model_settings(
     let mut settings = bridge.default_model_settings()?;
     validate_model_selection(&mut settings, model, effort)?;
     if !running {
-        match bridge.set_thread_model_settings(
-            thread_id,
-            &settings.model,
-            settings.reasoning_effort.as_deref().unwrap_or_default(),
-            &settings.models,
-        ) {
+        match retry_while_writer_is_active(|| {
+            bridge.set_thread_model_settings(
+                thread_id,
+                &settings.model,
+                settings.reasoning_effort.as_deref().unwrap_or_default(),
+                &settings.models,
+            )
+        }) {
             Ok(updated) => settings = updated,
             Err(error) if is_missing_codex_rollout(&error) => {}
             Err(error) => return Err(error),
@@ -2815,6 +2834,18 @@ mod tests {
         assert_eq!(omp_profile_from_label("Oh My Pi"), None);
         assert_eq!(omp_profile_from_label("Codex"), None);
         assert_eq!(omp_profile_from_label(""), None);
+    }
+
+    #[test]
+    fn a_writer_that_releases_in_time_is_not_reported() {
+        let mut attempts = 0;
+        let result = retry_while_writer_is_active(|| {
+            attempts += 1;
+            if attempts < 3 { Err("thread t already has an active writer".to_string()) } else { Ok(attempts) }
+        });
+        assert_eq!(result, Ok(3));
+        let other: Result<u32, String> = retry_while_writer_is_active(|| Err("Rollout not found".into()));
+        assert_eq!(other, Err("Rollout not found".into()));
     }
 
     #[test]

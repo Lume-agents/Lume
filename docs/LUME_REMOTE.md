@@ -1,9 +1,14 @@
 # Lume Remote — hosted Relay design
 
-Status: proposal with a working prototype of the transport. The Relay lives in
-[Lume-agents/lume-relay](https://github.com/Lume-agents/lume-relay) (AGPL-3.0); the Node side is `relay_link.rs` (connection,
-signed challenge, pairing, authorization) and `relay_e2e.rs` (end-to-end encryption) in `src-tauri`. They are not wired into
-the running Node or the UI yet, and accounts, billing and push do not exist. It extends [LUME_NODE.md](./LUME_NODE.md) and must satisfy
+Status: phase 1 (Relay MVP) running as a prototype, owner only. The Relay lives in
+[Lume-agents/lume-relay](https://github.com/Lume-agents/lume-relay) (AGPL-3.0) and is deployed at `relay.lumeagents.dev`;
+the Node side is `relay_link.rs` (connection, signed challenge, pairing, authorization), `relay_e2e.rs` (end-to-end
+encryption) and `node_relay.rs` (the Node's outbound connection, the commands it answers and the client queries) in
+`src-tauri`. The running Node connects to the Relay, devices pair through it from **Settings → Remote computers** or
+`lume node relay-pair`, and a paired device can read the other computer's health, inventory and agent sessions, plus a
+session's conversation when the owner allows it. Everything is read-only: there are no remote prompts, approvals or
+interrupts yet. Accounts, entitlement tokens, billing and push do not exist, so the Relay has no per-account quota, and
+the independent security review has not happened. It extends [LUME_NODE.md](./LUME_NODE.md) and must satisfy
 [DISTRIBUTED_THREAT_MODEL.md](./DISTRIBUTED_THREAT_MODEL.md), including its security gates before any internet pairing.
 
 ## Product decisions
@@ -73,7 +78,7 @@ for the registry. Self-hosters skip Paddle and entitlement checks.
 
 ## Phases and gates
 
-1. **Relay MVP (closed beta, owner only):** Durable Object relay, outbound Node transport, pairing, no billing.
+1. **Relay MVP (closed beta, owner only):** Durable Object relay, outbound Node transport, pairing, no billing. *Running, read-only.*
 2. **Accounts and push:** sign-in, entitlement tokens, push dispatch, device revocation.
 3. **Billing:** Paddle subscriptions and webhooks, in USD and BRL. Only after measuring real usage and cost.
 4. **Security review:** independent review of the handshake, key storage, revocation and downgrade behavior; replay,
@@ -84,7 +89,10 @@ for the registry. Self-hosters skip Paddle and entitlement checks.
 ## Open questions
 
 - Account recovery and what happens to paired devices after a subscription lapses.
-- Replay queue size and TTL per plan; abuse limits per account.
+- Replay queue size and TTL per plan; abuse limits per account. Today any key can open a room and the limits are per room
+  and per connection only.
+- Telling a joining client that its Node is offline, so a query fails at once instead of waiting and leaving a frame in
+  the replay queue.
 - Regions: Durable Objects are placed near the first client, which may add latency for the other peer.
 - Whether an optional end-to-end encrypted backup (user-held key) is ever offered; it would be opt-in and
   unrecoverable if the key is lost.

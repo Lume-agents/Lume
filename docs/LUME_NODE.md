@@ -1,6 +1,6 @@
 # Lume Node development guide
 
-The Phase 1 Node is an opt-in headless process embedded in the Lume executable. It exposes its signed public identity, high-entropy pairing and authenticated read-only health/inventory over pinned TLS. Inventory includes detected built-in agent processes and installed/loaded Ollama models. Agent control, inference prompts, files, P2P and Relay transport remain under development.
+The Phase 1 Node is an opt-in headless process embedded in the Lume executable. It exposes its signed public identity, high-entropy pairing and authenticated read-only health/inventory over pinned TLS. Inventory includes detected built-in agent processes and installed/loaded Ollama models. It also connects outbound to a Lume Relay, so a paired device can read the same information, the agent sessions and, when the owner allows it, a conversation from another network. Agent control, inference prompts, files and direct P2P remain under development.
 
 ```bash
 lume node enable

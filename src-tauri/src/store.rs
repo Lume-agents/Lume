@@ -33,6 +33,10 @@ pub struct TakeoverRecovery {
     pub phase: String,
 }
 
+const EVENT_SYNC_SLACK_MS: i64 = 10 * 60 * 1000;
+const EVENT_DETAIL_CHARS: usize = 160;
+const EVENT_FILES: usize = 20;
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path
@@ -133,6 +137,10 @@ impl Store {
                     payload TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     PRIMARY KEY(thread_key, activity_id)
+                 );
+                 -- Threads whose past operational events were archived in full once; afterwards only new ones are written.
+                 CREATE TABLE IF NOT EXISTS conversation_event_sync (
+                    thread_key TEXT PRIMARY KEY
                  );
                  CREATE INDEX IF NOT EXISTS idx_conversation_activities_thread
                     ON conversation_activities(thread_key, created_at ASC);
@@ -250,16 +258,31 @@ impl Store {
         if durable.is_empty() {
             return Ok(());
         }
-        let exists = self
+        let synced = self
             .connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM conversation_activities WHERE thread_key = ?1)",
+                "SELECT EXISTS(SELECT 1 FROM conversation_event_sync WHERE thread_key = ?1)",
                 [&thread_key],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(|error| error.to_string())?;
-        let start = if exists {
-            durable.len().saturating_sub(6)
+        // A thread is written in full the first time (so the events that already happened are kept too),
+        // then only what is recent: the last few items, or anything newer than ten minutes before the newest stored one.
+        let start = if synced {
+            let newest = self
+                .connection
+                .query_row(
+                    "SELECT COALESCE(MAX(created_at), 0) FROM conversation_activities WHERE thread_key = ?1",
+                    [&thread_key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let cutoff = newest.saturating_sub(EVENT_SYNC_SLACK_MS);
+            durable
+                .iter()
+                .position(|activity| activity.created_at >= cutoff)
+                .unwrap_or(durable.len())
+                .min(durable.len().saturating_sub(6))
         } else {
             0
         };
@@ -272,6 +295,9 @@ impl Store {
             for attachment in &mut archived.attachments {
                 attachment.preview_data_url.clear();
             }
+            if Self::is_event_summary(&archived) {
+                Self::lighten_event(&mut archived);
+            }
             let payload = serde_json::to_string(&archived).map_err(|error| error.to_string())?;
             transaction
                 .execute(
@@ -281,6 +307,14 @@ impl Store {
                         payload = excluded.payload,
                         created_at = excluded.created_at",
                     params![thread_key, archived.id, payload, archived.created_at],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        if !synced {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO conversation_event_sync(thread_key) VALUES (?1)",
+                    [&thread_key],
                 )
                 .map_err(|error| error.to_string())?;
         }
@@ -468,8 +502,36 @@ impl Store {
         Some(format!("{}:{native_id}", agent.trim_matches('"')))
     }
 
+    /// Operational events (commands, edits, skills, git, subagents): only the fact that they happened is archived.
+    pub fn is_event_summary(activity: &SessionActivity) -> bool {
+        matches!(
+            activity.kind.as_str(),
+            "command" | "file" | "subagent" | "plugin"
+        ) || (activity.kind == "tool"
+            && !["create_goal", "get_goal", "update_goal", "todo_write"]
+                .iter()
+                .any(|tool| activity.title.contains(tool)))
+    }
+
+    /// Keeps what names the event (its title and the first line of its detail, which tell a command from a
+    /// skill or a git operation) and drops what it produced: diffs, command output, file contents.
+    fn lighten_event(activity: &mut SessionActivity) {
+        activity.detail = activity
+            .detail
+            .as_deref()
+            .and_then(|detail| detail.lines().map(str::trim).find(|line| !line.is_empty()))
+            .map(|line| line.chars().take(EVENT_DETAIL_CHARS).collect());
+        activity.files.truncate(EVENT_FILES);
+        activity.attachments.clear();
+        // A history entry is never "running": the live copy shows the real state while the event lasts.
+        if activity.status == "running" {
+            activity.status = "completed".into();
+        }
+    }
+
     pub fn is_archivable_conversation_activity(activity: &SessionActivity) -> bool {
-        matches!(activity.kind.as_str(), "prompt" | "queued_prompt")
+        Self::is_event_summary(activity)
+            || matches!(activity.kind.as_str(), "prompt" | "queued_prompt")
             || (activity.kind == "message" && activity.status != "running")
             || matches!(activity.kind.as_str(), "plan" | "plan_document" | "warning")
             || (activity.kind == "tool"
@@ -1331,6 +1393,50 @@ mod tests {
         AccessMode, AgentKind, PermissionAction, PermissionProfile, PermissionRequest,
         SessionSource, SessionStatus,
     };
+
+    fn event(kind: &str, title: &str, detail: &str, status: &str) -> SessionActivity {
+        SessionActivity {
+            id: format!("{kind}-1"),
+            kind: kind.into(),
+            title: title.into(),
+            detail: Some(detail.into()),
+            status: status.into(),
+            created_at: 1,
+            files: (0..30).map(|index| format!("src/file-{index}.rs")).collect(),
+            attachments: Vec::new(),
+            append_detail: false,
+        }
+    }
+
+    #[test]
+    fn operational_events_are_archived_without_what_they_produced() {
+        let command = event("command", "exec", "rg -n nav src/lib\nsrc/lib/a.svelte:1:nav\nsrc/lib/b.svelte:2:nav", "running");
+        assert!(Store::is_event_summary(&command));
+        assert!(Store::is_archivable_conversation_activity(&command));
+        let mut light = command.clone();
+        Store::lighten_event(&mut light);
+        assert_eq!(light.detail.as_deref(), Some("rg -n nav src/lib"));
+        assert_eq!(light.status, "completed");
+        assert_eq!(light.files.len(), EVENT_FILES);
+
+        let diff = event("file", "src/lib/a.svelte", "diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n", "completed");
+        let mut light = diff.clone();
+        Store::lighten_event(&mut light);
+        assert_eq!(light.detail.as_deref(), Some("diff --git a/x b/x"));
+
+        let long = event("tool", "Bash", &"x".repeat(500), "completed");
+        let mut light = long.clone();
+        Store::lighten_event(&mut light);
+        assert_eq!(light.detail.as_deref().map(str::len), Some(EVENT_DETAIL_CHARS));
+    }
+
+    #[test]
+    fn goal_tools_and_chat_messages_keep_their_own_archive_rules() {
+        assert!(!Store::is_event_summary(&event("tool", "update_goal", "x", "completed")));
+        assert!(Store::is_archivable_conversation_activity(&event("tool", "update_goal", "x", "completed")));
+        assert!(!Store::is_event_summary(&event("message", "Codex", "hi", "completed")));
+        assert!(!Store::is_event_summary(&event("permission", "Allow", "x", "completed")));
+    }
 
     #[test]
     fn agent_sessions_are_never_persisted() {

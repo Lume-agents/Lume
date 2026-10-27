@@ -163,6 +163,26 @@ fn arrange(app: &AppHandle) -> Result<TourCardSide, String> {
 
 // These commands are async on purpose: a synchronous command runs on the main thread, and building a window
 // from there deadlocks on Windows, so the card never appeared and the tour fell back to drawing it in the panel.
+// Linux and macOS need the opposite: their window and layer-shell calls belong to the main thread, so the work is
+// handed back to it there (`on_window_thread`).
+
+/// Runs `work` where the platform wants window calls: here on Windows, the main thread everywhere else.
+fn on_window_thread<T, F>(app: &AppHandle, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&AppHandle) -> Result<T, String> + Send + 'static,
+{
+    if cfg!(windows) {
+        return work(app);
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(work(&handle));
+    })
+    .map_err(|error| error.to_string())?;
+    receiver.recv().map_err(|_| "The tour card work did not finish".to_string())?
+}
 
 /// Called by the Orb on every step: where the highlighted control sits, and how wide the card is.
 #[tauri::command]
@@ -180,22 +200,25 @@ pub async fn place_tour_card(
         placement.under = under;
         placement.width = width.clamp(260.0, 520.0);
     }
-    arrange(&app)
+    on_window_thread(&app, arrange)
 }
 
 /// Called by the card once it has laid out a step, with the height it needs.
 #[tauri::command]
 pub async fn fit_tour_card(app: AppHandle, height: f64) -> Result<TourCardSide, String> {
     PLACEMENT.lock().map_err(|_| "tour card lock")?.height = height.clamp(140.0, 720.0);
-    arrange(&app)
+    on_window_thread(&app, arrange)
 }
 
 #[tauri::command]
 pub async fn close_tour_card(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window(LABEL) {
-        overlay::forget_window(LABEL);
-        window.close().map_err(|error| error.to_string())?;
-    }
+    on_window_thread(&app, |app| {
+        if let Some(window) = app.get_webview_window(LABEL) {
+            overlay::forget_window(LABEL);
+            window.close().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })?;
     if let Ok(mut flag) = LAYERED.lock() {
         *flag = false;
     }

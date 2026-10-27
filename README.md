@@ -128,6 +128,8 @@ curl -fsSL https://raw.githubusercontent.com/Lume-agents/Lume/main/scripts/insta
 
 Running it again updates to the latest release.
 
+**Windows code signing.** Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/), once our application is approved. Until then the installer is unsigned and SmartScreen may warn. The [code signing policy](https://lumeagents.dev/code-signing/) says what is signed and who approves it.
+
 **Connect your agents** in **Settings**. The first-run guide can install the agent CLIs and the GitHub CLI for you. After connecting Codex, run `/hooks` inside Codex and trust the **Lume** hook. The browser Companion is covered in [docs/AGENT_SOURCES.md](docs/AGENT_SOURCES.md), GitHub in [docs/GITHUB.md](docs/GITHUB.md), Linux display backends in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Customization

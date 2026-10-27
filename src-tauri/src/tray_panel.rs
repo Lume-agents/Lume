@@ -1,8 +1,8 @@
 //! Tray mode: the Lume icon in the system tray, and a small panel with the agents that are running.
 //!
 //! With "Open Lume as → Tray" the Orb stays hidden. Clicking the icon (Windows and macOS report the click and where
-//! the icon is) opens the panel beside it. Linux trays report no clicks, so there the icon's own menu lists the agents
-//! and offers to open the panel in a corner of the screen.
+//! the icon is) opens the panel beside it. Linux trays report no clicks, so a panel would need a second click on a menu
+//! item: there the icon's menu itself lists the agents and their status, and everything else opens the Workspace.
 //!
 //! The panel is a window like the tour card: placed with the `overlay` functions so it floats above other windows on
 //! Wayland too, and it is built where each platform wants windows built (see `tour_card::on_window_thread`).
@@ -33,6 +33,8 @@ const WIDTH: f64 = 344.0;
 const HEIGHT: f64 = 468.0;
 const GAP: f64 = 10.0;
 const MENU_AGENTS: usize = 8;
+/// The panel opens from a click on the icon, which Linux trays do not report.
+const PANEL_AVAILABLE: bool = !cfg!(target_os = "linux");
 /// A click on the icon while the panel is open first takes the focus away from it, which hides it; the click then arrives
 /// and must not open it again.
 const REOPEN_GUARD_MS: i64 = 350;
@@ -180,6 +182,10 @@ fn show_or_hide(app: &AppHandle, icon: Option<IconRect>, only_show: bool) -> Res
 /// Opens the panel (or closes it, when `only_show` is false and it is open). Runs off the caller's thread: a tray
 /// event handler must not build a window itself.
 pub fn toggle(app: &AppHandle, icon: Option<IconRect>, only_show: bool) {
+    if !PANEL_AVAILABLE {
+        crate::workspace_windows::schedule_open(app);
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error) = crate::tour_card::on_window_thread(&app, move |app| show_or_hide(app, icon, only_show)) {
@@ -255,7 +261,9 @@ fn build_menu(app: &AppHandle, tray_mode: bool, portuguese: bool, sessions: &[Ag
             )?)?;
         }
         menu.append(&PredefinedMenuItem::separator(app)?)?;
-        menu.append(&MenuItem::with_id(app, "panel", tr(portuguese, "Open panel", "Abrir painel"), true, None::<&str>)?)?;
+        if PANEL_AVAILABLE {
+            menu.append(&MenuItem::with_id(app, "panel", tr(portuguese, "Open panel", "Abrir painel"), true, None::<&str>)?)?;
+        }
         menu.append(&MenuItem::with_id(app, "workspace", tr(portuguese, "Open Workspace", "Abrir Workspace"), true, None::<&str>)?)?;
         menu.append(&MenuItem::with_id(app, "orb", tr(portuguese, "Switch to the Orb", "Trocar para o Orb"), true, None::<&str>)?)?;
     } else {

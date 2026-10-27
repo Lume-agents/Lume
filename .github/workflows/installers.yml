@@ -189,6 +189,7 @@ jobs:
             --version "$version" \
             --apk "$apk" \
             --repository "$GITHUB_REPOSITORY" \
+            --download-repository "tulerws/Lume" \
             --tag "$LUME_RELEASE_TAG" \
             --output "$RUNNER_TEMP/mobile-latest.json"
           echo "apk=$apk" >> "$GITHUB_OUTPUT"

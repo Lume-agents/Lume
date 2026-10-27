@@ -17,6 +17,9 @@ const apkPath = values.get("--apk");
 const repository = values.get("--repository");
 const tag = values.get("--tag");
 const output = values.get("--output");
+// Phones installed before the repository moved to Lume-agents only trust download addresses under tulerws/Lume, which
+// GitHub still redirects. The manifest keeps that address until those installs have updated.
+const downloadRepository = values.get("--download-repository") || repository;
 const apkName = basename(apkPath);
 const apk = await readFile(apkPath);
 const sha256 = createHash("sha256").update(apk).digest("hex");
@@ -26,7 +29,7 @@ const manifest = {
   publishedAt: new Date().toISOString(),
   notesUrl: `https://github.com/${repository}/releases/tag/${tag}`,
   android: {
-    url: `https://github.com/${repository}/releases/download/${tag}/${apkName}`,
+    url: `https://github.com/${downloadRepository}/releases/download/${tag}/${apkName}`,
     sha256,
   },
 };

@@ -27,7 +27,7 @@ import org.json.JSONObject;
 
 public final class UpdateCheckWorker extends Worker {
     private static final String MANIFEST_URL =
-        "https://github.com/tulerws/Lume/releases/latest/download/mobile-latest.json";
+        "https://github.com/Lume-agents/Lume/releases/latest/download/mobile-latest.json";
     private static final String CHANNEL_ID = "lume-app-updates";
     private static final String PREFERENCES = "lume-native-update-checks";
     private static final String LAST_NOTIFIED_VERSION = "last-notified-version";
@@ -143,12 +143,18 @@ public final class UpdateCheckWorker extends Worker {
         return new UpdateManifest(version, apkUrl, sha256);
     }
 
+    /** The repository moved from tulerws/Lume to Lume-agents/Lume; GitHub still redirects the old address. */
+    static boolean isTrustedReleasePath(String path) {
+        return path.startsWith("/Lume-agents/Lume/releases/download/")
+            || path.startsWith("/tulerws/Lume/releases/download/");
+    }
+
     private static boolean isTrustedReleaseUrl(String value) {
         try {
             URI uri = URI.create(value);
             return "https".equalsIgnoreCase(uri.getScheme())
                 && "github.com".equalsIgnoreCase(uri.getHost())
-                && uri.getPath().startsWith("/tulerws/Lume/releases/download/");
+                && isTrustedReleasePath(uri.getPath());
         } catch (Exception ignored) {
             return false;
         }

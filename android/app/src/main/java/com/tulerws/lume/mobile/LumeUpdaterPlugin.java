@@ -135,7 +135,7 @@ public class LumeUpdaterPlugin extends Plugin {
             URI uri = URI.create(value);
             return "https".equalsIgnoreCase(uri.getScheme()) &&
                 "github.com".equalsIgnoreCase(uri.getHost()) &&
-                uri.getPath().startsWith("/tulerws/Lume/releases/download/");
+                UpdateCheckWorker.isTrustedReleasePath(uri.getPath());
         } catch (Exception ignored) {
             return false;
         }

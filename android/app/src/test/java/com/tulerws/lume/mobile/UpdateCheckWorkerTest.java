@@ -38,6 +38,18 @@ public class UpdateCheckWorkerTest {
     }
 
     @Test
+    public void acceptsTheMovedRepositoryAndTheOldAddress() {
+        for (String repository : new String[] {"Lume-agents/Lume", "tulerws/Lume"}) {
+            UpdateCheckWorker.UpdateManifest manifest = UpdateCheckWorker.validateManifest(
+                "0.18.7",
+                "https://github.com/" + repository + "/releases/download/v0.18.7/Lume-Mobile.apk",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            );
+            assertEquals("0.18.7", manifest.version);
+        }
+    }
+
+    @Test
     public void rejectsUntrustedUpdateManifest() {
         assertThrows(
             SecurityException.class,

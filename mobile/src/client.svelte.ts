@@ -1,5 +1,5 @@
 import type { HubCommand, HubCommandResponse, HubSession, HubSnapshot } from "$lib/hubProtocol";
-import type { PromptDelivery, WorkflowGroupDefinition, WorkflowRun } from "$lib/domain";
+import type { Preferences, PromptDelivery, SurfacePalette, WorkflowGroupDefinition, WorkflowRun } from "$lib/domain";
 import type { WorkflowBoardBackend } from "$lib/workflowBoardBackend";
 import type { AgentSlashCommand } from "$lib/slashCommands";
 import type { CodexThreadModelSettings, PathMention } from "$lib/lume";
@@ -34,9 +34,12 @@ export type Language = "en" | "pt-BR";
 export type MobileAppearance = {
   theme: "lume" | "forest" | "ocean" | "violet" | "ember";
   mode: "system" | "dark" | "light";
-  darkBase: "theme" | "graphite" | "black" | "slate";
-  lightBase: "theme" | "white" | "gray" | "beige";
+  darkBase: Preferences["darkBase"];
+  lightBase: Preferences["lightBase"];
   accentColor: string;
+  accentOpacity: number;
+  customDarkSurfaces?: SurfacePalette;
+  customLightSurfaces?: SurfacePalette;
   uiFont: string;
   codeFont: string;
   textSize: "small" | "default" | "large";
@@ -56,7 +59,7 @@ export type DesktopAppearance = {
   codeFont: string;
   darkMode?: boolean | null;
 };
-const defaultAppearance: MobileAppearance = { theme: "lume", mode: "system", darkBase: "theme", lightBase: "theme", accentColor: "", uiFont: "", codeFont: "", textSize: "default", followDesktop: false };
+const defaultAppearance: MobileAppearance = { theme: "lume", mode: "system", darkBase: "theme", lightBase: "theme", accentColor: "", accentOpacity: 100, uiFont: "", codeFont: "", textSize: "default", followDesktop: false };
 function storedAppearance(): MobileAppearance {
   try { return { ...defaultAppearance, ...JSON.parse(read(keys.appearance) || "{}") }; } catch { return { ...defaultAppearance }; }
 }
@@ -157,6 +160,40 @@ export class MobileClient {
     return Boolean(this.pairingCode) && /Android/i.test(navigator.userAgent) && !isNativeShell() && !this.installPromptDismissed;
   }
   get canScan() { return isNativeShell() && nativePlatform() === "android"; }
+
+  /** The phone's look as the desktop's Preferences, so the shared appearance settings can edit it. */
+  get appearancePreferences(): Preferences {
+    const look = this.appearance;
+    return {
+      language: this.language,
+      appearanceTheme: look.theme,
+      accentColor: look.accentColor || undefined,
+      accentOpacity: look.accentOpacity,
+      darkMode: look.mode === "system" ? undefined : look.mode === "dark",
+      darkBase: look.darkBase,
+      lightBase: look.lightBase,
+      customDarkSurfaces: look.customDarkSurfaces,
+      customLightSurfaces: look.customLightSurfaces,
+      uiFont: look.uiFont || "default",
+      codeFont: look.codeFont || "default",
+    } as unknown as Preferences;
+  }
+
+  /** A change made in the shared appearance settings, kept as the phone's own look. */
+  patchAppearancePreferences(patch: Partial<Preferences>) {
+    const next: Partial<MobileAppearance> = {};
+    if ("appearanceTheme" in patch) next.theme = patch.appearanceTheme as MobileAppearance["theme"];
+    if ("accentColor" in patch) next.accentColor = patch.accentColor ?? "";
+    if ("accentOpacity" in patch) next.accentOpacity = patch.accentOpacity ?? 100;
+    if ("darkMode" in patch) next.mode = patch.darkMode === undefined ? "system" : patch.darkMode ? "dark" : "light";
+    if ("darkBase" in patch) next.darkBase = patch.darkBase;
+    if ("lightBase" in patch) next.lightBase = patch.lightBase;
+    if ("customDarkSurfaces" in patch) next.customDarkSurfaces = patch.customDarkSurfaces;
+    if ("customLightSurfaces" in patch) next.customLightSurfaces = patch.customLightSurfaces;
+    if ("uiFont" in patch) next.uiFont = patch.uiFont ?? "";
+    if ("codeFont" in patch) next.codeFont = patch.codeFont ?? "";
+    this.setAppearance(next);
+  }
 
   setAppearance(patch: Partial<MobileAppearance>) {
     this.appearance = { ...this.appearance, ...patch };
@@ -846,6 +883,16 @@ export class MobileClient {
     setInterval(() => void this.checkUpdate(), UPDATE_INTERVAL);
     this.updatesReady = true;
     if (this.snapshot) void this.coordinateCompanionUpdates(this.snapshot);
+  }
+
+  /** Drops the phone's cached copy of the web app and loads it again, which picks up a newer build. */
+  async reloadWebApp() {
+    try {
+      const registration = await navigator.serviceWorker?.getRegistration();
+      await registration?.update();
+      for (const key of await caches.keys()) await caches.delete(key);
+    } catch { /* The reload below still fetches the page again. */ }
+    location.reload();
   }
 
   async checkUpdate(manual = false): Promise<string> {

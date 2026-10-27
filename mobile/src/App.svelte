@@ -29,15 +29,7 @@
   const dark = $derived(desktop
     ? (desktop.darkMode ?? systemDark)
     : client.appearance.mode === "system" ? systemDark : client.appearance.mode === "dark");
-  const look = $derived(appearanceAttributes((desktop ?? {
-    appearanceTheme: client.appearance.theme,
-    accentColor: client.appearance.accentColor || undefined,
-    accentOpacity: 100,
-    darkBase: client.appearance.darkBase,
-    lightBase: client.appearance.lightBase,
-    uiFont: client.appearance.uiFont,
-    codeFont: client.appearance.codeFont,
-  }) as unknown as Preferences));
+  const look = $derived(appearanceAttributes((desktop as unknown as Preferences | null) ?? client.appearancePreferences));
   const chatSession = $derived(chatId ? client.sessions.find((session) => session.id === chatId) ?? null : null);
 
   function openChat(id: string) {

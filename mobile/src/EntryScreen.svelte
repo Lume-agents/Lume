@@ -66,9 +66,14 @@
       <small>{client.tr("Lume for Android", "Lume para Android")}</small>
       <strong id="install-title">{client.tr("Continue in the mobile app", "Continue no app do celular")}</strong>
       <p>{client.tr("Open the installed app, or download it before pairing.", "Abra o app instalado ou baixe-o antes de parear.")}</p>
-      <a class="primary" href={client.appLink}>{client.tr("Open Lume Mobile", "Abrir o Lume Mobile")}</a>
-      <a class="download" href={apkUrl} rel="noopener">{client.tr("Download the app", "Baixar o app")}</a>
-      <button class="quiet" type="button" onclick={() => client.dismissInstallPrompt()}>{client.tr("Continue in browser", "Continuar no navegador")}</button>
+      <div class="install-actions">
+        <a class="primary" href={client.appLink}><LumeIcon name="external" size={18} />{client.tr("Open Lume Mobile", "Abrir o Lume Mobile")}</a>
+        <a class="secondary" href={apkUrl} rel="noopener"><LumeIcon name="download" size={18} />{client.tr("Download the app", "Baixar o app")}</a>
+        <button class="quiet" type="button" onclick={() => client.dismissInstallPrompt()}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c2.6 2.6 4 5.6 4 9s-1.4 6.4-4 9c-2.6-2.6-4-5.6-4-9s1.4-6.4 4-9Z" /></svg>
+          {client.tr("Continue in browser", "Continuar no navegador")}
+        </button>
+      </div>
     </div>
   </div>
 {/if}
@@ -102,7 +107,11 @@
   .install small { color: var(--workspace-accent); font-size: 12px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
   .install strong { color: var(--workspace-strong); font-size: 19px; }
   .install p { margin: 0 0 6px; color: var(--workspace-muted); font-size: 14px; }
-  .install .primary { width: 100%; }
+  .install-actions { width: 100%; margin-top: 12px; display: grid; gap: 12px; }
+  .install-actions .primary, .install-actions .secondary, .install-actions .quiet { width: 100%; height: 50px; margin: 0; padding: 0 16px; display: flex; align-items: center; justify-content: center; gap: 10px; border-radius: 14px; font-size: 15px; font-weight: 700; text-decoration: none; box-sizing: border-box; }
+  .install-actions .secondary { border: 1px solid color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); color: var(--workspace-accent); background: var(--workspace-accent-soft); }
+  .install-actions .quiet { border: 1px solid var(--workspace-line); color: var(--workspace-muted); background: transparent; font-weight: 650; }
+  .install-actions .quiet svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
   .close { position: absolute; top: 12px; right: 12px; width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 10px; color: var(--workspace-muted); background: transparent; }
   .quiet { margin-top: 4px; padding: 8px; border: 0; color: var(--workspace-muted); background: transparent; font-size: 14px; }
 </style>

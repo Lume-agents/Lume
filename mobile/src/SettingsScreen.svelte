@@ -1,12 +1,17 @@
 <script lang="ts">
-  import { appearanceThemes, darkBases, lightBases } from "$lib/appearance";
+  import AppearanceSettings from "$lib/AppearanceSettings.svelte";
   import { codeFonts, uiFonts } from "$lib/fonts";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import type { MobileAppearance, MobileClient } from "./client.svelte";
 
   let { client }: { client: MobileClient } = $props();
 
+  const apkUrl = "https://github.com/Lume-agents/Lume/releases/latest/download/Lume-Mobile.apk";
   const pt = $derived(client.language === "pt-BR");
+  // The mode in effect now: the phone's own choice, or the system's when it follows it.
+  const dark = $derived(client.appearance.mode === "system"
+    ? (typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)").matches : true)
+    : client.appearance.mode === "dark");
   const scopeNames = $derived([
     ["prompt", client.tr("Prompts", "Prompts")],
     ["approve", client.tr("Approvals", "Aprovações")],
@@ -33,50 +38,23 @@
       </button>
     </div>
     {#if !client.appearance.followDesktop}
-    <div class="group spaced">
-      <div class="block">
-        <span class="label">{client.tr("Theme", "Tema")}</span>
-        <div class="themes">
-          {#each appearanceThemes as theme (theme.value)}
-            <button class:on={client.appearance.theme === theme.value} type="button" aria-pressed={client.appearance.theme === theme.value} onclick={() => set("theme", theme.value)}>
-              <span class="swatch" style:--surface={theme.darkSurface} style:--light={theme.lightSurface} style:--accent={theme.accent}><i></i></span>
-              <small>{theme.label}</small>
-            </button>
-          {/each}
-        </div>
-      </div>
-      <div class="row">
-        <span class="label">{client.tr("Mode", "Modo")}</span>
-        <div class="segmented">
-          {#each [["system", client.tr("System", "Sistema")], ["dark", client.tr("Dark", "Escuro")], ["light", client.tr("Light", "Claro")]] as [value, label] (value)}
-            <button class:on={client.appearance.mode === value} type="button" onclick={() => set("mode", value as MobileAppearance["mode"])}>{label}</button>
-          {/each}
-        </div>
-      </div>
-      <label class="row">
-        <span class="label">{client.tr("Dark surfaces", "Superfícies escuras")}</span>
-        <select value={client.appearance.darkBase} onchange={(event) => set("darkBase", event.currentTarget.value as MobileAppearance["darkBase"])}>
-          {#each darkBases.filter((base) => base.value !== "custom") as base (base.value)}<option value={base.value}>{pt ? base.labelPt : base.label}</option>{/each}
-        </select>
-      </label>
-      <label class="row">
-        <span class="label">{client.tr("Light surfaces", "Superfícies claras")}</span>
-        <select value={client.appearance.lightBase} onchange={(event) => set("lightBase", event.currentTarget.value as MobileAppearance["lightBase"])}>
-          {#each lightBases.filter((base) => base.value !== "custom") as base (base.value)}<option value={base.value}>{pt ? base.labelPt : base.label}</option>{/each}
-        </select>
-      </label>
-      <label class="row">
-        <span class="label">{client.tr("Interface font", "Fonte da interface")}</span>
-        <select value={client.appearance.uiFont || "default"} onchange={(event) => set("uiFont", event.currentTarget.value)}>
-          {#each uiFonts as font (font.value)}<option value={font.value}>{pt ? font.labelPt : font.label}</option>{/each}
-        </select>
-      </label>
-      <label class="row">
-        <span class="label">{client.tr("Code font", "Fonte do código")}</span>
-        <select value={client.appearance.codeFont || "default"} onchange={(event) => set("codeFont", event.currentTarget.value)}>
-          {#each codeFonts as font (font.value)}<option value={font.value}>{pt ? font.labelPt : font.label}</option>{/each}
-        </select>
-      </label>
+    <div class="appearance-card">
+      <AppearanceSettings preferences={client.appearancePreferences} language={client.language} dark={dark} showBackdrop={false} onpatch={(patch) => client.patchAppearancePreferences(patch)}>
+        {#snippet typography()}
+          <label class="row">
+            <span class="label">{client.tr("Interface font", "Fonte da interface")}</span>
+            <select value={client.appearance.uiFont || "default"} onchange={(event) => set("uiFont", event.currentTarget.value)}>
+              {#each uiFonts as font (font.value)}<option value={font.value}>{pt ? font.labelPt : font.label}</option>{/each}
+            </select>
+          </label>
+          <label class="row">
+            <span class="label">{client.tr("Code font", "Fonte do código")}</span>
+            <select value={client.appearance.codeFont || "default"} onchange={(event) => set("codeFont", event.currentTarget.value)}>
+              {#each codeFonts as font (font.value)}<option value={font.value}>{pt ? font.labelPt : font.label}</option>{/each}
+            </select>
+          </label>
+        {/snippet}
+      </AppearanceSettings>
     </div>
     {/if}
     <div class="group spaced">
@@ -136,12 +114,21 @@
     <div class="group">
       <div class="row">
         <span><strong>Lume Mobile</strong><small>{client.update.version || client.update.detail}</small>{#if client.update.version && client.update.detail}<small>{client.update.detail}</small>{/if}</span>
-        {#if !client.update.managed}
+        {#if client.platform === "web"}
+          <button class="small" type="button" onclick={() => void client.reloadWebApp()}>{client.tr("Reload", "Recarregar")}</button>
+        {:else if !client.update.managed}
           <button class:primary={Boolean(client.update.available)} class="small" type="button" disabled={client.update.busy} onclick={() => void (client.update.available ? client.installUpdate() : client.checkUpdate(true))}>
             {client.update.busy ? client.tr("Working…", "Aguarde…") : client.update.available ? client.tr("Install", "Instalar") : client.tr("Check now", "Verificar")}
           </button>
         {/if}
       </div>
+      {#if client.platform === "web"}
+        <a class="row link" href={apkUrl} rel="noopener">
+          <span class="lead"><LumeIcon name="download" size={18} /></span>
+          <span><strong>{client.tr("Download the app", "Baixar o app")}</strong><small>{client.tr("Lume Mobile for Android, with notifications and updates", "Lume Mobile para Android, com notificações e atualizações")}</small></span>
+          <LumeIcon name="external" size={15} />
+        </a>
+      {/if}
     </div>
   </div>
 </section>
@@ -161,6 +148,9 @@
   .row strong { font-size: 15px; font-weight: 650; }
   .row small, .hint { overflow: hidden; color: var(--workspace-muted); font-size: 12.5px; text-overflow: ellipsis; }
   .label { color: var(--workspace-strong); font-size: 15px; font-weight: 650; }
+  .row.link { color: inherit; text-decoration: none; }
+  .row.link .lead { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-accent-soft); }
+  .appearance-card { margin: 0 0 14px; padding: 12px; border: 1px solid var(--workspace-line); border-radius: 16px; background: var(--workspace-pane); }
   .themes { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
   .themes button { padding: 6px 0; display: grid; justify-items: center; gap: 5px; border: 0; color: var(--workspace-muted); background: transparent; }
   .swatch { position: relative; width: 44px; height: 44px; overflow: hidden; border: 2px solid transparent; border-radius: 14px; background: linear-gradient(135deg, var(--surface) 50%, var(--light) 50%); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08); }

@@ -8,7 +8,7 @@
     darkBases, lightBases, normalizeBackdrop, workspaceCanvas,
   } from "$lib/appearance";
 
-  let { preferences, language, dark, onpatch, disabled = false, typography, backdropImage }: {
+  let { preferences, language, dark, onpatch, disabled = false, typography, backdropImage, showBackdrop = true }: {
     preferences: Preferences;
     language: Language;
     /** The color mode in effect now (a "system" choice already resolved). */
@@ -20,6 +20,8 @@
     typography?: Snippet;
     /** Extra rows for the backdrop section (the background image), when the window offers it. */
     backdropImage?: Snippet;
+    /** Whether the Background section is offered (the phone has no window backdrop to paint). */
+    showBackdrop?: boolean;
   } = $props();
 
   const tr = (english: string, portuguese: string) => (language === "pt-BR" ? portuguese : english);
@@ -81,7 +83,7 @@
     { id: "mode", label: tr("Mode", "Modo") },
     { id: "surfaces", label: tr("Surfaces", "Superfícies") },
     { id: "accent", label: tr("Accent", "Destaque") },
-    { id: "backdrop", label: tr("Background", "Fundo") },
+    ...(showBackdrop ? [{ id: "backdrop", label: tr("Background", "Fundo") }] : []),
     ...(typography ? [{ id: "type", label: tr("Typography", "Tipografia") }] : []),
   ]);
   let active = $state("mode");
@@ -154,7 +156,7 @@
         </div>
       </div>
     </section>
-  {:else if active === "backdrop"}
+  {:else if active === "backdrop" && showBackdrop}
     <section class="ap-section" aria-label={tr("Workspace background", "Fundo do Workspace")}>
       <p class="ap-label">{tr("Style", "Estilo")}</p>
       <div class="ap-segment" role="group" aria-label={tr("Background style", "Estilo do fundo")}>

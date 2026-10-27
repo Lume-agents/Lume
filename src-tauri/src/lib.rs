@@ -1,4 +1,5 @@
 mod adapters;
+mod tray_panel;
 mod agent_extensions;
 mod extension_github;
 mod agent_commands;
@@ -92,6 +93,11 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
 fn reveal_main_window(app: &AppHandle) {
+    // In tray mode the Orb stays hidden: what the person asked for shows as the tray panel.
+    if tray_panel::is_tray_mode(app) {
+        tray_panel::toggle(app, None, true);
+        return;
+    }
     if let Some(workspace) = app.get_webview_window("workspace") {
         if workspace.is_visible().unwrap_or(false)
             && app
@@ -2135,7 +2141,7 @@ fn set_preferences(
     }
     if !matches!(
         preferences.startup_mode.as_str(),
-        "ask" | "orb" | "workspace"
+        "ask" | "orb" | "workspace" | "tray"
     ) {
         return Err("Unknown startup mode".into());
     }
@@ -2201,6 +2207,7 @@ fn set_preferences(
         preferences.workspace_dark_background_opacity.clamp(35, 100);
     validate_workflow_groups(&preferences)?;
     let previous = state.preferences()?;
+    let startup_mode_changed = previous.startup_mode != preferences.startup_mode;
     let overlay_configuration_changed = previous.monitor_id != preferences.monitor_id
         || previous.show_over_fullscreen != preferences.show_over_fullscreen;
     let shortcuts_changed = shortcut_bindings(&previous)
@@ -2231,6 +2238,9 @@ fn set_preferences(
             let _ = apply_global_shortcuts(&app, &previous);
         }
         return Err(error);
+    }
+    if startup_mode_changed && (previous.startup_mode == tray_panel::MODE || preferences.startup_mode == tray_panel::MODE) {
+        tray_panel::apply_mode(&app);
     }
     if overlay_configuration_changed {
         overlay::apply_spaces_behavior_to_all(&app, preferences.show_over_fullscreen);
@@ -3454,7 +3464,10 @@ pub fn run() {
                         );
                     }
                 }
-                window.show()?;
+                // In tray mode the Orb stays hidden; the tray icon and its panel stand in for it.
+                if preferences.startup_mode != tray_panel::MODE {
+                    window.show()?;
+                }
             }
             trace.mark("orb window shown");
 
@@ -3464,7 +3477,7 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "Sair", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &workspace, &quit])?;
 
-            TrayIconBuilder::new()
+            TrayIconBuilder::with_id(tray_panel::TRAY_ID)
                 .icon(
                     app.default_window_icon()
                         .expect("ícone padrão ausente")
@@ -3477,21 +3490,42 @@ pub fn run() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
+                        rect,
                         ..
                     } = event
                     {
-                        reveal_main_window(tray.app_handle());
+                        let app = tray.app_handle();
+                        if tray_panel::is_tray_mode(app) {
+                            // Windows and macOS say where the icon is; the panel opens next to it.
+                            let scale = app
+                                .get_webview_window("main")
+                                .and_then(|window| window.scale_factor().ok())
+                                .unwrap_or(1.0);
+                            let position = rect.position.to_physical::<f64>(scale);
+                            let size = rect.size.to_physical::<f64>(scale);
+                            let icon = (size.width > 0.0).then_some((position.x, position.y, size.width, size.height));
+                            tray_panel::toggle(app, icon, false);
+                        } else {
+                            reveal_main_window(app);
+                        }
                     }
                 })
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => reveal_main_window(app),
-                    "workspace" => {
+                    "panel" => tray_panel::toggle(app, None, true),
+                    "orb" => {
+                        if let Some(state) = app.try_state::<AppState>() {
+                            let _ = tray_panel::go_orb(app, &state);
+                        }
+                    }
+                    id if id == "workspace" || id.starts_with("session:") => {
                         workspace_windows::schedule_open(app);
                     }
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .build(app)?;
+            tray_panel::refresh_menu(app.handle());
 
             if state.preferences()?.autostart {
                 let _ = app.autolaunch().enable();
@@ -3499,6 +3533,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            tray_panel::switch_from_tray,
+            tray_panel::hide_tray_panel,
             tour_card::place_tour_card,
             tour_card::fit_tour_card,
             tour_card::close_tour_card,

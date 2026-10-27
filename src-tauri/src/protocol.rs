@@ -1726,6 +1726,7 @@ fn emit_sessions_changed_for(
     native_session_id: Option<&str>,
 ) {
     let event = record_hub_event(HubEvent::SessionsChanged);
+    crate::tray_panel::sessions_changed(app);
     let _ = app.emit(
         "lume://sessions-changed",
         SessionChangePayload {

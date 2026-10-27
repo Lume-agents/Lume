@@ -335,7 +335,7 @@
 
   // The first time the panel is open with nothing else on it (setup guide, release notes), a short tour shows the Orb.
   $effect(() => {
-    if (!expanded || onboardingOpen || startupChooserOpen || orbTourOpen) return;
+    if (!expanded || onboardingOpen || startupChooserOpen || orbTourOpen || preferences.startupMode === "tray") return;
     try { if (localStorage.getItem(orbTourKey) !== null) return; }
     catch { return; /* Without storage it would show every time; Settings still has it. */ }
     const timer = window.setInterval(() => {
@@ -2415,6 +2415,8 @@
       await showWorkspaceWindow();
       return;
     }
+    // In tray mode the Orb stays hidden: the backend already opened the tray panel for this shortcut.
+    if (preferences.startupMode === "tray") return;
     if (action === "palette") {
       await showCommandPalette();
       return;

@@ -292,6 +292,18 @@ export async function loadRelayLumeNodeHealth(nodeId: string): Promise<RemoteLum
   return invoke<RemoteLumeNodeHealth>("get_relay_lume_node_health", { nodeId });
 }
 
+export async function sendRelayLumePrompt(nodeId: string, sessionId: string, requestId: string, prompt: string): Promise<{ accepted: boolean; repeated?: boolean }> {
+  return invoke("send_relay_lume_prompt", { nodeId, sessionId, requestId, prompt });
+}
+
+export async function loadNodeAllowPrompts(): Promise<boolean> {
+  return invoke<boolean>("get_node_allow_prompts");
+}
+
+export async function setNodeAllowPrompts(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_node_allow_prompts", { enabled });
+}
+
 export async function loadRelayLumeSession(nodeId: string, sessionId: string): Promise<RemoteConversation> {
   return invoke<RemoteConversation>("get_relay_lume_session", { nodeId, sessionId });
 }

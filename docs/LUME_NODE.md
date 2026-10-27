@@ -91,11 +91,23 @@ It is read-only, and it needs two things: the device holds the `read_conversatio
 must be paired again) and the owner turned the switch on (`lume node conversations on|off`, or the toggle in Settings →
 Remote computers). It is **off by default** and turning it off takes effect on the next request.
 
+### Sending a prompt
+
+A prompt is sent from the conversation view in Settings → Remote computers (there is no command-line form yet). It
+reaches a session of the other computer that Lume controls, and it needs four things: the device holds the `prompt` scope
+(devices paired before this existed must be paired again), the owner turned the switch on (`lume node prompts on|off`, or
+the toggle in Settings → Remote computers; **off by default**, effective at once), the Lume app is open there, and the
+request is fresh. The Node refuses a request more than a minute away from its own clock, because the Relay replays frames it
+kept for an offline Node and a prompt that waited must not start work nobody is watching. Each request carries an id: the
+Node runs an id once and answers a repeat with `repeated: true`, so retrying after a lost answer is safe. Text only, up to
+32,000 characters. Inside the computer the Node hands the prompt to the app through a loopback port, authenticated with an
+HMAC over the request, using a secret the app writes to `node-bridge.json` in the Node's folder (readable only by the user).
+
 ### In the app
 
 Settings → Remote computers accepts both `lume://pair-node?…` (same network) and `lume://pair-relay?…` (through the Relay) links.
 A computer paired through the Relay shows its agent sessions (status dot, agent, project, "needs permission" / "needs an answer") and
-refreshes them every few seconds while the window is visible. The view is read-only: the card only offers *Forget*. Each refresh
+refreshes them every few seconds while the window is visible. The card offers *Forget*, and an open conversation has a box to send a prompt when its owner allows it. Each refresh
 opens one encrypted session and asks `health` and `sessions` together.
 
 ## Friendlier terminal

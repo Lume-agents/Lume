@@ -46,6 +46,8 @@ pub struct NodeConfig {
     pub relay_url: Option<String>,
     /// Lets paired devices read what was said in this computer's sessions. Off until its owner turns it on.
     pub share_conversations: bool,
+    /// Lets paired devices send prompts to this computer's sessions. Off until its owner turns it on.
+    pub allow_prompts: bool,
 }
 
 impl Default for NodeConfig {
@@ -62,6 +64,7 @@ impl Default for NodeConfig {
             allowed_project_roots: Vec::new(),
             relay_url: None,
             share_conversations: false,
+            allow_prompts: false,
         }
     }
 }
@@ -251,6 +254,17 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             };
             save_config(&state_directory, &config)?;
             Ok(Some(json(&serde_json::json!({ "shareConversations": config.share_conversations }))?))
+        }
+        "prompts" => {
+            let value = positional_argument(arguments, 1).ok_or("prompts requires `on` or `off`")?;
+            let mut config = load_or_create_config(&state_directory)?;
+            config.allow_prompts = match value {
+                "on" => true,
+                "off" => false,
+                _ => return Err("prompts requires `on` or `off`".into()),
+            };
+            save_config(&state_directory, &config)?;
+            Ok(Some(json(&serde_json::json!({ "allowPrompts": config.allow_prompts }))?))
         }
         "relay" => {
             let value = positional_argument(arguments, 1).ok_or("relay requires a Relay address, or `off`")?;

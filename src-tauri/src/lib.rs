@@ -33,6 +33,7 @@ mod legacy_cli_gateway_cleanup;
 mod macos_process_supervisor;
 mod mobile_gateway;
 mod mobile_server;
+pub mod node_bridge;
 pub mod node_client;
 mod node_http;
 pub mod node_identity;
@@ -1736,6 +1737,31 @@ async fn get_relay_lume_session(node_id: String, session_id: String) -> Result<s
     .map_err(|error| error.to_string())?
 }
 
+/// A prompt for a session of a computer paired through the Relay, when its owner allows it.
+#[tauri::command]
+async fn send_relay_lume_prompt(node_id: String, session_id: String, request_id: String, prompt: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_relay::send_prompt(&node_service::default_state_directory()?, &node_id, &session_id, &request_id, &prompt)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn get_node_allow_prompts() -> Result<bool, String> {
+    Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.allow_prompts)
+}
+
+/// The owner's second switch: whether devices paired with this computer may send prompts to its sessions.
+#[tauri::command]
+fn set_node_allow_prompts(enabled: bool) -> Result<bool, String> {
+    let directory = node_service::default_state_directory()?;
+    let mut config = node_service::load_or_create_config(&directory)?;
+    config.allow_prompts = enabled;
+    node_service::save_config(&directory, &config)?;
+    Ok(config.allow_prompts)
+}
+
 #[tauri::command]
 fn get_node_share_conversations() -> Result<bool, String> {
     Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.share_conversations)
@@ -3421,6 +3447,15 @@ pub fn run() {
             trace.mark("mobile server");
             app.manage(mobile_gateway);
             app.manage(mobile_server);
+            // Prompts that another computer sends through the Node reach the app here.
+            match node_service::default_state_directory() {
+                Ok(directory) => {
+                    if let Err(error) = node_bridge::start(app.handle().clone(), state.clone(), &directory) {
+                        eprintln!("Could not open the Node bridge: {error}");
+                    }
+                }
+                Err(error) => eprintln!("Could not find the Node folder: {error}"),
+            }
             app.manage(terminal_windows::TerminalWindows::default());
             let workflow_runtime = workflow_runtime::WorkflowRuntime::default();
             if let Err(error) = workflow_runtime.restore(&state) {
@@ -3637,6 +3672,9 @@ pub fn run() {
             get_relay_lume_node_health,
             forget_relay_lume_node,
             get_relay_lume_session,
+            send_relay_lume_prompt,
+            get_node_allow_prompts,
+            set_node_allow_prompts,
             get_node_share_conversations,
             set_node_share_conversations,
             get_remote_lume_node_health,

@@ -60,6 +60,12 @@ function fixture() {
         return { session: { id: args.sessionId, agent: "codex", agentLabel: "Codex", name: "", project: "Lume", status: "running", statusLabel: "Running", startedAt: "1", updatedAt: now, needsPermission: false, needsAnswer: false }, generatedAt: now, truncated: false,
           messages: [{ id: "u1", role: "user", text: "Corrija o total <b>do carrinho</b>", createdAt: 1 }, { id: "a1", role: "assistant", text: "Pronto, corrigi.", createdAt: 2 }] };
       }
+      if (command === "get_node_allow_prompts") return window.__prompts ?? false;
+      if (command === "set_node_allow_prompts") { window.__prompts = args.enabled; return args.enabled; }
+      if (command === "send_relay_lume_prompt") {
+        if (window.__promptFails) { window.__promptFails -= 1; throw "the owner of that computer has not allowed prompts from other devices"; }
+        return { accepted: true };
+      }
       if (command === "forget_relay_lume_node") { paired.length = 0; return true; }
       if (command === "discover_lume_nodes") return [{ nodeId: "node-casa", address: "192.168.0.8", port: 4433, identityFingerprint: "f", certificateSha256: "c", protocolMinimum: 1, protocolMaximum: 1 }];
       if (command === "request_lume_node_pairing") return { requestId: "req-1", code: "482913", expiresAt: now + 120000 };
@@ -158,6 +164,19 @@ try {
   assert.equal(await evaluate("document.querySelector('.bubble.user p').textContent"), "Corrija o total <b>do carrinho</b>");
   assert.equal(await evaluate("document.querySelector('.bubble p b')"), null, "remote text is never interpreted as HTML");
   await screenshot("remote-conversation");
+  // Sending a prompt: refused politely, then delivered with the same request id the failed attempt used.
+  await evaluate("window.__promptFails = 1; const box = document.querySelector('.prompt-form textarea'); box.value = 'Rode os testes'; box.dispatchEvent(new Event('input', { bubbles: true }))");
+  await evaluate("document.querySelector('.prompt-form button').click()");
+  await wait("document.querySelector('.prompt-note.error')");
+  assert.match(await evaluate("document.querySelector('.prompt-note').textContent"), /não permitiu prompts/);
+  assert.equal(await evaluate("document.querySelector('.prompt-form textarea').value"), "Rode os testes", "a refused prompt stays in the box");
+  await evaluate("document.querySelector('.prompt-form button').click()");
+  await wait("document.querySelector('.prompt-note') && !document.querySelector('.prompt-note.error')");
+  const sent = await evaluate("window.__calls.filter(([command]) => command === 'send_relay_lume_prompt').map(([, args]) => args)");
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].requestId, sent[1].requestId, "a retry reuses the request id, so the Node runs it once");
+  assert.equal(sent[1].prompt, "Rode os testes");
+  assert.equal(await evaluate("document.querySelector('.prompt-form textarea').value"), "", "a delivered prompt clears the box");
   await evaluate("Array.from(document.querySelectorAll('.conversation-head button')).find((button) => /Voltar/.test(button.textContent)).click()");
   await wait("document.querySelectorAll('.session-row').length === 2");
   // The owner's switch.

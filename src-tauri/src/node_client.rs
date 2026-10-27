@@ -204,7 +204,7 @@ fn pair_at(
         &client_identity,
         &offer,
         &display_name,
-        vec![NodeScope::Observe, NodeScope::ReadConversations],
+        vec![NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt],
     )?;
     let response = tls_json_request(
         discovered,
@@ -473,7 +473,7 @@ pub fn request_pairing(directory: &Path, discovered: &DiscoveredNode) -> Result<
     let server = fetch_identity(discovered)?;
     let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
     let display_name = sysinfo::System::host_name().unwrap_or_else(|| "Lume client".into());
-    let (statement, nonce) = node_pairing::pair_request_statement(&identity, &server.node_id, &display_name, &[NodeScope::Observe, NodeScope::ReadConversations])?;
+    let (statement, nonce) = node_pairing::pair_request_statement(&identity, &server.node_id, &display_name, &[NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt])?;
     let response = tls_json_request(
         discovered,
         "POST",

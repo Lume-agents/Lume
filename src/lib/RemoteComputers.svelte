@@ -14,6 +14,9 @@
     loadNodeShareConversations,
     loadRelayLumeNodeOverview,
     loadRelayLumeSession,
+    loadNodeAllowPrompts,
+    sendRelayLumePrompt,
+    setNodeAllowPrompts,
     loadRelayLumeNodes,
     pairLumeRelayNode,
     requestLumeNodePairing,
@@ -42,6 +45,13 @@
   let conversation = $state<RemoteConversation | null>(null);
   let conversationError = $state("");
   let shareConversations = $state(false);
+  let allowPrompts = $state(false);
+  let promptText = $state("");
+  let promptNote = $state("");
+  let promptFailed = $state(false);
+  let sendingPrompt = $state(false);
+  // The same id is kept until a prompt is delivered, so sending again after a lost answer never runs it twice.
+  let promptRequestId: string | null = null;
   let chatScroller = $state<HTMLElement | undefined>();
   let requesting = $state<{ node: DiscoveredLumeNode; handle: PairingRequestHandle } | null>(null);
   let requestTimer: ReturnType<typeof setInterval> | undefined;
@@ -167,6 +177,45 @@
     if (error.includes("not allowed")) return tr("The owner of that computer has not allowed reading its conversations. They can turn it on in Settings → Remote computers.", "O dono daquele computador não liberou a leitura das conversas. Ele pode ativar em Configurações → Computadores remotos.");
     if (error.includes("pair it again")) return tr("This computer was paired before conversations could be shared. Forget it and pair it again.", "Este computador foi pareado antes de as conversas poderem ser compartilhadas. Esqueça e pareie de novo.");
     return error;
+  }
+
+  function friendlyPromptError(error: string) {
+    if (error.includes("not allowed")) return tr("The owner of that computer has not allowed prompts from other devices. They can turn it on in Settings → Remote computers.", "O dono daquele computador não permitiu prompts de outros dispositivos. Ele pode ligar em Ajustes → Computadores remotos.");
+    if (error.includes("pair it again")) return tr("This computer was paired before prompts could be sent. Forget it and pair it again.", "Este computador foi pareado antes de os prompts poderem ser enviados. Esqueça-o e pareie de novo.");
+    if (error.includes("not open")) return tr("Lume is not open on that computer.", "O Lume não está aberto naquele computador.");
+    if (error.includes("clocks")) return tr("The two computers' clocks differ by more than a minute. Fix the time on one of them.", "Os relógios dos dois computadores diferem em mais de um minuto. Acerte a hora de um deles.");
+    return error;
+  }
+
+  async function sendPrompt() {
+    const chat = openChat;
+    const text = promptText.trim();
+    if (!chat || !text || sendingPrompt) return;
+    sendingPrompt = true;
+    promptNote = "";
+    promptFailed = false;
+    promptRequestId ??= crypto.randomUUID();
+    try {
+      await sendRelayLumePrompt(chat.nodeId, chat.sessionId, promptRequestId, text);
+      promptText = "";
+      promptRequestId = null;
+      promptNote = tr("Sent.", "Enviado.");
+      void refreshRelay(chat.nodeId);
+    } catch (error) {
+      promptFailed = true;
+      promptNote = friendlyPromptError(errorMessage(error));
+    } finally {
+      sendingPrompt = false;
+    }
+  }
+
+  function setAllowPrompts(enabled: boolean) {
+    return perform(async () => {
+      allowPrompts = await setNodeAllowPrompts(enabled);
+      message = allowPrompts
+        ? tr("Paired devices can now send prompts to this computer's agents.", "Dispositivos pareados agora podem enviar prompts aos agentes deste computador.")
+        : tr("Prompts from other devices are blocked again.", "Os prompts de outros dispositivos voltaram a ser bloqueados.");
+    });
   }
 
   function openConversation(nodeId: string, session: RemoteAgentSession) {
@@ -371,6 +420,7 @@
       refreshAllRelay();
       await refreshIncoming();
       shareConversations = await loadNodeShareConversations().catch(() => false);
+      allowPrompts = await loadNodeAllowPrompts().catch(() => false);
     });
     const timer = setInterval(() => { refreshAllRelay(); void refreshIncoming(); }, RELAY_REFRESH_MS / 2);
     const onVisible = () => { if (!document.hidden) { refreshAllRelay(); void refreshIncoming(); } };
@@ -402,6 +452,11 @@
     <input type="checkbox" checked={shareConversations} disabled={!desktop || busy} onchange={(event) => void setShareConversations(event.currentTarget.checked)} />
     <i class="track" aria-hidden="true"></i>
     <span><strong>{tr("Let paired devices read this computer's conversations", "Permitir que dispositivos pareados leiam as conversas deste computador")}</strong><small>{tr("Off by default. Only what was said, never commands or files. Takes effect at once.", "Desligado por padrão. Só o que foi dito, nunca comandos nem arquivos. Vale na hora.")}</small></span>
+  </label>
+  <label class="share-switch">
+    <input type="checkbox" checked={allowPrompts} disabled={!desktop || busy} onchange={(event) => void setAllowPrompts(event.currentTarget.checked)} />
+    <i class="track" aria-hidden="true"></i>
+    <span><strong>{tr("Let paired devices send prompts to this computer's agents", "Permitir que dispositivos pareados enviem prompts aos agentes deste computador")}</strong><small>{tr("Off by default. Only sessions Lume controls, and only while Lume is open. Takes effect at once.", "Desligado por padrão. Só sessões que o Lume controla, e só com o Lume aberto. Vale na hora.")}</small></span>
   </label>
   {#if requesting}
     <div class="request-panel" role="status">
@@ -509,7 +564,12 @@
               {#if !conversation && !conversationError}<p class="empty">{tr("Loading…", "Carregando…")}</p>{/if}
               {#if conversationError}<p class="error inventory-error">{conversationError}</p>{/if}
             </div>
-            <small class="snapshot-label">{tr("Read-only view · updates every few seconds", "Visão somente leitura · atualiza a cada poucos segundos")}</small>
+            <form class="prompt-form" onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
+              <textarea rows="2" maxlength="32000" disabled={sendingPrompt} bind:value={promptText} placeholder={tr("Send a prompt to this agent", "Enviar um prompt a este agente")} onkeydown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void sendPrompt(); } }}></textarea>
+              <button type="submit" disabled={!desktop || sendingPrompt || !promptText.trim()}>{sendingPrompt ? tr("Sending…", "Enviando…") : tr("Send", "Enviar")}</button>
+            </form>
+            {#if promptNote}<p class={`prompt-note ${promptFailed ? "error" : ""}`} role="status">{promptNote}</p>{/if}
+            <small class="snapshot-label">{tr("Updates every few seconds", "Atualiza a cada poucos segundos")}</small>
           </div>
         {:else if snapshot}
           <details class="inventory" open>
@@ -590,6 +650,11 @@
   .share-switch input:disabled + .track { opacity: 0.5; }
   .share-switch > span { display: grid; gap: 2px; min-width: 0; }
   .share-switch strong { white-space: normal; }
+  .prompt-form { display: flex; align-items: flex-end; gap: 6px; }
+  .prompt-form textarea { flex: 1; min-width: 0; resize: vertical; max-height: 120px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: transparent; font: inherit; }
+  .prompt-form button { flex: 0 0 auto; }
+  .prompt-note { margin: 0; font-size: 11px; color: var(--muted); }
+  .prompt-note.error { color: #c0645e; }
   .conversation { margin-top: 9px; display: grid; gap: 6px; }
   .conversation-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
   .conversation-body { display: grid; align-content: start; gap: 6px; max-height: 280px; overflow: auto; scrollbar-width: thin; scrollbar-color: transparent transparent; }

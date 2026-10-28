@@ -2004,6 +2004,7 @@ fn push_claude_user_text(
         }
         None => text,
     };
+    let text = claude_queued_message(text).unwrap_or(text);
     if visible_claude_user_text(text) {
         push_claude_transcript_activity(
             activities,
@@ -2018,11 +2019,24 @@ fn push_claude_user_text(
     }
 }
 
+const CLAUDE_QUEUED_HEADER: &str = "The user sent a new message while you were working:";
+
+/// A message typed while Claude was busy is handed to the model inside a notice. The person wrote
+/// only what sits between its header and the explanation that follows.
+pub(crate) fn claude_queued_message(value: &str) -> Option<&str> {
+    let rest = value.trim_start().strip_prefix(CLAUDE_QUEUED_HEADER)?;
+    let message = rest
+        .split_once("This is how Claude Code surfaces")
+        .map_or(rest, |(message, _)| message);
+    Some(message.trim())
+}
+
 /// Whether a user-role message is something the person wrote. Claude Code also records its own
 /// notices in that role, such as the one that tells it a background command finished.
 pub(crate) fn visible_claude_user_text(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
+        && !value.starts_with(CLAUDE_QUEUED_HEADER)
         && ![
             "<command-",
             "<local-command-",
@@ -2816,6 +2830,10 @@ mod tests {
             assert!(!visible_claude_user_text(notice), "{notice}");
         }
         assert!(visible_claude_user_text("Corrija o teste que falhou"));
+        let queued = "The user sent a new message while you were working:\n\n506553\n\n192.168.0.204:41265\n\nThis is how Claude Code surfaces messages the user sends mid-turn.";
+        assert!(!visible_claude_user_text(queued));
+        assert_eq!(claude_queued_message(queued), Some("506553\n\n192.168.0.204:41265"));
+        assert_eq!(claude_queued_message("Corrija o teste"), None);
 
         // The prompt hook fires for the notice too, but it must not show up as a sent prompt.
         let notice = json!({ "session_id": "s1", "prompt": "<task-notification>done</task-notification>" });

@@ -21,7 +21,7 @@ export function cleanPromptTransport(value?: string): string {
   return (marker >= 0 ? normalized.slice(0, marker) : normalized).trim();
 }
 
-const syntheticPromptPrefixes = ["<task-notification>", "<system-reminder>", "<command-", "<local-command-"];
+const syntheticPromptPrefixes = ["<task-notification>", "<system-reminder>", "<command-", "<local-command-", "The user sent a new message while you were working:"];
 
 /** Providers also record notices and injected project/environment context with the user role. */
 export function isSyntheticPromptText(value?: string): boolean {

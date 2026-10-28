@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RemoteComputerBadge from "$lib/RemoteComputerBadge.svelte";
   import SettingsIcon from "$lib/SettingsIcon.svelte";
   import { onMount, setContext, tick } from "svelte";
   import { flip } from "svelte/animate";
@@ -3375,6 +3376,7 @@
                     <span class="session-copy">
                       <span class="session-title-row">
                         <strong>{sessionDisplayName(session)}</strong>
+                        {#if session.remote}<RemoteComputerBadge computer={session.remote.computer} />{/if}
                         {#if session.controlOrigin === "external"}
                           <span class="source-label">
                             <BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />

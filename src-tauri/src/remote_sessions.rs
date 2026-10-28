@@ -2,7 +2,7 @@
 //!
 //! While the app runs, every few seconds each paired computer is asked (through its Node and the Relay) what its sessions
 //! are doing, what was said in them and what they wait for. They become ordinary entries of the session list, with a
-//! `remote` origin: the computer's name in front of the project, and only the controls that computer allows (a prompt, a
+//! `remote` origin (the lists show the computer's name beside the chat's), and only the controls that computer allows (a prompt, a
 //! stop, allowing a permission once). Prompts, approvals and stops for them go back through the Relay.
 
 use std::{collections::HashMap, path::Path, thread, time::Duration};
@@ -118,7 +118,7 @@ fn session_of(node_id: &str, computer: &str, summary: &Value, conversation: Opti
         agent,
         agent_label: summary["agentLabel"].as_str().unwrap_or("Agent").to_string(),
         session_name: summary["name"].as_str().unwrap_or_default().to_string(),
-        project: if project.is_empty() { computer.to_string() } else { format!("{computer} · {project}") },
+        project: if project.is_empty() { computer.to_string() } else { project.to_string() },
         source: SessionSource::Desktop,
         source_app: None,
         control_origin: SessionControlOrigin::Lume,
@@ -224,7 +224,7 @@ mod tests {
         let session = session_of("node-1", "Home PC", &summary, Some(&conversation), Some(&permission)).unwrap();
         assert_eq!(session.id, "remote:node-1:s1");
         assert_eq!(parse(&session.id), Some(("node-1", "s1")));
-        assert_eq!(session.project, "Home PC · shop");
+        assert_eq!((session.project.as_str(), session.remote.as_ref().unwrap().computer.as_str()), ("shop", "Home PC"));
         assert_eq!(session.activities.iter().map(|activity| activity.kind.as_str()).collect::<Vec<_>>(), ["prompt", "message"]);
         let capabilities = protocol::SessionCapabilities::for_session(&session);
         assert!(capabilities.can_prompt && capabilities.can_interrupt && capabilities.can_approve);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RemoteComputerBadge from "$lib/RemoteComputerBadge.svelte";
   import SettingsIcon from "$lib/SettingsIcon.svelte";
   import { onMount, tick } from "svelte";
   import { fade, fly, slide } from "svelte/transition";
@@ -565,12 +566,13 @@
   const workspaceProjects = $derived.by(() => {
     const projects = new Map<string, string>();
     for (const session of orderedSessions) {
-      const key = projectKey(session.workingDirectory ?? session.project);
+      const key = session.remote ? "" : projectKey(session.workingDirectory ?? session.project);
       if (key) projects.set(key, session.project || sessionName(session));
     }
     return Array.from(projects, ([value, label]) => ({ value, label })).sort((left, right) => left.label.localeCompare(right.label));
   });
-  const projectSessions = $derived(projectFilter === "all" ? orderedSessions : orderedSessions.filter((session) => projectKey(session.workingDirectory ?? session.project) === projectFilter));
+  // Sessions of other computers stay in the list whatever local project is selected.
+  const projectSessions = $derived(projectFilter === "all" ? orderedSessions : orderedSessions.filter((session) => session.remote || projectKey(session.workingDirectory ?? session.project) === projectFilter));
   const subagentsBySession = $derived.by(() => {
     // Expanding a parent records a recent interaction, which can keep completed
     // children visible even when the session snapshot itself did not change.
@@ -2809,6 +2811,7 @@
               <span class="session-copy">
                 <span class="session-title-row">
                   <strong>{sessionName(session)}</strong>
+                  {#if session.remote}<RemoteComputerBadge computer={session.remote.computer} />{/if}
                   {#if session.controlOrigin === "external"}
                     <span class="source-label"><BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />{sourceLabel(session)}</span>
                   {/if}

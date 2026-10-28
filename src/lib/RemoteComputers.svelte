@@ -15,6 +15,11 @@
     loadRelayLumeNodeOverview,
     loadRelayLumeSession,
     loadNodeAllowPrompts,
+    loadNodeAllowApprovals,
+    setNodeAllowApprovals,
+    loadRelayLumePermission,
+    answerRelayLumePermission,
+    type RemotePermission,
     sendRelayLumePrompt,
     setNodeAllowPrompts,
     loadRelayLumeNodes,
@@ -46,6 +51,14 @@
   let conversationError = $state("");
   let shareConversations = $state(false);
   let allowPrompts = $state(false);
+  let allowApprovals = $state(false);
+  // What the open session waits for the person to allow, when the other computer lets this one see and answer it.
+  let permission = $state<RemotePermission | null>(null);
+  let permissionNote = $state("");
+  let permissionFailed = $state(false);
+  let answering = $state(false);
+  // One request id per pending permission: a retry after a lost answer never acts twice.
+  let approvalRequestIds: Record<string, string> = {};
   let promptText = $state("");
   let promptNote = $state("");
   let promptFailed = $state(false);
@@ -156,6 +169,17 @@
       if (chat) {
         const next = await loadRelayLumeSession(nodeId, chat.sessionId);
         if (openChat === chat) { conversation = next; conversationError = ""; }
+        if (next.session.needsPermission) {
+          try {
+            const pending = (await loadRelayLumePermission(nodeId, chat.sessionId)).permission;
+            if (openChat === chat) { permission = pending; if (!answering && permissionFailed) { permissionNote = ""; permissionFailed = false; } }
+          } catch (error) {
+            if (openChat === chat) { permission = null; permissionNote = friendlyApprovalError(errorMessage(error)); permissionFailed = true; }
+          }
+        } else if (openChat === chat) {
+          permission = null;
+          if (!answering && permissionFailed) { permissionNote = ""; permissionFailed = false; }
+        }
       } else {
         overviews[nodeId] = await loadRelayLumeNodeOverview(nodeId);
       }
@@ -185,6 +209,43 @@
     if (error.includes("not open")) return tr("Lume is not open on that computer.", "O Lume não está aberto naquele computador.");
     if (error.includes("clocks")) return tr("The two computers' clocks differ by more than a minute. Fix the time on one of them.", "Os relógios dos dois computadores diferem em mais de um minuto. Acerte a hora de um deles.");
     return error;
+  }
+
+  function friendlyApprovalError(error: string) {
+    if (error.includes("not allowed")) return tr("The agent waits for a permission. The owner of that computer has not allowed approvals from other devices.", "O agente aguarda uma permissão. O dono daquele computador não permitiu aprovações de outros dispositivos.");
+    if (error.includes("pair it again")) return tr("The agent waits for a permission. This computer was paired before approvals existed: forget it and pair it again.", "O agente aguarda uma permissão. Este computador foi pareado antes de as aprovações existirem: esqueça-o e pareie de novo.");
+    return friendlyPromptError(error);
+  }
+
+  async function answerPermission(action: "allow_once" | "deny") {
+    const chat = openChat;
+    const pending = permission;
+    if (!chat || !pending || answering) return;
+    answering = true;
+    permissionNote = "";
+    permissionFailed = false;
+    const requestId = (approvalRequestIds[pending.id] ??= crypto.randomUUID());
+    try {
+      await answerRelayLumePermission(chat.nodeId, chat.sessionId, pending.id, action, requestId);
+      delete approvalRequestIds[pending.id];
+      permission = null;
+      permissionNote = action === "allow_once" ? tr("Allowed once.", "Permitido uma vez.") : tr("Denied.", "Negado.");
+      void refreshRelay(chat.nodeId);
+    } catch (error) {
+      permissionNote = friendlyApprovalError(errorMessage(error));
+      permissionFailed = true;
+    } finally {
+      answering = false;
+    }
+  }
+
+  function setAllowApprovals(enabled: boolean) {
+    return perform(async () => {
+      allowApprovals = await setNodeAllowApprovals(enabled);
+      message = allowApprovals
+        ? tr("Paired devices can now allow once or deny what this computer's agents ask for.", "Dispositivos pareados agora podem permitir uma vez ou negar o que os agentes deste computador pedem.")
+        : tr("Approvals from other devices are blocked again.", "As aprovações de outros dispositivos voltaram a ser bloqueadas.");
+    });
   }
 
   async function sendPrompt() {
@@ -222,6 +283,9 @@
     openChat = { nodeId, sessionId: session.id, title: sessionTitle(session) };
     conversation = null;
     conversationError = "";
+    permission = null;
+    permissionNote = "";
+    permissionFailed = false;
     void refreshRelay(nodeId);
   }
 
@@ -230,6 +294,8 @@
     openChat = null;
     conversation = null;
     conversationError = "";
+    permission = null;
+    permissionNote = "";
     if (nodeId) void refreshRelay(nodeId);
   }
 
@@ -421,6 +487,7 @@
       await refreshIncoming();
       shareConversations = await loadNodeShareConversations().catch(() => false);
       allowPrompts = await loadNodeAllowPrompts().catch(() => false);
+      allowApprovals = await loadNodeAllowApprovals().catch(() => false);
     });
     const timer = setInterval(() => { refreshAllRelay(); void refreshIncoming(); }, RELAY_REFRESH_MS / 2);
     const onVisible = () => { if (!document.hidden) { refreshAllRelay(); void refreshIncoming(); } };
@@ -457,6 +524,11 @@
     <input type="checkbox" checked={allowPrompts} disabled={!desktop || busy} onchange={(event) => void setAllowPrompts(event.currentTarget.checked)} />
     <i class="track" aria-hidden="true"></i>
     <span><strong>{tr("Let paired devices send prompts to this computer's agents", "Permitir que dispositivos pareados enviem prompts aos agentes deste computador")}</strong><small>{tr("Off by default. Only sessions Lume controls, and only while Lume is open. Takes effect at once.", "Desligado por padrão. Só sessões que o Lume controla, e só com o Lume aberto. Vale na hora.")}</small></span>
+  </label>
+  <label class="share-switch">
+    <input type="checkbox" checked={allowApprovals} disabled={!desktop || busy} onchange={(event) => void setAllowApprovals(event.currentTarget.checked)} />
+    <i class="track" aria-hidden="true"></i>
+    <span><strong>{tr("Let paired devices answer this computer's permission requests", "Permitir que dispositivos pareados respondam aos pedidos de permissão deste computador")}</strong><small>{tr("Off by default. Allow once or deny; allowing a whole session stays here. Takes effect at once.", "Desligado por padrão. Permitir uma vez ou negar; permitir a sessão inteira fica só aqui. Vale na hora.")}</small></span>
   </label>
   {#if requesting}
     <div class="request-panel" role="status">
@@ -564,6 +636,17 @@
               {#if !conversation && !conversationError}<p class="empty">{tr("Loading…", "Carregando…")}</p>{/if}
               {#if conversationError}<p class="error inventory-error">{conversationError}</p>{/if}
             </div>
+            {#if permission}
+              <div class="permission-card" data-risk={permission.risk} role="group" aria-label={tr("Permission request", "Pedido de permissão")}>
+                <small>{tr("The agent asks to", "O agente pede para")} · {permission.risk === "high" ? tr("high risk", "risco alto") : permission.risk === "medium" ? tr("medium risk", "risco médio") : tr("low risk", "risco baixo")}</small>
+                <p>{permission.summary}</p>
+                <span class="permission-actions">
+                  <button type="button" disabled={!desktop || answering} onclick={() => void answerPermission("deny")}>{tr("Deny", "Negar")}</button>
+                  <button class="primary" type="button" disabled={!desktop || answering} onclick={() => void answerPermission("allow_once")}>{answering ? tr("Sending…", "Enviando…") : tr("Allow once", "Permitir uma vez")}</button>
+                </span>
+              </div>
+            {/if}
+            {#if permissionNote}<p class="prompt-note" class:error={permissionFailed} role="status">{permissionNote}</p>{/if}
             <form class="prompt-form" onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
               <textarea rows="2" maxlength="32000" disabled={sendingPrompt} bind:value={promptText} placeholder={tr("Send a prompt to this agent", "Enviar um prompt a este agente")} onkeydown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void sendPrompt(); } }}></textarea>
               <button type="submit" disabled={!desktop || sendingPrompt || !promptText.trim()}>{sendingPrompt ? tr("Sending…", "Enviando…") : tr("Send", "Enviar")}</button>
@@ -650,6 +733,12 @@
   .share-switch input:disabled + .track { opacity: 0.5; }
   .share-switch > span { display: grid; gap: 2px; min-width: 0; }
   .share-switch strong { white-space: normal; }
+  .permission-card { padding: 9px 10px; display: grid; gap: 6px; border: 1px solid color-mix(in srgb, #d6a441 45%, var(--line)); border-radius: 10px; background: color-mix(in srgb, #d6a441 10%, transparent); }
+  .permission-card[data-risk="high"] { border-color: color-mix(in srgb, #c0645e 55%, var(--line)); background: color-mix(in srgb, #c0645e 10%, transparent); }
+  .permission-card small { color: var(--muted); font-weight: 650; }
+  .permission-card p { margin: 0; overflow-wrap: anywhere; font-family: var(--lume-font-code, ui-monospace, monospace); font-size: 10px; }
+  .permission-actions { display: flex; justify-content: flex-end; gap: 6px; }
+  .permission-actions .primary { color: #fff; border-color: transparent; background: var(--lume-accent-strong, #397b5c); }
   .prompt-form { display: flex; align-items: flex-end; gap: 6px; }
   .prompt-form textarea { flex: 1; min-width: 0; resize: vertical; max-height: 120px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: transparent; font: inherit; }
   .prompt-form button { flex: 0 0 auto; }

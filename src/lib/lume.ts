@@ -296,6 +296,24 @@ export async function sendRelayLumePrompt(nodeId: string, sessionId: string, req
   return invoke("send_relay_lume_prompt", { nodeId, sessionId, requestId, prompt });
 }
 
+export interface RemotePermission { id: string; kind: string; summary: string; risk: "low" | "medium" | "high"; requestedAt: string }
+
+export async function loadRelayLumePermission(nodeId: string, sessionId: string): Promise<{ permission: RemotePermission | null }> {
+  return invoke("get_relay_lume_permission", { nodeId, sessionId });
+}
+
+export async function answerRelayLumePermission(nodeId: string, sessionId: string, permissionId: string, action: "allow_once" | "deny", requestId: string): Promise<{ accepted: boolean; repeated?: boolean }> {
+  return invoke("answer_relay_lume_permission", { nodeId, sessionId, permissionId, action, requestId });
+}
+
+export async function loadNodeAllowApprovals(): Promise<boolean> {
+  return invoke<boolean>("get_node_allow_approvals");
+}
+
+export async function setNodeAllowApprovals(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_node_allow_approvals", { enabled });
+}
+
 export async function loadNodeAllowPrompts(): Promise<boolean> {
   return invoke<boolean>("get_node_allow_prompts");
 }

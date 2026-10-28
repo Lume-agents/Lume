@@ -48,6 +48,8 @@ pub struct NodeConfig {
     pub share_conversations: bool,
     /// Lets paired devices send prompts to this computer's sessions. Off until its owner turns it on.
     pub allow_prompts: bool,
+    /// Lets paired devices allow once or deny what this computer's sessions wait for. Off until its owner turns it on.
+    pub allow_approvals: bool,
 }
 
 impl Default for NodeConfig {
@@ -65,6 +67,7 @@ impl Default for NodeConfig {
             relay_url: None,
             share_conversations: false,
             allow_prompts: false,
+            allow_approvals: false,
         }
     }
 }
@@ -254,6 +257,17 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             };
             save_config(&state_directory, &config)?;
             Ok(Some(json(&serde_json::json!({ "shareConversations": config.share_conversations }))?))
+        }
+        "approvals" => {
+            let value = positional_argument(arguments, 1).ok_or("approvals requires `on` or `off`")?;
+            let mut config = load_or_create_config(&state_directory)?;
+            config.allow_approvals = match value {
+                "on" => true,
+                "off" => false,
+                _ => return Err("approvals requires `on` or `off`".into()),
+            };
+            save_config(&state_directory, &config)?;
+            Ok(Some(json(&serde_json::json!({ "allowApprovals": config.allow_approvals }))?))
         }
         "prompts" => {
             let value = positional_argument(arguments, 1).ok_or("prompts requires `on` or `off`")?;

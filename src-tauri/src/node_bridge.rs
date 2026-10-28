@@ -6,7 +6,8 @@
 //! the request, so another program, or a web page that guesses the port, cannot send a prompt through it.
 //!
 //! Commands: `prompt` sends text to one of the app's own sessions, with the request id that makes a repeat harmless
-//! (the app answers as it does for a phone); `sessions` and `session` read what the app's sessions are doing now.
+//! (the app answers as it does for a phone); `sessions` and `session` read what the app's sessions are doing now;
+//! `permission` reads what a session waits for the person to allow, and `approve` allows it once or denies it.
 //! The app's database only keeps a scrubbed copy of a session (no status, no pending question, no transcript), so
 //! anything that needs the live state has to ask the running app.
 
@@ -31,7 +32,7 @@ use tauri::{AppHandle, Manager};
 use crate::{
     codex_bridge::CodexBridge,
     control,
-    protocol::{HubCommand, HubCommandRequest},
+    protocol::HubCommandRequest,
     state::AppState,
 };
 
@@ -125,12 +126,13 @@ fn serve(mut stream: TcpStream, app: &AppHandle, state: &AppState, secret: &str)
 
 fn handle(line: &str, app: &AppHandle, state: &AppState, secret: &str) -> Result<Value, String> {
     let request = authenticated(line, secret)?;
-    match request["cmd"].as_str() {
+    let command = match request["cmd"].as_str() {
         Some("sessions") => return live_sessions(state),
         Some("session") => return live_conversation(state, request["sessionId"].as_str().unwrap_or_default()),
-        _ => {}
-    }
-    let command = prompt_command(&request)?;
+        Some("permission") => return pending_permission(state, request["sessionId"].as_str().unwrap_or_default()),
+        Some("approve") => approve_command(&request)?,
+        _ => prompt_command(&request)?,
+    };
     let response = control::execute_hub_command(
         app,
         state,
@@ -142,7 +144,7 @@ fn handle(line: &str, app: &AppHandle, state: &AppState, secret: &str) -> Result
     if response.ok {
         Ok(json!({ "accepted": true }))
     } else {
-        Err(response.error.map(|error| error.message).unwrap_or_else(|| "The Lume app refused the prompt".into()))
+        Err(response.error.map(|error| error.message).unwrap_or_else(|| "The Lume app refused the request".into()))
     }
 }
 
@@ -161,6 +163,38 @@ fn live_conversation(state: &AppState, session_id: &str) -> Result<Value, String
     }
     let conversation = state.with_session(session_id, |session| crate::node_sessions::conversation_of(session, now_millis()))?;
     serde_json::to_value(conversation).map_err(io)
+}
+
+/// What a session waits for the person to allow, or `null` when it waits for nothing.
+fn pending_permission(state: &AppState, session_id: &str) -> Result<Value, String> {
+    if session_id.is_empty() || session_id.len() > 512 {
+        return Err("a session id is required".into());
+    }
+    let permission = state.with_session(session_id, |session| session.pending_permission.clone())?;
+    Ok(json!({ "permission": permission.map(|permission| json!({
+        "id": permission.id,
+        "kind": permission.kind,
+        "summary": permission.summary,
+        "risk": permission.risk,
+        "requestedAt": permission.requested_at,
+    })) }))
+}
+
+/// An approval travels in the signed text slot as `permission id`, a newline and the answer.
+fn approve_command(request: &Value) -> Result<HubCommandRequest, String> {
+    let body = request["prompt"].as_str().unwrap_or_default();
+    let (permission_id, action) = body.split_once('\n').ok_or("an approval needs a permission and an answer")?;
+    if !matches!(action, "allow_once" | "deny") {
+        return Err("the answer must be allow_once or deny".into());
+    }
+    serde_json::from_value(json!({
+        "requestId": request["requestId"],
+        "type": "resolve_permission",
+        "sessionId": request["sessionId"],
+        "permissionId": permission_id,
+        "action": action,
+    }))
+    .map_err(|error: serde_json::Error| error.to_string())
 }
 
 fn now_millis() -> i64 {
@@ -193,10 +227,6 @@ fn prompt_command(request: &Value) -> Result<HubCommandRequest, String> {
         "prompt": prompt,
     }))
     .map_err(|error: serde_json::Error| error.to_string())
-    .map(|request: HubCommandRequest| {
-        debug_assert!(matches!(request.command, HubCommand::SubmitPrompt { .. }));
-        request
-    })
 }
 
 // ── Node side ────────────────────────────────────────────────────────────────
@@ -222,6 +252,16 @@ pub fn live_sessions_snapshot(directory: &Path) -> Result<Value, String> {
 /// What was said in one session of the running app.
 pub fn live_session_conversation(directory: &Path, session_id: &str) -> Result<Value, String> {
     call(directory, "session", session_id, &random_id(), "")
+}
+
+/// What a session of the running app waits for the person to allow.
+pub fn live_permission(directory: &Path, session_id: &str) -> Result<Value, String> {
+    call(directory, "permission", session_id, &random_id(), "")
+}
+
+/// Allows once or denies a session's pending permission in the running app.
+pub fn answer_permission(directory: &Path, session_id: &str, request_id: &str, permission_id: &str, action: &str) -> Result<Value, String> {
+    call(directory, "approve", session_id, request_id, &format!("{permission_id}\n{action}"))
 }
 
 /// Sends a prompt to the running Lume app on this computer. `Err` when the app is not open.
@@ -259,6 +299,7 @@ pub(crate) fn publish_for_tests(directory: &Path, port: u16, secret: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::HubCommand;
 
     #[test]
     fn a_signature_covers_the_command_the_session_the_request_and_the_text() {
@@ -365,6 +406,21 @@ mod tests {
         assert!(!conversation.to_string().contains("id_rsa"), "commands never leave");
         assert!(live_conversation(&state, "unknown").is_err());
         assert!(live_conversation(&state, "").is_err());
+        // The permission's details are for a device allowed to answer it (the Node checks that before asking).
+        let pending = pending_permission(&state, "live-1").expect("pending permission");
+        assert_eq!((pending["permission"]["id"].as_str(), pending["permission"]["summary"].as_str()), (Some("perm"), Some("rm -rf secrets")));
+        assert!(pending_permission(&state, "unknown").is_err());
+    }
+
+    #[test]
+    fn an_approval_is_allow_once_or_deny_for_one_permission() {
+        let request = |body: &str| json!({ "cmd": "approve", "sessionId": "s1", "requestId": "r1", "prompt": body });
+        let command = approve_command(&request("perm-1\nallow_once")).unwrap();
+        assert!(matches!(command.command, HubCommand::ResolvePermission { ref session_id, ref permission_id, action: crate::domain::PermissionAction::AllowOnce }
+            if session_id == "s1" && permission_id == "perm-1"));
+        assert!(matches!(approve_command(&request("perm-1\ndeny")).unwrap().command, HubCommand::ResolvePermission { action: crate::domain::PermissionAction::Deny, .. }));
+        assert!(approve_command(&request("perm-1\nallow_session")).is_err(), "allowing a whole session stays on the computer");
+        assert!(approve_command(&request("perm-1")).is_err());
     }
 
     #[test]

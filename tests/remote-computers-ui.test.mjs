@@ -57,9 +57,16 @@ function fixture() {
       if (command === "set_node_share_conversations") { window.__share = args.enabled; return args.enabled; }
       if (command === "get_relay_lume_session") {
         if (window.__denyChat) throw "the owner of that computer has not allowed reading its conversations";
-        return { session: { id: args.sessionId, agent: "codex", agentLabel: "Codex", name: "", project: "Lume", status: "running", statusLabel: "Running", startedAt: "1", updatedAt: now, needsPermission: false, needsAnswer: false }, generatedAt: now, truncated: false,
+        return { session: { id: args.sessionId, agent: "codex", agentLabel: "Codex", name: "", project: "Lume", status: "running", statusLabel: "Running", startedAt: "1", updatedAt: now, needsPermission: Boolean(window.__needsPermission), needsAnswer: false }, generatedAt: now, truncated: false,
           messages: [{ id: "u1", role: "user", text: "Corrija o total <b>do carrinho</b>", createdAt: 1 }, { id: "a1", role: "assistant", text: "Pronto, corrigi.", createdAt: 2 }] };
       }
+      if (command === "get_relay_lume_permission") {
+        if (window.__approvalsDenied) throw "the owner of that computer has not allowed approvals from other devices";
+        return { permission: window.__permission ?? null };
+      }
+      if (command === "answer_relay_lume_permission") { window.__permission = null; window.__needsPermission = false; return { accepted: true }; }
+      if (command === "get_node_allow_approvals") return window.__approvals ?? false;
+      if (command === "set_node_allow_approvals") { window.__approvals = args.enabled; return args.enabled; }
       if (command === "get_node_allow_prompts") return window.__prompts ?? false;
       if (command === "set_node_allow_prompts") { window.__prompts = args.enabled; return args.enabled; }
       if (command === "send_relay_lume_prompt") {
@@ -177,6 +184,18 @@ try {
   assert.equal(sent[0].requestId, sent[1].requestId, "a retry reuses the request id, so the Node runs it once");
   assert.equal(sent[1].prompt, "Rode os testes");
   assert.equal(await evaluate("document.querySelector('.prompt-form textarea').value"), "", "a delivered prompt clears the box");
+  // A pending permission: refused politely without the owner's switch, then answered once.
+  await evaluate("window.__needsPermission = true; window.__approvalsDenied = true; document.dispatchEvent(new Event('visibilitychange'))");
+  await wait("document.querySelector('.prompt-note.error') && /aprovações/.test(document.querySelector('.prompt-note.error').textContent)");
+  assert.equal(await evaluate("document.querySelector('.permission-card')"), null);
+  await evaluate("window.__approvalsDenied = false; window.__permission = { id: 'perm-1', kind: 'command', summary: 'npm test', risk: 'low', requestedAt: 'now' }; document.dispatchEvent(new Event('visibilitychange'))");
+  await wait("document.querySelector('.permission-card')");
+  assert.match(await evaluate("document.querySelector('.permission-card p').textContent"), /npm test/);
+  await screenshot("remote-permission");
+  await evaluate("document.querySelector('.permission-actions .primary').click()");
+  await wait("!document.querySelector('.permission-card')");
+  const answered = await evaluate("window.__calls.filter(([command]) => command === 'answer_relay_lume_permission').map(([, args]) => args)");
+  assert.deepEqual([answered.length, answered[0].permissionId, answered[0].action], [1, "perm-1", "allow_once"]);
   await evaluate("Array.from(document.querySelectorAll('.conversation-head button')).find((button) => /Voltar/.test(button.textContent)).click()");
   await wait("document.querySelectorAll('.session-row').length === 2");
   // The owner's switch.

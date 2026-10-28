@@ -277,7 +277,7 @@ fn pair_device(directory: &Path, identity: &NodeIdentity, link: &mut RelayLink, 
     if request.proof.identity.fingerprint != from {
         return Err("the pairing request does not come from the connection that sent it".into());
     }
-    let client = node_pairing::accept_pairing(directory, &request, &[NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt], now_millis())?;
+    let client = node_pairing::accept_pairing(directory, &request, &[NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt, NodeScope::Approve], now_millis())?;
     let _ = fs::remove_file(directory.join(OFFER_FILE));
     link.authorize(&client_key(&client).ok_or("the paired key is invalid")?)?;
     let answer = json!({ "client": client, "nodeIdentity": identity.public() });
@@ -304,18 +304,18 @@ fn conversation_for(directory: &Path, command: &Value, scopes: &[NodeScope]) -> 
     })
 }
 
-/// A prompt that is older than this when it arrives is refused: the Relay replays frames kept for an offline Node, and a
-/// prompt that waited minutes must not start work nobody is watching.
-const PROMPT_MAX_AGE_MS: i64 = 60_000;
-/// How long a request id is remembered, so a repeated prompt is answered without running twice.
-const PROMPT_MEMORY_MS: i64 = 10 * 60_000;
+/// A prompt or an approval that is older than this when it arrives is refused: the Relay replays frames kept for an
+/// offline Node, and a request that waited minutes must not act when nobody is watching.
+const REQUEST_MAX_AGE_MS: i64 = 60_000;
+/// How long a request id is remembered, so a repeated request is answered without acting twice.
+const REQUEST_MEMORY_MS: i64 = 10 * 60_000;
 
-static SEEN_PROMPTS: std::sync::Mutex<Vec<(String, i64)>> = std::sync::Mutex::new(Vec::new());
+static SEEN_REQUESTS: std::sync::Mutex<Vec<(String, i64)>> = std::sync::Mutex::new(Vec::new());
 
 /// Remembers a request id; false when it was already seen.
 fn first_time(request_id: &str, now: i64) -> bool {
-    let Ok(mut seen) = SEEN_PROMPTS.lock() else { return false };
-    seen.retain(|(_, at)| now - at < PROMPT_MEMORY_MS);
+    let Ok(mut seen) = SEEN_REQUESTS.lock() else { return false };
+    seen.retain(|(_, at)| now - at < REQUEST_MEMORY_MS);
     if seen.iter().any(|(id, _)| id == request_id) {
         return false;
     }
@@ -323,35 +323,75 @@ fn first_time(request_id: &str, now: i64) -> bool {
     true
 }
 
+/// Forgets a request id whose attempt failed, so the device can retry it.
+fn forget_request(request_id: &str) {
+    if let Ok(mut seen) = SEEN_REQUESTS.lock() {
+        seen.retain(|(id, _)| id != request_id);
+    }
+}
+
+/// What a device needs before it may act on this computer: a pairing that granted `scope`, and the owner's switch
+/// (`allowed`), which is off by default.
+fn control_gate(directory: &Path, scopes: &[NodeScope], scope: NodeScope, allowed: fn(&node_service::NodeConfig) -> bool, what: &str) -> Result<(), String> {
+    if !scopes.contains(&scope) {
+        return Err(format!("this device was paired before {what} existed; pair it again"));
+    }
+    if !allowed(&node_service::load_or_create_config(directory)?) {
+        return Err(format!("the owner of that computer has not allowed {what} from other devices"));
+    }
+    Ok(())
+}
+
+fn session_id_of(command: &Value) -> Result<&str, String> {
+    command["id"].as_str().filter(|id| !id.is_empty() && id.len() <= 512).ok_or_else(|| "a session id is required".to_string())
+}
+
+/// The id and the freshness every acting request carries.
+fn acting_request<'a>(command: &'a Value, now: i64) -> Result<&'a str, String> {
+    let request_id = command["requestId"].as_str().filter(|id| (8..=128).contains(&id.len())).ok_or("a request id is required")?;
+    let sent_at = command["sentAt"].as_i64().ok_or("the request has no time")?;
+    if (now - sent_at).abs() > REQUEST_MAX_AGE_MS {
+        return Err("the request is too old, or the two clocks differ by more than a minute".into());
+    }
+    Ok(request_id)
+}
+
+/// Runs an acting request once per request id; a repeat is answered without acting again, a failure can be retried.
+fn once(request_id: &str, now: i64, act: impl FnOnce() -> Result<Value, String>) -> Result<Value, String> {
+    if !first_time(request_id, now) {
+        return Ok(json!({ "accepted": true, "repeated": true }));
+    }
+    act().inspect_err(|_| forget_request(request_id))
+}
+
 /// A prompt for one of this computer's sessions: needs the device's scope, the owner's switch (off by default), a fresh
 /// request, and the Lume app open. A request id the Node already handled is answered without sending it again.
 fn prompt_for(directory: &Path, command: &Value, scopes: &[NodeScope], now: i64) -> Result<Value, String> {
-    if !scopes.contains(&NodeScope::Prompt) {
-        return Err("this device was paired before prompts could be sent; pair it again".into());
-    }
-    if !node_service::load_or_create_config(directory)?.allow_prompts {
-        return Err("the owner of that computer has not allowed prompts from other devices".into());
-    }
-    let session_id = command["id"].as_str().filter(|id| !id.is_empty() && id.len() <= 512).ok_or("a session id is required")?;
-    let request_id = command["requestId"].as_str().filter(|id| (8..=128).contains(&id.len())).ok_or("a request id is required")?;
+    control_gate(directory, scopes, NodeScope::Prompt, |config| config.allow_prompts, "prompts")?;
+    let session_id = session_id_of(command)?;
     let prompt = command["prompt"].as_str().unwrap_or_default();
     if prompt.trim().is_empty() || prompt.chars().count() > crate::node_bridge::MAX_PROMPT_CHARS {
         return Err("the prompt is empty or too long".into());
     }
-    let sent_at = command["sentAt"].as_i64().ok_or("the request has no time")?;
-    if (now - sent_at).abs() > PROMPT_MAX_AGE_MS {
-        return Err("the request is too old, or the two clocks differ by more than a minute".into());
-    }
-    if !first_time(request_id, now) {
-        return Ok(json!({ "accepted": true, "repeated": true }));
-    }
-    crate::node_bridge::send_prompt(directory, session_id, request_id, prompt).map_err(|error| {
-        // A failed attempt may be retried with the same id.
-        if let Ok(mut seen) = SEEN_PROMPTS.lock() {
-            seen.retain(|(id, _)| id != request_id);
-        }
-        error
-    })
+    let request_id = acting_request(command, now)?;
+    once(request_id, now, || crate::node_bridge::send_prompt(directory, session_id, request_id, prompt))
+}
+
+/// What a session waits for the person to allow: the summary and the risk, so the decision is an informed one. It shows
+/// more than the session list does, so it needs the same scope and switch as answering it.
+fn permission_for(directory: &Path, command: &Value, scopes: &[NodeScope]) -> Result<Value, String> {
+    control_gate(directory, scopes, NodeScope::Approve, |config| config.allow_approvals, "approvals")?;
+    crate::node_bridge::live_permission(directory, session_id_of(command)?)
+}
+
+/// Allows once or denies what a session waits for. "Allow for the whole session" stays on the computer itself.
+fn approval_for(directory: &Path, command: &Value, scopes: &[NodeScope], now: i64) -> Result<Value, String> {
+    control_gate(directory, scopes, NodeScope::Approve, |config| config.allow_approvals, "approvals")?;
+    let session_id = session_id_of(command)?;
+    let permission_id = command["permissionId"].as_str().filter(|id| !id.is_empty() && id.len() <= 512).ok_or("a permission id is required")?;
+    let action = command["action"].as_str().filter(|action| matches!(*action, "allow_once" | "deny")).ok_or("the answer must be allow_once or deny")?;
+    let request_id = acting_request(command, now)?;
+    once(request_id, now, || crate::node_bridge::answer_permission(directory, session_id, request_id, permission_id, action))
 }
 
 /// Read-only commands, the same observations the LAN transport offers, and the prompt the owner allows.
@@ -361,6 +401,8 @@ fn answer_command(directory: &Path, command: &Value, scopes: &[NodeScope]) -> Va
         Some("inventory") => crate::node_inventory::InventoryCache::default().snapshot(directory).and_then(|inventory| serde_json::to_value(inventory).map_err(io)),
         Some("session") => conversation_for(directory, command, scopes),
         Some("prompt") => prompt_for(directory, command, scopes, now_millis()),
+        Some("permission") => permission_for(directory, command, scopes),
+        Some("approve") => approval_for(directory, command, scopes, now_millis()),
         Some("sessions") => crate::node_bridge::live_sessions_snapshot(directory).or_else(|error| {
             if !crate::node_bridge::is_app_closed(&error) {
                 return Err(error);
@@ -470,7 +512,7 @@ pub fn pair(directory: &Path, uri: &str) -> Result<RelayRemote, String> {
         qr_payload: String::new(),
     };
     let name = sysinfo::System::host_name().unwrap_or_else(|| "Lume client".into());
-    let request = node_pairing::pairing_request(&identity, &offer, &name, vec![NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt])?;
+    let request = node_pairing::pairing_request(&identity, &offer, &name, vec![NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt, NodeScope::Approve])?;
     link.send(None, "pair", &seal_box(&pairing.secret, PAIR_REQUEST, &serde_json::to_vec(&request).map_err(io)?)?)?;
     let frame = wait_for(&mut link, 20, |event| payload_of(event, PAIR_RESPONSE))?;
     let answer: Value = serde_json::from_slice(&open_box(&pairing.secret, PAIR_RESPONSE, &frame)?).map_err(io)?;
@@ -505,6 +547,18 @@ pub fn query_many(directory: &Path, node_id: &str, commands: &[&str]) -> Result<
 /// the same `request_id` after a failure to be safe: the Node runs a request id only once.
 pub fn send_prompt(directory: &Path, node_id: &str, session_id: &str, request_id: &str, prompt: &str) -> Result<Value, String> {
     let command = json!({ "cmd": "prompt", "id": session_id, "requestId": request_id, "prompt": prompt, "sentAt": now_millis() });
+    query_commands(directory, node_id, &[command])?.into_iter().next().ok_or("the Node did not answer")?
+}
+
+/// What a session of a computer paired through the Relay waits for the person to allow, when its owner allows approvals.
+pub fn query_permission(directory: &Path, node_id: &str, session_id: &str) -> Result<Value, String> {
+    query_commands(directory, node_id, &[json!({ "cmd": "permission", "id": session_id })])?.into_iter().next().ok_or("the Node did not answer")?
+}
+
+/// Allows once or denies a session's pending permission on a computer paired through the Relay. Retrying with the same
+/// `request_id` is safe.
+pub fn answer_permission(directory: &Path, node_id: &str, session_id: &str, permission_id: &str, action: &str, request_id: &str) -> Result<Value, String> {
+    let command = json!({ "cmd": "approve", "id": session_id, "permissionId": permission_id, "action": action, "requestId": request_id, "sentAt": now_millis() });
     query_commands(directory, node_id, &[command])?.into_iter().next().ok_or("the Node did not answer")?
 }
 
@@ -576,7 +630,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("lume-prompt-gate-{}-{}", std::process::id(), now_millis()));
         let _ = node_service::load_or_create_config(&directory).unwrap();
         let now = now_millis();
-        let with = [NodeScope::Observe, NodeScope::Prompt];
+        let with = [NodeScope::Observe, NodeScope::Prompt, NodeScope::Approve];
         // The device lacks the scope: it must pair again.
         let refused = prompt_for(&directory, &prompt_command("request-001", now), &[NodeScope::Observe], now).unwrap_err();
         assert!(refused.contains("pair it again"), "{refused}");
@@ -587,8 +641,8 @@ mod tests {
         config.allow_prompts = true;
         node_service::save_config(&directory, &config).unwrap();
         // Allowed, but the checks on the request itself still apply.
-        assert!(prompt_for(&directory, &prompt_command("request-003", now - 2 * PROMPT_MAX_AGE_MS), &with, now).unwrap_err().contains("too old"));
-        assert!(prompt_for(&directory, &prompt_command("request-004", now + 2 * PROMPT_MAX_AGE_MS), &with, now).unwrap_err().contains("too old"));
+        assert!(prompt_for(&directory, &prompt_command("request-003", now - 2 * REQUEST_MAX_AGE_MS), &with, now).unwrap_err().contains("too old"));
+        assert!(prompt_for(&directory, &prompt_command("request-004", now + 2 * REQUEST_MAX_AGE_MS), &with, now).unwrap_err().contains("too old"));
         assert!(prompt_for(&directory, &prompt_command("short", now), &with, now).unwrap_err().contains("request id"));
         assert!(prompt_for(&directory, &json!({ "cmd": "prompt", "id": "s1", "requestId": "request-005", "prompt": " ", "sentAt": now }), &with, now).unwrap_err().contains("empty"));
         assert!(prompt_for(&directory, &json!({ "cmd": "prompt", "requestId": "request-006", "prompt": "x", "sentAt": now }), &with, now).unwrap_err().contains("session id"));
@@ -601,13 +655,38 @@ mod tests {
     }
 
     #[test]
+    fn an_approval_needs_its_own_scope_and_switch() {
+        let directory = std::env::temp_dir().join(format!("lume-approve-gate-{}-{}", std::process::id(), now_millis()));
+        let mut config = node_service::load_or_create_config(&directory).unwrap();
+        config.allow_prompts = true;
+        node_service::save_config(&directory, &config).unwrap();
+        let now = now_millis();
+        let approve = |request_id: &str, action: &str| json!({ "cmd": "approve", "id": "s1", "permissionId": "perm", "action": action, "requestId": request_id, "sentAt": now });
+        let with = [NodeScope::Observe, NodeScope::Prompt, NodeScope::Approve];
+        // Allowing prompts does not allow approvals, and an older pairing lacks the scope.
+        assert!(approval_for(&directory, &approve("approve-001", "allow_once"), &[NodeScope::Observe, NodeScope::Prompt], now).unwrap_err().contains("pair it again"));
+        assert!(approval_for(&directory, &approve("approve-002", "allow_once"), &with, now).unwrap_err().contains("not allowed"));
+        assert!(permission_for(&directory, &json!({ "cmd": "permission", "id": "s1" }), &with).unwrap_err().contains("not allowed"));
+        config.allow_approvals = true;
+        node_service::save_config(&directory, &config).unwrap();
+        assert!(approval_for(&directory, &approve("approve-003", "allow_session"), &with, now).unwrap_err().contains("allow_once or deny"));
+        assert!(approval_for(&directory, &json!({ "cmd": "approve", "id": "s1", "action": "deny", "requestId": "approve-004", "sentAt": now }), &with, now).unwrap_err().contains("permission id"));
+        assert!(approval_for(&directory, &json!({ "cmd": "approve", "id": "s1", "permissionId": "perm", "action": "deny", "requestId": "approve-005", "sentAt": now - 2 * REQUEST_MAX_AGE_MS }), &with, now).unwrap_err().contains("too old"));
+        // Everything is right, but no Lume app is open here; the id stays usable for a retry.
+        assert!(approval_for(&directory, &approve("approve-006", "deny"), &with, now).unwrap_err().contains("not open"));
+        assert!(approval_for(&directory, &approve("approve-006", "deny"), &with, now).unwrap_err().contains("not open"));
+        assert!(permission_for(&directory, &json!({ "cmd": "permission", "id": "s1" }), &with).unwrap_err().contains("not open"));
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn a_request_id_runs_once() {
         let now = now_millis();
         assert!(first_time("repeat-0001", now));
         assert!(!first_time("repeat-0001", now + 1_000));
         assert!(first_time("repeat-0002", now + 1_000));
         // After the memory window the id may be used again.
-        assert!(first_time("repeat-0001", now + PROMPT_MEMORY_MS + 1));
+        assert!(first_time("repeat-0001", now + REQUEST_MEMORY_MS + 1));
     }
 
     #[test]
@@ -703,6 +782,38 @@ mod tests {
         allowing.allow_prompts = false;
         node_service::save_config(&node_dir, &allowing).unwrap();
         assert!(send_prompt(&client_dir, &config.node_id, "s1", "request-e2e-3", "Run the tests").is_err(), "turning the switch off takes effect at once");
+        // Approvals: their own switch; the device reads what is asked, then allows it once.
+        assert!(query_permission(&client_dir, &config.node_id, "s1").unwrap_err().contains("not allowed"), "approvals are off by default");
+        let mut approving = node_service::load_or_create_config(&node_dir).unwrap();
+        approving.allow_approvals = true;
+        node_service::save_config(&node_dir, &approving).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        crate::node_bridge::publish_for_tests(&node_dir, listener.local_addr().unwrap().port(), "e2e-secret");
+        let app = thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(line.trim()).unwrap();
+                let answer = if request["cmd"] == "permission" {
+                    json!({ "ok": true, "result": { "permission": { "id": "perm-1", "kind": "command", "summary": "npm test", "risk": "low", "requestedAt": "now" } } })
+                } else {
+                    json!({ "ok": true, "result": { "accepted": true } })
+                };
+                seen.push((request["cmd"].as_str().unwrap_or_default().to_string(), request["prompt"].as_str().unwrap_or_default().to_string()));
+                stream.write_all(format!("{answer}\n").as_bytes()).unwrap();
+            }
+            seen
+        });
+        let pending = query_permission(&client_dir, &config.node_id, "s1").expect("the pending permission through the Relay");
+        assert_eq!(pending["permission"]["summary"], "npm test");
+        let answered = answer_permission(&client_dir, &config.node_id, "s1", "perm-1", "allow_once", "approve-e2e-1").expect("an approval through the Relay");
+        assert_eq!(answered["accepted"], true);
+        let seen = app.join().unwrap();
+        assert_eq!(seen, [("permission".to_string(), String::new()), ("approve".to_string(), "perm-1\nallow_once".to_string())]);
+        assert!(answer_permission(&client_dir, &config.node_id, "s1", "perm-1", "allow_session", "approve-e2e-2").unwrap_err().contains("allow_once or deny"));
         let both = query_many(&client_dir, &config.node_id, &["health", "sessions", "launch-missiles"]).expect("several commands over one session");
         assert_eq!(both[0].as_ref().unwrap()["nodeId"], config.node_id.as_str());
         assert!(both[1].as_ref().unwrap()["sessions"].is_array());

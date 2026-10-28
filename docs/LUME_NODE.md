@@ -105,11 +105,20 @@ Node runs an id once and answers a repeat with `repeated: true`, so retrying aft
 32,000 characters. Inside the computer the Node hands the prompt to the app through a loopback port, authenticated with an
 HMAC over the request, using a secret the app writes to `node-bridge.json` in the Node's folder (readable only by the user).
 
+### Answering a permission request
+
+When a session of the other computer waits for a permission, the conversation view shows what the agent asks for (the
+summary and the risk) with *Allow once* and *Deny*. Allowing a whole session stays on the computer itself. It needs the
+`approve` scope (devices paired before this existed must be paired again) and the owner's own switch (`lume node approvals
+on|off`, or the toggle in Settings → Remote computers), **off by default** and separate from the prompts switch. Reading
+what is asked needs the same scope and switch, because the session list never includes it. Answers carry a request id
+and a time, like prompts: a repeat does not act twice, and an answer more than a minute old is refused.
+
 ### In the app
 
 Settings → Remote computers accepts both `lume://pair-node?…` (same network) and `lume://pair-relay?…` (through the Relay) links.
 A computer paired through the Relay shows its agent sessions (status dot, agent, project, "needs permission" / "needs an answer") and
-refreshes them every few seconds while the window is visible. The card offers *Forget*, and an open conversation has a box to send a prompt when its owner allows it. Each refresh
+refreshes them every few seconds while the window is visible. The card offers *Forget*, and an open conversation has a box to send a prompt and, when the agent waits for a permission, a card to answer it, each when its owner allows it. Each refresh
 opens one encrypted session and asks `health` and `sessions` together.
 
 ## Friendlier terminal

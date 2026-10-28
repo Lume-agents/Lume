@@ -1753,6 +1753,41 @@ async fn send_relay_lume_prompt(node_id: String, session_id: String, request_id:
     .map_err(|error| error.to_string())?
 }
 
+/// What a session of a computer paired through the Relay waits for the person to allow.
+#[tauri::command]
+async fn get_relay_lume_permission(node_id: String, session_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_relay::query_permission(&node_service::default_state_directory()?, &node_id, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Allows once or denies a pending permission on a computer paired through the Relay, when its owner allows it.
+#[tauri::command]
+async fn answer_relay_lume_permission(node_id: String, session_id: String, permission_id: String, action: String, request_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_relay::answer_permission(&node_service::default_state_directory()?, &node_id, &session_id, &permission_id, &action, &request_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn get_node_allow_approvals() -> Result<bool, String> {
+    Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.allow_approvals)
+}
+
+/// The owner's third switch: whether devices paired with this computer may allow once or deny what its sessions wait for.
+#[tauri::command]
+fn set_node_allow_approvals(enabled: bool) -> Result<bool, String> {
+    let directory = node_service::default_state_directory()?;
+    let mut config = node_service::load_or_create_config(&directory)?;
+    config.allow_approvals = enabled;
+    node_service::save_config(&directory, &config)?;
+    Ok(config.allow_approvals)
+}
+
 #[tauri::command]
 fn get_node_allow_prompts() -> Result<bool, String> {
     Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.allow_prompts)
@@ -3649,6 +3684,10 @@ pub fn run() {
             forget_relay_lume_node,
             get_relay_lume_session,
             send_relay_lume_prompt,
+            get_relay_lume_permission,
+            answer_relay_lume_permission,
+            get_node_allow_approvals,
+            set_node_allow_approvals,
             get_node_allow_prompts,
             set_node_allow_prompts,
             get_node_share_conversations,

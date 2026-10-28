@@ -240,7 +240,7 @@ export interface Backdrop {
 
 export interface Preferences {
   language: "en" | "pt-BR";
-  startupMode: "ask" | "orb" | "workspace" | "tray";
+  startupMode: "ask" | "orb" | "workspace";
   /** The first-run guide has been seen once. */
   onboardingCompleted: boolean;
   darkMode?: boolean;

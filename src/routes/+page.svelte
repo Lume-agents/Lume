@@ -3943,7 +3943,6 @@
                   { value: "ask", label: tr("Always ask", "Perguntar sempre") },
                   { value: "orb", label: "Orb" },
                   { value: "workspace", label: "Workspace" },
-                  { value: "tray", label: tr("Tray", "Bandeja") },
                 ]}
                 minWidth={122}
                 onValueChange={(value) => void updatePreference("startupMode", value as Preferences["startupMode"])}

@@ -167,7 +167,7 @@ fn arrange(app: &AppHandle) -> Result<TourCardSide, String> {
 // handed back to it there (`on_window_thread`).
 
 /// Runs `work` where the platform wants window calls: here on Windows, the main thread everywhere else.
-pub(crate) fn on_window_thread<T, F>(app: &AppHandle, work: F) -> Result<T, String>
+fn on_window_thread<T, F>(app: &AppHandle, work: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&AppHandle) -> Result<T, String> + Send + 'static,

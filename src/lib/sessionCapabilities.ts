@@ -29,7 +29,25 @@ function claudeQueuesInLume(session: AgentSession) {
     && ["cli", "desktop"].includes(session.source);
 }
 
+/** A session on another computer: only what that computer allows through the Relay (see protocol.rs). */
+function remoteCapabilities(session: AgentSession, remote: NonNullable<AgentSession["remote"]>): SessionCapabilities {
+  return {
+    canPrompt: remote.canPrompt,
+    promptUnavailableReason: remote.canPrompt ? undefined : "session_not_connected",
+    canApprove: Boolean(session.pendingPermission),
+    canAnswerQuestion: false,
+    canTerminate: false,
+    canOpenSource: false,
+    canReadResults: session.results.length > 0 || Boolean(session.lastResponse),
+    canAttachImages: false,
+    canInterrupt: remote.canInterrupt && ["running", "permission_required"].includes(session.status),
+    canTakeControl: false,
+    promptDeliveries: ["new_turn"],
+  };
+}
+
 export function sessionCapabilities(session: AgentSession): SessionCapabilities {
+  if (session.remote) return remoteCapabilities(session, session.remote);
   let promptUnavailableReason: PromptUnavailableReason | undefined;
   const promptIsRunning = ["running", "permission_required"].includes(session.status);
   const legacyGeminiCli = session.source !== "web" && session.agent === "gemini";

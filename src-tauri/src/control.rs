@@ -86,6 +86,9 @@ pub fn resolve_permission(
     permission_id: &str,
     action: PermissionAction,
 ) -> Result<(), String> {
+    if crate::remote_sessions::is_remote(session_id) {
+        return crate::remote_sessions::resolve_permission(session_id, permission_id, action);
+    }
     ensure_monitor_control_available(&state.connected_session(session_id)?)?;
     state.resolve_permission(session_id, permission_id, action)
 }
@@ -150,6 +153,15 @@ pub fn submit_prompt(
     }
     if prompt.len() > 16 * 1024 {
         return Err("O prompt excede o limite local de 16 KB".into());
+    }
+    // A session of another computer: the prompt goes back through the Relay, text only.
+    if crate::remote_sessions::is_remote(session_id) {
+        if !attachments.is_empty() {
+            return Err("Images cannot be sent to a session on another computer yet".into());
+        }
+        crate::remote_sessions::prompt(session_id, prompt)?;
+        crate::protocol::emit_session_changed(app, session_id, None);
+        return Ok(());
     }
     let session = state.connected_session(session_id)?;
     ensure_monitor_control_available(&session)?;
@@ -492,6 +504,9 @@ pub fn interrupt_prompt(
     bridge: &CodexBridge,
     session_id: &str,
 ) -> Result<(), String> {
+    if crate::remote_sessions::is_remote(session_id) {
+        return crate::remote_sessions::interrupt(session_id);
+    }
     let session = state.connected_session(session_id)?;
     if session.control_origin != SessionControlOrigin::Lume {
         return Err("Only Lume-controlled sessions can be interrupted safely".into());

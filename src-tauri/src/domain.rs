@@ -357,6 +357,19 @@ pub struct AgentSession {
     /// Native id of the conversation this one was forked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<String>,
+    /// Set for a session that runs on another computer paired through the Relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteOrigin>,
+}
+
+/// Where a session from another computer comes from, and what that computer lets this one do with it.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteOrigin {
+    pub computer_id: String,
+    pub computer: String,
+    pub can_prompt: bool,
+    pub can_interrupt: bool,
 }
 
 /// Process-owned helpers are reported separately from user-facing chats.

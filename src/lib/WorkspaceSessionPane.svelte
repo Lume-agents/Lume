@@ -672,8 +672,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     && session.capabilities.promptDeliveries.includes("steer")
   ));
   // Claude Code and Codex can change how they ask before acting, from Lume.
-  const supportsPermissionPicker = $derived(["claude_code", "codex", "antigravity", "omp"].includes(session.agent));
-  const supportsAgentControls = $derived(["codex", "claude_code", "opencode", "antigravity", "omp"].includes(session.agent));
+  const supportsPermissionPicker = $derived(!session.remote && ["claude_code", "codex", "antigravity", "omp"].includes(session.agent));
+  const supportsAgentControls = $derived(!session.remote && ["codex", "claude_code", "opencode", "antigravity", "omp"].includes(session.agent));
   let sourceEntryId = $state<string | null>(null);
   let actionNotice = $state("");
   let forkingEntryId = $state<string | null>(null);
@@ -1622,7 +1622,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   $effect(() => {
     const sessionId = session.id;
-    if (slashCommandQuery(prompt) === null) return;
+    // A session on another computer offers no commands from here.
+    if (session.remote || slashCommandQuery(prompt) === null) return;
     const retrying = agentCommandsFailedAt > 0 && Date.now() - agentCommandsFailedAt >= 3000;
     if (sessionId === agentCommandsSessionId && !retrying) return;
     agentCommandsSessionId = sessionId;

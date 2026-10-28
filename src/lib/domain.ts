@@ -105,6 +105,8 @@ export interface AgentSession {
   promptTokenUsage?: PromptTokenUsage[];
   /** Native id of the conversation this one was forked from. */
   forkedFrom?: string;
+  /** Set for a session that runs on another computer paired through the Relay. */
+  remote?: { computerId: string; computer: string; canPrompt: boolean; canInterrupt: boolean };
 }
 
 export interface PromptTokenUsage {

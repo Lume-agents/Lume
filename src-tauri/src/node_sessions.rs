@@ -30,6 +30,11 @@ pub struct SessionSummary {
     pub updated_at: i64,
     pub needs_permission: bool,
     pub needs_answer: bool,
+    /// What the computer the agent runs on would let its owner do now; a device still needs the owner's switches.
+    #[serde(default)]
+    pub can_prompt: bool,
+    #[serde(default)]
+    pub can_interrupt: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -56,6 +61,7 @@ fn project_name(project: &str) -> String {
 }
 
 pub fn summarize(session: &AgentSession) -> SessionSummary {
+    let capabilities = crate::protocol::SessionCapabilities::for_session(session);
     SessionSummary {
         id: session.id.clone(),
         agent: tag(&session.agent),
@@ -68,6 +74,8 @@ pub fn summarize(session: &AgentSession) -> SessionSummary {
         updated_at: session.updated_at,
         needs_permission: session.pending_permission.is_some(),
         needs_answer: session.pending_question.is_some(),
+        can_prompt: capabilities.can_prompt,
+        can_interrupt: capabilities.can_interrupt,
     }
 }
 

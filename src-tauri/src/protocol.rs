@@ -72,7 +72,30 @@ pub struct SessionCapabilities {
 }
 
 impl SessionCapabilities {
+    /// A session on another computer: only what that computer allows through the Relay (prompts, stopping, answering a
+    /// permission once). Everything else stays on the computer the agent runs on.
+    fn for_remote(session: &AgentSession, remote: &crate::domain::RemoteOrigin) -> Self {
+        Self {
+            can_prompt: remote.can_prompt,
+            prompt_unavailable_reason: (!remote.can_prompt).then_some(PromptUnavailableReason::SessionNotConnected),
+            can_approve: session.pending_permission.is_some(),
+            can_answer_question: false,
+            can_terminate: false,
+            can_open_source: false,
+            can_read_results: !session.results.is_empty() || session.last_response.is_some(),
+            can_attach_images: false,
+            can_interrupt: remote.can_interrupt
+                && matches!(session.status, SessionStatus::Running | SessionStatus::PermissionRequired),
+            can_take_control: false,
+            can_compact: false,
+            prompt_deliveries: vec![PromptDelivery::NewTurn],
+        }
+    }
+
     pub fn for_session(session: &AgentSession) -> Self {
+        if let Some(remote) = &session.remote {
+            return Self::for_remote(session, remote);
+        }
         let monitor_only = is_unbound_codex_cli_monitor(session);
         let prompt_unavailable_reason = if session.source == SessionSource::Web
             && matches!(
@@ -1816,6 +1839,7 @@ mod tests {
             rate_limits_error: None,
             prompt_token_usage: Vec::new(),
             forked_from: None,
+            remote: None,
         }
     }
 

@@ -83,6 +83,8 @@ pub struct AppState {
     permission_mode_overrides: Arc<Mutex<HashMap<(AgentKind, String), String>>>,
     active_codex_turns: Arc<Mutex<HashMap<String, String>>>,
     hub_command_responses: Arc<Mutex<HashMap<String, (i64, crate::protocol::HubCommandResponse)>>>,
+    /// Sessions of other computers paired through the Relay, listed with this computer's own (see remote_sessions.rs).
+    remote_sessions: Arc<Mutex<Vec<AgentSession>>>,
 }
 
 impl AppState {
@@ -168,6 +170,7 @@ impl AppState {
             permission_mode_overrides: Arc::new(Mutex::new(HashMap::new())),
             active_codex_turns: Arc::new(Mutex::new(HashMap::new())),
             hub_command_responses: Arc::new(Mutex::new(HashMap::new())),
+            remote_sessions: Arc::new(Mutex::new(Vec::new())),
         };
         for recovery in queued_recoveries {
             let target = state.sessions()?.into_iter().find(|session| {
@@ -305,6 +308,25 @@ impl AppState {
         self.finalize_sessions(sessions)
     }
 
+    /// Replaces the sessions of other computers; true when the list changed.
+    pub fn replace_remote_sessions(&self, sessions: Vec<AgentSession>) -> Result<bool, String> {
+        let mut current = self.remote_sessions.lock().map_err(|_| "Could not update remote sessions".to_string())?;
+        let changed = serde_json::to_value(&*current).ok() != serde_json::to_value(&sessions).ok();
+        *current = sessions;
+        Ok(changed)
+    }
+
+    /// One session of another computer, as last read.
+    pub fn remote_session(&self, session_id: &str) -> Result<AgentSession, String> {
+        self.remote_sessions
+            .lock()
+            .map_err(|_| "Could not read remote sessions".to_string())?
+            .iter()
+            .find(|session| session.id == session_id)
+            .cloned()
+            .ok_or_else(|| "Session not found".to_string())
+    }
+
     fn visible_session_snapshot(&self) -> Result<Vec<AgentSession>, String> {
         let mut sessions = self.connected_sessions()?;
         let needs_names = self
@@ -345,6 +367,12 @@ impl AppState {
             .lock()
             .map_err(|_| "Não foi possível ler as identidades das CLIs".to_string())
             .map(|identities| identities.project(sessions, &names))
+            .map(|mut sessions| {
+                if let Ok(remote) = self.remote_sessions.lock() {
+                    sessions.extend(remote.iter().cloned());
+                }
+                sessions
+            })
     }
 
     pub(crate) fn has_external_codex_cli(&self) -> Result<bool, String> {
@@ -3832,6 +3860,7 @@ impl AppState {
                 rate_limits_error: None,
                 prompt_token_usage: Vec::new(),
                 forked_from: None,
+                remote: None,
             };
             snapshots.push(session.clone());
             sessions.push(session);
@@ -3995,6 +4024,7 @@ fn session_from_event(event: &HookEvent, now: i64) -> AgentSession {
         rate_limits_error: None,
         prompt_token_usage: Vec::new(),
         forked_from: None,
+        remote: None,
     }
 }
 

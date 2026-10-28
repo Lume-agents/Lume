@@ -669,6 +669,8 @@ export interface RemoteAgentSession {
 export interface RemoteSessionsSnapshot {
   generatedAt: number;
   appFound: boolean;
+  /** True when the app answered with what its sessions are doing now; false for the last state it saved to disk. */
+  live?: boolean;
   sessions: RemoteAgentSession[];
 }
 

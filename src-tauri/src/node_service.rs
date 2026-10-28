@@ -283,7 +283,10 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             Ok(Some(json(&crate::node_relay::pair(&state_directory, uri)?)?))
         }
         "relay-remotes" => Ok(Some(json(&crate::node_relay::remotes(&state_directory)?)?)),
-        "sessions" => Ok(Some(json(&crate::node_sessions::snapshot()?)?)),
+        "sessions" => match crate::node_bridge::live_sessions_snapshot(&state_directory) {
+            Ok(snapshot) => Ok(Some(json(&snapshot)?)),
+            Err(_) => Ok(Some(json(&crate::node_sessions::snapshot()?)?)),
+        },
         "requests" => {
             let fingerprint = NodeIdentity::load_or_create(&state_directory)?.public().fingerprint.clone();
             Ok(Some(json(&node_pairing::pending_requests(&state_directory, &fingerprint, now_millis())?)?))

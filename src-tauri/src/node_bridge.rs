@@ -5,8 +5,10 @@
 //! in the Node's state folder (readable only by the user). The Node proves it holds the secret with an HMAC over
 //! the request, so another program, or a web page that guesses the port, cannot send a prompt through it.
 //!
-//! The first command is `prompt`: send text to one of the app's own sessions, with the request id that makes a repeat
-//! harmless. The app answers with the same result a phone gets from the gateway.
+//! Commands: `prompt` sends text to one of the app's own sessions, with the request id that makes a repeat harmless
+//! (the app answers as it does for a phone); `sessions` and `session` read what the app's sessions are doing now.
+//! The app's database only keeps a scrubbed copy of a session (no status, no pending question, no transcript), so
+//! anything that needs the live state has to ask the running app.
 
 use std::{
     fs,
@@ -123,6 +125,11 @@ fn serve(mut stream: TcpStream, app: &AppHandle, state: &AppState, secret: &str)
 
 fn handle(line: &str, app: &AppHandle, state: &AppState, secret: &str) -> Result<Value, String> {
     let request = authenticated(line, secret)?;
+    match request["cmd"].as_str() {
+        Some("sessions") => return live_sessions(state),
+        Some("session") => return live_conversation(state, request["sessionId"].as_str().unwrap_or_default()),
+        _ => {}
+    }
     let command = prompt_command(&request)?;
     let response = control::execute_hub_command(
         app,
@@ -137,6 +144,27 @@ fn handle(line: &str, app: &AppHandle, state: &AppState, secret: &str) -> Result
     } else {
         Err(response.error.map(|error| error.message).unwrap_or_else(|| "The Lume app refused the prompt".into()))
     }
+}
+
+/// What every session of the app is doing now, as the summaries a device may see.
+fn live_sessions(state: &AppState) -> Result<Value, String> {
+    let mut sessions = state.map_sessions(crate::node_sessions::summarize)?;
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+    sessions.truncate(crate::node_sessions::MAX_SESSIONS);
+    let snapshot = crate::node_sessions::SessionsSnapshot { generated_at: now_millis(), app_found: true, live: true, sessions };
+    serde_json::to_value(snapshot).map_err(io)
+}
+
+fn live_conversation(state: &AppState, session_id: &str) -> Result<Value, String> {
+    if session_id.is_empty() || session_id.len() > 512 {
+        return Err("a session id is required".into());
+    }
+    let conversation = state.with_session(session_id, |session| crate::node_sessions::conversation_of(session, now_millis()))?;
+    serde_json::to_value(conversation).map_err(io)
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis() as i64).unwrap_or(0)
 }
 
 /// The request, once its signature checks out. A wrong or missing signature never reveals why.
@@ -173,16 +201,43 @@ fn prompt_command(request: &Value) -> Result<HubCommandRequest, String> {
 
 // ── Node side ────────────────────────────────────────────────────────────────
 
+const APP_CLOSED: &str = "the Lume app is not open on that computer";
+
+/// True for the error a Node gets when no app answers, as opposed to an app that answered with a refusal.
+pub fn is_app_closed(error: &str) -> bool {
+    error == APP_CLOSED
+}
+
+fn random_id() -> String {
+    let mut bytes = [0u8; 12];
+    let _ = SystemRandom::new().fill(&mut bytes);
+    hex(&bytes)
+}
+
+/// What the running app says its sessions are doing now. `Err` when the app is not open on this computer.
+pub fn live_sessions_snapshot(directory: &Path) -> Result<Value, String> {
+    call(directory, "sessions", "", &random_id(), "")
+}
+
+/// What was said in one session of the running app.
+pub fn live_session_conversation(directory: &Path, session_id: &str) -> Result<Value, String> {
+    call(directory, "session", session_id, &random_id(), "")
+}
+
 /// Sends a prompt to the running Lume app on this computer. `Err` when the app is not open.
 pub fn send_prompt(directory: &Path, session_id: &str, request_id: &str, prompt: &str) -> Result<Value, String> {
-    let stored: Stored = serde_json::from_slice(&fs::read(path(directory)).map_err(|_| "the Lume app is not open on that computer".to_string())?)
-        .map_err(|_| "the Lume app is not open on that computer".to_string())?;
+    call(directory, "prompt", session_id, request_id, prompt)
+}
+
+fn call(directory: &Path, command: &str, session_id: &str, request_id: &str, prompt: &str) -> Result<Value, String> {
+    let stored: Stored = serde_json::from_slice(&fs::read(path(directory)).map_err(|_| APP_CLOSED.to_string())?)
+        .map_err(|_| APP_CLOSED.to_string())?;
     let mut stream = TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, stored.port)), IO_TIMEOUT)
-        .map_err(|_| "the Lume app is not open on that computer".to_string())?;
+        .map_err(|_| APP_CLOSED.to_string())?;
     stream.set_read_timeout(Some(Duration::from_secs(30))).map_err(io)?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(io)?;
-    let mac = sign(&stored.secret, &signed_text("prompt", session_id, request_id, prompt));
-    let request = json!({ "cmd": "prompt", "sessionId": session_id, "requestId": request_id, "prompt": prompt, "mac": mac });
+    let mac = sign(&stored.secret, &signed_text(command, session_id, request_id, prompt));
+    let request = json!({ "cmd": command, "sessionId": session_id, "requestId": request_id, "prompt": prompt, "mac": mac });
     stream.write_all(format!("{request}\n").as_bytes()).map_err(io)?;
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line).map_err(|_| "the Lume app did not answer".to_string())?;
@@ -273,6 +328,43 @@ mod tests {
         assert_eq!(send_prompt(&directory, "s1", "request-0002", "hello").unwrap_err(), "not authorized");
         app.join().unwrap();
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// The running app knows what its sessions are doing and saying; the copy in its database does not.
+    #[test]
+    fn the_live_view_has_the_status_the_permission_flag_and_the_conversation() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let event = |kind: &str, session: &str, extra: Value| -> crate::domain::HookEvent {
+            let mut value = json!({
+                "event": kind, "sessionId": session, "agent": "claude_code", "agentLabel": "Claude Code", "sessionName": "Cart",
+                "project": "/home/ana/secret/shop", "source": "cli", "statusLabel": "Working", "startedAt": null, "processId": null,
+                "nativeSessionId": null, "workingDirectory": "/home/ana/secret/shop", "permissionProfile": null, "permission": null,
+                "activities": [], "waitForDecision": false
+            });
+            for (key, item) in extra.as_object().unwrap() {
+                value[key] = item.clone();
+            }
+            serde_json::from_value(value).expect("hook event")
+        };
+        let activity = |id: &str, kind: &str, detail: &str, at: i64| json!({ "id": id, "kind": kind, "title": "t", "detail": detail, "status": "completed", "createdAt": at, "files": [] });
+        state
+            .ingest(event("session_started", "live-1", json!({ "activities": [activity("p1", "prompt", "Fix the cart", 1), activity("c1", "command", "cat ~/.ssh/id_rsa", 2), activity("m1", "message", "Fixed it.", 3)] })))
+            .expect("session");
+        state
+            .ingest(event("permission_request", "live-1", json!({ "permission": { "id": "perm", "kind": "command", "summary": "rm -rf secrets", "resource": "x", "risk": "high", "requestedAt": "now" } })))
+            .expect("permission");
+        let snapshot = live_sessions(&state).expect("live sessions");
+        assert_eq!(snapshot["live"], true);
+        let session = &snapshot["sessions"][0];
+        assert_eq!((session["id"].as_str(), session["status"].as_str(), session["needsPermission"].as_bool()), (Some("live-1"), Some("permission_required"), Some(true)));
+        assert_eq!(session["project"], "shop", "only the last folder of the project");
+        assert!(!snapshot.to_string().contains("rm -rf"), "the permission's details stay on the computer");
+        let conversation = live_conversation(&state, "live-1").expect("live conversation");
+        let texts: Vec<_> = conversation["messages"].as_array().unwrap().iter().map(|message| message["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, ["Fix the cart", "Fixed it."]);
+        assert!(!conversation.to_string().contains("id_rsa"), "commands never leave");
+        assert!(live_conversation(&state, "unknown").is_err());
+        assert!(live_conversation(&state, "").is_err());
     }
 
     #[test]

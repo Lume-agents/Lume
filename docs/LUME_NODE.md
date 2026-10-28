@@ -67,8 +67,10 @@ The pairing secret travels only in the URI/QR code. The Relay learns a one-way d
 is encrypted with a key derived separately, so the Relay can neither read nor forge it. After pairing, every message runs
 inside an Ed25519-authenticated X25519 session (ChaCha20-Poly1305, per-direction keys, increasing counters). Only the read-only
 `health`, `inventory` and `sessions` commands exist so far, with the `observe` scope. `sessions` lists the agent sessions
-of the Lume app on the Node (agent, project folder name, status, whether it waits for a permission or an answer). It reads the
-app's database read-only and never includes the conversation, the working directory or the permission details. `lume node revoke` removes a device from the Node; the
+of the Lume app on the Node (agent, project folder name, status, whether it waits for a permission or an answer). It asks the
+running app (through the bridge described under *Sending a prompt*), because the app's database only keeps a scrubbed copy
+of a session: no status, no pending permission, no transcript. With the app closed the Node falls back to that copy,
+read-only, and marks the answer `live: false`. It never includes the conversation, the working directory or the permission details. `lume node revoke` removes a device from the Node; the
 Relay drops its access the next time the Node connects.
 
 ### Pairing without a link (same network)

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::AgentSession;
 
-const MAX_SESSIONS: usize = 200;
+pub const MAX_SESSIONS: usize = 200;
 const APP_IDENTIFIER: &str = "com.tulerws.lume";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -38,6 +38,10 @@ pub struct SessionsSnapshot {
     pub generated_at: i64,
     /// False when the Lume app has not created its database on this computer yet.
     pub app_found: bool,
+    /// True when the Lume app answered with what its sessions are doing now; false for the last state it saved to disk,
+    /// which does not know what a session is doing or waiting for.
+    #[serde(default)]
+    pub live: bool,
     pub sessions: Vec<SessionSummary>,
 }
 
@@ -84,7 +88,7 @@ pub fn app_database_path() -> Option<PathBuf> {
 /// Reads the sessions without ever writing to (or migrating) the app's database.
 pub fn read(database: &Path, now: i64) -> Result<SessionsSnapshot, String> {
     if !database.is_file() {
-        return Ok(SessionsSnapshot { generated_at: now, app_found: false, sessions: Vec::new() });
+        return Ok(SessionsSnapshot { generated_at: now, app_found: false, live: false, sessions: Vec::new() });
     }
     let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(|error| error.to_string())?;
     connection.busy_timeout(std::time::Duration::from_secs(2)).map_err(|error| error.to_string())?;
@@ -97,7 +101,7 @@ pub fn read(database: &Path, now: i64) -> Result<SessionsSnapshot, String> {
             sessions.push(summarize(&session));
         }
     }
-    Ok(SessionsSnapshot { generated_at: now, app_found: true, sessions })
+    Ok(SessionsSnapshot { generated_at: now, app_found: true, live: false, sessions })
 }
 
 const MAX_MESSAGES: usize = 80;
@@ -202,7 +206,7 @@ pub fn snapshot() -> Result<SessionsSnapshot, String> {
     let now = now_millis();
     match app_database_path() {
         Some(path) => read(&path, now),
-        None => Ok(SessionsSnapshot { generated_at: now, app_found: false, sessions: Vec::new() }),
+        None => Ok(SessionsSnapshot { generated_at: now, app_found: false, live: false, sessions: Vec::new() }),
     }
 }
 

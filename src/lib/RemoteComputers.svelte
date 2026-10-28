@@ -574,7 +574,7 @@
         {:else if snapshot}
           <details class="inventory" open>
             <summary>{snapshot.sessions.length} {tr("agent sessions", "sessões de agentes")}</summary>
-            <small class="snapshot-label">{tr("Read-only view", "Visão somente leitura")} · {snapshotTime(snapshot.generatedAt)}</small>
+            <small class="snapshot-label">{snapshot.live === true || !snapshot.appFound ? tr("Live view", "Visão ao vivo") : tr("Last saved state, not live (Lume closed there, or an older version)", "Último estado salvo, não ao vivo (Lume fechado lá, ou versão antiga)")} · {snapshotTime(snapshot.generatedAt)}</small>
             <div class="inventory-list" class:scrolling onscroll={showScrollbar}>
               {#each snapshot.sessions as session (session.id)}
                 <button type="button" class="inventory-row session-row session-button" onclick={() => openConversation(node.nodeId, session)} title={tr("Read this conversation", "Ler esta conversa")}>

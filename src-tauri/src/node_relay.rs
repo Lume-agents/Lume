@@ -295,7 +295,13 @@ fn conversation_for(directory: &Path, command: &Value, scopes: &[NodeScope]) -> 
         return Err("the owner of that computer has not allowed reading its conversations".into());
     }
     let id = command["id"].as_str().ok_or("a session id is required")?;
-    crate::node_sessions::conversation(id).and_then(|conversation| serde_json::to_value(conversation).map_err(io))
+    // The running app knows what was said; its database only keeps a scrubbed copy, so that is the fallback.
+    crate::node_bridge::live_session_conversation(directory, id).or_else(|error| {
+        if !crate::node_bridge::is_app_closed(&error) {
+            return Err(error);
+        }
+        crate::node_sessions::conversation(id).and_then(|conversation| serde_json::to_value(conversation).map_err(io))
+    })
 }
 
 /// A prompt that is older than this when it arrives is refused: the Relay replays frames kept for an offline Node, and a
@@ -355,7 +361,12 @@ fn answer_command(directory: &Path, command: &Value, scopes: &[NodeScope]) -> Va
         Some("inventory") => crate::node_inventory::InventoryCache::default().snapshot(directory).and_then(|inventory| serde_json::to_value(inventory).map_err(io)),
         Some("session") => conversation_for(directory, command, scopes),
         Some("prompt") => prompt_for(directory, command, scopes, now_millis()),
-        Some("sessions") => crate::node_sessions::snapshot().and_then(|snapshot| serde_json::to_value(snapshot).map_err(io)),
+        Some("sessions") => crate::node_bridge::live_sessions_snapshot(directory).or_else(|error| {
+            if !crate::node_bridge::is_app_closed(&error) {
+                return Err(error);
+            }
+            crate::node_sessions::snapshot().and_then(|snapshot| serde_json::to_value(snapshot).map_err(io))
+        }),
         _ => Err("unsupported command".into()),
     };
     match result {

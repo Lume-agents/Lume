@@ -818,6 +818,25 @@ impl AppState {
         Ok(true)
     }
 
+    /// Maps every session while holding the lock, so a caller that needs a few fields never clones a transcript.
+    pub fn map_sessions<T>(&self, map: impl Fn(&AgentSession) -> T) -> Result<Vec<T>, String> {
+        self.sessions
+            .lock()
+            .map_err(|_| "Não foi possível acessar as sessões".to_string())
+            .map(|sessions| sessions.iter().map(map).collect())
+    }
+
+    /// Reads one session without cloning it.
+    pub fn with_session<T>(&self, session_id: &str, read: impl FnOnce(&AgentSession) -> T) -> Result<T, String> {
+        self.sessions
+            .lock()
+            .map_err(|_| "Não foi possível acessar as sessões".to_string())?
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(read)
+            .ok_or_else(|| "Session not found".to_string())
+    }
+
     pub fn connected_sessions(&self) -> Result<Vec<AgentSession>, String> {
         self.sessions
             .lock()

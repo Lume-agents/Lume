@@ -14,6 +14,7 @@
   import DevicePlatformIcon from "$lib/DevicePlatformIcon.svelte";
   import AppUpdateNotice from "$lib/AppUpdateNotice.svelte";
   import QRCode from "qrcode";
+  import QrCode from "$lib/QrCode.svelte";
   import {
     availableMonitors,
     getCurrentWindow,
@@ -4231,7 +4232,7 @@
                 </div>
                 {#if pairingOffer && pairingQr}
                   <div class="mobile-pairing" transition:fade={{ duration: 140 }}>
-                    <img src={pairingQr} alt={tr("Lume mobile pairing QR code", "QR Code de pareamento mobile do Lume")} />
+                    <QrCode src={pairingQr} alt={tr("Lume mobile pairing QR code", "QR Code de pareamento mobile do Lume")} label={pairingOffer.code} />
                     <span>
                       <strong>{tr("One-time code", "Código de uso único")}</strong>
                       <code>{pairingOffer.code}</code>
@@ -5216,7 +5217,8 @@
   .mobile-access-card button:disabled,
   .paired-devices button:disabled { cursor: default; opacity: 0.5; }
   .mobile-pairing { flex-direction: column; align-items: center; padding: 10px; border-radius: 9px; background: rgba(255, 255, 255, 0.5); }
-  .mobile-pairing img { width: 208px; max-width: 100%; height: auto; border-radius: 5px; image-rendering: pixelated; }
+  .mobile-pairing :global(.qr) { width: 208px; max-width: 100%; border-radius: 5px; }
+  .mobile-pairing :global(.qr img) { height: auto; image-rendering: pixelated; }
   .mobile-pairing > span { width: 100%; min-width: 0; display: grid; gap: 5px; text-align: center; }
   .mobile-pairing code { color: #31483e; font-size: 9px; overflow-wrap: anywhere; }
   .mobile-message { margin: 0; color: #61756b; font-size: 8px; line-height: 1.4; }

@@ -13,6 +13,7 @@
   import AppUpdateNotice from "$lib/AppUpdateNotice.svelte";
   import { availableMonitors, getCurrentWindow } from "@tauri-apps/api/window";
   import QRCode from "qrcode";
+  import QrCode from "$lib/QrCode.svelte";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import LumeLogo from "$lib/LumeLogo.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
@@ -3242,7 +3243,7 @@
             </label>
             {#if mobileStatus?.networkReachable}
               <div class="mobile-pairing-action"><button type="button" onclick={() => void createMobilePairing()}>{pairingOffer ? tr("New QR code", "Novo QR Code") : tr("Pair device", "Parear dispositivo")}</button></div>
-              {#if pairingQr && pairingOffer}<div class="pairing-qr"><img src={pairingQr} alt={tr("Pairing QR code", "QR Code de pareamento")} /><span><strong>{pairingOffer.code}</strong><small>{tr("Same local network", "Mesma rede local")}</small></span></div>{/if}
+              {#if pairingQr && pairingOffer}<div class="pairing-qr"><QrCode src={pairingQr} alt={tr("Pairing QR code", "QR Code de pareamento")} label={pairingOffer.code} /><span><strong>{pairingOffer.code}</strong><small>{tr("Same local network", "Mesma rede local")}</small></span></div>{/if}
             {/if}
             {#each pairedDevices as device (device.id)}
               <div class="device-card">
@@ -3690,7 +3691,7 @@
   .preferred-agents button.active { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 40%, transparent); background: var(--workspace-accent-soft); }
   .settings-empty { margin: 4px 0 0; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }
   .mobile-pairing-action { padding: 10px 0 3px; }
-  .pairing-qr { padding: 10px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.pairing-qr img { width: 96px; height: 96px; border-radius: 7px; }.pairing-qr span { display: grid; gap: 3px; }.pairing-qr strong { color: var(--workspace-strong); font: 750 12px var(--lume-font-code, ui-monospace, monospace); }.pairing-qr small { color: var(--workspace-muted); font-size: 7px; }
+  .pairing-qr { padding: 10px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.pairing-qr :global(.qr) { width: 96px; height: 96px; border-radius: 7px; }.pairing-qr span { display: grid; gap: 3px; }.pairing-qr strong { color: var(--workspace-strong); font: 750 12px var(--lume-font-code, ui-monospace, monospace); }.pairing-qr small { color: var(--workspace-muted); font-size: 7px; }
   .device-card { margin-top: 9px; padding: 9px 10px 3px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }.device-card header { display: flex; align-items: center; gap: 8px; }.device-card header span { min-width: 0; display: grid; gap: 2px; flex: 1; }.device-card header button { border: 0; color: #b7605c; background: transparent; font-size: 7px; cursor: pointer; }
   .reset-control { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }.reset-control > span { margin-right: auto; color: var(--workspace-muted); font-size: 8px; }.reset-control .danger { color: #b65d59; border-color: rgba(182, 93, 89, .28); }
   .shortcut-scrim { position: fixed; z-index: 60; inset: 0; display: grid; place-items: center; background: rgba(5, 11, 8, .45); backdrop-filter: blur(4px); }

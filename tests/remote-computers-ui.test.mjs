@@ -137,8 +137,15 @@ try {
   assert.deepEqual(await evaluate("window.__calls.filter(([command]) => command === 'set_this_node_on').map(([, args]) => args.on)"), [true]);
   // A pairing link with its QR code.
   await evaluate("Array.from(document.querySelectorAll('button')).find((button) => /Link de pareamento/.test(button.textContent)).click()");
-  await wait("document.querySelector('.pairing img')");
+  await wait("document.querySelector('.pairing .qr img')");
   assert.match(await evaluate("document.querySelector('.pairing code').textContent"), /^lume:\/\/pair-relay/);
+  // A click opens the QR code larger; Escape closes it.
+  await evaluate("document.querySelector('.pairing .qr').click()");
+  await wait("document.querySelector('.qr-zoom img')");
+  assert.ok(await evaluate("document.querySelector('.qr-zoom img').getBoundingClientRect().width > 300"), "the large QR code is readable from a distance");
+  await screenshot("qr-zoom");
+  await evaluate("window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))");
+  await wait("!document.querySelector('.qr-zoom')");
   // A device that asks to pair by code, then the owner's switches and the paired devices.
   await wait("document.querySelector('.request')");
   assert.match(await evaluate("document.querySelector('.request').textContent"), /Celular da Ana[\s\S]*120045/);

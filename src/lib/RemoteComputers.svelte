@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getContext, onMount, untrack } from "svelte";
   import QRCode from "qrcode";
+  import QrCode from "$lib/QrCode.svelte";
   import { createSystemBannerSource, SYSTEM_BANNER_CONTEXT, type SystemBannerReporter, type SystemBannerNotice } from "$lib/systemBannerContext";
   import type { DiscoveredLumeNode, PairingRequestHandle, PendingPairRequest, RelayLumeNode, RemoteLumeNode } from "$lib/domain";
   import { localize, type Language } from "$lib/i18n";
@@ -222,7 +223,7 @@
     {#if on}
       {#if pairing}
         <div class="pairing">
-          <img src={pairing.qr} alt={tr("Pairing QR code", "QR Code de pareamento")} />
+          <span class="qr-box"><QrCode src={pairing.qr} alt={tr("Pairing QR code", "QR Code de pareamento")} /></span>
           <div>
             <code>{pairing.link}</code>
             <span class="actions"><button type="button" onclick={copyLink}>{tr("Copy", "Copiar")}</button><small>{Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, "0")}</small></span>
@@ -313,7 +314,7 @@
   .switch-row input:checked + .track::after { transform: translateX(12px); }
   .switch-row input:focus-visible + .track { outline: 2px solid var(--lume-accent-strong, #397b5c); outline-offset: 2px; }
   .pairing { display: flex; gap: 10px; align-items: center; }
-  .pairing img { width: 96px; height: 96px; border-radius: 8px; background: #fff; }
+  .qr-box { width: 96px; height: 96px; flex: 0 0 auto; border-radius: 8px; background: #fff; }
   .pairing > div { min-width: 0; flex: 1; display: grid; gap: 6px; }
   .pairing code { display: block; max-height: 48px; overflow: hidden; color: var(--muted); font-size: 8.5px; word-break: break-all; }
   .actions { display: flex; align-items: center; gap: 8px; }

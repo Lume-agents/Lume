@@ -198,6 +198,20 @@ pub fn clients(directory: &Path) -> Result<Vec<PairedNodeClient>, String> {
     Ok(load_state(directory)?.clients)
 }
 
+/// Records that a paired device just talked to this Node, at most every 30 seconds, so the owner can see who is connected.
+pub fn touch(directory: &Path, fingerprint: &str, now: i64) -> Result<(), String> {
+    let _lock = PairingLock::acquire(directory)?;
+    let mut state = load_state(directory)?;
+    let Some(client) = state.clients.iter_mut().find(|client| client.identity.fingerprint == fingerprint) else {
+        return Ok(());
+    };
+    if client.last_seen_at.is_some_and(|seen| now - seen < 30_000) {
+        return Ok(());
+    }
+    client.last_seen_at = Some(now);
+    save_state(directory, &state)
+}
+
 pub fn revoke(directory: &Path, device_id: &str) -> Result<bool, String> {
     validate_identifier(device_id, 256, "device ID")?;
     let _lock = PairingLock::acquire(directory)?;

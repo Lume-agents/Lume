@@ -1,6 +1,6 @@
 import { readable } from "svelte/store";
 import type { PairedDevice } from "$lib/domain";
-import { loadPairedDevices, loadRelayLumeNodeHealth, loadRelayLumeNodes, loadRemoteLumeNodeHealth, loadRemoteLumeNodes } from "$lib/lume";
+import { loadPairedDevices, loadRelayLumeNodeHealth, loadRelayLumeNodes, loadRemoteLumeNodeHealth, loadRemoteLumeNodes, loadThisNode } from "$lib/lume";
 
 /** The names of what is connected right now: phones and other computers. */
 export interface ConnectionState { phones: string[]; computers: string[] }
@@ -10,6 +10,8 @@ const PHONE_RECENT_MS = 90_000;
 const REFRESH_MS = 15_000;
 /** A check through the Relay opens an encrypted session on the hosted service, so it runs less often. */
 const RELAY_REFRESH_MS = 60_000;
+/** A device that reached this computer's Node this recently counts as connected (it checks in every few seconds). */
+const CONNECTED_MS = 90_000;
 
 export function devicePlatform(name: string): "ios" | "android" {
   return /iphone|ipad|ipod|\bios\b|apple/i.test(name) ? "ios" : "android";
@@ -35,17 +37,21 @@ let relayCheckedAt = 0;
 
 async function check(): Promise<ConnectionState> {
   const relayDue = Date.now() - relayCheckedAt >= RELAY_REFRESH_MS;
-  const [phones, lan, relay] = await Promise.all([
+  const [phones, lan, relay, visitors] = await Promise.all([
     loadPairedDevices().then((devices) => connectedPhones(devices)).catch(() => [] as string[]),
     loadRemoteLumeNodes().then((nodes) => answering(nodes, loadRemoteLumeNodeHealth)).catch(() => [] as Computer[]),
     relayDue
       ? loadRelayLumeNodes().then((nodes) => answering(nodes, loadRelayLumeNodeHealth)).catch(() => [] as Computer[])
       : Promise.resolve(relayComputers),
+    // Computers connected to this one: devices paired with this computer's Node that talked to it recently.
+    loadThisNode()
+      .then((node) => node.lifecycle === "disabled" ? [] : node.devices.filter((device) => device.lastSeenAt && Date.now() - device.lastSeenAt <= CONNECTED_MS).map((device) => device.name))
+      .catch(() => [] as string[]),
   ]);
   if (relayDue) { relayComputers = relay; relayCheckedAt = Date.now(); }
   // A computer paired both on the network and through the Relay is listed once.
   const computers = [...lan, ...relay.filter((computer) => !lan.some((item) => item.nodeId === computer.nodeId))];
-  return { phones, computers: computers.map((computer) => computer.name) };
+  return { phones, computers: [...computers.map((computer) => computer.name), ...visitors.filter((name) => !computers.some((computer) => computer.name === name))] };
 }
 
 /** What is connected to this Lume right now, refreshed while the window is visible. */

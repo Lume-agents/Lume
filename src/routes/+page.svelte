@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { dev } from "$app/environment";
   import { onMount, setContext, tick } from "svelte";
   import { flip } from "svelte/animate";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
@@ -183,13 +182,6 @@
   const compactSize = { width: 78, height: 44 };
   const expandedWidth = 392;
   const expandedMaxHeight = 560;
-  const devMobileDeviceId = "lume-mobile-dev-preview";
-  const devMobileDevice: PairedDevice = {
-    id: devMobileDeviceId,
-    name: "Lume Mobile",
-    createdAt: 0,
-    scopes: ["monitor", "prompt", "approve"],
-  };
   const expandedPanelMaxHeight = 544;
 
   let expanded = $state(!isTauri);
@@ -416,7 +408,7 @@
   let overlayMoveTask: Promise<void> | null = null;
   let systemDark = $state(false);
   let mobileStatus = $state<MobileGatewayStatus | null>(null);
-  let pairedDevices = $state<PairedDevice[]>(dev ? [devMobileDevice] : []);
+  let pairedDevices = $state<PairedDevice[]>([]);
   let newMobileDevice = $state<PairedDevice | null>(null);
   const knownMobileDeviceIds = new Set<string>();
   let mobileDevicesInitialized = false;
@@ -615,21 +607,15 @@
     dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-200);
   }
 
-  function withDevMobileDevice(devices: PairedDevice[]) {
-    return dev && !devices.some((device) => device.id === devMobileDeviceId)
-      ? [devMobileDevice, ...devices]
-      : devices;
-  }
-
   function applyPairedDevices(devices: PairedDevice[], announceNew: boolean) {
-    const realDevices = devices.filter((device) => device.id !== devMobileDeviceId);
+    const realDevices = devices;
     const addedDevice = announceNew
       ? [...realDevices]
           .sort((left, right) => right.createdAt - left.createdAt)
           .find((device) => !knownMobileDeviceIds.has(device.id))
       : undefined;
     for (const device of realDevices) knownMobileDeviceIds.add(device.id);
-    pairedDevices = withDevMobileDevice(realDevices);
+    pairedDevices = realDevices;
     mobileDevicesInitialized = true;
     if (addedDevice) newMobileDevice = addedDevice;
   }
@@ -929,8 +915,7 @@
           ({ payload }) => {
             applyPairedDevices([
               ...pairedDevices.filter(
-                (device) =>
-                  device.id !== devMobileDeviceId && device.id !== payload.id,
+                (device) => device.id !== payload.id,
               ),
               payload,
             ], true);
@@ -2259,14 +2244,6 @@
     const scopes = device.scopes.includes(scope)
       ? device.scopes.filter((value) => value !== scope)
       : [...device.scopes, scope];
-    if (dev && device.id === devMobileDeviceId) {
-      pairedDevices = pairedDevices.map((value) =>
-        value.id === devMobileDeviceId ? { ...value, scopes } : value,
-      );
-      mobileMessageIsError = false;
-      mobileMessage = tr("Preview permission updated.", "Permissão de demonstração atualizada.");
-      return;
-    }
     mobileBusy = true;
     mobileMessage = null;
     try {
@@ -4260,13 +4237,9 @@
                           <DevicePlatformIcon name={device.name} size={26} />
                           <span class="paired-device-info">
                             <strong>{device.name}</strong>
-                            <small>{dev && device.id === devMobileDeviceId ? tr("Development preview", "Demonstração do ambiente de desenvolvimento") : device.lastSeenAt ? relativeTime(device.lastSeenAt) : tr("Not used yet", "Ainda não utilizado")}</small>
+                            <small>{device.lastSeenAt ? relativeTime(device.lastSeenAt) : tr("Not used yet", "Ainda não utilizado")}</small>
                           </span>
-                          {#if dev && device.id === devMobileDeviceId}
-                            <span class="preview-badge">{tr("Preview", "Demonstração")}</span>
-                          {:else}
-                            <button class="revoke-device" disabled={mobileBusy} type="button" onclick={() => void removePairedDevice(device.id)}>{tr("Revoke access", "Revogar acesso")}</button>
-                          {/if}
+                          <button class="revoke-device" disabled={mobileBusy} type="button" onclick={() => void removePairedDevice(device.id)}>{tr("Revoke access", "Revogar acesso")}</button>
                         </div>
                         <div class="device-permissions">
                           {#each [
@@ -5230,7 +5203,6 @@
   .paired-device-info { min-width: 0; flex: 1; display: grid; gap: 2px; }
   .paired-device-info strong { color: #35423d; font-size: 10px; }
   .paired-device-info small { color: #89938f; font-size: 8px; }
-  .preview-badge { padding: 4px 6px; border: 1px solid rgba(82, 124, 108, 0.14); border-radius: 999px; color: #527c6c; background: rgba(82, 124, 108, 0.06); font-size: 7px; font-weight: 750; }
   .paired-devices .revoke-device { color: #8a5e5e; border-color: rgba(151, 91, 91, 0.14); }
   .device-permissions { margin-top: 8px; border-top: 1px solid rgba(92, 111, 103, 0.1); }
   .device-permission { min-height: 49px; padding: 7px 1px; display: flex; align-items: center; gap: 9px; border-bottom: 1px solid rgba(92, 111, 103, 0.08); transition: background 140ms ease; }
@@ -5389,7 +5361,6 @@
   .overlay-shell.dark .device-permission.active { background: rgba(116, 191, 157, 0.035); }
   .overlay-shell.dark .permission-state { color: #91a098; }
   .overlay-shell.dark .permission-state.allowed { color: #91c7ae; }
-  .overlay-shell.dark .preview-badge { color: #91c7ae; border-color: rgba(116, 191, 157, 0.16); background: rgba(92, 161, 130, 0.08); }
   .overlay-shell.dark .paired-devices .revoke-device { color: #d19a9a; border-color: rgba(209, 131, 131, 0.16); }
   .overlay-shell.dark .diagnostic-card { border-color: rgba(190, 209, 200, 0.09); background: rgba(216, 229, 223, 0.035); }
   .overlay-shell.dark .diagnostic-check strong { color: #dce7e1; }

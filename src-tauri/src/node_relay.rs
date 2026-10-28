@@ -283,6 +283,7 @@ fn handle_message(directory: &Path, identity: &NodeIdentity, link: &mut RelayLin
             let key = client_key(&client).ok_or("the paired key is invalid")?;
             let (reply, session) = relay_e2e::respond(identity, &key, payload)?;
             sessions.insert(from.to_string(), session);
+            let _ = node_pairing::touch(directory, from, now_millis());
             link.send(Some(from), "hs2", &reply)
         }
         Some(3) => {

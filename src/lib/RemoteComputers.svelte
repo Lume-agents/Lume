@@ -248,7 +248,7 @@
       {/each}
       {#each me?.devices ?? [] as device (device.deviceId)}
         <div class="row device">
-          <span class="title"><strong>{device.name}</strong><small>{relativeTime(device.lastSeenAt)}</small></span>
+          <span class="title"><strong>{device.name}</strong>{#if device.lastSeenAt && now - device.lastSeenAt <= 90_000}<small class="state online"><i></i>{tr("Connected", "Conectado")}</small>{:else}<small>{relativeTime(device.lastSeenAt)}</small>{/if}</span>
           <button type="button" disabled={busy} onclick={() => void revoke(device.deviceId)}>{tr("Revoke", "Revogar")}</button>
         </div>
       {/each}

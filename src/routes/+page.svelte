@@ -4201,7 +4201,6 @@
               <div class="mobile-access-header">
                 <div>
                   <strong>{tr("Local network gateway", "Gateway da rede local")}</strong>
-                  <span>{tr("Only paired devices can read your sessions.", "Apenas dispositivos pareados podem ler suas sessões.")}</span>
                 </div>
                 <label class="switch">
                   <input
@@ -4227,7 +4226,6 @@
                 <div class="mobile-pair-action">
                   <span>
                     <strong>{tr("Scan once to connect", "Leia uma vez para conectar")}</strong>
-                    <small>{tr("The installed app opens automatically. Otherwise, the PWA opens with the APK download option.", "O aplicativo instalado abre automaticamente. Caso contrário, o PWA abre com a opção de baixar o APK.")}</small>
                   </span>
                   <button disabled={mobileBusy} type="button" onclick={() => void createMobilePairing()}>{pairingOffer ? tr("New code", "Novo código") : tr("Show QR", "Mostrar QR")}</button>
                 </div>
@@ -4245,7 +4243,6 @@
                   <span>
                     <strong>{tr("Optional direct APK download", "Download direto opcional do APK")}</strong>
                     <code>{mobileApkUrl}</code>
-                    <small>{tr("The same download is offered after scanning the QR code.", "O mesmo download é oferecido depois da leitura do QR Code.")}</small>
                   </span>
                   <button type="button" onclick={() => void copyMobileValue(mobileApkUrl)}>{tr("Copy link", "Copiar link")}</button>
                 </div>

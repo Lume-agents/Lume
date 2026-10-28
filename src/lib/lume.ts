@@ -318,6 +318,33 @@ export async function setNodeAllowApprovals(enabled: boolean): Promise<boolean> 
   return invoke<boolean>("set_node_allow_approvals", { enabled });
 }
 
+export interface ThisNode {
+  lifecycle: "disabled" | "offline" | "running";
+  name: string;
+  relayUrl?: string | null;
+  relayConnected?: boolean | null;
+  devices: Array<{ deviceId: string; name: string; pairedAt: number; lastSeenAt?: number | null }>;
+  shareConversations: boolean;
+  allowPrompts: boolean;
+  allowApprovals: boolean;
+}
+
+export async function loadThisNode(): Promise<ThisNode> {
+  return invoke<ThisNode>("get_this_node");
+}
+
+export async function setThisNodeOn(on: boolean): Promise<ThisNode> {
+  return invoke<ThisNode>("set_this_node_on", { on });
+}
+
+export async function createThisNodePairing(): Promise<{ link: string; expiresAt: number }> {
+  return invoke("create_this_node_pairing");
+}
+
+export async function revokeThisNodeDevice(deviceId: string): Promise<ThisNode> {
+  return invoke<ThisNode>("revoke_this_node_device", { deviceId });
+}
+
 export async function loadNodeAllowPrompts(): Promise<boolean> {
   return invoke<boolean>("get_node_allow_prompts");
 }

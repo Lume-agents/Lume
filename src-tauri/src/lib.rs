@@ -1,4 +1,5 @@
 mod adapters;
+mod remote_sessions;
 mod agent_extensions;
 mod extension_github;
 mod agent_commands;
@@ -1783,6 +1784,78 @@ async fn interrupt_relay_lume_session(node_id: String, session_id: String, reque
     .map_err(|error| error.to_string())?
 }
 
+/// This computer's Node as the Settings show it: on or off, the Relay, the paired devices and the owner's switches.
+fn this_node(directory: &std::path::Path) -> Result<serde_json::Value, String> {
+    let health = node_service::health(directory)?;
+    let config = node_service::load_or_create_config(directory)?;
+    let devices = node_pairing::clients(directory)?
+        .into_iter()
+        .map(|client| serde_json::json!({ "deviceId": client.device_id, "name": client.display_name, "pairedAt": client.paired_at, "lastSeenAt": client.last_seen_at }))
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "lifecycle": health.lifecycle,
+        "name": health.display_name,
+        "relayUrl": health.relay_url,
+        "relayConnected": health.relay_connected,
+        "devices": devices,
+        "shareConversations": config.share_conversations,
+        "allowPrompts": config.allow_prompts,
+        "allowApprovals": config.allow_approvals,
+    }))
+}
+
+#[tauri::command]
+async fn get_this_node() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| this_node(&node_service::default_state_directory()?))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Turns this computer's Node on (in the background, with the hosted Relay unless another was chosen) or off.
+#[tauri::command]
+async fn set_this_node_on(on: bool) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = node_service::default_state_directory()?;
+        if on { node_service::turn_on(&directory)?; } else { node_service::turn_off(&directory)?; }
+        this_node(&directory)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// A single-use link (and its QR code payload) another device uses to pair with this computer, valid for five minutes.
+#[tauri::command]
+async fn create_this_node_pairing() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let directory = node_service::default_state_directory()?;
+        let config = node_service::load_or_create_config(&directory)?;
+        if !config.enabled {
+            return Err("Turn on access from other computers first".to_string());
+        }
+        let identity = node_identity::NodeIdentity::load_or_create(&directory)?;
+        let offer = node_pairing::begin_pairing(&directory, &config.node_id, &identity)?;
+        let relay = match &config.relay_url {
+            Some(url) => Some(node_relay::publish_offer(&directory, url, &offer)?),
+            None => None,
+        };
+        Ok(serde_json::json!({ "link": relay.clone().unwrap_or_else(|| offer.qr_payload.clone()), "expiresAt": offer.expires_at }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Removes a device's access to this computer; through the Relay it loses it within a few seconds.
+#[tauri::command]
+async fn revoke_this_node_device(device_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = node_service::default_state_directory()?;
+        node_pairing::revoke(&directory, &device_id)?;
+        this_node(&directory)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 fn get_node_allow_approvals() -> Result<bool, String> {
     Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.allow_approvals)
@@ -3497,6 +3570,13 @@ pub fn run() {
             // Prompts that another computer sends through the Node reach the app here.
             match node_service::default_state_directory() {
                 Ok(directory) => {
+                    // A Node the person turned on comes back with the app (after a restart, for example).
+                    let resume = directory.clone();
+                    std::thread::spawn(move || {
+                        if node_service::load_or_create_config(&resume).is_ok_and(|config| config.enabled) {
+                            let _ = node_service::start_in_background(&resume);
+                        }
+                    });
                     if let Err(error) = node_bridge::start(app.handle().clone(), state.clone(), &directory) {
                         eprintln!("Could not open the Node bridge: {error}");
                     }
@@ -3521,6 +3601,7 @@ pub fn run() {
             overlay::start_fullscreen_guard(state.clone(), app.handle().clone())?;
             usage_monitor::start(state.clone(), app.handle().clone());
             pair_watch::start(state.clone(), app.handle().clone());
+            remote_sessions::start(state.clone(), app.handle().clone());
             trace.mark("watchers started");
 
             if let Some(window) = app.get_webview_window("main") {
@@ -3695,6 +3776,10 @@ pub fn run() {
             get_relay_lume_session,
             send_relay_lume_prompt,
             get_relay_lume_permission,
+            get_this_node,
+            set_this_node_on,
+            create_this_node_pairing,
+            revoke_this_node_device,
             interrupt_relay_lume_session,
             answer_relay_lume_permission,
             get_node_allow_approvals,

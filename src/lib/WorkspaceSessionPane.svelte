@@ -124,6 +124,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     onToggleMaximize,
     onDismissExternalWriterConflict,
     onResolveExternalWriterConflict,
+    header = true,
   } = $props<{
     session: HubSession;
     externalWriterConflict?: ExternalWriterConflict | null;
@@ -142,6 +143,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     onToggleMaximize?: () => void;
     onDismissExternalWriterConflict?: (conflict: ExternalWriterConflict) => void;
     onResolveExternalWriterConflict?: (action: "keep_lume" | "open_branch") => void | Promise<void>;
+    /** False where the window already shows the session's name and controls (a terminal). */
+    header?: boolean;
   }>();
 
   const subagents = $derived(subagentsForSession(session));
@@ -2406,6 +2409,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   onfocusin={() => onFocus?.()}
 >
   <SystemBannerStack items={systemBanners} contained {language} dismissLabel={tr("Dismiss", "Fechar")} />
+  {#if header}
   <header
     class="pane-header"
     role="group"
@@ -2502,6 +2506,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         {/if}
       </div>
   </header>
+  {/if}
 
   {#if subagents.length}
     <SubagentPortals {session} children={subagents} {language} />

@@ -1,0 +1,52 @@
+/* The Workspace's color and type tokens, for a Workspace chat pane shown outside the Workspace (the terminals). */
+.workspace-tokens {
+    --workspace-background-color: var(--lume-canvas-light);
+    --workspace-background-opacity: 96%;
+    --workspace-bg: var(--lume-canvas-light);
+    --workspace-sidebar: var(--lume-sidebar-light);
+    --workspace-pane: color-mix(in srgb, var(--lume-surface-light) 96%, transparent);
+    --workspace-chat-background: color-mix(in srgb, var(--workspace-background-color) var(--workspace-background-opacity), transparent);
+    --workspace-raised: var(--lume-raised-light);
+    --workspace-line: var(--lume-line-light);
+    --workspace-strong: var(--lume-ink-strong-light);
+    --workspace-text: var(--lume-ink-light);
+    --workspace-muted: var(--lume-ink-muted-light);
+    --workspace-faint: var(--lume-ink-faint-light);
+    --workspace-accent: var(--lume-accent-strong);
+    --workspace-accent-soft: var(--lume-accent-soft-light);
+    --workspace-subtle: var(--lume-subtle-light);
+    --workspace-message: var(--lume-message-light);
+    --workspace-user: var(--lume-user-light);
+    --workspace-user-line: var(--lume-user-line-light);
+    --workspace-code: var(--lume-code-light);
+    --workspace-scroll-thumb: var(--lume-scroll-light);
+    --file-monochrome-filter: grayscale(1) brightness(0) contrast(.82);
+    --file-monochrome-opacity: .78;
+    --chat-small-font-size: 10px;
+    --chat-tiny-font-size: 8px;
+  color: var(--workspace-text);
+  font-family: var(--lume-font-ui, "Segoe UI Variable", "SF Pro Text", ui-sans-serif, system-ui, sans-serif);
+  accent-color: var(--workspace-accent);
+}
+.workspace-tokens.dark {
+    --workspace-background-color: var(--lume-canvas-dark);
+    --workspace-bg: var(--lume-canvas-dark);
+    --workspace-sidebar: var(--lume-sidebar-dark);
+    --workspace-pane: color-mix(in srgb, var(--lume-surface-dark) 96%, transparent);
+    --workspace-raised: var(--lume-raised-dark);
+    --workspace-line: var(--lume-line-dark);
+    --workspace-strong: var(--lume-ink-strong-dark);
+    --workspace-text: var(--lume-ink-dark);
+    --workspace-muted: var(--lume-ink-muted-dark);
+    --workspace-faint: var(--lume-ink-faint-dark);
+    --workspace-accent: var(--lume-accent);
+    --workspace-accent-soft: var(--lume-accent-soft-dark);
+    --workspace-subtle: var(--lume-subtle-dark);
+    --workspace-message: var(--lume-message-dark);
+    --workspace-user: var(--lume-user-dark);
+    --workspace-user-line: var(--lume-user-line-dark);
+    --workspace-code: var(--lume-code-dark);
+    --workspace-scroll-thumb: var(--lume-scroll-dark);
+    --file-monochrome-filter: grayscale(1) brightness(0) invert(.94) contrast(.9);
+    --file-monochrome-opacity: .88;
+}

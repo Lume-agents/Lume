@@ -1,4 +1,6 @@
 <script lang="ts">
+  import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
+  import "$lib/workspaceTokens.css";
   import { onMount, tick, untrack } from "svelte";
   import { fade, fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
@@ -3693,233 +3695,14 @@
       <div
         class:with-workflow-role={activeTab === "chat" && windowState?.workflowEnabled && windowState.docked}
         class="terminal-output"
+        class:pane-mode={activeTab === "chat"}
         bind:this={outputElement}
         onscroll={handleOutputScroll}
         onwheel={handleOutputWheel}
       >
         {#if activeTab === "chat"}
-          <p><span>$</span> {session.agentLabel.toLowerCase()}{#if session.source !== "web"} <i>{session.project}</i>{/if}{#if session.forkedFrom}<span class="fork-mark" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)}><LumeIcon name="fork" size={10} />fork</span>{/if}</p>
-          <p class="status status-{session.status}"><span>&gt;</span> {displayText(language, session.statusLabel)}</p>
-        {/if}
-        {#if session.pendingQuestion}
-          <section class="agent-question" aria-label={tr("Agent question", "Pergunta do agente")}>
-            {#each session.pendingQuestion.questions as question}
-              <div class="agent-question-item">
-                <small>{displayText(language, question.header)}</small>
-                <strong>{displayText(language, question.question)}</strong>
-                {#if question.options.length}
-                  <div class="question-options">
-                    {#each question.options as option, index}
-                      <button
-                        class:selected={questionSelections[question.id] === option.label}
-                        disabled={sending}
-                        type="button"
-                        onclick={() => void selectQuestionOption(question.id, option.label)}
-                      >
-                        <b>{index + 1}</b>
-                        <span>
-                          {displayText(language, option.label)}
-                          {#if option.description}<small>{displayText(language, option.description)}</small>{/if}
-                        </span>
-                      </button>
-                    {/each}
-                  </div>
-                {/if}
-                <em>{tr("Click an option or type its number below.", "Clique em uma opção ou digite o número abaixo.")}</em>
-              </div>
-            {/each}
-            {#if session.pendingQuestion.questions.length > 1}
-              <button class="question-submit" disabled={sending} type="button" onclick={() => void submitSelectedQuestionAnswers()}>
-                {tr("Answer", "Responder")}
-              </button>
-            {/if}
-          </section>
-        {/if}
-
-        {#if activeTab === "chat"}
-          <div class="chat-feed">
-            {#if hiddenChatItemCount > 0}
-              <button class="load-earlier-chat" type="button" onclick={() => void revealEarlierChatItems()}>
-                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 12 4-4 4 4" /></svg>
-                <span>{tr(`Load ${Math.min(60, hiddenChatItemCount)} earlier items`, `Carregar ${Math.min(60, hiddenChatItemCount)} itens anteriores`)}</span>
-                <small>{hiddenChatItemCount}</small>
-              </button>
-            {/if}
-            {#each visibleChatFeedItems as feedItem (feedItem.id)}
-              {#if feedItem.kind === "trace"}
-                <ActivityTraceGroup
-                  activities={feedItem.entries.map((entry) => entry.activity)}
-                  active={feedItem.id === activeTraceId}
-                  {language}
-                />
-                {#if feedItem.files.length}
-                  <div class="turn-files">
-                    <header>
-                      <span class="turn-files-mark"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h6l4 4v9H5zM11 3.5v4h4M8 11h4M8 14h3" /></svg></span>
-                      <strong>{tr("Files changed", "Arquivos alterados")}</strong>
-                      <small>{feedItem.files.length}</small>
-                      <button
-                        class="handoff-button"
-                        disabled={handoffLoading}
-                        type="button"
-                        title={tr("Send files to a docked agent", "Enviar arquivos para um agente acoplado")}
-                        aria-label={tr("Send these changed files to a docked agent", "Enviar estes arquivos alterados para um agente acoplado")}
-                        onclick={() => void openHandoff(traceHandoffEntry(feedItem))}
-                      >
-                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h8M9 3l3 3-3 3M16 14H8M11 11l-3 3 3 3" /></svg>
-                      </button>
-                    </header>
-                    <div>
-                      {#each feedItem.files as file}
-                        <code title={file.path}><FileTypeIcon path={file.path} /><span class="file-path">{displayFileChangePath(file.path)}</span><span class="added">+{file.added}</span><span class="removed">-{file.removed}</span></code>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-              {:else}
-                {@const entry = feedItem.entry}
-                {@const item = entry.activity}
-                {#if item.kind === "prompt" && (item.detail || item.attachments?.length)}
-                  {@const receivedHandoff = parseHandoffPrompt(item.detail)}
-                  <div class="chat-message user-message">
-                    <header>
-                      <strong>
-                        {receivedHandoff
-                          ? tr(`Context from ${receivedHandoff.source}`, `Contexto de ${receivedHandoff.source}`)
-                          : tr("You", "Você")}
-                      </strong>
-                      <time>{activityTime(item.createdAt)}</time>
-                    </header>
-                    {#if receivedHandoff}
-                      <div class="markdown-content">{@html renderCachedMarkdown(`handoff:${entry.id}`, receivedHandoff.body)}</div>
-                    {:else if item.detail}
-                      <CollapsibleUserMessage text={item.detail} {language} />
-                    {/if}
-                    {#if item.attachments?.length}
-                      <div class="message-images">
-                        {#each item.attachments as attachment}
-                          {#if attachment.previewDataUrl || (attachment.path && isImageAttachmentPath(attachment.path))}
-                            <AttachmentImage {attachment} {language} width="100%" height={120} radius={7} />
-                          {:else}
-                            <span class="message-file" title={attachment.name}>
-                              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.8h6l4 4V17H5zM11 3v4h4M7.5 11h5M7.5 14h4" /></svg>
-                              <small>{attachment.name}</small>
-                            </span>
-                          {/if}
-                        {/each}
-                      </div>
-                    {/if}
-                  </div>
-                {:else if item.kind === "message" && (item.detail || item.attachments?.length)}
-                  {@const authorizationNeeded = authorizationMessageId === entry.id}
-                  <div class:intervention-required={authorizationNeeded} class="chat-message agent-message">
-                    <header>
-                      <strong>{session.agentLabel}</strong>
-                      <button
-                        class="handoff-button"
-                        disabled={handoffLoading}
-                        type="button"
-                        title={tr("Send to a docked agent", "Enviar para um agente acoplado")}
-                        aria-label={tr("Send this response to a docked agent", "Enviar esta resposta para um agente acoplado")}
-                        onclick={() => void openHandoff(entry)}
-                      >
-                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h8M9 3l3 3-3 3M16 14H8M11 11l-3 3 3 3" /></svg>
-                      </button>
-                      <time>{activityTime(item.createdAt)}</time>
-                    </header>
-                    {#if authorizationNeeded}
-                      <aside class="intervention-indicator" aria-label={tr("Your intervention is required", "Sua intervenção é necessária")}>
-                        <span aria-hidden="true">
-                          <svg viewBox="0 0 20 20"><path class="indicator-shape" d="M10 2.8 18 16.5H2z"></path><path class="indicator-mark" d="M10 7v4.5M10 14.2v.2"></path></svg>
-                        </span>
-                        <div>
-                          <strong>{tr("Your authorization is needed", "Sua autorização é necessária")}</strong>
-                        </div>
-                      </aside>
-                    {/if}
-                    {#if item.detail}<div class="markdown-content">{@html renderCachedMarkdown(`message:${entry.id}`, item.detail)}</div>{/if}
-                    <ResponseAttachments
-                      text={item.detail}
-                      attachments={item.attachments ?? []}
-                      workingDirectory={session.workingDirectory}
-                      sessionId={session.id}
-                      {language}
-                      onError={(error) => (message = error)}
-                    />
-                    {#if entry.isFinalResponse}
-                      <footer class="agent-response-duration" title={tr("Time from prompt to final response", "Tempo entre o prompt e a resposta final")}>
-                        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5" /><path d="M10 6.5v4l2.7 1.6" /></svg>
-                        <span>{entry.durationMs !== undefined
-                          ? `${tr("Worked for", "Trabalhou por")} ${formatAgentDuration(entry.durationMs)}`
-                          : tr("Work time unavailable", "Tempo de trabalho indisponível")}</span>
-                      </footer>
-                    {/if}
-                  </div>
-                {:else if item.kind === "interrupt"}
-                  <p class="interrupt-notice" role="status"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" /></svg>{interruptNoticeText(item.detail, tr)}<time>{activityTime(item.createdAt)}</time></p>
-                {:else if item.kind === "analysis" && item.detail}
-                  <section class:running={item.status === "running"} class="reasoning-update">
-                    <header>
-                      <span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 11.4 7 16 8.5 11.4 10 10 14.5 8.6 10 4 8.5 8.6 7ZM15.5 13l.7 2.1 2.1.7-2.1.7-.7 2.1-.7-2.1-2.1-.7 2.1-.7Z" /></svg></span>
-                      <strong>{displayText(language, item.title)}</strong>
-                      <time>{activityTime(item.createdAt)}</time>
-                    </header>
-                    <div class="markdown-content">{@html renderCachedMarkdown(`analysis:${entry.id}`, item.detail)}</div>
-                  </section>
-                {/if}
-                {#if entry.files.length}
-                  <div class="turn-files">
-                    <header>
-                      <span class="turn-files-mark"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h6l4 4v9H5zM11 3.5v4h4M8 11h4M8 14h3" /></svg></span>
-                      <strong>{tr("Files changed", "Arquivos alterados")}</strong>
-                      <small>{entry.files.length}</small>
-                      <button
-                        class="handoff-button"
-                        disabled={handoffLoading}
-                        type="button"
-                        title={tr("Send files to a docked agent", "Enviar arquivos para um agente acoplado")}
-                        aria-label={tr("Send these changed files to a docked agent", "Enviar estes arquivos alterados para um agente acoplado")}
-                        onclick={() => void openHandoff(entry)}
-                      >
-                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h8M9 3l3 3-3 3M16 14H8M11 11l-3 3 3 3" /></svg>
-                      </button>
-                    </header>
-                    <div>
-                      {#each entry.files as file}
-                        <code title={file.path}><FileTypeIcon path={file.path} /><span class="file-path">{displayFileChangePath(file.path)}</span><span class="added">+{file.added}</span><span class="removed">-{file.removed}</span></code>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-              {/if}
-            {:else}
-              <p class="empty-state">{tr("Messages and agent activity will appear here in real time.", "As mensagens e a atividade do agente aparecerão aqui em tempo real.")}</p>
-            {/each}
-            {#if session.status === "running"}
-              <div class="agent-typing">
-                <ThinkingOrb
-                  state={activeThinkingState}
-                  size={34}
-                  speed={0.92}
-                  label={tr(`${sessionDisplayName(session)} is working`, `${sessionDisplayName(session)} está trabalhando`)}
-                />
-                <span>{activityThinkingLabel(activeThinkingState, language)}</span>
-              </div>
-            {/if}
-            {#if session.pendingPermission}
-              <div class="permission" aria-busy={permissionPending !== null}>
-                <strong>{displayText(language, session.pendingPermission.summary)}</strong>
-                <code>{session.pendingPermission.resource}</code>
-                <div>
-                  {#each (session.agent === "omp" ? session.permissionProfile.availableActions.filter((action) => action === "allow_once" || action === "deny") : session.permissionProfile.availableActions) as action}
-                    <button class:danger={action === "deny"} class:loading={permissionPending === action} type="button" disabled={permissionPending !== null} onclick={() => permission(action)}>
-                      {#if permissionPending === action}<i class="permission-spinner" aria-hidden="true"></i>{/if}
-                      {actionLabel(action)}
-                    </button>
-                  {/each}
-                </div>
-              </div>
-            {/if}
+          <div class="terminal-pane workspace-tokens" class:dark={effectiveDark}>
+            <WorkspaceSessionPane {session} {language} header={false} focused visible onOpenReview={() => void selectTab("changes")} />
           </div>
         {:else if activeTab === "changes"}
           <section class="changes-panel">
@@ -4286,6 +4069,8 @@
       {/if}
 
       <UsageBanner alerts={usageNotices} {language} {reducedMotion} onDismiss={dismissAgentAlert} />
+      <!-- The chat tab has the Workspace composer inside its pane; the other tabs keep this one. -->
+      {#if activeTab !== "chat"}
       <form
         class="terminal-composer"
         inert={modalOpen}
@@ -4562,6 +4347,7 @@
           {/if}
         </div>
       </form>
+      {/if}
       {#if !windowState?.workflowBridgeOpen}
         <button class="resize-handle resize-nw" type="button" tabindex="-1" aria-label={tr("Resize from top-left corner", "Redimensionar pelo canto superior esquerdo")} onpointerdown={(event) => void beginResize(event, "NorthWest")} onpointermove={moveResize} onpointerup={(event) => void endResize(event)} onpointercancel={(event) => void endResize(event)}></button>
         <button class="resize-handle resize-ne" type="button" tabindex="-1" aria-label={tr("Resize from top-right corner", "Redimensionar pelo canto superior direito")} onpointerdown={(event) => void beginResize(event, "NorthEast")} onpointermove={moveResize} onpointerup={(event) => void endResize(event)} onpointercancel={(event) => void endResize(event)}></button>
@@ -4604,6 +4390,8 @@
   .terminal-window :global(*::-webkit-scrollbar-corner) { background: transparent; }
   .terminal-window :global(*::-webkit-scrollbar-thumb) { border-radius: 999px; background: var(--terminal-scroll-thumb); }
   .terminal-window :global(*::-webkit-scrollbar-thumb:hover) { background: var(--terminal-scroll-thumb-hover); }
+  .terminal-output.pane-mode { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .terminal-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; background: transparent; }
   .terminal-card { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; overflow: clip; container-type: inline-size; --chat-font-adjust: 0px; --chat-small-font-adjust: 0px; --chat-tiny-font-adjust: 0px; --chat-font-size: calc(9px + var(--chat-font-adjust)); --chat-small-font-size: calc(8px + var(--chat-small-font-adjust)); --chat-tiny-font-size: calc(7px + var(--chat-tiny-font-adjust)); border: 1px solid rgba(103, 126, 116, 0.2); border-radius: 17px; color: #26342e; background: #f8fbf9; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32); transition: border-color 150ms ease, box-shadow 180ms ease, background-color 180ms ease, transform 180ms cubic-bezier(0.22, 1, 0.36, 1); }
   @container (min-width: 520px) {
     .terminal-card { --chat-font-size: calc(10px + var(--chat-font-adjust)); --chat-small-font-size: calc(9px + var(--chat-small-font-adjust)); --chat-tiny-font-size: calc(8px + var(--chat-tiny-font-adjust)); }
@@ -4876,7 +4664,6 @@
   .terminal-output { min-width: 0; min-height: 0; max-width: 100%; flex: 1; padding: 10px 12px 7px; overflow-x: hidden; overflow-y: auto; color: #55635d; background: linear-gradient(180deg, rgba(61, 87, 75, 0.025), transparent); font-family: var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); font-size: var(--chat-font-size); }
   .terminal-output.with-workflow-role { padding-top: 49px; }
   .terminal-output p { max-width: 100%; margin: 0 0 6px; overflow-wrap: anywhere; line-height: 1.45; word-break: break-word; }
-  .terminal-output p > span { color: #36a269; font-weight: 800; }
   .terminal-output i { color: #8a9690; font-style: normal; }
   .load-earlier-chat { width: min(240px, 88%); min-height: 29px; margin: 1px auto 8px; padding: 0 8px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid rgba(77, 104, 91, 0.1); border-radius: 8px; color: #6d7e76; background: rgba(69, 99, 84, 0.025); font: 700 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .load-earlier-chat:hover { color: #37785a; border-color: rgba(52, 139, 94, 0.18); background: rgba(52, 139, 94, 0.045); }
@@ -4894,12 +4681,8 @@
   .chat-message.agent-message { margin-right: auto; border-bottom-left-radius: 3px; }
   .interrupt-notice { width: fit-content; max-width: 100%; margin: 3px 0; padding: 3px 9px 3px 7px; display: flex; align-items: center; gap: 6px; border: 1px solid rgba(74, 107, 91, 0.14); border-radius: 999px; color: #6c7d75; background: rgba(74, 107, 91, 0.05); font: 680 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); }
   .interrupt-notice svg { width: 9px; height: 9px; fill: #d85c64; }
-  .interrupt-notice time { margin-left: 4px; color: #93a19a; font-weight: 600; }
   .terminal-window.dark .interrupt-notice { border-color: rgba(205, 222, 213, 0.12); color: #9eb0a7; background: rgba(205, 222, 213, 0.05); }
   .chat-message.agent-message.intervention-required { width: min(94%, 460px); border-color: rgba(190, 132, 42, 0.18); background: rgba(196, 139, 47, 0.025); }
-  .chat-message header { display: flex; align-items: center; gap: 6px; }
-  .chat-message header strong { min-width: 0; flex: 1; color: #4f685c; font: 750 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); }
-  .chat-message header time { flex: 0 0 auto; color: #9aa59f; font-size: var(--chat-tiny-font-size); }
   .agent-response-duration { margin-top: 7px; padding-top: 5px; display: flex; align-items: center; gap: 4px; border-top: 1px solid rgba(77, 104, 91, 0.07); color: #85958d; font: 600 var(--chat-tiny-font-size)/1.2 var(--lume-font-ui, Inter, sans-serif); }
   .agent-response-duration svg { width: 11px; height: 11px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .intervention-indicator { margin: 6px 0 2px; padding: 3px 1px; display: flex; align-items: center; gap: 7px; color: #806128; }
@@ -4907,8 +4690,6 @@
   .intervention-indicator svg { width: 18px; height: 18px; overflow: visible; }
   .intervention-indicator .indicator-shape { fill: currentColor; stroke: none; }
   .intervention-indicator .indicator-mark { fill: none; stroke: white; stroke-linecap: round; stroke-width: 1.5; }
-  .intervention-indicator > div { min-width: 0; display: grid; gap: 1px; }
-  .intervention-indicator strong { color: #78591f; font: 800 var(--chat-small-font-size)/1.3 var(--lume-font-ui, Inter, sans-serif); }
   .handoff-button { width: 20px; height: 20px; padding: 3px; display: grid; place-items: center; border: 0; border-radius: 5px; color: #668076; background: transparent; cursor: pointer; transition: color 130ms ease, background 130ms ease; }
   .handoff-button:hover:not(:disabled) { color: #2f8b63; background: rgba(47, 139, 99, 0.09); }
   .handoff-button:disabled { opacity: 0.4; cursor: default; }
@@ -4961,16 +4742,9 @@
   .agent-typing { width: fit-content; min-height: 38px; padding: 0 3px; display: flex; align-items: center; gap: 8px; color: #4e7faf; }
   .agent-typing > span { color: transparent; background: linear-gradient(90deg, #718179 10%, #4e87b2 44%, #91bfdd 53%, #4e87b2 62%, #718179 90%); background-size: 240% 100%; background-clip: text; font: 720 max(10px, var(--chat-small-font-size)) var(--lume-font-ui, Inter, sans-serif); animation: thinking-label-shimmer 1.75s linear infinite; }
   @keyframes thinking-label-shimmer { to { background-position: -240% 0; } }
-  .reasoning-update.running > header > span,
   .workflow-bridge-link { will-change: transform, opacity; }
   .reasoning-update { min-width: 0; max-width: 94%; padding: 6px 8px 7px; border-left: 2px solid #6d91ae; border-radius: 0 8px 8px 0; background: linear-gradient(90deg, rgba(91, 133, 164, .07), rgba(91, 133, 164, .018)); }
-  .reasoning-update > header { display: flex; align-items: center; gap: 6px; color: #698092; }
-  .reasoning-update > header > span { width: 21px; height: 21px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 6px; background: rgba(91, 133, 164, .09); }
-  .reasoning-update > header svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
-  .reasoning-update > header strong { min-width: 0; flex: 1; color: #5c7181; font: 740 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); }
-  .reasoning-update > header time { color: #98a4aa; font: 500 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); }
   .reasoning-update .markdown-content { margin: 5px 0 0 27px; color: #586961; }
-  .reasoning-update.running > header > span { animation: reasoning-pulse 1.25s ease-in-out infinite; }
   @keyframes reasoning-pulse { 50% { opacity: .55; transform: scale(.92); } }
   @container (max-width: 390px) {
     .terminal-output { padding-right: 8px; padding-left: 8px; }
@@ -4981,21 +4755,10 @@
     .message-images { grid-template-columns: minmax(0, 1fr); }
   }
   .turn-files { padding: 6px; overflow: hidden; border: 1px solid rgba(70, 139, 105, .13); border-radius: 10px; background: linear-gradient(145deg, rgba(66, 143, 104, .055), rgba(66, 143, 104, .018)); }
-  .turn-files > header { min-height: 25px; margin-bottom: 5px; padding: 0 2px; display: flex; align-items: center; gap: 6px; }
   .turn-files-mark { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 6px; color: #448466; background: rgba(55, 142, 98, .085); }
   .turn-files-mark svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.45; stroke-linecap: round; stroke-linejoin: round; }
-  .turn-files > header strong { min-width: 0; flex: 1; color: #4f775f; font: 760 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); }
-  .turn-files > header small { min-width: 18px; height: 18px; padding: 0 4px; display: grid; place-items: center; border-radius: 9px; color: #688076; background: rgba(76, 105, 91, .07); font: 700 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); }
-  .turn-files > div { display: grid; gap: 4px; }
-  .turn-files code { min-height: 28px; padding: 5px 3px; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto; align-items: center; gap: 5px; overflow: hidden; border-bottom: 1px solid rgba(75, 112, 94, .075); color: #496258; background: transparent; font-size: var(--chat-small-font-size); white-space: normal; }
-  .turn-files code:last-child { border-bottom: 0; }
-  .turn-files code .file-path { min-width: 0; flex: 1; color: inherit; overflow-wrap: anywhere; word-break: break-word; }
-  .turn-files code .added,
   .change-list code .added { color: #45906a; }
-  .turn-files code .added { padding: 2px 4px; border-radius: 5px; background: rgba(69, 144, 106, .08); }
-  .turn-files code .removed,
   .change-list code .removed { color: #b46161; }
-  .turn-files code .removed { padding: 2px 4px; border-radius: 5px; background: rgba(180, 97, 97, .07); }
   .privacy-note { padding-top: 6px; border-top: 1px solid rgba(81, 105, 94, 0.08); color: #9aa49f; font: var(--chat-tiny-font-size)/1.45 var(--lume-font-ui, Inter, sans-serif); }
   .empty-state { margin: 7px 0 10px !important; color: #909c96; font: var(--chat-small-font-size)/1.5 var(--lume-font-ui, Inter, sans-serif); }
   .changes-panel { margin-top: 9px; display: grid; gap: 7px; }
@@ -5067,9 +4830,6 @@
   .use-note-button { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: #3c805d; background: rgba(61, 145, 100, .07); cursor: pointer; }
   .use-note-button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.45; stroke-linecap: round; stroke-linejoin: round; }
   .permission { margin: 7px 0 2px; padding-left: 9px; display: grid; gap: 6px; border-left: 2px solid #c87d32; }
-  .permission strong { color: #5a4633; font: 700 var(--chat-font-size)/1.35 var(--lume-font-ui, Inter, sans-serif); }
-  .permission code { padding: 5px 6px; overflow: hidden; border-radius: 6px; color: #5f6b66; background: rgba(74, 99, 88, 0.055); font-size: var(--chat-small-font-size); text-overflow: ellipsis; white-space: nowrap; }
-  .permission > div { display: flex; gap: 4px; }
   .permission button { min-height: 23px; padding: 0 7px; border: 1px solid rgba(82, 101, 93, 0.15); border-radius: 6px; color: #4b5d55; background: rgba(255, 255, 255, 0.58); font: 700 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .permission button.danger { color: #a64d4d; }
   .permission button { display: inline-flex; align-items: center; gap: 5px; }
@@ -5079,16 +4839,11 @@
   @keyframes permission-spin { to { transform: rotate(360deg); } }
   .agent-question { margin: 8px 0 3px; padding: 9px; display: grid; gap: 9px; border: 1px solid rgba(48, 133, 176, 0.2); border-radius: 9px; background: rgba(48, 133, 176, 0.055); }
   .agent-question-item { min-width: 0; display: grid; gap: 5px; }
-  .agent-question-item > small { color: #367b9c; font: 800 var(--chat-small-font-size)/1.2 var(--lume-font-ui, Inter, sans-serif); letter-spacing: 0.04em; text-transform: uppercase; }
-  .agent-question-item > strong { color: #344b52; font: 700 var(--chat-font-size)/1.4 var(--lume-font-ui, Inter, sans-serif); overflow-wrap: anywhere; }
-  .agent-question-item > em { color: #698078; font: 500 var(--chat-small-font-size)/1.3 var(--lume-font-ui, Inter, sans-serif); }
   .question-options { display: grid; gap: 4px; }
   .question-options button { min-width: 0; padding: 6px 7px; display: flex; align-items: flex-start; gap: 7px; border: 1px solid rgba(65, 112, 133, 0.14); border-radius: 7px; color: #425a61; background: rgba(255, 255, 255, 0.55); text-align: left; cursor: pointer; }
   .question-options button:hover,
   .question-options button.selected { border-color: rgba(44, 137, 178, 0.42); background: rgba(48, 145, 187, 0.1); }
-  .question-options button b { color: #2f83aa; font-size: var(--chat-small-font-size); }
   .question-options button span { min-width: 0; display: grid; gap: 2px; font: 700 var(--chat-small-font-size)/1.3 var(--lume-font-ui, Inter, sans-serif); }
-  .question-options button small { color: #71827b; font: 500 var(--chat-small-font-size)/1.3 var(--lume-font-ui, Inter, sans-serif); overflow-wrap: anywhere; }
   .agent-question .question-submit { justify-self: end; min-height: 25px; padding: 0 10px; border: 0; border-radius: 7px; color: white; background: #318e62; font: 750 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .hint { color: #89948f; font-size: var(--chat-small-font-size); }
   .hint.docked { color: #4f7566; }
@@ -5310,7 +5065,6 @@
     border-color: rgba(55, 132, 91, 0.22);
     background: #cce2d1;
   }
-  .terminal-window:not(.dark) .turn-files code { border-color: rgba(65, 103, 84, 0.13); }
   .terminal-window:not(.dark) .load-earlier-chat {
     border-color: rgba(66, 94, 81, 0.18);
     background: #e9e6d4;
@@ -5551,7 +5305,6 @@
   .terminal-window.dark .chat-message.agent-message.intervention-required { border-color: rgba(215, 166, 78, 0.17); background: rgba(202, 149, 55, 0.025); }
   .terminal-window.dark .intervention-indicator { color: #dfbd79; }
   .terminal-window.dark .intervention-indicator > span { color: #e1ad51; }
-  .terminal-window.dark .intervention-indicator strong { color: #e3c17c; }
   .terminal-window.dark .handoff-button { color: #91a79c; }
   .terminal-window.dark .workflow-connection { background: linear-gradient(180deg, rgba(70, 182, 127, 0.15), #59c58b 45%, rgba(70, 182, 127, 0.15)); box-shadow: 0 0 9px rgba(75, 201, 137, 0.38); }
   .terminal-window.dark .workflow-connection-editor { color: #7ed4a6; border-color: rgba(101, 210, 153, .22); background: rgba(25, 43, 34, .97); box-shadow: 0 8px 24px rgba(0, 0, 0, .32); }
@@ -5571,9 +5324,7 @@
   .terminal-window.dark .workflow-bottom { background: linear-gradient(90deg, rgba(70, 182, 127, 0.15), #59c58b 45%, rgba(70, 182, 127, 0.15)); }
   .terminal-window.dark .agent-typing > span { color: transparent; background-image: linear-gradient(90deg, #7f948a 10%, #74acd2 44%, #c2e4f6 53%, #74acd2 62%, #7f948a 90%); }
   .terminal-window.dark .chat-message.user-message { --message-collapse-surface: rgba(76, 169, 124, 0.09); --user-message-text: #bdcbc4; --user-message-muted: #8fa198; --user-message-accent: #69c992; background: rgba(76, 169, 124, 0.09); }
-  .terminal-window.dark .chat-message header strong,
   .terminal-window.dark .markdown-content,
-  .terminal-window.dark .turn-files code { color: #bdcbc4; }
   .terminal-window.dark .markdown-content :global(strong),
   .terminal-window.dark .markdown-content :global(h1),
   .terminal-window.dark .markdown-content :global(h2),
@@ -5592,15 +5343,9 @@
   .terminal-window.dark .markdown-content :global(th),
   .terminal-window.dark .markdown-content :global(td) { border-color: rgba(205, 222, 213, 0.075); }
   .terminal-window.dark .reasoning-update { border-color: #6c9abc; background: linear-gradient(90deg, rgba(90, 139, 174, .085), rgba(90, 139, 174, .018)); }
-  .terminal-window.dark .reasoning-update > header { color: #92b3ca; }
-  .terminal-window.dark .reasoning-update > header > span { background: rgba(105, 157, 194, .1); }
-  .terminal-window.dark .reasoning-update > header strong { color: #a9c4d6; }
   .terminal-window.dark .reasoning-update .markdown-content { color: #bccbc4; }
-  .terminal-window.dark .turn-files > header strong { color: #8bc6a8; }
   .terminal-window.dark .turn-files { border-color: rgba(104, 180, 143, .14); background: linear-gradient(145deg, rgba(91, 177, 137, .065), rgba(91, 177, 137, .018)); }
   .terminal-window.dark .turn-files-mark { color: #8bc6a8; background: rgba(91, 177, 137, .09); }
-  .terminal-window.dark .turn-files > header small { color: #91a59a; background: rgba(205, 222, 213, .06); }
-  .terminal-window.dark .turn-files code { border-color: rgba(205, 222, 213, .065); background: transparent; }
   .terminal-window.dark .handoff-backdrop { background: rgba(4, 9, 7, 0.55); }
   .terminal-window.dark .handoff-dialog { color: #d4e1da; border-color: rgba(200, 219, 210, 0.13); background: #18221d; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36); }
 
@@ -5656,13 +5401,8 @@
   .terminal-window.dark .terminal-composer .composer-resize-handle:hover,
   .terminal-window.dark .terminal-composer .composer-resize-handle:focus-visible { background: rgba(205, 225, 215, 0.045); }
   .terminal-window.dark .pending-images button { color: #c6d5ce; border-color: rgba(205, 222, 213, 0.14); background: #26332d; }
-  .terminal-window.dark .permission strong { color: #dfc6ac; }
-  .terminal-window.dark .permission code,
   .terminal-window.dark .permission button { color: #bdcbc4; background: rgba(218, 232, 225, 0.055); }
   .terminal-window.dark .agent-question { border-color: rgba(83, 165, 204, 0.2); background: rgba(55, 139, 178, 0.07); }
-  .terminal-window.dark .agent-question-item > strong { color: #d4e2dc; }
-  .terminal-window.dark .agent-question-item > em,
-  .terminal-window.dark .question-options button small { color: #8fa59b; }
   .terminal-window.dark .question-options button { color: #c5d7cf; border-color: rgba(178, 210, 224, 0.12); background: rgba(219, 235, 228, 0.045); }
   @media (prefers-reduced-motion: reduce) {
     .terminal-card { transition-duration: 0.01ms; }

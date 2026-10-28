@@ -1216,11 +1216,7 @@ impl AppState {
         for session in sessions {
             let archived = store.recent_conversation_activities(session, activity_limit)?;
             for activity in archived {
-                if !session
-                    .activities
-                    .iter()
-                    .any(|current| current.id == activity.id)
-                {
+                if !already_shown(&session.activities, &activity) {
                     session.activities.push(activity);
                 }
             }
@@ -1353,11 +1349,7 @@ impl AppState {
                 }
             }
             for activity in archived.iter() {
-                if !session
-                    .activities
-                    .iter()
-                    .any(|current| current.id == activity.id)
-                {
+                if !already_shown(&session.activities, activity) {
                     session.activities.push(activity.clone());
                 }
             }
@@ -4071,12 +4063,20 @@ fn remember_activity(session: &mut AgentSession, mut activity: SessionActivity) 
                     == incoming_key
                 && (existing.created_at - activity.created_at).abs() < 60_000
         });
+        // The prompt Lume wrote down when it sent it (`local:`) and the agent's own copy, which can arrive after the
+        // answer (a transcript read again in full), are the same message: the agent's copy takes the local one's place,
+        // so it is matched once and a later identical prompt is not swallowed.
         if let Some(index) = duplicate.filter(|index| {
-            !session.activities[index.saturating_add(1)..]
-                .iter()
-                .any(|existing| matches!(existing.kind.as_str(), "prompt" | "message"))
+            let existing = &session.activities[*index];
+            (existing.id.starts_with("local:") && !activity.id.starts_with("local:"))
+                || !session.activities[index.saturating_add(1)..]
+                    .iter()
+                    .any(|existing| matches!(existing.kind.as_str(), "prompt" | "message"))
         }) {
             let existing = &mut session.activities[index];
+            if existing.id.starts_with("local:") && !activity.id.starts_with("local:") {
+                existing.id = activity.id.clone();
+            }
             existing.status = activity.status;
             merge_attachments(&mut existing.attachments, activity.attachments);
             return;
@@ -4622,6 +4622,18 @@ fn remove_superseded_streamed_messages(session: &mut AgentSession) {
         }
         activity.status != "running"
     });
+}
+
+/// Whether an archived activity is already in the live conversation: the same id, or (for a prompt Lume wrote down
+/// before the agent's own copy replaced it) the same kind and text within a minute.
+fn already_shown(activities: &[SessionActivity], archived: &SessionActivity) -> bool {
+    activities.iter().any(|current| {
+        current.id == archived.id
+            || (archived.id.starts_with("local:")
+                && current.kind == archived.kind
+                && (current.created_at - archived.created_at).abs() < 60_000
+                && current.detail.as_deref().map(normalized_chat_text) == archived.detail.as_deref().map(normalized_chat_text))
+    })
 }
 
 fn normalized_chat_text(value: &str) -> String {
@@ -6903,6 +6915,40 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn an_agent_copy_of_the_exchange_that_arrives_after_the_answer_is_not_shown_twice() {
+        let mut session = session_from_event(&started_event("chat", 4242), 1);
+        let reply = "Recebi sua mensagem de teste. Está tudo funcionando por aqui.";
+        for (id, kind, created_at, detail) in [
+            ("local:chat:1000", "prompt", 1_000, "teste"),
+            ("claude:chat:stream:1", "message", 2_000, reply),
+            // The transcript read again in full, after the answer.
+            ("claude:chat:user:u1", "prompt", 1_050, "teste"),
+            ("claude:chat:assistant:a1", "message", 2_050, reply),
+        ] {
+            remember_activity(
+                &mut session,
+                SessionActivity {
+                    id: id.into(),
+                    kind: kind.into(),
+                    title: kind.into(),
+                    detail: Some(detail.into()),
+                    status: "completed".into(),
+                    created_at,
+                    files: Vec::new(),
+                    attachments: Vec::new(),
+                    append_detail: false,
+                },
+            );
+        }
+        let kinds = session.activities.iter().map(|activity| activity.kind.as_str()).collect::<Vec<_>>();
+        assert_eq!(kinds, ["prompt", "message"], "{:?}", session.activities.iter().map(|activity| &activity.id).collect::<Vec<_>>());
+        assert_eq!(session.activities[0].id, "claude:chat:user:u1", "the agent's copy replaces the local one");
+        // The same text asked again later is a new prompt.
+        remember_activity(&mut session, SessionActivity { id: "local:chat:9000".into(), kind: "prompt".into(), title: "prompt".into(), detail: Some("teste".into()), status: "completed".into(), created_at: 9_000, files: Vec::new(), attachments: Vec::new(), append_detail: false });
+        assert_eq!(session.activities.iter().filter(|activity| activity.kind == "prompt").count(), 2);
     }
 
     #[test]

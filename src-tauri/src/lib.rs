@@ -658,12 +658,24 @@ async fn get_subagent_timeline(
     .map_err(|error| error.to_string())?
 }
 
-/// What a subagent did, read from its own thread (Codex and Oh My Pi keep one per subagent).
+/// What a subagent did, read from its own thread (Codex and Oh My Pi keep one per subagent; Claude Code keeps a
+/// transcript per subagent beside the conversation's own).
 pub(crate) fn subagent_timeline(
     state: &AppState,
     session_id: &str,
     activity_id: &str,
 ) -> Result<Vec<SessionActivity>, String> {
+    if session_id.starts_with("claude:") || activity_id.starts_with("claude:") {
+        let native_id = state
+            .connected_session(session_id)?
+            .native_session_id
+            .ok_or_else(|| "The Claude conversation has no session id".to_string())?;
+        let agent_id = activity_id
+            .rsplit_once(":subagent:")
+            .map(|(_, agent)| agent.to_string())
+            .ok_or_else(|| "This is not a Claude subagent".to_string())?;
+        return integrations::claude_subagent_timeline(&native_id, &agent_id);
+    }
     if session_id.starts_with("omp:") {
         let (parent_id, child_id) = state.omp_subagent_thread(session_id, activity_id)?;
         return omp_sessions::load_subagent_timeline(&parent_id, &child_id);

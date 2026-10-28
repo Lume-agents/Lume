@@ -6,7 +6,7 @@
 
 <script lang="ts">
   // The icon in front of each Settings section title, the same in the Orb and the Workspace.
-  let { name, size = 14 }: { name: SettingsIconName; size?: number } = $props();
+  let { name, size = 17 }: { name: SettingsIconName; size?: number } = $props();
 </script>
 
 <svg class="settings-icon" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
@@ -38,5 +38,5 @@
 </svg>
 
 <style>
-  .settings-icon { flex: 0 0 auto; margin-right: 7px; vertical-align: -2px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; opacity: .85; }
+  .settings-icon { flex: 0 0 auto; margin-right: 8px; vertical-align: -3px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; opacity: .85; }
 </style>

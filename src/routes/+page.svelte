@@ -3821,82 +3821,6 @@
           </div>
         {:else}
           <div class="settings" in:fade={{ duration: 150 }}>
-            <details use:animatedDisclosure class="settings-section" data-agent-integrations>
-              <summary class="settings-section-label"><SettingsIcon name="agents" />{tr("Agents", "Agentes")}</summary>
-              <div class="settings-section-content">
-                <button class="setup-guide-link" type="button" onclick={() => void reopenOnboarding()}>{tr("Open the setup guide", "Abrir o guia de configuração")}</button>
-                <div class="agent-setup-host">
-                  <AgentSetupCards
-                    language={preferences.language}
-                    {integrations}
-                    plans={cliPlans}
-                    diagnostics={integrationDiagnostics}
-                    configuring={configuringIntegration}
-                    diagnosing={diagnosingIntegration}
-                    onInstall={(plan) => (installingPlan = plan)}
-                    onConnect={(integration) => void toggleIntegration(integration)}
-                    onDisconnect={(integration) => void toggleIntegration(integration)}
-                    onTest={(integration) => void runIntegrationDiagnostic(integration)}
-                  />
-                </div>
-              </div>
-            </details>
-            <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label"><SettingsIcon name="detectors" />{tr("External detectors", "Detectores externos")}</summary>
-              <div class="settings-section-content">
-                {#each externalPlugins as plugin (plugin.id)}
-                  <div class="integration-row external-plugin-row">
-                    <span class="agent-avatar agent-unknown"><BrandIcon name="unknown" size={17} /></span>
-                    <div><strong>{plugin.name}</strong><span>{plugin.executable} · {plugin.id}</span></div>
-                    <button type="button" onclick={() => uninstallExternalPlugin(plugin.id)}>{tr("Remove", "Remover")}</button>
-                  </div>
-                {:else}
-                  <p class="profile-empty">{tr("Install a JSON manifest to monitor another CLI process.", "Instale um manifesto JSON para monitorar outro processo CLI.")}</p>
-                {/each}
-                <div class="plugin-actions">
-                  <button disabled={installingPlugin} type="button" onclick={addExternalPlugin}>{installingPlugin ? "…" : tr("Install manifest", "Instalar manifesto")}</button>
-                  <button type="button" onclick={openPluginFolder}>{tr("Open folder", "Abrir pasta")}</button>
-                </div>
-              </div>
-            </details>
-            <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label"><SettingsIcon name="interface" />Interface</summary>
-              <div class="settings-section-content">
-                <div class="integration-row">
-                  <span class="agent-avatar agent-vscode"><BrandIcon name="vscode" size={19} /></span>
-                  <div>
-                    <strong>VS Code Companion</strong>
-                    <span>{shown(vscodeStatus.detail)}</span>
-                  </div>
-                  <button
-                    class:connected={vscodeStatus.configured}
-                    disabled={!vscodeStatus.installed || configuringVscode}
-                    type="button"
-                    onclick={toggleVscode}
-                  >{configuringVscode ? "…" : vscodeStatus.configured ? tr("Connected", "Conectado") : tr("Connect", "Conectar")}</button>
-                </div>
-                <div class="integration-row browser-row">
-                  <span class="agent-avatar agent-browser"><BrandIcon name="browsers" size={21} /></span>
-                  <div>
-                    <strong>{tr("Browsers", "Navegadores")}</strong>
-                    <span>{tr("Load the folder as an unpacked extension.", "Carregue a pasta como extensão descompactada.")}</span>
-                  </div>
-                  <button type="button" onclick={openBrowserCompanion}>{tr("Open folder", "Abrir pasta")}</button>
-                </div>
-                {#if browserCompanionPath}
-                  <p class="browser-path" transition:fade>{browserCompanionPath}</p>
-                {/if}
-              </div>
-            </details>
-            <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label"><SettingsIcon name="tour" />{tr("Tour", "Tour")}</summary>
-              <div class="settings-section-content">
-                <div class="setting-row">
-                  <div><strong>{tr("Orb tour", "Tour do Orb")}</strong><span>{tr("A short walk through the panel, terminals and workflows.", "Um passeio rápido pelo painel, os terminais e os workflows.")}</span></div>
-                  <button class="tour-replay" type="button" onclick={() => { view = "sessions"; orbTourOpen = true; }}>{tr("Show again", "Ver de novo")}</button>
-                </div>
-              </div>
-            </details>
             <details use:animatedDisclosure class="settings-section">
               <summary class="settings-section-label"><SettingsIcon name="appearance" />{tr("Appearance", "Aparência")}</summary>
               <div class="settings-section-content">
@@ -4032,6 +3956,77 @@
                 {/each}
               </div>
             </div>
+                <div class="setting-row">
+                  <div><strong>{tr("Orb tour", "Tour do Orb")}</strong><span>{tr("A short walk through the panel, terminals and workflows.", "Um passeio rápido pelo painel, os terminais e os workflows.")}</span></div>
+                  <button class="tour-replay" type="button" onclick={() => { view = "sessions"; orbTourOpen = true; }}>{tr("Show again", "Ver de novo")}</button>
+                </div>
+              </div>
+            </details>
+            <details use:animatedDisclosure class="settings-section" data-agent-integrations>
+              <summary class="settings-section-label"><SettingsIcon name="agents" />{tr("Agents", "Agentes")}</summary>
+              <div class="settings-section-content">
+                <button class="setup-guide-link" type="button" onclick={() => void reopenOnboarding()}>{tr("Open the setup guide", "Abrir o guia de configuração")}</button>
+                <div class="agent-setup-host">
+                  <AgentSetupCards
+                    language={preferences.language}
+                    {integrations}
+                    plans={cliPlans}
+                    diagnostics={integrationDiagnostics}
+                    configuring={configuringIntegration}
+                    diagnosing={diagnosingIntegration}
+                    onInstall={(plan) => (installingPlan = plan)}
+                    onConnect={(integration) => void toggleIntegration(integration)}
+                    onDisconnect={(integration) => void toggleIntegration(integration)}
+                    onTest={(integration) => void runIntegrationDiagnostic(integration)}
+                  />
+                </div>
+              </div>
+            </details>
+            <details use:animatedDisclosure class="settings-section">
+              <summary class="settings-section-label"><SettingsIcon name="companions" />{tr("Companions", "Companions")}</summary>
+              <div class="settings-section-content">
+                <div class="integration-row">
+                  <span class="agent-avatar agent-vscode"><BrandIcon name="vscode" size={19} /></span>
+                  <div>
+                    <strong>VS Code Companion</strong>
+                    <span>{shown(vscodeStatus.detail)}</span>
+                  </div>
+                  <button
+                    class:connected={vscodeStatus.configured}
+                    disabled={!vscodeStatus.installed || configuringVscode}
+                    type="button"
+                    onclick={toggleVscode}
+                  >{configuringVscode ? "…" : vscodeStatus.configured ? tr("Connected", "Conectado") : tr("Connect", "Conectar")}</button>
+                </div>
+                <div class="integration-row browser-row">
+                  <span class="agent-avatar agent-browser"><BrandIcon name="browsers" size={21} /></span>
+                  <div>
+                    <strong>{tr("Browsers", "Navegadores")}</strong>
+                    <span>{tr("Load the folder as an unpacked extension.", "Carregue a pasta como extensão descompactada.")}</span>
+                  </div>
+                  <button type="button" onclick={openBrowserCompanion}>{tr("Open folder", "Abrir pasta")}</button>
+                </div>
+                {#if browserCompanionPath}
+                  <p class="browser-path" transition:fade>{browserCompanionPath}</p>
+                {/if}
+              </div>
+            </details>
+            <details use:animatedDisclosure class="settings-section">
+              <summary class="settings-section-label"><SettingsIcon name="detectors" />{tr("External detectors", "Detectores externos")}</summary>
+              <div class="settings-section-content">
+                {#each externalPlugins as plugin (plugin.id)}
+                  <div class="integration-row external-plugin-row">
+                    <span class="agent-avatar agent-unknown"><BrandIcon name="unknown" size={17} /></span>
+                    <div><strong>{plugin.name}</strong><span>{plugin.executable} · {plugin.id}</span></div>
+                    <button type="button" onclick={() => uninstallExternalPlugin(plugin.id)}>{tr("Remove", "Remover")}</button>
+                  </div>
+                {:else}
+                  <p class="profile-empty">{tr("Install a JSON manifest to monitor another CLI process.", "Instale um manifesto JSON para monitorar outro processo CLI.")}</p>
+                {/each}
+                <div class="plugin-actions">
+                  <button disabled={installingPlugin} type="button" onclick={addExternalPlugin}>{installingPlugin ? "…" : tr("Install manifest", "Instalar manifesto")}</button>
+                  <button type="button" onclick={openPluginFolder}>{tr("Open folder", "Abrir pasta")}</button>
+                </div>
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">

@@ -22,6 +22,8 @@ use crate::{
 };
 
 const CONFIG_FILE: &str = "node.json";
+/// The hosted Relay a Node uses when it is turned on without one.
+pub const DEFAULT_RELAY: &str = "https://relay.lumeagents.dev";
 const RUNTIME_FILE: &str = "runtime.json";
 const LOCK_FILE: &str = "node.lock";
 const LOG_FILE: &str = "node.log";
@@ -110,6 +112,11 @@ pub struct NodeHealth {
     pub transports: Vec<TransportKind>,
     pub network: Option<NodeNetworkHealth>,
     pub machine: MachineSnapshot,
+    /// The Relay this Node uses, and whether the running Node is connected to it now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_connected: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -181,14 +188,7 @@ fn run_menu(arguments: &[String]) -> i32 {
         .position(|argument| argument == "--state-dir")
         .map(|index| arguments[index..].iter().take(2).cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    let directory = match state_directory(arguments) {
-        Ok(directory) => directory,
-        Err(error) => {
-            eprintln!("Lume Node: {error}");
-            return 1;
-        }
-    };
-    match crate::cli_ui::menu(&state_arguments, &|command| run_cli_inner(command), &|| run_service(&directory, false)) {
+    match crate::cli_ui::menu(&state_arguments, &|command| run_cli_inner(command)) {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("Lume Node: {error}");
@@ -381,7 +381,10 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
                 "revoked": removed
             }))?))
         }
+        "on" => Ok(Some(json(&turn_on(&state_directory)?)?)),
+        "off" => Ok(Some(json(&turn_off(&state_directory)?)?)),
         "run" => {
+            allow_ctrl_c();
             let once = arguments.iter().any(|argument| argument == "--once");
             run_service(&state_directory, once)?;
             Ok(None)
@@ -392,7 +395,7 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lume node [menu|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|sessions|requests|approve|deny|conversations|relay|relay-pair|relay-remotes|relay-health|relay-inventory|relay-sessions|relay-session> [VALUE] [--state-dir PATH] [--once]"
+    "Usage: lume node [menu|on|off|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|sessions|requests|approve|deny|conversations|relay|relay-pair|relay-remotes|relay-health|relay-inventory|relay-sessions|relay-session> [VALUE] [--state-dir PATH] [--once]"
 }
 
 fn positional_argument(arguments: &[String], index: usize) -> Option<&str> {
@@ -556,7 +559,90 @@ pub(crate) fn health(directory: &Path) -> Result<NodeHealth, String> {
             total_memory_bytes: system.total_memory(),
             available_memory_bytes: system.available_memory(),
         },
+        relay_connected: config.relay_url.as_ref().and(runtime.as_ref()).map(|_| crate::node_relay::relay_status(directory).is_some_and(|status| status.connected)),
+        relay_url: config.relay_url.clone(),
     })
+}
+
+// ── Turning the Node on and off ──────────────────────────────────────────────
+
+/// Turns the Node on and starts it in the background, with the hosted Relay when none was chosen. The Node keeps running
+/// after the app or the terminal closes; turning it off stops it within a few seconds.
+pub fn turn_on(directory: &Path) -> Result<NodeHealth, String> {
+    let mut config = load_or_create_config(directory)?;
+    config.enabled = true;
+    if config.relay_url.is_none() {
+        config.relay_url = Some(DEFAULT_RELAY.into());
+    }
+    save_config(directory, &config)?;
+    append_log(directory, "Node enabled")?;
+    start_in_background(directory)?;
+    health(directory)
+}
+
+/// Turns the Node off; a running Node notices and stops by itself.
+pub fn turn_off(directory: &Path) -> Result<NodeHealth, String> {
+    let mut config = load_or_create_config(directory)?;
+    config.enabled = false;
+    save_config(directory, &config)?;
+    append_log(directory, "Node disabled")?;
+    health(directory)
+}
+
+/// Starts `lume node run` as a process of its own, unless one is already running for this folder.
+pub fn start_in_background(directory: &Path) -> Result<(), String> {
+    if read_runtime(directory).filter(runtime_is_live).is_some() {
+        return Ok(());
+    }
+    let executable = env::current_exe().map_err(|error| error.to_string())?;
+    let mut command = process::Command::new(executable);
+    command
+        .args(["node", "run", "--state-dir"])
+        .arg(directory)
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // No console window, and not tied to the terminal that started it.
+        command.creation_flags(0x0800_0000 | 0x0000_0200);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // A session of its own: closing the terminal does not stop the Node.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    command.spawn().map_err(|error| format!("could not start the Node: {error}"))?;
+    // Wait briefly for the first heartbeat, so the caller sees it running.
+    for _ in 0..25 {
+        if read_runtime(directory).filter(runtime_is_live).is_some() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+/// Lets Ctrl+C stop `lume node run` on Windows, where the `lume` launcher starts it with Ctrl+C ignored.
+fn allow_ctrl_c() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleCtrlHandler(handler: *const core::ffi::c_void, add: i32) -> i32;
+        }
+        // SAFETY: a null handler with `add = 0` restores the default Ctrl+C handling of the process.
+        unsafe {
+            SetConsoleCtrlHandler(std::ptr::null(), 0);
+        }
+    }
 }
 
 fn run_service(directory: &Path, once: bool) -> Result<(), String> {

@@ -42,6 +42,29 @@ const PAIR_REQUEST: u8 = 0x10;
 const PAIR_RESPONSE: u8 = 0x11;
 const PAIR_AAD: &[u8] = b"lume-relay-pair-v1";
 const HEARTBEAT: Duration = Duration::from_secs(20);
+const STATUS_FILE: &str = "relay-status.json";
+
+/// Whether the running Node is connected to its Relay right now, for the app and `lume node status`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayStatus {
+    pub connected: bool,
+    pub since: i64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+fn write_status(directory: &Path, connected: bool, error: Option<String>) {
+    let status = RelayStatus { connected, since: now_millis(), error };
+    if let Ok(bytes) = serde_json::to_vec(&status) {
+        let _ = write_private(&directory.join(STATUS_FILE), &bytes);
+    }
+}
+
+/// The last Relay connection state the running Node reported, if any.
+pub fn relay_status(directory: &Path) -> Option<RelayStatus> {
+    serde_json::from_slice(&fs::read(directory.join(STATUS_FILE)).ok()?).ok()
+}
 const AUTHORIZATION_SYNC: Duration = Duration::from_secs(3);
 
 fn io(error: impl std::fmt::Display) -> String {
@@ -126,6 +149,7 @@ fn now_millis() -> i64 {
 pub struct RelayWorker {
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    directory: std::sync::Mutex<PathBuf>,
 }
 
 impl RelayWorker {
@@ -135,7 +159,7 @@ impl RelayWorker {
             let (directory, stop) = (directory.to_path_buf(), stop.clone());
             thread::spawn(move || run_worker(&directory, &relay_url, &stop))
         };
-        Self { stop, handle: Some(handle) }
+        Self { stop, handle: Some(handle), directory: std::sync::Mutex::new(directory.to_path_buf()) }
     }
 }
 
@@ -144,6 +168,9 @@ impl Drop for RelayWorker {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
+        }
+        if let Ok(directory) = self.directory.lock() {
+            let _ = fs::remove_file(directory.join(STATUS_FILE));
         }
     }
 }
@@ -167,6 +194,7 @@ fn run_worker(directory: &Path, relay_url: &str, stop: &AtomicBool) {
             Ok(()) => delay = 1,
             Err(error) => {
                 log(directory, &format!("Relay: {error}"));
+                write_status(directory, false, Some(error.clone()));
                 sleep_unless_stopped(stop, Duration::from_secs(delay));
                 delay = (delay * 2).min(60);
             }
@@ -183,6 +211,7 @@ fn serve(directory: &Path, relay_url: &str, identity: &NodeIdentity, stop: &Atom
     let mut link = RelayLink::connect(relay_url, &room, identity, Role::Node, None)?;
     link.set_read_timeout(Some(Duration::from_secs(1)))?;
     log(directory, "Relay: connected");
+    write_status(directory, true, None);
     let mut authorized: HashSet<String> = HashSet::new();
     sync_authorized(directory, &mut link, &mut authorized)?;
     let mut last_sync = Instant::now();
@@ -347,7 +376,7 @@ fn session_id_of(command: &Value) -> Result<&str, String> {
 }
 
 /// The id and the freshness every acting request carries.
-fn acting_request<'a>(command: &'a Value, now: i64) -> Result<&'a str, String> {
+fn acting_request(command: &Value, now: i64) -> Result<&str, String> {
     let request_id = command["requestId"].as_str().filter(|id| (8..=128).contains(&id.len())).ok_or("a request id is required")?;
     let sent_at = command["sentAt"].as_i64().ok_or("the request has no time")?;
     if (now - sent_at).abs() > REQUEST_MAX_AGE_MS {
@@ -582,7 +611,7 @@ pub fn query_session(directory: &Path, node_id: &str, session_id: &str) -> Resul
     query_commands(directory, node_id, &[json!({ "cmd": "session", "id": session_id })])?.into_iter().next().ok_or("the Node did not answer")?
 }
 
-fn query_commands(directory: &Path, node_id: &str, commands: &[Value]) -> Result<Vec<Result<Value, String>>, String> {
+pub(crate) fn query_commands(directory: &Path, node_id: &str, commands: &[Value]) -> Result<Vec<Result<Value, String>>, String> {
     let remote = remotes(directory)?.into_iter().find(|remote| remote.node_id == node_id || remote.identity.fingerprint == node_id).ok_or("that Node is not paired through a Relay")?;
     let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
     let node_key: [u8; 32] = URL_SAFE_NO_PAD.decode(&remote.identity.public_key).map_err(io)?.try_into().map_err(|_| "invalid Node key".to_string())?;

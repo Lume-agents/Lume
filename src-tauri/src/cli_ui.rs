@@ -17,7 +17,7 @@ pub fn show_qr(enabled: bool) {
     SHOW_QR.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
-const DEFAULT_RELAY: &str = "https://relay.lumeagents.dev";
+use crate::node_service::DEFAULT_RELAY;
 
 type Rgb = (u8, u8, u8);
 
@@ -282,6 +282,14 @@ fn health(value: &Value) -> String {
     ));
     let capabilities = value["capabilities"].as_array().map(|list| list.iter().filter_map(|item| item.as_str()).map(capability).collect::<Vec<_>>().join(", ")).unwrap_or_default();
     row(t("Capabilities", "Capacidades"), capabilities);
+    if let Some(url) = value["relayUrl"].as_str() {
+        let state = match value["relayConnected"].as_bool() {
+            Some(true) => style(t("connected", "conectado")).green().to_string(),
+            Some(false) => style(t("connecting…", "conectando…")).yellow().to_string(),
+            None => style(t("Node not running", "Node parado")).dim().to_string(),
+        };
+        row("Relay", format!("{} · {state}", url.trim_start_matches("https://")));
+    }
     row(t("Last signal", "Último sinal"), ago(value["heartbeatAt"].as_i64()));
     out
 }
@@ -366,7 +374,7 @@ fn ago_until(millis: Option<i64>) -> String {
 /// A readable version of a command's JSON result, or `None` to keep the JSON.
 pub fn pretty(command: &str, value: &Value) -> Option<String> {
     Some(match command {
-        "status" | "health" | "relay-health" | "enable" | "disable" => health(value),
+        "status" | "health" | "relay-health" | "enable" | "disable" | "on" | "off" => health(value),
         "pair" => pairing(value),
         "clients" => list(value, t("No device is paired with this Node yet.", "Nenhum dispositivo está pareado com este Node ainda."), |client| {
             format!(
@@ -412,7 +420,7 @@ pub fn pretty(command: &str, value: &Value) -> Option<String> {
 /// Runs a `lume node` command and returns the JSON text it would print.
 pub type CommandRunner<'a> = &'a dyn Fn(&[String]) -> Result<Option<String>, String>;
 
-pub fn menu(state_arguments: &[String], run: CommandRunner, run_service: &dyn Fn() -> Result<(), String>) -> Result<(), String> {
+pub fn menu(state_arguments: &[String], run: CommandRunner) -> Result<(), String> {
     prepare_terminal();
     println!("{}", banner());
     let theme = ColorfulTheme::default();
@@ -430,43 +438,56 @@ pub fn menu(state_arguments: &[String], run: CommandRunner, run_service: &dyn Fn
         Ok(None) => {}
         Err(error) => eprintln!("\n  {} {error}\n", style("✘").red()),
     };
-    let items = [
-        t("Node status", "Estado do Node"),
-        t("Turn the Node on", "Ativar o Node"),
-        t("Connect to the Relay (access from other networks)", "Conectar ao Relay (acesso de outras redes)"),
-        t("Start the Node now", "Iniciar o Node agora"),
-        t("Pair another device with this Node", "Parear outro dispositivo com este Node"),
-        t("Pair this computer with another Node", "Parear este computador com outro Node"),
-        t("Devices authorized on this Node", "Dispositivos autorizados neste Node"),
-        t("Paired computers", "Computadores pareados"),
-        t("Check a paired computer", "Verificar um computador pareado"),
-        t("Pairing requests from the network", "Pedidos de pareamento da rede"),
-        t("Quit", "Sair"),
-    ];
+    // One line with what the Node is doing, shown above the menu every time.
+    let status_line = || -> (bool, String) {
+        let status = run(&command("status", &[])).ok().flatten().and_then(|text| serde_json::from_str::<Value>(&text).ok()).unwrap_or(Value::Null);
+        let lifecycle = status["lifecycle"].as_str().unwrap_or("disabled");
+        let on = lifecycle != "disabled";
+        let line = match (lifecycle, status["relayConnected"].as_bool()) {
+            ("running", Some(true)) => format!("{} {}", style("●").green(), t("Node on · connected to the Relay", "Node ligado · conectado ao Relay")),
+            ("running", _) => format!("{} {}", style("●").green(), t("Node on", "Node ligado")),
+            ("offline", _) => format!("{} {}", style("●").yellow(), t("Node on, but not running", "Node ligado, mas parado")),
+            _ => format!("{} {}", style("●").red(), t("Node off", "Node desligado")),
+        };
+        (on, line)
+    };
     loop {
+        let (on, line) = status_line();
+        println!("  {line}\n");
+        let items = [
+            t("Node status", "Estado do Node"),
+            if on { t("Turn the Node off", "Desligar o Node") } else { t("Turn the Node on", "Ligar o Node") },
+            t("Pairing link for another device", "Link de pareamento para outro dispositivo"),
+            t("Pair this computer with another Node", "Parear este computador com outro Node"),
+            t("Devices authorized on this Node", "Dispositivos autorizados neste Node"),
+            t("Paired computers", "Computadores pareados"),
+            t("Check a paired computer", "Verificar um computador pareado"),
+            t("Pairing requests from the network", "Pedidos de pareamento da rede"),
+            t("Change the Relay", "Trocar o Relay"),
+            t("Quit", "Sair"),
+        ];
         let choice = Select::with_theme(&theme).with_prompt(t("What do you want to do?", "O que você quer fazer?")).items(&items).default(0).interact_opt().map_err(|error| error.to_string())?;
         let Some(choice) = choice else { return Ok(()) };
         println!();
         match choice {
             0 => show("status", run(&command("status", &[]))),
-            1 => show("enable", run(&command("enable", &[]))),
-            2 => {
-                let url: String = Input::with_theme(&theme).with_prompt(t("Relay address", "Endereço do Relay")).default(DEFAULT_RELAY.into()).interact_text().map_err(|error| error.to_string())?;
-                show("relay", run(&command("relay", &[&url])));
+            1 => {
+                if on {
+                    show("off", run(&command("off", &[])));
+                } else {
+                    // Runs in the background: the menu stays, and the Node keeps running after it closes.
+                    show("on", run(&command("on", &[])));
+                }
             }
+            2 => show("pair", run(&command("pair", &[]))),
             3 => {
-                println!("  {}\n", style(t("The Node is running. Press Ctrl+C to stop it.", "O Node está rodando. Pressione Ctrl+C para parar.")).dim());
-                return run_service();
-            }
-            4 => show("pair", run(&command("pair", &[]))),
-            5 => {
                 let uri: String = Input::with_theme(&theme).with_prompt(t("Paste the pairing link", "Cole o link de pareamento")).interact_text().map_err(|error| error.to_string())?;
                 let name = if uri.trim().starts_with("lume://pair-relay") { "relay-pair" } else { "connect" };
                 show(name, run(&command(name, &[uri.trim()])));
             }
-            6 => show("clients", run(&command("clients", &[]))),
-            7 => show("relay-remotes", run(&command("relay-remotes", &[]))),
-            8 => {
+            4 => show("clients", run(&command("clients", &[]))),
+            5 => show("relay-remotes", run(&command("relay-remotes", &[]))),
+            6 => {
                 let remotes = run(&command("relay-remotes", &[])).ok().flatten().and_then(|text| serde_json::from_str::<Value>(&text).ok()).and_then(|value| value.as_array().cloned()).unwrap_or_default();
                 if remotes.is_empty() {
                     println!("  {}\n", style(t("No computer is paired yet.", "Nenhum computador pareado ainda.")).dim());
@@ -476,7 +497,7 @@ pub fn menu(state_arguments: &[String], run: CommandRunner, run_service: &dyn Fn
                 let picked = Select::with_theme(&theme).with_prompt(t("Which one?", "Qual?")).items(&names).default(0).interact().map_err(|error| error.to_string())?;
                 show("relay-health", run(&command("relay-health", &[&names[picked]])));
             }
-            9 => {
+            7 => {
                 let requests = run(&command("requests", &[])).ok().flatten().and_then(|text| serde_json::from_str::<Value>(&text).ok()).and_then(|value| value.as_array().cloned()).unwrap_or_default();
                 if requests.is_empty() {
                     println!("  {}\n", style(t("No device is asking to pair.", "Nenhum dispositivo pedindo pareamento.")).dim());
@@ -494,10 +515,17 @@ pub fn menu(state_arguments: &[String], run: CommandRunner, run_service: &dyn Fn
                     show("deny", run(&command("deny", &[&id])));
                 }
             }
+            8 => {
+                let url: String = Input::with_theme(&theme).with_prompt(t("Relay address (or off)", "Endereço do Relay (ou off)")).default(DEFAULT_RELAY.into()).interact_text().map_err(|error| error.to_string())?;
+                show("relay", run(&command("relay", &[&url])));
+                if on {
+                    // A running Node reads the Relay address when it starts: turn it off and on again.
+                    let _ = run(&command("off", &[]));
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    show("on", run(&command("on", &[])));
+                }
+            }
             _ => return Ok(()),
-        }
-        if !Confirm::with_theme(&theme).with_prompt(t("Back to the menu?", "Voltar ao menu?")).default(true).interact().map_err(|error| error.to_string())? {
-            return Ok(());
         }
         println!();
     }

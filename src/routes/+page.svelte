@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SettingsIcon from "$lib/SettingsIcon.svelte";
   import { onMount, setContext, tick } from "svelte";
   import { flip } from "svelte/animate";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
@@ -3819,7 +3820,7 @@
         {:else}
           <div class="settings" in:fade={{ duration: 150 }}>
             <details use:animatedDisclosure class="settings-section" data-agent-integrations>
-              <summary class="settings-section-label">{tr("Agents", "Agentes")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="agents" />{tr("Agents", "Agentes")}</summary>
               <div class="settings-section-content">
                 <button class="setup-guide-link" type="button" onclick={() => void reopenOnboarding()}>{tr("Open the setup guide", "Abrir o guia de configuração")}</button>
                 <div class="agent-setup-host">
@@ -3839,7 +3840,7 @@
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label">{tr("External detectors", "Detectores externos")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="detectors" />{tr("External detectors", "Detectores externos")}</summary>
               <div class="settings-section-content">
                 {#each externalPlugins as plugin (plugin.id)}
                   <div class="integration-row external-plugin-row">
@@ -3857,7 +3858,7 @@
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label">Interface</summary>
+              <summary class="settings-section-label"><SettingsIcon name="interface" />Interface</summary>
               <div class="settings-section-content">
                 <div class="integration-row">
                   <span class="agent-avatar agent-vscode"><BrandIcon name="vscode" size={19} /></span>
@@ -3886,7 +3887,7 @@
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label">{tr("Tour", "Tour")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="tour" />{tr("Tour", "Tour")}</summary>
               <div class="settings-section-content">
                 <div class="setting-row">
                   <div><strong>{tr("Orb tour", "Tour do Orb")}</strong><span>{tr("A short walk through the panel, terminals and workflows.", "Um passeio rápido pelo painel, os terminais e os workflows.")}</span></div>
@@ -3895,13 +3896,13 @@
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label">{tr("Appearance", "Aparência")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="appearance" />{tr("Appearance", "Aparência")}</summary>
               <div class="settings-section-content">
                 <AppearanceSettings {preferences} language={preferences.language} dark={effectiveDark} disabled={savingSettings} onpatch={updateAppearancePatch} />
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label">{tr("Preferences", "Preferências")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="preferences" />{tr("Preferences", "Preferências")}</summary>
               <div class="settings-section-content">
             <label class="field-row">
               <span><strong>{tr("Language", "Idioma")}</strong><small>{tr("Lume interface language.", "Idioma da interface do Lume.")}</small></span>
@@ -4032,7 +4033,7 @@
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label">{tr("Keyboard shortcuts", "Atalhos de teclado")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="shortcuts" />{tr("Keyboard shortcuts", "Atalhos de teclado")}</summary>
               <div class="settings-section-content">
                 {#each [
                   ["openShortcut", tr("Open Lume", "Abrir o Lume"), tr("Shows and expands the overlay.", "Exibe e expande a sobreposição.")],
@@ -4054,7 +4055,7 @@
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label">{tr("Project profiles", "Perfis por projeto")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="profiles" />{tr("Project profiles", "Perfis por projeto")}</summary>
               <div class="settings-section-content">
             {#if detectedProjects.length > 0}
               <label class="field-row">
@@ -4167,13 +4168,13 @@
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section" data-remote-nodes-section>
-              <summary class="settings-section-label">{tr("Remote computers", "Computadores remotos")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="remote" />{tr("Remote computers", "Computadores remotos")}</summary>
               <div class="settings-section-content">
                 <RemoteComputers language={preferences.language} dark={effectiveDark} />
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section" data-mobile-access-section>
-              <summary class="settings-section-label">{tr("Mobile access", "Acesso mobile")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="mobile" />{tr("Mobile access", "Acesso mobile")}</summary>
               <div class="settings-section-content">
                 <div class="mobile-access-card">
               <div class="mobile-access-header">
@@ -4282,7 +4283,7 @@
               </div>
             </details>
             <details use:animatedDisclosure class="settings-section">
-              <summary class="settings-section-label">{tr("Reset", "Redefinir")}</summary>
+              <summary class="settings-section-label"><SettingsIcon name="reset" />{tr("Reset", "Redefinir")}</summary>
               <div class="settings-section-content">
                 <div class:confirming={resetConfirming} class="reset-settings-control">
                   {#if resetConfirming}
@@ -5060,13 +5061,14 @@
     padding: 0 2px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     list-style: none;
     cursor: pointer;
     user-select: none;
   }
   .settings-section > .settings-section-label::-webkit-details-marker { display: none; }
   .settings-section > .settings-section-label::after {
+    margin-left: auto;
     content: "+";
     color: #7d8d85;
     font-size: 15px;

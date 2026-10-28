@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SettingsIcon from "$lib/SettingsIcon.svelte";
   import { onMount, tick } from "svelte";
   import { fade, fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
@@ -2949,7 +2950,7 @@
 
         <div class="settings-content">
           <details class="settings-group" open={settingsSections.appearance} use:animatedDisclosure={(open) => setSettingsSectionOpen("appearance", open)}>
-            <summary>{tr("Appearance", "Aparência")}</summary>
+            <summary><SettingsIcon name="appearance" />{tr("Appearance", "Aparência")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.appearance}
             <AppearanceSettings {preferences} {language} dark={darkMode} disabled={settingsSaving} onpatch={savePreferencePatch}>
@@ -3015,7 +3016,7 @@
           </details>
 
           <details class="settings-group compact-settings" open={settingsSections.preferences} use:animatedDisclosure={(open) => setSettingsSectionOpen("preferences", open)}>
-            <summary>{tr("Preferences", "Preferências")}</summary>
+            <summary><SettingsIcon name="preferences" />{tr("Preferences", "Preferências")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.preferences}
             {#if settingsLoadingSections.includes("preferences")}<p class="settings-loading-hint" role="status">{tr("Loading display information…", "Carregando informações de tela…")}</p>{/if}
@@ -3092,7 +3093,7 @@
           </details>
 
           <details class="settings-group" open={settingsSections.agents} use:animatedDisclosure={(open) => setSettingsSectionOpen("agents", open)}>
-            <summary>{tr("Agents", "Agentes")}</summary>
+            <summary><SettingsIcon name="agents" />{tr("Agents", "Agentes")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.agents}
             {#if settingsLoadingSections.includes("agents")}<p class="settings-loading-hint" role="status">{tr("Loading agent integrations…", "Carregando integrações de agentes…")}</p>{/if}
@@ -3119,7 +3120,7 @@
           </details>
 
           <details class="settings-group" open={settingsSections.companions} use:animatedDisclosure={(open) => setSettingsSectionOpen("companions", open)}>
-            <summary>{tr("Companions", "Companions")}</summary>
+            <summary><SettingsIcon name="companions" />{tr("Companions", "Companions")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.companions}
             {#if settingsLoadingSections.includes("companions")}<p class="settings-loading-hint" role="status">{tr("Loading companions…", "Carregando companions…")}</p>{/if}
@@ -3138,7 +3139,7 @@
           </details>
 
           <details class="settings-group" data-external-detectors open={settingsSections.externalDetectors} use:animatedDisclosure={(open) => setSettingsSectionOpen("externalDetectors", open)}>
-            <summary>{tr("External detectors", "Detectores externos")}</summary>
+            <summary><SettingsIcon name="detectors" />{tr("External detectors", "Detectores externos")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.externalDetectors}
             {#if settingsLoadingSections.includes("externalDetectors")}<p class="settings-loading-hint" role="status">{tr("Loading external detectors…", "Carregando detectores externos…")}</p>{/if}
@@ -3160,7 +3161,7 @@
           </details>
 
           <details class="settings-group compact-settings" open={settingsSections.shortcuts} use:animatedDisclosure={(open) => setSettingsSectionOpen("shortcuts", open)}>
-            <summary>{tr("Keyboard shortcuts", "Atalhos de teclado")}</summary>
+            <summary><SettingsIcon name="shortcuts" />{tr("Keyboard shortcuts", "Atalhos de teclado")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.shortcuts}
             {#each [
@@ -3180,7 +3181,7 @@
           </details>
 
           <details class="settings-group compact-settings" open={settingsSections.projectProfiles} use:animatedDisclosure={(open) => setSettingsSectionOpen("projectProfiles", open)}>
-            <summary>{tr("Project profiles", "Perfis por projeto")}</summary>
+            <summary><SettingsIcon name="profiles" />{tr("Project profiles", "Perfis por projeto")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.projectProfiles}
             {#if settingsLoadingSections.includes("projectProfiles")}<p class="settings-loading-hint" role="status">{tr("Loading project options…", "Carregando opções do projeto…")}</p>{/if}
@@ -3226,14 +3227,14 @@
           </details>
 
           <details class="settings-group" data-remote-nodes-section open={settingsSections.remoteComputers} use:animatedDisclosure={(open) => setSettingsSectionOpen("remoteComputers", open)}>
-            <summary>{tr("Remote computers", "Computadores remotos")}</summary>
+            <summary><SettingsIcon name="remote" />{tr("Remote computers", "Computadores remotos")}</summary>
             <div class="settings-section-content">
               {#if settingsSections.remoteComputers}<RemoteComputers language={preferences.language} dark={darkMode} />{/if}
             </div>
           </details>
 
           <details class="settings-group compact-settings" open={settingsSections.mobileAccess} use:animatedDisclosure={(open) => setSettingsSectionOpen("mobileAccess", open)}>
-            <summary>{tr("Mobile access", "Acesso mobile")}</summary>
+            <summary><SettingsIcon name="mobile" />{tr("Mobile access", "Acesso mobile")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.mobileAccess}
             {#if settingsLoadingSections.includes("mobileAccess")}<p class="settings-loading-hint" role="status">{tr("Checking mobile access…", "Verificando acesso mobile…")}</p>{/if}
@@ -3258,7 +3259,7 @@
           </details>
 
           <details class="settings-group reset-group" open={settingsSections.reset} use:animatedDisclosure={(open) => setSettingsSectionOpen("reset", open)}>
-            <summary>{tr("Reset", "Redefinir")}</summary>
+            <summary><SettingsIcon name="reset" />{tr("Reset", "Redefinir")}</summary>
             <div class="settings-section-content">
             {#if settingsSections.reset}
             <div class="reset-control">

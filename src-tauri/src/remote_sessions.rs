@@ -18,6 +18,18 @@ use crate::{
 
 const PREFIX: &str = "remote:";
 const REFRESH: Duration = Duration::from_secs(6);
+/// While a session of another computer is working, it is read more often so its answer shows up soon.
+const BUSY_REFRESH: Duration = Duration::from_secs(3);
+/// A computer that does not answer keeps its sessions for this many attempts (a dropped connection, a slow Relay)
+/// before they leave the list.
+const KEEP_ON_FAILURE: u32 = 4;
+
+/// Set after a prompt, an approval or a stop, so the next read happens at once instead of after the interval.
+static WAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn wake() {
+    WAKE.store(true, std::sync::atomic::Ordering::Release);
+}
 /// The conversations read per computer and refresh: the most recently active sessions.
 const CONVERSATIONS: usize = 8;
 
@@ -47,7 +59,7 @@ fn directory() -> Result<std::path::PathBuf, String> {
 /// Sends a prompt to a session of another computer.
 pub fn prompt(session_id: &str, prompt: &str) -> Result<(), String> {
     let (node, session) = parse(session_id).ok_or("Not a session of another computer")?;
-    node_relay::send_prompt(&directory()?, node, session, &request_id(), prompt).map(|_| ())
+    node_relay::send_prompt(&directory()?, node, session, &request_id(), prompt).map(|_| wake())
 }
 
 /// Allows once or denies what a session of another computer waits for.
@@ -58,13 +70,13 @@ pub fn resolve_permission(session_id: &str, permission_id: &str, action: Permiss
         PermissionAction::Deny => "deny",
         _ => return Err("Only allowing once or denying can be done from another computer".into()),
     };
-    node_relay::answer_permission(&directory()?, node, session, permission_id, action, &request_id()).map(|_| ())
+    node_relay::answer_permission(&directory()?, node, session, permission_id, action, &request_id()).map(|_| wake())
 }
 
 /// Stops the turn a session of another computer is running.
 pub fn interrupt(session_id: &str) -> Result<(), String> {
     let (node, session) = parse(session_id).ok_or("Not a session of another computer")?;
-    node_relay::interrupt_session(&directory()?, node, session, &request_id()).map(|_| ())
+    node_relay::interrupt_session(&directory()?, node, session, &request_id()).map(|_| wake())
 }
 
 fn conversation_activities(conversation: &Value) -> Vec<SessionActivity> {
@@ -150,7 +162,7 @@ fn session_of(node_id: &str, computer: &str, summary: &Value, conversation: Opti
 
 /// Everything one computer shows: its sessions, the conversations of the most recent ones and what they wait for.
 /// Errors from a computer that is offline or forbids a part are left out, never shown as sessions.
-fn computer_sessions(directory: &Path, node_id: &str) -> Result<Vec<AgentSession>, String> {
+fn computer_sessions(directory: &Path, node_id: &str, previous: &[AgentSession]) -> Result<Vec<AgentSession>, String> {
     let mut answers = node_relay::query_many(directory, node_id, &["health", "sessions"])?.into_iter();
     let health = answers.next().ok_or("the Node did not answer")??;
     let snapshot = answers.next().ok_or("the Node did not answer")??;
@@ -171,14 +183,15 @@ fn computer_sessions(directory: &Path, node_id: &str) -> Result<Vec<AgentSession
     }
     let mut conversations: HashMap<String, Value> = HashMap::new();
     let mut permissions: HashMap<String, Value> = HashMap::new();
+    let mut refusals: HashMap<String, String> = HashMap::new();
     if !commands.is_empty() {
         if let Ok(results) = node_relay::query_commands(directory, node_id, &commands) {
             for ((id, kind), result) in wanted.into_iter().zip(results) {
-                let Ok(value) = result else { continue };
-                if kind == "session" {
-                    conversations.insert(id, value);
-                } else if !value["permission"].is_null() {
-                    permissions.insert(id, value["permission"].clone());
+                match result {
+                    Ok(value) if kind == "session" => { conversations.insert(id, value); }
+                    Ok(value) if !value["permission"].is_null() => { permissions.insert(id, value["permission"].clone()); }
+                    Err(error) if kind == "session" => { refusals.insert(id, error); }
+                    _ => {}
                 }
             }
         }
@@ -187,27 +200,69 @@ fn computer_sessions(directory: &Path, node_id: &str) -> Result<Vec<AgentSession
         .iter()
         .filter_map(|summary| {
             let id = summary["id"].as_str()?;
-            session_of(node_id, &computer, summary, conversations.get(id), permissions.get(id))
+            let mut session = session_of(node_id, &computer, summary, conversations.get(id), permissions.get(id))?;
+            if conversations.get(id).is_none() {
+                // What was already read stays in view when one read fails; a refusal from the owner says so in the chat.
+                if let Some(known) = previous.iter().find(|item| item.id == session.id) {
+                    session.activities = known.activities.clone();
+                }
+                if let Some(error) = refusals.get(id).filter(|error| error.contains("not allowed")) {
+                    session.activities.retain(|activity| activity.kind != "warning");
+                    session.activities.push(SessionActivity {
+                        id: format!("remote-refusal-{id}"),
+                        kind: "warning".into(),
+                        title: "Lume".into(),
+                        detail: Some(if error.contains("conversations") {
+                            "The owner of that computer has not allowed reading its conversations. / O dono daquele computador não liberou a leitura das conversas.".into()
+                        } else {
+                            error.clone()
+                        }),
+                        status: "completed".into(),
+                        created_at: session.updated_at,
+                        files: Vec::new(),
+                        attachments: Vec::new(),
+                        append_detail: false,
+                    });
+                }
+            }
+            Some(session)
         })
         .collect())
 }
 
-/// Keeps the remote sessions current while the app runs.
+/// Keeps the remote sessions current while the app runs. A computer that misses a few reads keeps its sessions, so a
+/// slow answer does not make them blink out of the list.
 pub fn start(state: AppState, app: AppHandle) {
-    let _ = thread::Builder::new().name("lume-remote-sessions".into()).spawn(move || loop {
-        let sessions = directory()
-            .and_then(|directory| {
-                let remotes = node_relay::remotes(&directory)?;
-                Ok(remotes
-                    .iter()
-                    .flat_map(|remote| computer_sessions(&directory, &remote.node_id).unwrap_or_default())
-                    .collect::<Vec<_>>())
-            })
-            .unwrap_or_default();
-        if state.replace_remote_sessions(sessions).unwrap_or(false) {
-            protocol::emit_sessions_changed(&app);
+    let _ = thread::Builder::new().name("lume-remote-sessions".into()).spawn(move || {
+        let mut known: HashMap<String, (Vec<AgentSession>, u32)> = HashMap::new();
+        loop {
+            if let Ok(directory) = directory() {
+                let remotes = node_relay::remotes(&directory).unwrap_or_default();
+                known.retain(|node_id, _| remotes.iter().any(|remote| &remote.node_id == node_id));
+                for remote in &remotes {
+                    let entry = known.entry(remote.node_id.clone()).or_insert_with(|| (Vec::new(), 0));
+                    match computer_sessions(&directory, &remote.node_id, &entry.0) {
+                        Ok(sessions) => *entry = (sessions, 0),
+                        Err(_) => {
+                            entry.1 += 1;
+                            if entry.1 >= KEEP_ON_FAILURE {
+                                entry.0.clear();
+                            }
+                        }
+                    }
+                }
+            }
+            let sessions = known.values().flat_map(|(sessions, _)| sessions.iter().cloned()).collect::<Vec<_>>();
+            let busy = sessions.iter().any(|session| matches!(session.status, SessionStatus::Running | SessionStatus::PermissionRequired));
+            if state.replace_remote_sessions(sessions).unwrap_or(false) {
+                protocol::emit_sessions_changed(&app);
+            }
+            // Sleep in short steps, so a prompt sent from here is followed by a read at once.
+            let until = std::time::Instant::now() + if busy { BUSY_REFRESH } else { REFRESH };
+            while std::time::Instant::now() < until && !WAKE.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                thread::sleep(Duration::from_millis(250));
+            }
         }
-        thread::sleep(REFRESH);
     });
 }
 

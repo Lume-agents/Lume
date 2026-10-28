@@ -306,6 +306,10 @@ export async function answerRelayLumePermission(nodeId: string, sessionId: strin
   return invoke("answer_relay_lume_permission", { nodeId, sessionId, permissionId, action, requestId });
 }
 
+export async function interruptRelayLumeSession(nodeId: string, sessionId: string, requestId: string): Promise<{ accepted: boolean; repeated?: boolean }> {
+  return invoke("interrupt_relay_lume_session", { nodeId, sessionId, requestId });
+}
+
 export async function loadNodeAllowApprovals(): Promise<boolean> {
   return invoke<boolean>("get_node_allow_approvals");
 }

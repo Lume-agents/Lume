@@ -7,7 +7,7 @@ encryption) and `node_relay.rs` (the Node's outbound connection, the commands it
 `src-tauri`. The running Node connects to the Relay, devices pair through it from **Settings → Remote computers** or
 `lume node relay-pair`, and a paired device can read the other computer's health, inventory and agent sessions, plus a
 session's conversation when the owner allows it. It can also send a prompt to a session the app controls and allow once or deny what a session waits for, each behind
-its own owner switch. There are no remote interrupts or streaming yet. Accounts, entitlement tokens, billing and push do not exist, so the Relay has no per-account quota, and
+its own owner switch, and stop a running turn. There is no streaming yet: views refresh every few seconds. Accounts, entitlement tokens, billing and push do not exist, so the Relay has no per-account quota, and
 the independent security review has not happened. It extends [LUME_NODE.md](./LUME_NODE.md) and must satisfy
 [DISTRIBUTED_THREAT_MODEL.md](./DISTRIBUTED_THREAT_MODEL.md), including its security gates before any internet pairing.
 

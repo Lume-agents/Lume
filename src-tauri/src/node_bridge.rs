@@ -7,7 +7,8 @@
 //!
 //! Commands: `prompt` sends text to one of the app's own sessions, with the request id that makes a repeat harmless
 //! (the app answers as it does for a phone); `sessions` and `session` read what the app's sessions are doing now;
-//! `permission` reads what a session waits for the person to allow, and `approve` allows it once or denies it.
+//! `permission` reads what a session waits for the person to allow, and `approve` allows it once or denies it;
+//! `interrupt` stops the turn a session is running.
 //! The app's database only keeps a scrubbed copy of a session (no status, no pending question, no transcript), so
 //! anything that needs the live state has to ask the running app.
 
@@ -131,6 +132,7 @@ fn handle(line: &str, app: &AppHandle, state: &AppState, secret: &str) -> Result
         Some("session") => return live_conversation(state, request["sessionId"].as_str().unwrap_or_default()),
         Some("permission") => return pending_permission(state, request["sessionId"].as_str().unwrap_or_default()),
         Some("approve") => approve_command(&request)?,
+        Some("interrupt") => interrupt_command(&request)?,
         _ => prompt_command(&request)?,
     };
     let response = control::execute_hub_command(
@@ -178,6 +180,16 @@ fn pending_permission(state: &AppState, session_id: &str) -> Result<Value, Strin
         "risk": permission.risk,
         "requestedAt": permission.requested_at,
     })) }))
+}
+
+/// Stops the turn a session is running; the session itself stays open.
+fn interrupt_command(request: &Value) -> Result<HubCommandRequest, String> {
+    serde_json::from_value(json!({
+        "requestId": request["requestId"],
+        "type": "interrupt_prompt",
+        "sessionId": request["sessionId"],
+    }))
+    .map_err(|error: serde_json::Error| error.to_string())
 }
 
 /// An approval travels in the signed text slot as `permission id`, a newline and the answer.
@@ -262,6 +274,11 @@ pub fn live_permission(directory: &Path, session_id: &str) -> Result<Value, Stri
 /// Allows once or denies a session's pending permission in the running app.
 pub fn answer_permission(directory: &Path, session_id: &str, request_id: &str, permission_id: &str, action: &str) -> Result<Value, String> {
     call(directory, "approve", session_id, request_id, &format!("{permission_id}\n{action}"))
+}
+
+/// Stops the turn a session of the running app is running.
+pub fn interrupt_session(directory: &Path, session_id: &str, request_id: &str) -> Result<Value, String> {
+    call(directory, "interrupt", session_id, request_id, "")
 }
 
 /// Sends a prompt to the running Lume app on this computer. `Err` when the app is not open.
@@ -410,6 +427,13 @@ mod tests {
         let pending = pending_permission(&state, "live-1").expect("pending permission");
         assert_eq!((pending["permission"]["id"].as_str(), pending["permission"]["summary"].as_str()), (Some("perm"), Some("rm -rf secrets")));
         assert!(pending_permission(&state, "unknown").is_err());
+    }
+
+    #[test]
+    fn an_interrupt_stops_one_session() {
+        let command = interrupt_command(&json!({ "cmd": "interrupt", "sessionId": "s1", "requestId": "r1" })).unwrap();
+        assert!(matches!(command.command, HubCommand::InterruptPrompt { ref session_id } if session_id == "s1"));
+        assert_eq!(command.request_id, "r1");
     }
 
     #[test]

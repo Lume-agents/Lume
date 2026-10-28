@@ -105,6 +105,12 @@ Node runs an id once and answers a repeat with `repeated: true`, so retrying aft
 32,000 characters. Inside the computer the Node hands the prompt to the app through a loopback port, authenticated with an
 HMAC over the request, using a secret the app writes to `node-bridge.json` in the Node's folder (readable only by the user).
 
+### Stopping an agent
+
+While a session of the other computer is running, the conversation view has a *Stop* button that ends the current turn
+(the session stays open). Stopping goes with sending prompts: it needs the `interrupt` scope and the prompts switch, and
+carries a request id and a time like the other requests.
+
 ### Answering a permission request
 
 When a session of the other computer waits for a permission, the conversation view shows what the agent asks for (the

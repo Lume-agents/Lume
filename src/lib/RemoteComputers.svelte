@@ -19,6 +19,7 @@
     setNodeAllowApprovals,
     loadRelayLumePermission,
     answerRelayLumePermission,
+    interruptRelayLumeSession,
     type RemotePermission,
     sendRelayLumePrompt,
     setNodeAllowPrompts,
@@ -57,6 +58,9 @@
   let permissionNote = $state("");
   let permissionFailed = $state(false);
   let answering = $state(false);
+  let stopping = $state(false);
+  // The same id until the stop is delivered, so a retry never stops a later turn.
+  let stopRequestId: string | null = null;
   // One request id per pending permission: a retry after a lost answer never acts twice.
   let approvalRequestIds: Record<string, string> = {};
   let promptText = $state("");
@@ -236,6 +240,26 @@
       permissionFailed = true;
     } finally {
       answering = false;
+    }
+  }
+
+  async function stopSession() {
+    const chat = openChat;
+    if (!chat || stopping) return;
+    stopping = true;
+    promptNote = "";
+    promptFailed = false;
+    stopRequestId ??= crypto.randomUUID();
+    try {
+      await interruptRelayLumeSession(chat.nodeId, chat.sessionId, stopRequestId);
+      stopRequestId = null;
+      promptNote = tr("Stopped.", "Parado.");
+      void refreshRelay(chat.nodeId);
+    } catch (error) {
+      promptFailed = true;
+      promptNote = friendlyPromptError(errorMessage(error));
+    } finally {
+      stopping = false;
     }
   }
 
@@ -626,6 +650,9 @@
             <div class="conversation-head">
               <button type="button" onclick={closeConversation}>← {tr("Back", "Voltar")}</button>
               <strong>{openChat.title}</strong>
+              {#if conversation?.session.status === "running"}
+                <button class="stop-session" type="button" disabled={!desktop || stopping} title={tr("Stop the turn this agent is running", "Parar o turno que este agente está rodando")} onclick={() => void stopSession()}>{stopping ? tr("Stopping…", "Parando…") : tr("Stop", "Parar")}</button>
+              {/if}
             </div>
             <div class="conversation-body" class:scrolling bind:this={chatScroller} onscroll={showScrollbar}>
               {#if conversation?.truncated}<p class="empty">{tr("Older messages are not shown.", "Mensagens mais antigas não aparecem.")}</p>{/if}
@@ -733,6 +760,7 @@
   .share-switch input:disabled + .track { opacity: 0.5; }
   .share-switch > span { display: grid; gap: 2px; min-width: 0; }
   .share-switch strong { white-space: normal; }
+  .stop-session { margin-left: auto; color: #c0645e; border-color: color-mix(in srgb, #c0645e 40%, var(--line)); }
   .permission-card { padding: 9px 10px; display: grid; gap: 6px; border: 1px solid color-mix(in srgb, #d6a441 45%, var(--line)); border-radius: 10px; background: color-mix(in srgb, #d6a441 10%, transparent); }
   .permission-card[data-risk="high"] { border-color: color-mix(in srgb, #c0645e 55%, var(--line)); background: color-mix(in srgb, #c0645e 10%, transparent); }
   .permission-card small { color: var(--muted); font-weight: 650; }

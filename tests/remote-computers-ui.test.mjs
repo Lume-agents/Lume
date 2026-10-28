@@ -65,6 +65,7 @@ function fixture() {
         return { permission: window.__permission ?? null };
       }
       if (command === "answer_relay_lume_permission") { window.__permission = null; window.__needsPermission = false; return { accepted: true }; }
+      if (command === "interrupt_relay_lume_session") { window.__stopped = (window.__stopped ?? 0) + 1; return { accepted: true }; }
       if (command === "get_node_allow_approvals") return window.__approvals ?? false;
       if (command === "set_node_allow_approvals") { window.__approvals = args.enabled; return args.enabled; }
       if (command === "get_node_allow_prompts") return window.__prompts ?? false;
@@ -196,6 +197,12 @@ try {
   await wait("!document.querySelector('.permission-card')");
   const answered = await evaluate("window.__calls.filter(([command]) => command === 'answer_relay_lume_permission').map(([, args]) => args)");
   assert.deepEqual([answered.length, answered[0].permissionId, answered[0].action], [1, "perm-1", "allow_once"]);
+  // A running session can be stopped from here.
+  await evaluate("document.querySelector('.stop-session').click()");
+  await wait("window.__stopped === 1");
+  const stopped = await evaluate("window.__calls.filter(([command]) => command === 'interrupt_relay_lume_session').map(([, args]) => args)");
+  assert.equal(stopped[0].sessionId, "a");
+  assert.ok(stopped[0].requestId.length >= 8);
   await evaluate("Array.from(document.querySelectorAll('.conversation-head button')).find((button) => /Voltar/.test(button.textContent)).click()");
   await wait("document.querySelectorAll('.session-row').length === 2");
   // The owner's switch.

@@ -645,7 +645,7 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
             match node_pairing::accept_pairing(
                 &state.directory,
                 &request,
-                &[NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt, NodeScope::Approve],
+                &[NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt, NodeScope::Approve, NodeScope::Interrupt],
                 now_millis(),
             ) {
                 Ok(client) => {
@@ -662,7 +662,7 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                 &state.directory,
                 &state.server_identity.node_id,
                 &statement,
-                &[NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt, NodeScope::Approve],
+                &[NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt, NodeScope::Approve, NodeScope::Interrupt],
                 now_millis(),
             ) {
                 Ok(ticket) => json_response(200, serde_json::to_value(ticket).unwrap_or(Value::Null)),

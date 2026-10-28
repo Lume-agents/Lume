@@ -1773,6 +1773,16 @@ async fn answer_relay_lume_permission(node_id: String, session_id: String, permi
     .map_err(|error| error.to_string())?
 }
 
+/// Stops the turn a session of a computer paired through the Relay is running, when its owner allows prompts.
+#[tauri::command]
+async fn interrupt_relay_lume_session(node_id: String, session_id: String, request_id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        node_relay::interrupt_session(&node_service::default_state_directory()?, &node_id, &session_id, &request_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 fn get_node_allow_approvals() -> Result<bool, String> {
     Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.allow_approvals)
@@ -3685,6 +3695,7 @@ pub fn run() {
             get_relay_lume_session,
             send_relay_lume_prompt,
             get_relay_lume_permission,
+            interrupt_relay_lume_session,
             answer_relay_lume_permission,
             get_node_allow_approvals,
             set_node_allow_approvals,

@@ -15,8 +15,14 @@
   import type { AgentSession } from "$lib/domain";
   import { commitRepository, getGitHubAccount, getRepositoryDiff, getSessionGitHub, observeRepository, openGitHub, repositoryError, type GitHubAccountSnapshot, type GitHubRepoSnapshot, type RepositoryDiff, type RepositoryState } from "$lib/repositories";
 
-  let { session, language = "en", compact = false, onOpenCommitFile } = $props<{ session: AgentSession; language?: "en" | "pt-BR"; compact?: boolean; onOpenCommitFile?: (commit: { oid: string; subject: string }, path: string) => void }>();
+  let { session, language = "en", compact = false, onOpenCommitFile, onOpenWorkingFile } = $props<{ session: AgentSession; language?: "en" | "pt-BR"; compact?: boolean; onOpenCommitFile?: (commit: { oid: string; subject: string }, path: string) => void; onOpenWorkingFile?: (path: string) => void }>();
   let focusCommit = $state<string | null>(null);
+  // In the Workspace a changed file opens the review center beside the inspector; elsewhere its diff shows here.
+  function openWorkingFile(path: string) {
+    if (!onOpenWorkingFile) { void showDiff(path); return; }
+    previewPath = path;
+    onOpenWorkingFile(path);
+  }
   let repository = $state<RepositoryState>({ loading: true, value: null, error: "" });
   let github = $state<GitHubRepoSnapshot | null>(null);
   let githubLoading = $state(false);
@@ -236,15 +242,6 @@
       <div class="change-summary"><span><strong>{local.staged}</strong>{tr("staged", local.staged === 1 ? "preparado" : "preparados")}</span><span><strong>{local.modified}</strong>{tr("modified", local.modified === 1 ? "modificado" : "modificados")}</span><span><strong>{local.untracked}</strong>{tr("new", local.untracked === 1 ? "novo" : "novos")}</span>{#if local.conflicts}<span class="conflict"><strong>{local.conflicts}</strong>{tr("conflicts", "conflitos")}</span>{/if}</div>
       <p class="source-note">{tr("Shared working tree · not attributed to this chat", "Árvore de trabalho compartilhada · sem atribuição a este chat")}</p>
       {#if !local.files.length}<p class="empty-list"><LumeIcon name="check" size={18} />{tr("Working tree is clean.", "Árvore de trabalho limpa.")}</p>{/if}
-      <div class="repository-list">{#each local.files.slice(0, fileLimit) as file (file.path)}
-        {@const included = ticked.includes(file.path)}
-        <div class="file-row" class:excluded={!included && !file.conflict}>
-        <button type="button" class:selected={previewPath === file.path} onclick={() => void showDiff(file.path)} title={file.path} aria-pressed={previewPath === file.path}>
-          <FileStatusMark status={workingStatus(file)} {language} /><FileTypeIcon path={file.path} size={15} /><span class="file-copy"><strong>{fileName(file.path)}</strong>{#if fileDirectory(file.path)}<small>{fileDirectory(file.path)}</small>{/if}</span>
-        </button>
-        {#if !file.conflict}<button class="include-toggle" type="button" disabled={committing} title={included ? tr("Leave out of the commit", "Deixar fora do commit") : tr("Include in the commit", "Incluir no commit")} aria-label={(included ? tr("Leave out of the commit: ", "Deixar fora do commit: ") : tr("Include in the commit: ", "Incluir no commit: ")) + file.path} aria-pressed={included} onclick={() => toggleTicked(file.path)}><LumeIcon name={included ? "minus" : "plus"} size={12} /></button>{/if}
-        </div>
-      {/each}</div>
       {#if local.files.length}
         <section class="commit-box" aria-label={tr("Commit", "Commit")}>
           <div class="commit-head"><button class="text-action" type="button" disabled={committing} onclick={toggleAllTicked}>{ticked.length === local.files.filter((file) => !file.conflict).length ? tr("Clear selection", "Limpar seleção") : tr("Select all", "Selecionar tudo")}</button><small>{ticked.length}/{local.files.length}</small></div>
@@ -254,8 +251,17 @@
           {#if commitDone}<p class="commit-done" role="status"><LumeIcon name="check" size={13} />{tr("Committed", "Commit criado")} · {commitDone}<br /><small>{tr("Nothing was pushed.", "Nada foi enviado ao remoto.")}</small></p>{/if}
         </section>
       {/if}
+      <div class="repository-list">{#each local.files.slice(0, fileLimit) as file (file.path)}
+        {@const included = ticked.includes(file.path)}
+        <div class="file-row" class:excluded={!included && !file.conflict}>
+        <button type="button" class:selected={previewPath === file.path} onclick={() => openWorkingFile(file.path)} title={file.path} aria-pressed={previewPath === file.path}>
+          <FileStatusMark status={workingStatus(file)} {language} /><FileTypeIcon path={file.path} size={15} /><span class="file-copy"><strong>{fileName(file.path)}</strong>{#if fileDirectory(file.path)}<small>{fileDirectory(file.path)}</small>{/if}</span>
+        </button>
+        {#if !file.conflict}<button class="include-toggle" type="button" disabled={committing} title={included ? tr("Leave out of the commit", "Deixar fora do commit") : tr("Include in the commit", "Incluir no commit")} aria-label={(included ? tr("Leave out of the commit: ", "Deixar fora do commit: ") : tr("Include in the commit: ", "Incluir no commit: ")) + file.path} aria-pressed={included} onclick={() => toggleTicked(file.path)}><LumeIcon name={included ? "minus" : "plus"} size={12} /></button>{/if}
+        </div>
+      {/each}</div>
       {#if local.files.length > fileLimit}<button class="text-action" type="button" onclick={() => (fileLimit += 100)}>{tr("Show more files", "Mostrar mais arquivos")} · {local.files.length - fileLimit}</button>{/if}
-      {#if previewPath}
+      {#if previewPath && !onOpenWorkingFile}
         <section class="diff-preview"><header><FileTypeIcon path={previewPath} size={14} /><strong title={previewPath}>{fileName(previewPath)}</strong><button class="icon-button" type="button" aria-label={tr("Close diff", "Fechar diff")} onclick={() => { previewGeneration += 1; previewPath = ""; preview = null; }}><LumeIcon name="close" size={13} /></button></header>
           {#if previewLoading}<p class="empty-list" role="status">{tr("Reading changes…", "Lendo mudanças…")}</p>
           {:else if previewError}{#if !bannerReporter}<p class="inline-error" role="alert">{previewError}</p>{/if}
@@ -347,14 +353,14 @@
   .change-summary strong { color: var(--workspace-strong); font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
   .conflict, .failed { color: #c36c60; }
   .tab-body { min-width: 0; }
-  .repository-list { display: grid; gap: 2px; margin-inline: -5px; }
+  .repository-list { display: grid; gap: 2px; margin-inline: -3px; }
   .file-row { position: relative; display: flex; align-items: center; gap: 2px; transition: opacity .18s ease; }
   .file-row > button:first-child { flex: 1; min-width: 0; }
   .file-row.excluded > button:first-child { opacity: .5; }
   .include-toggle { position: absolute; right: 6px; width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-raised, var(--workspace-bg)); opacity: 0; cursor: pointer; transition: opacity .15s ease, color .15s ease; }
   .file-row:hover .include-toggle, .include-toggle:focus-visible, .file-row.excluded .include-toggle { opacity: 1; }
   .include-toggle:hover { color: var(--workspace-accent); }
-  .commit-box { margin-top: 10px; padding: 9px; display: grid; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }
+  .commit-box { margin: 2px 0 10px; padding: 9px; display: grid; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }
   .commit-head { display: flex; align-items: center; justify-content: space-between; color: var(--workspace-muted); font-size: 10px; }
   .commit-box textarea { box-sizing: border-box; width: 100%; padding: 7px 9px; resize: vertical; border: 1px solid var(--workspace-line); border-radius: 8px; outline: 0; color: var(--workspace-strong); background: var(--workspace-raised); font: inherit; font-size: 11px; line-height: 1.45; }
   .commit-box textarea:focus { border-color: var(--workspace-accent); }
@@ -367,9 +373,7 @@
   .repository-list .file-row > button:first-child { width: 100%; min-width: 0; min-height: 30px; display: flex; align-items: center; gap: 7px; padding: 4px 34px 4px 7px; border: 1px solid transparent; border-radius: 7px; color: var(--workspace-text); background: transparent; text-align: left; transition: background-color .15s ease, border-color .15s ease; }
   .repository-list .file-row > button:first-child:hover { background: var(--workspace-subtle); }
   .repository-list .file-row > button.selected { border-color: color-mix(in srgb, var(--workspace-accent) 60%, transparent); background: var(--workspace-accent-soft); }
-  .file-copy { min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; }
-  .file-copy strong { flex: 0 1 auto; }
-  .file-copy small { min-width: 0; flex: 1 1 0; }
+  .file-copy { min-width: 0; flex: 1; display: grid; gap: 1px; }
   .file-copy strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
   .file-copy small { color: var(--workspace-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-status { flex: 0 0 auto; color: var(--workspace-muted); font-size: 9px; }

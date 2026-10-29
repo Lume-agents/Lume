@@ -56,7 +56,8 @@
     | "minus"
     | "stash"
     | "rebase"
-    | "dot";
+    | "dot"
+    | "folder-plus";
 </script>
 
 <script lang="ts">
@@ -129,6 +130,10 @@
   {:else if name === "rebase"}
     <circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="9" r="2" />
     <path d="M6 7v10M18 11v1a4 4 0 0 1-4 4H8.5" />
+  {:else if name === "folder-plus"}
+    <path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h4l2 2h3" />
+    <path d="M3.5 7.5v10a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2V12" />
+    <path d="M19 3v6M16 6h6" />
   {:else if name === "dot"}
     <circle cx="12" cy="12" r="4" fill="currentColor" stroke="none" />
   {:else if name === "warning"}

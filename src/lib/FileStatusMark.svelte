@@ -4,11 +4,11 @@
 
   // A file's state as a small colored mark: green new, amber modified, red deleted, blue renamed.
   let { status, language = "en" }: { status: FileStatus; language?: "en" | "pt-BR" } = $props();
-  const icons: Record<FileStatus, LumeIconName> = { added: "plus", modified: "dot", deleted: "minus", renamed: "arrow-right", conflict: "warning", staged: "check" };
+  const icons: Record<FileStatus, LumeIconName> = { added: "plus", modified: "rename", deleted: "minus", renamed: "arrow-right", conflict: "warning", staged: "check" };
   const label = $derived(statusLabel(status, language === "pt-BR"));
 </script>
 
-<span class="mark {status}" title={label} role="img" aria-label={label}><LumeIcon name={icons[status]} size={status === "modified" ? 10 : 11} strokeWidth={2.2} /></span>
+<span class="mark {status}" title={label} role="img" aria-label={label}><LumeIcon name={icons[status]} size={11} strokeWidth={2.2} /></span>
 
 <style>
   .mark { width: 17px; height: 17px; flex: 0 0 17px; display: inline-grid; place-items: center; border-radius: 5px; }

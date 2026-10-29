@@ -16,6 +16,7 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-available-monitors",
     "core:webview:allow-set-webview-size",
+    "core:webview:allow-set-webview-zoom",
     "dialog:allow-open",
     "dialog:allow-save",
     "clipboard-manager:allow-read-image",

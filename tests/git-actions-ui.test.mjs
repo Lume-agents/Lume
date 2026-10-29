@@ -25,7 +25,8 @@ assert.match(actions, /Stash and switch/, "the switch offers a stash");
 // The menus float and animate in and out.
 assert.match(actions, /class="menu branches"[^>]*transition:fly/);
 assert.match(actions, /class="menu actions"[^>]*transition:fly/);
-assert.match(graph, /class="detail-wrap" transition:slide/, "a commit opens and closes with a transition");
+assert.match(graph, /class="detail" transition:slide/, "a commit opens and closes with a transition");
+assert.ok(!/class="people"/.test(graph) && !/detail\.email/.test(graph), "an open commit keeps its own row, without a second author block or the e-mail");
 assert.match(panel, /\{#key tab\}\s*<div class="tab-body" in:fly/, "a tab change animates");
 
 // What moves files waits while an agent works in the folder, in the bar and in the backend.

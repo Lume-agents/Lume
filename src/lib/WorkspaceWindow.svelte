@@ -32,6 +32,7 @@
   import { codeFonts, ensureCustomFonts, importCustomFont, listCustomFonts, removeCustomFont, uiFonts, type CustomFont } from "$lib/fonts";
   import { appearanceAttributes, appearanceThemes, backdropBackground, backdropEffects, normalizeBackdrop, workspaceCanvas } from "$lib/appearance";
   import AppearanceSettings from "$lib/AppearanceSettings.svelte";
+  import { applyInterfaceScale, interfaceScaleOptions } from "$lib/interfaceScale";
   import LumeSelect from "$lib/LumeSelect.svelte";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
@@ -165,7 +166,7 @@
   // Only what is needed to paint the loading screen in the user's own look is remembered locally.
   const appearanceSnapshotKey = "lume:appearance-snapshot:v1";
   const appearanceKeys = [
-    "language", "darkMode", "appearanceTheme", "accentColor", "accentOpacity", "darkBase", "lightBase", "uiFont", "codeFont",
+    "language", "darkMode", "appearanceTheme", "accentColor", "accentOpacity", "darkBase", "lightBase", "uiFont", "codeFont", "interfaceScale",
     "workspaceBackgroundColor", "workspaceBackgroundOpacity", "workspaceLightBackgroundColor", "workspaceLightBackgroundOpacity",
     "workspaceDarkBackgroundColor", "workspaceDarkBackgroundOpacity", "customDarkSurfaces", "customLightSurfaces", "backdrop",
   ] as const satisfies readonly (keyof Preferences)[];
@@ -176,6 +177,7 @@
     } catch { return {}; }
   }
   let preferences = $state<Preferences>({ ...structuredClone(defaultPreferences), ...savedAppearance() });
+  $effect(() => { void applyInterfaceScale(preferences.interfaceScale); });
   $effect(() => {
     const snapshot = Object.fromEntries(appearanceKeys.map((key) => [key, preferences[key]]));
     try { localStorage.setItem(appearanceSnapshotKey, JSON.stringify(snapshot)); } catch { /* The loading screen then falls back to the defaults. */ }
@@ -306,6 +308,7 @@
   // A commit opened from the repository history shows its review over the chats, beside the open inspector.
   let reviewCommit = $state<{ oid: string; subject: string } | null>(null);
   let reviewOverlay = $state(false);
+  let reviewWorktree = $state(false);
   let inspectorBeforeReview = $state(false);
   let splitRatio = $state(0.5);
   let tertiaryRatio = $state(0.34);
@@ -1719,6 +1722,14 @@
     }
   }
 
+  let reloadingAgents = $state(false);
+  async function reloadAgents() {
+    if (reloadingAgents) return;
+    reloadingAgents = true;
+    try { await Promise.all([refreshSessionsAfterContextAction(), new Promise((resolve) => setTimeout(resolve, 450))]); }
+    finally { reloadingAgents = false; }
+  }
+
   async function refreshSessionsAfterContextAction() {
     try {
       const snapshot = await loadHubSnapshot();
@@ -1736,6 +1747,7 @@
     reviewInitialPath = path;
     reviewCommit = null;
     reviewOverlay = false;
+    reviewWorktree = false;
     if (!reviewOpen) inspectorBeforeReview = inspectorOpen;
     inspectorOpen = false;
     reviewOpen = true;
@@ -1745,6 +1757,19 @@
     if (!focusedSession) return;
     if (reviewOpen && !reviewOverlay) closeReview();
     reviewCommit = commit;
+    reviewWorktree = false;
+    reviewInitialPath = path;
+    reviewOverlay = true;
+    reviewWide = false;
+    inspectorBeforeReview = false;
+    reviewOpen = true;
+  }
+
+  function openWorkingReview(path: string) {
+    if (!focusedSession) return;
+    if (reviewOpen && !reviewOverlay) closeReview();
+    reviewCommit = null;
+    reviewWorktree = true;
     reviewInitialPath = path;
     reviewOverlay = true;
     reviewWide = false;
@@ -1763,6 +1788,7 @@
     reviewOpen = false;
     reviewInitialPath = undefined;
     reviewCommit = null;
+    reviewWorktree = false;
     if (inspectorBeforeReview) inspectorOpen = true;
     inspectorBeforeReview = false;
   }
@@ -2713,16 +2739,19 @@
     </header>
 
     <div class:searching={searchOpen} class="session-heading">
+      <button class="search-toggle" class:active={searchOpen} type="button" aria-label={tr("Search agents", "Buscar agentes")} title={tr("Search agents · /", "Buscar agentes · /")} onclick={() => (searchOpen ? closeAgentSearch() : void openAgentSearch())}><LumeIcon name="search" size={16} /></button>
+      <div class="heading-fold" inert={searchOpen}>
+        {#if !sidebarCollapsed}<button class="heading-icon" type="button" aria-label={tr("New group", "Novo grupo")} title={tr("New group", "Novo grupo")} onclick={createSidebarGroup}><LumeIcon name="folder-plus" size={16} /></button>{/if}
+        <strong>{tr("Agents", "Agentes")}</strong>
+      </div>
       {#if searchOpen}
-        <div class="search-inline">
+        <div class="search-inline" in:fly={{ x: -8, duration: motionDuration(200), easing: cubicOut }}>
           <input bind:this={searchInput} bind:value={query} placeholder={tr("Search agents", "Buscar agentes")} aria-label={tr("Search agents", "Buscar agentes")} />
           <button type="button" aria-label={tr("Close agent search", "Fechar busca de agentes")} onclick={closeAgentSearch}><LumeIcon name="close" size={14} /></button>
         </div>
-      {:else}
-        <button class="search-toggle" type="button" aria-label={tr("Search agents", "Buscar agentes")} title={tr("Search agents · /", "Buscar agentes · /")} onclick={() => void openAgentSearch()}><LumeIcon name="search" size={16} /></button>
-        <strong>{tr("Agents", "Agentes")}</strong>
-        <span>{orderedSessions.length}</span>
       {/if}
+      <div class="heading-actions" inert={searchOpen}>
+      <button class="heading-icon refresh-agents" class:spinning={reloadingAgents} type="button" disabled={reloadingAgents} aria-label={tr("Reload agents", "Recarregar agentes")} title={tr("Reload agents", "Recarregar agentes")} onclick={() => void reloadAgents()}><LumeIcon name="refresh" size={15} /></button>
       <div class="session-launcher" data-tour="new-chat" bind:this={launcherRoot}>
         <button class:active={launcherOpen} type="button" aria-label={launcherOpen ? tr("Close session launcher", "Fechar iniciador de sessões") : tr("New or resume chat", "Novo chat ou retomar")} title={launcherOpen ? tr("Close session launcher", "Fechar iniciador de sessões") : tr("New or resume chat", "Novo chat ou retomar")} aria-controls="workspace-session-launcher" aria-expanded={launcherOpen} onclick={() => void toggleLauncher()}><LumeIcon name="plus" size={16} /></button>
         {#if launcherOpen}
@@ -2777,6 +2806,7 @@
           </div>
         {/if}
       </div>
+      </div>
     </div>
 
     <div class="session-tools">
@@ -2785,9 +2815,6 @@
       <button class:active={filter === "active"} type="button" onclick={() => filter = "active"}>{tr("Active", "Ativos")}</button>
       <button class:active={filter === "attention"} type="button" onclick={() => filter = "attention"}>{tr("Attention", "Atenção")}</button>
     </div>
-    {#if !sidebarCollapsed}
-      <button class="new-group" type="button" onclick={createSidebarGroup}><LumeIcon name="plus" size={12} />{tr("New group", "Novo grupo")}</button>
-    {/if}
     </div>
 
     <nav class:releasing={sidebarReleaseIntent} class="session-list" data-tour="agents" aria-label={tr("Agent sessions", "Sessões de agentes")} ondragover={trackSidebarRelease} ondrop={dropSidebarRelease}>
@@ -2990,6 +3017,10 @@
             {#if settingsSections.appearance}
             <AppearanceSettings {preferences} {language} dark={darkMode} disabled={settingsSaving} onpatch={savePreferencePatch}>
               {#snippet typography()}
+            <div class="workspace-setting-row font-setting">
+              <span><strong>{tr("Interface size", "Tamanho da interface")}</strong></span>
+              <LumeSelect ariaLabel={tr("Interface size", "Tamanho da interface")} value={String(preferences.interfaceScale ?? 100)} minWidth={150} options={interfaceScaleOptions(language)} onValueChange={(value) => void savePreferencePatch({ interfaceScale: Number(value) })} />
+            </div>
             <div class="workspace-setting-row font-setting">
               <span><strong>{tr("Interface font", "Fonte da interface")}</strong></span>
               <LumeSelect ariaLabel={tr("Interface font", "Fonte da interface")} value={preferences.uiFont} minWidth={150} options={fontOptions(uiFonts)} onValueChange={(value) => void savePreferencePatch({ uiFont: value })} />
@@ -3539,14 +3570,14 @@
     <div class:open={inspectorOpen && !stageTakeover} class="inspector-shell" aria-hidden={!inspectorOpen || stageTakeover} inert={!inspectorOpen || stageTakeover}>
       {#if inspectorOpen}
         <div class="inspector-content" in:fade={{ duration: motionDuration(140) }} out:fade={{ duration: motionDuration(100) }}>
-          <WorkspaceInspector session={focusedSession} {language} {loading} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} onOpenCommitFile={openCommitReview} />
+          <WorkspaceInspector session={focusedSession} {language} {loading} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} onOpenCommitFile={openCommitReview} onOpenWorkingFile={openWorkingReview} />
         </div>
       {/if}
     </div>
     <div class:open={reviewOpen && !stageTakeover} class="review-shell" aria-hidden={!reviewOpen || stageTakeover} inert={!reviewOpen || stageTakeover}>
       {#if reviewOpen && focusedSession}
         <div class="review-content" in:fly={{ x: 22, duration: motionDuration(220), easing: cubicOut }} out:fly={{ x: 16, duration: motionDuration(145), easing: cubicOut }}>
-          <WorkspaceReviewCenter session={focusedSession} {language} initialPath={reviewInitialPath} commit={reviewCommit} wide={reviewWide} onToggleWide={reviewOverlay ? undefined : () => (reviewWide = !reviewWide)} onClose={closeReview} />
+          <WorkspaceReviewCenter session={focusedSession} {language} initialPath={reviewInitialPath} commit={reviewCommit} worktree={reviewWorktree} wide={reviewWide} onToggleWide={reviewOverlay ? undefined : () => (reviewWide = !reviewWide)} onClose={closeReview} />
         </div>
       {/if}
     </div>
@@ -3759,7 +3790,15 @@
   .search-inline button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .search-toggle { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
   .search-toggle:hover, .search-toggle.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
-  .session-launcher { position: relative; margin-left: auto; }
+  .session-launcher { position: relative; }
+  .heading-fold { min-width: 0; max-width: 220px; display: flex; align-items: center; gap: 4px; overflow: hidden; white-space: nowrap; transition: max-width 220ms cubic-bezier(.16, 1, .3, 1), opacity 160ms ease; }
+  .heading-actions { margin-left: auto; max-width: 90px; display: flex; align-items: center; gap: 2px; transition: max-width 220ms cubic-bezier(.16, 1, .3, 1), opacity 160ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1); }
+  .session-heading.searching .heading-fold { max-width: 0; opacity: 0; }
+  .session-heading.searching .heading-actions { max-width: 0; margin-left: 0; overflow: hidden; opacity: 0; transform: translateX(8px); pointer-events: none; }
+  .heading-icon { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
+  .heading-icon:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .heading-icon.spinning :global(svg) { animation: heading-spin 700ms linear infinite; }
+  @keyframes heading-spin { to { transform: rotate(360deg); } }
   .session-launcher > button { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 120ms ease, background-color 120ms ease, transform 120ms cubic-bezier(.16, 1, .3, 1); }
   .session-launcher > button:hover, .session-launcher > button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .session-launcher > button:active { transform: scale(.94); }
@@ -3794,8 +3833,6 @@
   .session-filters button:hover { color: var(--workspace-strong); }
   .session-filters button.active { color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(26, 42, 34, .08); }
   .session-filters button:active { transform: scale(.97); }
-  .new-group { margin: -3px 11px 8px; padding: 0 8px; height: 24px; display: flex; align-items: center; gap: 6px; border: 1px dashed var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 9px; font-weight: 700; cursor: pointer; }
-  .new-group:hover { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); }
   .group-heading { margin: 9px 0 3px; padding: 2px 4px 2px 2px; display: flex; align-items: center; gap: 4px; border-radius: 8px; color: var(--workspace-faint); transition: background 120ms ease; }
   .group-heading { cursor: grab; }
   .group-heading.dragging-section { opacity: .45; }
@@ -3970,14 +4007,14 @@
   .workspace.sidebar-collapsed .brand-copy,
   .workspace.sidebar-collapsed .session-copy { display: none; }
   .workspace.sidebar-collapsed .session-heading > .search-toggle,
-  .workspace.sidebar-collapsed .session-heading > strong,
-  .workspace.sidebar-collapsed .session-heading > span,
+  .workspace.sidebar-collapsed .heading-fold,
+  .workspace.sidebar-collapsed .refresh-agents,
   .workspace.sidebar-collapsed .session-filters { display: none; }
   .workspace.sidebar-collapsed .header-selectors,
   .workspace.sidebar-collapsed .header-utilities { margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 3px; }
   .workspace.sidebar-collapsed .header-selectors { padding-top: 10px; }
   .workspace.sidebar-collapsed .session-heading { padding: 5px 0 9px; flex-direction: column; justify-content: center; gap: 0; border-bottom: 1px solid var(--workspace-line); }
-  .workspace.sidebar-collapsed .session-launcher { margin: 0; }
+  .workspace.sidebar-collapsed .session-launcher, .workspace.sidebar-collapsed .heading-actions { margin: 0; }
   .workspace.sidebar-collapsed .session-list { padding: 7px 3px 12px; }
   .workspace.sidebar-collapsed .session-row { height: 44px; }
   .workspace.sidebar-collapsed .session-select { min-height: 44px; padding: 5px; gap: 0; align-items: center; justify-content: center; }

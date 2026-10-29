@@ -73,6 +73,7 @@ export const defaultPreferences: Preferences = {
   lightBase: "theme",
   uiFont: "default",
   codeFont: "default",
+  interfaceScale: 100,
   workspaceBackgroundColor: undefined,
   workspaceBackgroundOpacity: 96,
   workspaceLightBackgroundColor: undefined,

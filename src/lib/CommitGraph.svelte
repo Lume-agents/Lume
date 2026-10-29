@@ -175,8 +175,8 @@
         {@const row = rows[index]}
         {@const open = selected === commit.oid && !readonly}
         <li class:selected={open} data-oid={commit.oid}>
-          <button type="button" class="commit" aria-expanded={readonly ? undefined : open} title={readonly ? tr("Open in History", "Abrir no Histórico") : undefined} onclick={() => void select(commit.oid)}>
-            <svg class="graph" width={graphPixels} height={ROW} viewBox={`0 0 ${graphPixels} ${ROW}`} aria-hidden="true">
+          <div class="graph-col" aria-hidden="true">
+            <svg class="graph" width={graphPixels} height={ROW} viewBox={`0 0 ${graphPixels} ${ROW}`}>
               {#each row.through as lane (lane)}<line x1={x(lane)} y1="0" x2={x(lane)} y2={ROW} stroke={color(lane)} />{/each}
               {#each row.from as lane (lane)}
                 {#if lane === row.lane}<line x1={x(lane)} y1="0" x2={x(lane)} y2={ROW / 2} stroke={color(lane)} />
@@ -188,30 +188,29 @@
               {/each}
               <circle cx={x(row.lane)} cy={ROW / 2} r={commit.parents.length > 1 ? 3.2 : 4} fill={commit.parents.length > 1 ? "var(--workspace-bg, #1c1f1e)" : color(row.lane)} stroke={color(row.lane)} stroke-width="1.8" />
             </svg>
-            <AuthorAvatar name={commit.author} email={commit.email} url={avatars[commit.email]} size={20} />
-            <span class="copy">
-              <strong>{commit.subject}</strong>
-              <span class="meta-row">
-                {#each commit.refs.slice(0, 3) as name (name)}<span class="ref" class:current={name === branch && isHead(commit.oid)} class:tag={name.startsWith("tag: ")}>{refName(name)}</span>{/each}
-                {#if commit.refs.length > 3}<span class="ref">+{commit.refs.length - 3}</span>{/if}
-                <small>{commit.oid.slice(0, 7)} · {when(commit.at)}</small>
+            {#if open}
+              <!-- The lanes that go on below the commit run beside its open details. -->
+              <div class="gutter" style:width="{graphPixels}px">{#each below(index) as lane (lane)}<i style:left="{x(lane) - 0.9}px" style:background={color(lane)}></i>{/each}</div>
+            {/if}
+          </div>
+          <div class="body">
+            <button type="button" class="commit" class:open aria-expanded={readonly ? undefined : open} title={readonly ? tr("Open in History", "Abrir no Histórico") : undefined} onclick={() => void select(commit.oid)}>
+              <AuthorAvatar name={commit.author} email={commit.email} url={avatars[commit.email]} size={20} />
+              <span class="copy">
+                <strong>{commit.subject}</strong>
+                <span class="meta-row">
+                  {#each (open ? commit.refs : commit.refs.slice(0, 3)) as name (name)}<span class="ref" class:current={name === branch && isHead(commit.oid)} class:tag={name.startsWith("tag: ")}>{refName(name)}</span>{/each}
+                  {#if !open && commit.refs.length > 3}<span class="ref">+{commit.refs.length - 3}</span>{/if}
+                  <small>{#if open}{commit.author} · {fullDate(commit.at)}{:else}{commit.oid.slice(0, 7)} · {when(commit.at)}{/if}</small>
+                </span>
               </span>
-            </span>
-            {#if !readonly}<span class="chevron" class:open aria-hidden="true"><LumeIcon name="chevron-down" size={12} /></span>{/if}
-          </button>
-          {#if open}
-            <div class="detail-wrap" transition:slide={{ duration: 200, easing: cubicOut }}>
-              <svg class="gutter" width={graphPixels} aria-hidden="true">
-                {#each below(index) as lane (lane)}<line x1={x(lane)} y1="0" x2={x(lane)} y2="100%" stroke={color(lane)} />{/each}
-              </svg>
-              <div class="detail">
+              {#if !readonly}<span class="chevron" class:open aria-hidden="true"><LumeIcon name="chevron-down" size={12} /></span>{/if}
+            </button>
+            {#if open}
+              <div class="detail" transition:slide={{ duration: 200, easing: cubicOut }}>
                 {#if detailError}<p class="inline-error" role="alert">{detailError}</p>
                 {:else if !detail}<p class="empty" role="status">{tr("Reading commit…", "Lendo commit…")}</p>
                 {:else}
-                  <div class="people">
-                    <AuthorAvatar name={detail.author} email={detail.email} url={avatars[detail.email]} size={30} />
-                    <span><strong>{detail.author}</strong><small>{detail.email}</small><small>{fullDate(detail.at)}</small></span>
-                  </div>
                   {#if detail.committer !== detail.author || detail.committedAt !== detail.at}
                     <p class="committed">{tr("Committed by", "Commit feito por")} <b>{detail.committer}</b> · {fullDate(detail.committedAt)}</p>
                   {/if}
@@ -221,10 +220,6 @@
                     {#if detail.parents.length}
                       <dt>{detail.parents.length > 1 ? tr("Parents", "Pais") : tr("Parent", "Pai")}</dt>
                       <dd>{#each detail.parents as parent (parent)}<button type="button" class="parent" title={parent} disabled={!loaded(parent)} onclick={() => { void select(parent); requestAnimationFrame(() => list?.querySelector(`[data-oid="${parent}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" })); }}>{parent.slice(0, 7)}</button>{/each}</dd>
-                    {/if}
-                    {#if commit.refs.length}
-                      <dt>{tr("Refs", "Refs")}</dt>
-                      <dd class="ref-list">{#each commit.refs as name (name)}<span class="ref" class:tag={name.startsWith("tag: ")}>{refName(name)}</span>{/each}</dd>
                     {/if}
                     {#if totals}
                       <dt>{tr("Changes", "Mudanças")}</dt>
@@ -236,7 +231,7 @@
                     {#each detail.files as file (file.path)}
                       <li><button type="button" class:active={filePath === file.path} onclick={() => void openFile(commit, file.path)} title={file.path}>
                         <FileStatusMark status={commitStatus(file.status)} {language} />
-                        <FileTypeIcon path={file.path} size={14} />
+                        <FileTypeIcon path={file.path} size={16} />
                         <span class="path"><span>{fileName(file.path)}</span>{#if fileFolder(file.path)}<small>{fileFolder(file.path)}</small>{/if}</span>
                         <span class="stat">{#if file.added !== null}<b class="plus">+{file.added}</b><b class="minus">−{file.removed ?? 0}</b>{:else}<b>{tr("binary", "binário")}</b>{/if}</span>
                       </button></li>
@@ -253,8 +248,8 @@
                   {/if}
                 {/if}
               </div>
-            </div>
-          {/if}
+            {/if}
+          </div>
         </li>
       {/each}
     </ol>
@@ -265,12 +260,20 @@
 <style>
   .history { min-width: 0; display: grid; gap: 6px; }
   .rows { margin: 0; padding: 0; list-style: none; }
-  .rows > li { border-radius: 8px; transition: background-color .18s ease; }
+  .rows > li { display: flex; align-items: stretch; border-radius: 8px; transition: background-color .18s ease; }
   .rows > li.selected { background: color-mix(in srgb, var(--workspace-accent) 7%, transparent); }
-  .commit { width: 100%; min-width: 0; padding: 0 6px 0 0; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 8px; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; transition: background-color .15s ease; }
+  .graph-col { flex: 0 0 auto; display: flex; flex-direction: column; }
+  .graph { flex: 0 0 auto; overflow: visible; }
+  .graph line, .graph path { stroke-width: 1.8; stroke-linecap: round; }
+  .gutter { position: relative; flex: 1 1 auto; }
+  .gutter i { position: absolute; top: 0; bottom: 0; width: 1.8px; border-radius: 1px; }
+  .body { min-width: 0; flex: 1; }
+  .commit { width: 100%; min-width: 0; min-height: 40px; padding: 0 6px 0 2px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 8px; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; transition: background-color .15s ease; }
   .commit:hover { background: color-mix(in srgb, var(--workspace-muted) 9%, transparent); }
-  .graph, .gutter { flex: 0 0 auto; overflow: visible; }
-  .graph line, .graph path, .gutter line { stroke-width: 1.8; stroke-linecap: round; }
+  .commit.open { padding-block: 8px 4px; align-items: flex-start; }
+  .commit.open .copy strong { white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
+  .commit.open .meta-row { flex-wrap: wrap; margin-top: 3px; }
+  .commit.open :global(.avatar) { margin-top: 1px; }
   .copy { min-width: 0; flex: 1; display: grid; gap: 0; }
   .meta-row { min-width: 0; display: flex; align-items: center; gap: 5px; }
   .copy strong { min-width: 0; overflow: hidden; color: var(--workspace-strong); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
@@ -281,14 +284,8 @@
   .ref { max-width: 45%; flex: 0 1 auto; overflow: hidden; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 35%, transparent); border-radius: 999px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 9%, transparent); font-size: 9px; font-weight: 650; line-height: 1.6; text-overflow: ellipsis; white-space: nowrap; }
   .ref.tag { color: #d6a441; border-color: rgba(214, 164, 65, .4); background: rgba(214, 164, 65, .1); }
   .ref.current { color: #fff; background: var(--workspace-accent); }
-  .detail-wrap { display: flex; align-items: stretch; overflow: hidden; }
-  .gutter { height: auto; align-self: stretch; }
-  .detail { min-width: 0; flex: 1; padding: 2px 8px 10px 2px; display: grid; gap: 8px; }
-  .people { display: flex; align-items: center; gap: 9px; }
-  .people span { min-width: 0; display: grid; }
-  .people strong { color: var(--workspace-strong); font-size: 11.5px; }
-  .people small, .committed { overflow: hidden; color: var(--workspace-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-  .committed { margin: 0; }
+  .detail { min-width: 0; padding: 2px 8px 12px 2px; display: grid; gap: 9px; }
+  .committed { margin: 0; overflow: hidden; color: var(--workspace-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   .committed b { color: var(--workspace-text); font-weight: 600; }
   .facts { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; align-items: center; font-size: 10px; }
   .facts dt { color: var(--workspace-muted); }
@@ -298,16 +295,15 @@
   .copy-hash, .parent { height: 20px; padding: 0 6px; display: inline-flex; align-items: center; border: 1px solid var(--workspace-line); border-radius: 6px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 9.5px; cursor: pointer; }
   .parent { font-family: ui-monospace, monospace; }
   .copy-hash:hover, .parent:hover { border-color: color-mix(in srgb, var(--workspace-accent) 45%, transparent); color: var(--workspace-accent); }
-  .ref-list .ref { max-width: 100%; }
   .message { margin: 0; padding: 8px 10px; border-radius: 8px; color: var(--workspace-text); background: color-mix(in srgb, var(--workspace-muted) 7%, transparent); font: inherit; font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
   .files { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
-  .files button { width: 100%; min-width: 0; padding: 4px 6px; display: flex; align-items: center; gap: 7px; border: 1px solid transparent; border-radius: 7px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 10.5px; text-align: left; cursor: pointer; transition: background-color .15s ease, border-color .15s ease; }
+  .files button { width: 100%; min-width: 0; min-height: 38px; padding: 5px 8px; display: flex; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: 7px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 11.5px; text-align: left; cursor: pointer; transition: background-color .15s ease, border-color .15s ease; }
   .files button:hover { background: color-mix(in srgb, var(--workspace-muted) 9%, transparent); }
   .files button.active { border-color: color-mix(in srgb, var(--workspace-accent) 55%, transparent); background: color-mix(in srgb, var(--workspace-accent) 10%, transparent); }
-  .path { min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; }
-  .path > span { flex: 0 0 auto; }
-  .path small { min-width: 0; overflow: hidden; color: var(--workspace-muted); font-size: 9.5px; text-overflow: ellipsis; }
-  .stat { display: flex; gap: 6px; font-size: 9.5px; font-variant-numeric: tabular-nums; }
+  .path { min-width: 0; flex: 1; display: grid; gap: 1px; }
+  .path > span, .path small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .path small { color: var(--workspace-muted); font-size: 9.5px; }
+  .stat { display: flex; gap: 6px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
   .plus { color: var(--workspace-accent); font-weight: 650; }
   .minus { color: #c36c60; font-weight: 650; }
   .diff { border: 1px solid var(--workspace-line); border-radius: 8px; overflow: hidden; background: var(--workspace-subtle); }

@@ -256,6 +256,8 @@ export interface Preferences {
   /** "default", a bundled font id, "system", or "custom:<id>". */
   uiFont: string;
   codeFont: string;
+  /** Interface size in percent (80–140); the chat has its own text size. */
+  interfaceScale: number;
   workspaceBackgroundColor?: string;
   workspaceBackgroundOpacity: number;
   workspaceLightBackgroundColor?: string;

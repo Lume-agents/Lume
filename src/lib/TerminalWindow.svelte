@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { applyInterfaceScale } from "$lib/interfaceScale";
   import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
   import "$lib/workspaceTokens.css";
   import { onMount, tick, untrack } from "svelte";
@@ -1582,6 +1583,7 @@
       customLightSurfaces = nextPreferences.customLightSurfaces ?? {};
       uiFont = nextPreferences.uiFont;
       codeFont = nextPreferences.codeFont;
+      void applyInterfaceScale(nextPreferences.interfaceScale);
       workflowGroups = nextPreferences.workflowGroups;
       workflowTerminals = nextWorkflowTerminals;
       displayBackend = nextDisplayBackend;
@@ -1680,6 +1682,7 @@
         customLightSurfaces = payload.customLightSurfaces ?? {};
         uiFont = payload.uiFont;
         codeFont = payload.codeFont;
+        void applyInterfaceScale(payload.interfaceScale);
         workflowGroups = payload.workflowGroups;
       });
       stopDockPreview = await listen<DockPreviewEvent>("lume://terminal-dock-preview", ({ payload }) => {

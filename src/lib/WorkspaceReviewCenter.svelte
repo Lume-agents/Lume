@@ -22,12 +22,14 @@
   type GitDiff = { diff: string; binary: boolean } | { error: string };
   const GIT_TURN = "git:worktree";
 
-  let { session, language = "en", initialPath, commit = null, wide = false, onToggleWide, onClose } = $props<{
+  let { session, language = "en", initialPath, commit = null, worktree = false, wide = false, onToggleWide, onClose } = $props<{
     session: HubSession;
     language?: Language;
     initialPath?: string;
     /** A commit from the repository history to review instead of a task. */
     commit?: { oid: string; subject: string } | null;
+    /** Opens on the git working tree's pending changes. */
+    worktree?: boolean;
     wide?: boolean;
     onToggleWide?: () => void;
     onClose: () => void;
@@ -191,6 +193,13 @@
   });
 
   // A commit opened from the history is shown at once, and its files are read from git.
+  let shownWorktree = false;
+  $effect(() => {
+    if (!worktree) { shownWorktree = false; return; }
+    if (shownWorktree) return;
+    shownWorktree = true;
+    selectedTurnId = GIT_TURN;
+  });
   $effect(() => {
     if (!commitTurn || commitTurn === shownCommit) return;
     shownCommit = commitTurn;

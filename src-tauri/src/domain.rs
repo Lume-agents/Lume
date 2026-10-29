@@ -785,6 +785,8 @@ pub struct Preferences {
     pub ui_font: String,
     /// Code and terminal font, with the same ids as the interface font.
     pub code_font: String,
+    /// Interface size in percent (80–140); the chat keeps its own text size.
+    pub interface_scale: u8,
     pub workspace_background_color: Option<String>,
     pub workspace_background_opacity: u8,
     pub workspace_light_background_color: Option<String>,
@@ -834,6 +836,7 @@ impl Default for Preferences {
             light_base: "theme".into(),
             ui_font: "default".into(),
             code_font: "default".into(),
+            interface_scale: 100,
             workspace_background_color: None,
             workspace_background_opacity: 96,
             workspace_light_background_color: None,

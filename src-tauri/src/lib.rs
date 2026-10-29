@@ -2477,6 +2477,7 @@ fn set_preferences(
     preferences.accent_opacity = preferences.accent_opacity.clamp(20, 100);
     preferences.workspace_background_opacity =
         preferences.workspace_background_opacity.clamp(35, 100);
+    preferences.interface_scale = preferences.interface_scale.clamp(80, 140);
     preferences.workspace_light_background_opacity = preferences
         .workspace_light_background_opacity
         .clamp(35, 100);

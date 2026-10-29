@@ -25,6 +25,7 @@
     onClose,
     onOpenReview,
     onOpenCommitFile,
+    onOpenWorkingFile,
     variant = "workspace",
     showCloseButton = true,
     section = $bindable("session"),
@@ -37,6 +38,7 @@
     onClose?: () => void;
     onOpenReview?: (path?: string) => void;
     onOpenCommitFile?: (commit: { oid: string; subject: string }, path: string) => void;
+    onOpenWorkingFile?: (path: string) => void;
     variant?: "workspace" | "orb";
     showCloseButton?: boolean;
     section?: "session" | "repository";
@@ -262,7 +264,7 @@
       <button type="button" class:active={section === "repository"} aria-pressed={section === "repository"} onclick={() => (section = "repository")}><LumeIcon name="repository" size={14} />{tr("Repository", "Repositório")}</button>
     </nav>
     {#if section === "repository"}
-      <div class="inspector-scroll" use:transientScrollbar in:fly={{ y: 8, duration: 200, easing: cubicOut }}><RepositoryPanel {session} {language} compact {onOpenCommitFile} /></div>
+      <div class="inspector-scroll" use:transientScrollbar in:fly={{ y: 8, duration: 200, easing: cubicOut }}><RepositoryPanel {session} {language} compact {onOpenCommitFile} {onOpenWorkingFile} /></div>
     {:else}
     <div class="inspector-scroll" use:transientScrollbar in:fly={{ y: 8, duration: 200, easing: cubicOut }}>
       {#if hasUsage(session.agent)}

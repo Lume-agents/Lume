@@ -408,7 +408,7 @@
   } | null = null;
   let pendingOverlayMove: { x: number; y: number } | null = null;
   let overlayMoveTask: Promise<void> | null = null;
-  let systemDark = $state(false);
+  let systemDark = $state(typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches);
   let mobileStatus = $state<MobileGatewayStatus | null>(null);
   let pairedDevices = $state<PairedDevice[]>([]);
   let newMobileDevice = $state<PairedDevice | null>(null);

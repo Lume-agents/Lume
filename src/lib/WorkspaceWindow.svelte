@@ -181,7 +181,7 @@
     try { localStorage.setItem(appearanceSnapshotKey, JSON.stringify(snapshot)); } catch { /* The loading screen then falls back to the defaults. */ }
   });
   let language = $state<Language>(preferences.language);
-  let systemDark = $state(false);
+  let systemDark = $state(typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches);
   let settingsOpen = $state(false);
   let settingsLoading = $state(false);
   let settingsLoadingSections = $state<SettingsSectionKey[]>([]);

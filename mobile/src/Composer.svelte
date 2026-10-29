@@ -74,6 +74,17 @@
     return ({ minimal: client.tr("Minimal", "Mínimo"), low: client.tr("Low", "Baixo"), medium: client.tr("Medium", "Médio"), high: client.tr("High", "Alto"), xhigh: client.tr("Extra high", "Muito alto"), max: client.tr("Max", "Máximo") } as Record<string, string>)[value] ?? value;
   }
 
+  function effortTone(value: string) {
+    switch (value.toLowerCase()) {
+      case "ultra": return "#9a70e8";
+      case "max": return "#d85c64";
+      case "xhigh": return "#e6813f";
+      case "high": return "#ed9a48";
+      case "medium": return "#eeb561";
+      default: return "#4e98ca";
+    }
+  }
+
   function pickCommand(command: SlashCommand) {
     if (command.action === "model") {
       setDraft("");
@@ -356,10 +367,19 @@
       </div>
       {#if pickedOption?.supportedReasoningEfforts.length}
         <span class="sheet-label">{client.tr("Reasoning effort", "Esforço de raciocínio")}</span>
-        <div class="efforts">
-          {#each pickedOption.supportedReasoningEfforts as effort (effort.value)}
-            <button class:on={pickedEffort === effort.value} type="button" onclick={() => (pickedEffort = effort.value)}>{effortLabel(effort.value)}</button>
-          {/each}
+        {@const efforts = pickedOption.supportedReasoningEfforts.map((effort) => effort.value)}
+        {@const effortIndex = Math.max(0, efforts.indexOf(pickedEffort))}
+        {@const effortRatio = efforts.length > 1 ? effortIndex / (efforts.length - 1) : 0}
+        <div class:max={pickedEffort.toLowerCase() === "max"} class:ultra={pickedEffort.toLowerCase() === "ultra"} class="effort-field"
+          style={`--effort-tone:${effortTone(pickedEffort)};--effort-progress:${effortRatio * 100}%;--effort-ratio:${effortRatio};`}>
+          <b class="effort-value" aria-live="polite">{effortLabel(pickedEffort) || pickedEffort}</b>
+          <div class="effort-track">
+            <span class="effort-progress" aria-hidden="true"></span>
+            <span class="effort-thumb" aria-hidden="true"></span>
+            <input type="range" min="0" max={Math.max(0, efforts.length - 1)} step="1" value={effortIndex}
+              aria-label={client.tr("Reasoning effort", "Esforço de raciocínio")} aria-valuetext={effortLabel(pickedEffort) || pickedEffort}
+              oninput={(event) => { pickedEffort = efforts[Number(event.currentTarget.value)] ?? pickedEffort; }} />
+          </div>
         </div>
       {/if}
       <div class="dialog-actions">
@@ -421,11 +441,19 @@
   .sheet { max-height: 80vh; overflow-y: auto; }
   .model-list { display: grid; gap: 4px; }
   .model-list button { min-height: 52px; padding: 8px 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-strong); background: transparent; text-align: left; }
-  .model-list button.on { border-color: var(--workspace-accent); background: var(--workspace-accent-soft); color: var(--workspace-accent); }
+  .model-list button.on { border-color: color-mix(in srgb, var(--workspace-strong) 38%, var(--workspace-line)); background: var(--workspace-subtle); color: var(--workspace-strong); }
   .model-list span { display: grid; gap: 2px; }
   .model-list b { color: var(--workspace-strong); font-size: 14.5px; }
-  .model-list small { color: var(--workspace-muted); font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+  .model-list small { color: var(--workspace-muted); font-size: 10.5px; line-height: 1.35; font-weight: 500; letter-spacing: 0; text-transform: none; }
   .sheet-label { margin-top: 6px; color: var(--workspace-muted); font-size: 12.5px; font-weight: 700; }
+  .effort-field { display: grid; gap: 4px; padding: 0 4px; }
+  .effort-value { color: var(--workspace-strong); font-size: 13px; font-weight: 700; text-transform: capitalize; }
+  .effort-track { position: relative; height: 44px; margin: 0 12px; display: flex; align-items: center; isolation: isolate; }
+  .effort-track::before, .effort-progress { position: absolute; right: 0; left: 0; height: 12px; border-radius: 999px; content: ""; }
+  .effort-track::before { border: 1px solid color-mix(in srgb, var(--workspace-muted) 16%, var(--workspace-line)); background: color-mix(in srgb, var(--workspace-muted) 14%, transparent); }
+  .effort-progress { z-index: 0; background: linear-gradient(90deg, #4e98ca, var(--effort-tone)); transform: scaleX(var(--effort-ratio)); transform-origin: left; transition: transform 240ms cubic-bezier(.16, 1, .3, 1), background 180ms ease; }
+  .effort-thumb { position: absolute; z-index: 1; left: var(--effort-progress); box-sizing: border-box; width: 28px; height: 28px; border: 4px solid var(--workspace-raised); border-radius: 50%; background: var(--effort-tone); box-shadow: 0 0 0 1px color-mix(in srgb, var(--effort-tone) 76%, transparent), 0 4px 10px rgba(0, 0, 0, .2); pointer-events: none; transform: translateX(-50%); transition: left 240ms cubic-bezier(.16, 1, .3, 1), background 180ms ease; }
+  .effort-track input { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; margin: 0; appearance: none; opacity: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: pan-y; }
   .efforts { display: flex; flex-wrap: wrap; gap: 6px; }
   .efforts button { height: 36px; padding: 0 13px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: transparent; font-size: 13px; font-weight: 680; }
   .efforts button.on { border-color: var(--workspace-accent); color: var(--workspace-accent); background: var(--workspace-accent-soft); }

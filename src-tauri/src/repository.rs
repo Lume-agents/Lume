@@ -486,6 +486,136 @@ pub fn commit(directory: &str, paths: &[String], message: &str) -> Result<Commit
     Ok(CommitOutcome { hash, summary })
 }
 
+// ── History ──────────────────────────────────────────────────────────────────
+
+/// One commit of the history graph: its parents (to draw the lines), the branches and tags that point at it.
+#[derive(Clone, Serialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryCommit {
+    pub oid: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub at: i64,
+    pub refs: Vec<String>,
+    pub subject: String,
+}
+
+#[derive(Clone, Serialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitFile {
+    pub path: String,
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
+}
+
+#[derive(Clone, Serialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDetail {
+    pub oid: String,
+    pub message: String,
+    pub files: Vec<CommitFile>,
+}
+
+const HISTORY_PAGE: usize = 200;
+
+fn valid_oid(oid: &str) -> bool {
+    (7..=64).contains(&oid.len()) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// `git log` records (`%H %P %an %at %D %s`, joined by unit separators), newest first, in topological order so the
+/// lines of the graph never cross a commit that comes later.
+fn parse_history(bytes: &[u8]) -> Vec<HistoryCommit> {
+    String::from_utf8_lossy(bytes)
+        .split('\0')
+        .filter_map(|record| {
+            let record = record.trim_start_matches(['\n', '\r']);
+            let mut fields = record.splitn(6, '\u{1f}');
+            let oid = fields.next().filter(|oid| valid_oid(oid))?.to_string();
+            let parents = fields.next()?.split_whitespace().map(str::to_string).collect();
+            let author = fields.next()?.to_string();
+            let at = fields.next()?.parse().ok()?;
+            let refs = fields
+                .next()?
+                .split(", ")
+                .filter(|name| !name.is_empty() && !name.ends_with("/HEAD"))
+                .map(|name| name.trim_start_matches("HEAD -> ").trim_start_matches("tag: ").to_string())
+                .collect();
+            let subject = fields.next()?.to_string();
+            Some(HistoryCommit { oid, parents, author, at, refs, subject })
+        })
+        .collect()
+}
+
+/// The commits of every branch, tag and remote, a page at a time.
+pub fn history(directory: &str, skip: usize) -> Result<Vec<HistoryCommit>, String> {
+    let root = root_for(directory)?;
+    if git_text(&root, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+        return Ok(Vec::new());
+    }
+    let skip = skip.min(100_000).to_string();
+    let limit = HISTORY_PAGE.to_string();
+    let bytes = git(
+        &root,
+        &[
+            "log",
+            "--all",
+            "--topo-order",
+            "-z",
+            "--decorate=short",
+            "--skip",
+            &skip,
+            "-n",
+            &limit,
+            "--format=%H%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s",
+        ],
+    )?;
+    Ok(parse_history(&bytes))
+}
+
+/// A commit's full message and the files it changed with their line counts.
+pub fn commit_detail(directory: &str, oid: &str) -> Result<CommitDetail, String> {
+    if !valid_oid(oid) {
+        return Err("invalid_commit".into());
+    }
+    let root = root_for(directory)?;
+    let message = git_text(&root, &["show", "-s", "--format=%B", oid])?;
+    let stat = git(&root, &["show", "--format=", "--numstat", "--no-renames", "-z", oid])?;
+    let files = String::from_utf8_lossy(&stat)
+        .split('\0')
+        .filter_map(|record| {
+            let mut parts = record.trim_start_matches(['\n', '\r']).splitn(3, '\t');
+            let added = parts.next()?;
+            let removed = parts.next()?;
+            let path = parts.next()?.to_string();
+            Some(CommitFile { path, added: added.parse().ok(), removed: removed.parse().ok() })
+        })
+        .take(500)
+        .collect();
+    Ok(CommitDetail { oid: oid.to_string(), message: message.trim().to_string(), files })
+}
+
+/// One file's diff in a commit.
+pub fn commit_diff(directory: &str, oid: &str, path: &str) -> Result<RepositoryDiff, String> {
+    if !valid_oid(oid)
+        || Path::new(path).is_absolute()
+        || Path::new(path).components().any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("invalid_path".into());
+    }
+    let root = root_for(directory)?;
+    let bytes = git(&root, &["show", "--format=", "--no-ext-diff", "--no-textconv", "--no-renames", oid, "--", path])?;
+    if bytes.len() > OUTPUT_LIMIT {
+        return Err("command_output_limit".into());
+    }
+    let binary = bytes.contains(&0);
+    Ok(RepositoryDiff {
+        path: path.into(),
+        diff: if binary { String::new() } else { String::from_utf8_lossy(&bytes).into_owned() },
+        binary,
+        untracked: false,
+    })
+}
+
 pub fn diff(directory: &str, path: &str) -> Result<RepositoryDiff, String> {
     let value = snapshot(directory, true)?;
     let file = value
@@ -805,5 +935,72 @@ mod reference_tests {
     fn live_pull_request_reference() {
         let value = github_reference("Lume-agents", "Lume", 26, true).expect("reference");
         assert_eq!(value["state"], "connected", "{value}");
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    fn run(root: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["-c", "user.name=Ana", "-c", "user.email=ana@example.com", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(status.status.success(), "{args:?}: {}", String::from_utf8_lossy(&status.stderr));
+    }
+
+    #[test]
+    fn the_history_lists_every_branch_with_its_parents_refs_and_files() {
+        let root = std::env::temp_dir().join(format!("lume-history-{}-{}", std::process::id(), timestamp()));
+        std::fs::create_dir_all(&root).unwrap();
+        run(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        run(&root, &["add", "."]);
+        run(&root, &["commit", "-q", "-m", "first"]);
+        run(&root, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(root.join("b.txt"), "two\nthree\n").unwrap();
+        run(&root, &["add", "."]);
+        run(&root, &["commit", "-q", "-m", "on a branch"]);
+        run(&root, &["checkout", "-q", "main"]);
+        std::fs::write(root.join("a.txt"), "one\nmore\n").unwrap();
+        run(&root, &["commit", "-q", "-am", "on main"]);
+        run(&root, &["merge", "-q", "--no-ff", "-m", "merge feature", "feature"]);
+        run(&root, &["tag", "v1"]);
+        let directory = root.to_string_lossy().into_owned();
+
+        let commits = history(&directory, 0).unwrap();
+        assert_eq!(commits.iter().map(|commit| commit.subject.as_str()).collect::<Vec<_>>().len(), 4);
+        let merge = &commits[0];
+        assert_eq!(merge.subject, "merge feature");
+        assert_eq!(merge.parents.len(), 2, "a merge has two parents");
+        assert!(merge.refs.contains(&"main".to_string()) && merge.refs.contains(&"v1".to_string()), "{:?}", merge.refs);
+        assert!(commits.iter().any(|commit| commit.refs.contains(&"feature".to_string())));
+        assert_eq!(commits.last().unwrap().parents.len(), 0, "the root commit has none");
+        assert_eq!(history(&directory, 3).unwrap().len(), 1, "a page can start later");
+
+        let on_branch = commits.iter().find(|commit| commit.subject == "on a branch").unwrap();
+        let detail = commit_detail(&directory, &on_branch.oid).unwrap();
+        assert_eq!(detail.message, "on a branch");
+        assert_eq!(detail.files, [CommitFile { path: "b.txt".into(), added: Some(2), removed: Some(0) }]);
+        let diff = commit_diff(&directory, &on_branch.oid, "b.txt").unwrap();
+        assert!(diff.diff.contains("+three") && !diff.binary);
+        assert!(commit_diff(&directory, &on_branch.oid, "../x").is_err());
+        assert!(commit_diff(&directory, "--output=x", "b.txt").is_err());
+        assert!(commit_detail(&directory, "not a hash").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_repository_has_no_history_and_a_folder_that_is_not_one_is_refused() {
+        let root = std::env::temp_dir().join(format!("lume-history-empty-{}-{}", std::process::id(), timestamp()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(history(&root.to_string_lossy(), 0).is_err());
+        run(&root, &["init", "-q"]);
+        assert_eq!(history(&root.to_string_lossy(), 0).unwrap(), []);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

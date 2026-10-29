@@ -528,6 +528,30 @@ async fn get_session_repository(
 }
 
 #[tauri::command]
+async fn get_session_history(state: State<'_, AppState>, session_id: String, skip: usize) -> Result<Vec<repository::HistoryCommit>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || repository::history(&repository_directory(&state, &session_id)?, skip))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_session_commit(state: State<'_, AppState>, session_id: String, oid: String) -> Result<repository::CommitDetail, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || repository::commit_detail(&repository_directory(&state, &session_id)?, &oid))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_session_commit_diff(state: State<'_, AppState>, session_id: String, oid: String, path: String) -> Result<repository::RepositoryDiff, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || repository::commit_diff(&repository_directory(&state, &session_id)?, &oid, &path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_session_repository_diff(
     state: State<'_, AppState>,
     session_id: String,
@@ -3695,6 +3719,9 @@ pub fn run() {
             stop_session_environment,
             get_session_repository,
             get_session_repository_diff,
+            get_session_history,
+            get_session_commit,
+            get_session_commit_diff,
             get_github_reference,
             commit_session_repository,
             cli_install_plans,

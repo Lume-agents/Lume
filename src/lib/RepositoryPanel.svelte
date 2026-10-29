@@ -3,6 +3,7 @@
   import { createSystemBannerSource, SYSTEM_BANNER_CONTEXT, type SystemBannerReporter, type SystemBannerNotice } from "$lib/systemBannerContext";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import GitHubActivity from "$lib/GitHubActivity.svelte";
+  import CommitGraph from "$lib/CommitGraph.svelte";
   import LumeIcon, { type LumeIconName } from "$lib/LumeIcon.svelte";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import { transientScrollbar } from "$lib/transientScrollbar";
@@ -70,7 +71,7 @@
   const sections = $derived<Array<{ value: string; label: string; short: string; icon: LumeIconName }>>([
     { value: "activity", label: tr("Repository overview", "Resumo do repositório"), short: tr("Overview", "Resumo"), icon: "repository" },
     { value: "changes", label: `${tr("Changes", "Mudanças")} · ${local?.files.length ?? 0}`, short: tr("Changes", "Mudanças"), icon: "diff" },
-    { value: "commits", label: tr("Recent commits", "Commits recentes"), short: "Commits", icon: "commit" },
+    { value: "commits", label: tr("Commit history", "Histórico de commits"), short: tr("History", "Histórico"), icon: "commit" },
     { value: "pulls", label: "Pull requests", short: "PRs", icon: "pull-request" },
     { value: "issues", label: "Issues", short: "Issues", icon: "issue" },
     { value: "actions", label: "GitHub Actions", short: "Actions", icon: "bolt" },
@@ -272,9 +273,8 @@
         </section>
       {/if}
     {:else if tab === "commits"}
-      <div class="section-heading history-heading"><h3>{tr("Branch history", "Histórico da branch")}</h3><span>{local.commits.length} {tr("recent", "recentes")}</span></div>
-      {@render commitHistory(local.commits)}
-      {#if !local.commits.length}<p class="empty-list">{tr("This branch has no commits yet.", "Esta branch ainda não tem commits.")}</p>{/if}
+      <div class="section-heading history-heading"><h3>{tr("History", "Histórico")}</h3><span>{local.branch === "(detached)" ? local.head?.slice(0, 7) : local.branch}</span></div>
+      <CommitGraph sessionId={session.id} {language} head={local.head} />
     {:else if !local.github}
       <p class="empty-list"><LumeIcon name="repository" size={21} />{tr("Connect a GitHub remote to use these tools.", "Conecte um remote do GitHub para usar estas ferramentas.")}</p>
     {:else if githubLoading && !github}

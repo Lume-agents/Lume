@@ -609,6 +609,9 @@
     touches.delete(event.pointerId);
     if (touches.size < 2) pinch = null;
   }
+  // A finger held still on the empty canvas offers to add an agent there.
+  let holdTimer = 0;
+  function clearHold() { if (holdTimer) { window.clearTimeout(holdTimer); holdTimer = 0; } }
   function beginPan(event: PointerEvent) {
     if (event.button !== 0 && event.button !== 1) return;
     orbitFor = null;
@@ -626,6 +629,16 @@
     capture(event);
     gesture = { kind: "pan", pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, origin: { x: view.x, y: view.y } };
     if (!connectionSource) choose(null);
+    clearHold();
+    if (event.pointerType === "touch" && !locked) {
+      holdTimer = window.setTimeout(() => {
+        holdTimer = 0;
+        if (gesture?.kind !== "pan" || touches.size > 1) return;
+        navigator.vibrate?.(12);
+        cancelGesture();
+        openPicker();
+      }, 550);
+    }
   }
   function beginCard(event: PointerEvent, id: string) {
     if (event.button !== 0 || !layout.positions[id]) return;
@@ -682,6 +695,7 @@
       const bounds = viewport.getBoundingClientRect();
       cardOutside = event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
     }
+    if (holdTimer && Math.hypot(dx, dy) > 8) clearHold();
     if (gesture.kind === "pan") queuePatch({ view: { ...view, x: gesture.origin.x + dx, y: gesture.origin.y + dy } });
     else if (gesture.kind === "card" && gesture.stepId) queuePatch({ positions: { ...layout.positions, [gesture.stepId]: { x: gesture.origin.x + dx / view.zoom, y: gesture.origin.y + dy / view.zoom } } });
   }
@@ -706,6 +720,7 @@
     cancelGesture();
   }
   function cancelGesture() {
+    clearHold();
     if (detachedConnection && group) {
       const lost = detachedConnection;
       detachedConnection = null;
@@ -1194,6 +1209,7 @@
     <button class:confirm={confirmingDelete} class="delete-workflow" type="button" disabled={!group || locked || deleting} title={confirmingDelete ? tr("Click again to delete this workflow", "Clique de novo para excluir este workflow") : tr("Delete workflow", "Excluir workflow")} aria-label={confirmingDelete ? tr("Confirm deleting this workflow", "Confirmar exclusão deste workflow") : tr("Delete workflow", "Excluir workflow")} onclick={requestDeleteGroup}><LumeIcon name="trash" size={15} />{#if confirmingDelete}<span>{tr("Delete?", "Excluir?")}</span>{/if}</button>
     <span class="toolbar-divider"></span>
     {#if simulatorAvailable}<button class="sim-toggle" class:active={Boolean(demo)} type="button" title={tr("Preview card and pipe states", "Visualizar estados dos cards e canos")} aria-pressed={Boolean(demo)} onclick={toggleDemo}><LumeIcon name="bolt" size={14} />{tr("Simulate", "Simular")}</button>{/if}
+    {#if touch}<button class="add-agent-icon" type="button" disabled={locked || adding} title={tr("Add an agent", "Adicionar um agente")} aria-label={tr("Add an agent", "Adicionar um agente")} onclick={() => openPicker()}><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3M8 6h8a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3ZM3 12v3M21 12v3M9.5 12v1.5M14.5 12v1.5M9.5 17h5" /></svg></button>{/if}
     {#if !touch}<button class="add-agent" type="button" disabled={locked || adding} onclick={() => openPicker()}><LumeIcon name="plus" size={14} />{tr("Agent", "Agente")}</button>{/if}
     <span class="save-state" aria-live="polite">{saving ? tr("Saving…", "Salvando…") : saveFailed ? tr("Not saved", "Não salvo") : ""}</span>
     {#if saveFailed}<button type="button" title={tr("Retry saving", "Tentar salvar novamente")} aria-label={tr("Retry saving", "Tentar salvar novamente")} onclick={() => void retrySave()}><LumeIcon name="refresh" size={15} /></button>{/if}
@@ -1382,7 +1398,7 @@
   .workflow-board { position: absolute; z-index: 30; inset: 0; overflow: hidden; opacity: 0; transform: scale(.985); transition: opacity 220ms ease, transform 280ms cubic-bezier(.16, 1, .3, 1); color: var(--workspace-text); background: var(--workspace-bg); isolation: isolate; --board-danger: #a83e3a; --board-warning: #91640f; --board-ok: #2f8f5b; --select-surface: var(--workspace-raised); --select-text: var(--workspace-strong); --select-muted: var(--workspace-muted); --select-line: var(--workspace-line); --select-accent: var(--workspace-accent); --select-hover: var(--workspace-subtle); --select-active: var(--workspace-accent-soft);
     --role-planner: #4f86bd; --role-implementer: #3d9a6c; --role-reviewer: #c28a3c; --role-tester: #8460bd; --role-researcher: #3c97a6; --role-custom: #7b8a83;
     --hud-surface: var(--workspace-raised); --hud-shadow: 0 10px 28px rgba(20, 38, 30, .12), 0 1px 3px rgba(20, 38, 30, .1); }
-  :global(.workspace.dark) .workflow-board { --board-danger: #ec9894; --board-warning: #e0b75b; --board-ok: #56bd8a; --role-planner: #6aa0d6; --role-implementer: #56bd8a; --role-reviewer: #dba653; --role-tester: #a583d8; --role-researcher: #58b6c5; --role-custom: #93a39b; --hud-shadow: 0 12px 30px rgba(0, 0, 0, .38), 0 1px 3px rgba(0, 0, 0, .4); }
+  :global(.workspace.dark) .workflow-board, :global(.mobile-app.dark) .workflow-board { --board-danger: #ec9894; --board-warning: #e0b75b; --board-ok: #56bd8a; --role-planner: #6aa0d6; --role-implementer: #56bd8a; --role-reviewer: #dba653; --role-tester: #a583d8; --role-researcher: #58b6c5; --role-custom: #93a39b; --hud-shadow: 0 12px 30px rgba(0, 0, 0, .38), 0 1px 3px rgba(0, 0, 0, .4); }
   .workflow-board[hidden] { display: none; }
   .board-viewport { position: absolute; inset: 0; z-index: 0; isolation: isolate; overflow: hidden; outline: none; touch-action: none; background-image: radial-gradient(circle, color-mix(in srgb, var(--workspace-muted) 28%, transparent) 1px, transparent 1px); cursor: grab; }
   .board-viewport.panning { cursor: grabbing; }
@@ -1459,7 +1475,7 @@
   .edge-menu small { color: var(--workspace-muted); font-size: 10px; line-height: 1.35; }
   .edge-menu-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 9px; color: var(--workspace-accent); background: var(--workspace-accent-soft); }
   .board-card { --card-role: var(--role-custom); position: absolute; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--card-role) 30%, var(--workspace-line)); border-radius: 18px; background: linear-gradient(180deg, color-mix(in srgb, var(--card-role) 7%, var(--workspace-raised)), var(--workspace-raised) 62%); box-shadow: 0 10px 24px rgba(20, 38, 30, .1), 0 1px 3px rgba(20, 38, 30, .1), inset 0 1px 0 rgba(255, 255, 255, .5); transition: border-color 140ms ease, box-shadow 180ms ease, transform 180ms cubic-bezier(.2, .8, .2, 1); }
-  :global(.workspace.dark) .board-card { box-shadow: 0 12px 26px rgba(0, 0, 0, .34), 0 1px 3px rgba(0, 0, 0, .4), inset 0 1px 0 rgba(255, 255, 255, .06); }
+  :global(.workspace.dark) .board-card, :global(.mobile-app.dark) .board-card { box-shadow: 0 12px 26px rgba(0, 0, 0, .34), 0 1px 3px rgba(0, 0, 0, .4), inset 0 1px 0 rgba(255, 255, 255, .06); }
   .board-card:hover { box-shadow: 0 14px 30px rgba(20, 38, 30, .15), 0 0 0 3px color-mix(in srgb, var(--card-role) 12%, transparent); }
   .board-card.selected, .board-card.target-valid { border-color: var(--card-role); box-shadow: 0 14px 30px rgba(20, 38, 30, .16), 0 0 0 3px color-mix(in srgb, var(--card-role) 22%, transparent); }
   .board-card.target-valid { border-color: var(--workspace-accent); }
@@ -1471,11 +1487,11 @@
   .card-body { position: relative; width: 100%; height: 100%; padding: 26px 14px 12px; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 6px; border: 0; border-radius: inherit; color: inherit; background: transparent; text-align: center; user-select: none; cursor: grab; touch-action: none; }
   .moving .card-body { cursor: grabbing; }
   .card-role-fab { position: absolute; z-index: 2; top: -18px; left: 50%; width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--card-role) 42%, transparent); border-radius: 50%; color: var(--card-role); background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .96) 0 13%, rgba(255, 255, 255, .34) 31%, transparent 52%), linear-gradient(145deg, #fbfdfc 12%, color-mix(in srgb, var(--card-role) 14%, #e7eeea) 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 22%, transparent), 0 5px 10px rgba(24, 58, 41, .2), 0 1px 2px rgba(24, 58, 41, .16), 0 0 0 3px color-mix(in srgb, var(--card-role) 10%, transparent); transform: translateX(-50%); transition: box-shadow 170ms ease, transform 170ms cubic-bezier(.2, .8, .2, 1); }
-  :global(.workspace.dark) .card-role-fab { background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .22) 0 13%, transparent 46%), linear-gradient(145deg, color-mix(in srgb, var(--card-role) 20%, #2c3631), #1e2623 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 5px 12px rgba(0, 0, 0, .45), 0 0 0 3px color-mix(in srgb, var(--card-role) 16%, transparent); }
+  :global(.workspace.dark) .card-role-fab, :global(.mobile-app.dark) .card-role-fab { background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .22) 0 13%, transparent 46%), linear-gradient(145deg, color-mix(in srgb, var(--card-role) 20%, #2c3631), #1e2623 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 5px 12px rgba(0, 0, 0, .45), 0 0 0 3px color-mix(in srgb, var(--card-role) 16%, transparent); }
   .board-card.selected .card-role-fab { transform: translateX(-50%) translateY(-2px); }
   .role-symbol { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; transform: scale(.9); font-style: normal; }
   .step-number { position: absolute; top: -3px; right: -5px; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box; display: grid; place-items: center; border: 1px solid rgba(255, 255, 255, .86); border-radius: 999px; color: #fff; background: var(--card-role); box-shadow: 0 2px 5px rgba(20, 40, 30, .3); font: 800 8px/1 var(--lume-font-ui, Inter, sans-serif); font-variant-numeric: tabular-nums; }
-  :global(.workspace.dark) .step-number { border-color: rgba(24, 35, 29, .9); }
+  :global(.workspace.dark) .step-number, :global(.mobile-app.dark) .step-number { border-color: rgba(24, 35, 29, .9); }
   .role-tooltip { position: absolute; bottom: calc(100% + 7px); left: 50%; min-width: max-content; padding: 5px 9px; display: grid; gap: 1px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-raised); box-shadow: var(--hud-shadow); opacity: 0; pointer-events: none; transform: translate(-50%, 0); }
   .role-tooltip strong { font-size: 10px; font-weight: 700; }
   .role-tooltip small { color: var(--workspace-muted); font-size: 9px; }
@@ -1529,6 +1545,8 @@
   .board-toolbar button, .board-navigation button, .board-panel > header button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; }
   .board-toolbar button:hover, .board-navigation button:hover, .board-panel > header button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .board-toolbar .add-agent { width: auto; display: flex; gap: 5px; padding: 0 8px; font-size: 11px; }
+  .board-toolbar .add-agent-icon { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-strong); background: var(--workspace-subtle); }
+  .board-toolbar .add-agent-icon:disabled { opacity: .4; }
   .board-toolbar .close-board { margin-left: 6px; }
   .board-toolbar .close-board:hover .exit-icon { transform: translateX(1px); }
   .exit-icon { transition: transform 160ms ease; }
@@ -1561,14 +1579,14 @@
   /* The same FABs the cards wear, so a role reads the same in the picker and on the canvas. */
   .role-option { min-width: 0; padding: 12px 2px 8px; display: grid; justify-items: center; align-content: start; gap: 7px; border: 1px solid color-mix(in srgb, var(--card-role) 20%, var(--workspace-line)); border-radius: 13px; color: var(--workspace-muted); background: linear-gradient(180deg, color-mix(in srgb, var(--card-role) 10%, var(--workspace-raised)), var(--workspace-raised) 72%); font: inherit; font-size: 9.5px; font-weight: 680; letter-spacing: -.01em; cursor: pointer; transition: color 140ms ease, border-color 140ms ease, box-shadow 160ms ease, transform 160ms cubic-bezier(.2, .8, .2, 1); }
   .role-option-fab { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--card-role) 42%, transparent); border-radius: 50%; color: var(--card-role); background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .96) 0 13%, rgba(255, 255, 255, .34) 31%, transparent 52%), linear-gradient(145deg, #fbfdfc 12%, color-mix(in srgb, var(--card-role) 14%, #e7eeea) 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 22%, transparent), 0 4px 9px rgba(24, 58, 41, .16), 0 0 0 3px color-mix(in srgb, var(--card-role) 8%, transparent); transition: box-shadow 170ms ease, transform 170ms cubic-bezier(.2, .8, .2, 1); }
-  :global(.workspace.dark) .role-option-fab { background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .22) 0 13%, transparent 46%), linear-gradient(145deg, color-mix(in srgb, var(--card-role) 20%, #2c3631), #1e2623 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 4px 10px rgba(0, 0, 0, .4), 0 0 0 3px color-mix(in srgb, var(--card-role) 12%, transparent); }
+  :global(.workspace.dark) .role-option-fab, :global(.mobile-app.dark) .role-option-fab { background: radial-gradient(circle at 34% 24%, rgba(255, 255, 255, .22) 0 13%, transparent 46%), linear-gradient(145deg, color-mix(in srgb, var(--card-role) 20%, #2c3631), #1e2623 88%); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 4px 10px rgba(0, 0, 0, .4), 0 0 0 3px color-mix(in srgb, var(--card-role) 12%, transparent); }
   .role-option .role-symbol :global(.workflow-role-icon) { width: 18px; height: 18px; }
   .role-option-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .role-option:hover:not(:disabled) { border-color: color-mix(in srgb, var(--card-role) 45%, var(--workspace-line)); color: var(--workspace-strong); }
   .role-option:hover:not(:disabled) .role-option-fab { transform: translateY(-2px); }
   .role-option.selected { border-color: var(--card-role); color: var(--card-role); box-shadow: 0 0 0 3px color-mix(in srgb, var(--card-role) 18%, transparent); }
   .role-option.selected .role-option-fab { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .95), inset 0 -3px 5px color-mix(in srgb, var(--card-role) 22%, transparent), 0 5px 10px rgba(24, 58, 41, .2), 0 0 0 5px color-mix(in srgb, var(--card-role) 22%, transparent); }
-  :global(.workspace.dark) .role-option.selected .role-option-fab { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 5px 12px rgba(0, 0, 0, .45), 0 0 0 5px color-mix(in srgb, var(--card-role) 26%, transparent); }
+  :global(.workspace.dark) .role-option.selected .role-option-fab, :global(.mobile-app.dark) .role-option.selected .role-option-fab { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 5px 12px rgba(0, 0, 0, .45), 0 0 0 5px color-mix(in srgb, var(--card-role) 26%, transparent); }
   .role-option:focus-visible { outline: 2px solid var(--card-role); outline-offset: 2px; }
   .role-option:disabled { opacity: .5; cursor: default; }
   .field input, .field textarea, .run-controls textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-subtle); font: inherit; line-height: 1.5; resize: vertical; caret-color: var(--workspace-accent); }

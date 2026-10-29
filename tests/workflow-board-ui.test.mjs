@@ -334,6 +334,8 @@ try {
   await click(".edge-hub");
   await click('[data-edge-action="insert"]');
   await wait("document.querySelector('.edge-popover .agent-options')");
+  // The board follows the agents from a throttled copy, so a newly listed agent can take a moment to be offered.
+  await wait("Array.from(document.querySelectorAll('.agent-options button')).some(button => button.textContent.includes('Implementação'))");
   await evaluate("Array.from(document.querySelectorAll('.agent-options button')).find(button => button.textContent.includes('Implementação')).click()");
   await wait("window.__fixture.preferences.workflowGroups[0].steps.length === 3");
   assert.equal(await evaluate("window.__fixture.preferences.workflowGroups[0].connections.length"), 2, "an optional intermediate agent splits the arrow");

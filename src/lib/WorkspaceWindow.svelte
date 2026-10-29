@@ -2371,7 +2371,14 @@
   });
 
   onMount(() => {
-    try { if (localStorage.getItem("lume:workflow-board:open") === "true") showWorkflowBoard(true); }
+    // A board that overwhelmed the window must not open again on its own after a forced restart: it is only
+    // restored when the window was closed normally while it was open.
+    try {
+      const cleanExit = localStorage.getItem("lume:workflow-board:clean-exit") !== "false";
+      if (localStorage.getItem("lume:workflow-board:open") === "true" && cleanExit) showWorkflowBoard(true);
+      localStorage.setItem("lume:workflow-board:clean-exit", "false");
+      window.addEventListener("pagehide", () => { try { localStorage.setItem("lume:workflow-board:clean-exit", "true"); } catch { /* ignore */ } });
+    }
     catch { /* Start with chats when storage is unavailable. */ }
     const narrowSidebar = window.matchMedia("(max-width: 800px)");
     const syncSidebarWidth = (event: MediaQueryListEvent | MediaQueryList) => {

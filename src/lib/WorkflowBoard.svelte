@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import type { Preferences, WorkflowContextPolicy, WorkflowContextSelection, WorkflowGroupDefinition, WorkflowRole, WorkflowStepDefinition, WorkflowConnectionDefinition, WorkflowContextPackage, WorkflowRun } from "$lib/domain";
@@ -225,7 +225,24 @@
     const timer = setInterval(() => { now = Date.now(); }, 1000);
     return () => clearInterval(timer);
   });
-  const dragSession = $derived(draggingSessionId ? sessions.find((item) => item.id === draggingSessionId) : undefined);
+  // Agents stream many small updates while a workflow runs; the board redraws from a copy that follows them a few
+  // times a second and keeps only each agent's recent activity, so a long run cannot pile work on every update.
+  const boardActivityLimit = 240;
+  const trimSessions = (list: HubSession[]) => list.map((session) => session.activities.length > boardActivityLimit
+    ? { ...session, activities: session.activities.slice(-boardActivityLimit) }
+    : session);
+  let boardSessions = $state<HubSession[]>(untrack(() => trimSessions(sessions)));
+  let sessionsTimer = 0;
+  $effect(() => {
+    void sessions;
+    if (sessionsTimer) return;
+    sessionsTimer = window.setTimeout(() => {
+      sessionsTimer = 0;
+      boardSessions = trimSessions(untrack(() => sessions));
+    }, active ? 350 : 1500);
+  });
+  onDestroy(() => { if (sessionsTimer) window.clearTimeout(sessionsTimer); });
+  const dragSession = $derived(draggingSessionId ? boardSessions.find((item) => item.id === draggingSessionId) : undefined);
   const dragIssue = $derived.by(() => {
     if (!dragSession) return null;
     if (locked) return "locked" as const;
@@ -284,7 +301,7 @@
 
   function tr(english: string, portuguese: string) { return localize(language, english, portuguese); }
   function name(session?: HubSession) { return session?.sessionName?.trim() || session?.project || session?.agentLabel || tr("Session unavailable", "Sessão indisponível"); }
-  function sessionFor(step?: WorkflowStepDefinition) { return step ? sessions.find((session) => session.nativeSessionId === step.sessionNativeId || session.id === step.sessionNativeId) : undefined; }
+  function sessionFor(step?: WorkflowStepDefinition) { return step ? boardSessions.find((session) => session.nativeSessionId === step.sessionNativeId || session.id === step.sessionNativeId) : undefined; }
   function groupName(item: WorkflowGroupDefinition, index = groups.indexOf(item)) { return layouts[item.id]?.name || (item.terminalGroupId.startsWith("board-") ? "Workflow " : tr("Orb workflow ", "Workflow do Orb ")) + (index + 1); }
   function roleName(role: WorkflowRole) {
     return { planner: tr("Planner", "Planejador"), implementer: tr("Implementer", "Implementador"), reviewer: tr("Reviewer", "Revisor"), tester: tr("Tester", "Testador"), researcher: tr("Researcher", "Pesquisador"), custom: tr("Custom", "Personalizado") }[role];
@@ -761,7 +778,7 @@
   function drop(event: DragEvent) {
     event.preventDefault();
     event.stopPropagation();
-    const session = sessions.find((item) => item.id === event.dataTransfer?.getData("text/x-lume-session"));
+    const session = boardSessions.find((item) => item.id === event.dataTransfer?.getData("text/x-lume-session"));
     const point = viewport ? boardPoint(event.clientX, event.clientY) : undefined;
     endDragOver();
     onFinishSidebarDrag();
@@ -877,7 +894,7 @@
 
 {#snippet agentChoices()}
           <div class="agent-options">
-            {#each sessions as session (session.id)}
+            {#each boardSessions as session (session.id)}
               {@const used = group?.steps.some((step) => step.sessionNativeId === session.nativeSessionId)}
               <button type="button" disabled={adding || used || !session.nativeSessionId?.trim()} onclick={() => void addSession(session)}>
                 <ThreadAvatar seed={session.nativeSessionId || session.id} label={name(session)} size={32} />
@@ -885,7 +902,7 @@
                 <LumeIcon name={used ? "check" : "plus"} size={15} />
               </button>
             {/each}
-            {#if !sessions.length}<p class="panel-help">{tr("Open an agent from the sidebar to get started.", "Abra um agente pela sidebar para começar.")}</p>{/if}
+            {#if !boardSessions.length}<p class="panel-help">{tr("Open an agent from the sidebar to get started.", "Abra um agente pela sidebar para começar.")}</p>{/if}
           </div>
 {/snippet}
 

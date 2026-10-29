@@ -121,6 +121,16 @@ export interface CommitDetail { oid: string; message: string; files: Array<{ pat
 export const getSessionHistory = (sessionId: string, skip = 0) => invoke<HistoryCommit[]>("get_session_history", { sessionId, skip });
 export const getSessionCommit = (sessionId: string, oid: string) => invoke<CommitDetail>("get_session_commit", { sessionId, oid });
 export const getSessionCommitDiff = (sessionId: string, oid: string, path: string) => invoke<RepositoryDiff>("get_session_commit_diff", { sessionId, oid, path });
+export interface StashEntry { oid: string; index: number; message: string; at: number }
+export interface LocalBranch { name: string; current: boolean; upstream: string | null; at: number }
+export interface GitTools { stashes: StashEntry[]; branches: LocalBranch[]; busy: boolean }
+export const getSessionGitTools = (sessionId: string) => invoke<GitTools>("get_session_git_tools", { sessionId });
+export const gitFetch = (sessionId: string) => invoke<unknown>("git_fetch_session", { sessionId });
+export const gitPull = (sessionId: string) => invoke<unknown>("git_pull_session", { sessionId });
+export const gitStash = (sessionId: string, message: string) => invoke<StashEntry[]>("git_stash_session", { sessionId, message });
+export const gitStashApply = (sessionId: string, oid: string, index: number) => invoke<unknown>("git_stash_apply_session", { sessionId, oid, index });
+export const gitStashDrop = (sessionId: string, oid: string, index: number) => invoke<StashEntry[]>("git_stash_drop_session", { sessionId, oid, index });
+export const gitSwitch = (sessionId: string, branch: string) => invoke<unknown>("git_switch_session", { sessionId, branch });
 export const getRepositoryDiff = (sessionId: string, path: string) => invoke<RepositoryDiff>("get_session_repository_diff", { sessionId, path });
 
 export async function openGitHub(url: string) {
@@ -148,6 +158,18 @@ export function repositoryError(error: string, portuguese: boolean) {
     nothing_to_commit: ["There is nothing to commit.", "Não há nada para commitar."],
     hook_failed: ["A Git hook rejected the commit.", "Um hook do Git rejeitou o commit."],
     command_failed: ["Git could not complete the command.", "O Git não conseguiu concluir o comando."],
+    diverged: ["This branch and its upstream both have new commits. Lume only moves a branch forward: merge or rebase it in a terminal.", "Esta branch e a original têm commits novos. O Lume só avança a branch: faça o merge ou rebase em um terminal."],
+    local_changes_block: ["Your uncommitted changes would be overwritten. Commit or stash them first.", "Suas mudanças não commitadas seriam sobrescritas. Faça commit ou guarde-as em um stash antes."],
+    git_auth_failed: ["Git could not sign in to the remote. Check your credentials in a terminal.", "O Git não conseguiu entrar no remote. Confira suas credenciais em um terminal."],
+    network_failed: ["Could not reach the remote. Check your connection.", "Não foi possível alcançar o remote. Confira sua conexão."],
+    stash_conflict: ["The stash conflicts with the current files. It was kept, so nothing is lost.", "O stash conflita com os arquivos atuais. Ele foi mantido, então nada se perdeu."],
+    no_upstream: ["This branch has no upstream to pull from.", "Esta branch não tem uma original para receber."],
+    has_conflicts: ["Resolve the conflicts in the working tree first.", "Resolva primeiro os conflitos na árvore de trabalho."],
+    agent_running: ["An agent is working in this folder. Try again when it finishes.", "Um agente está trabalhando nesta pasta. Tente de novo quando ele terminar."],
+    dirty_tree: ["Commit or stash your changes before switching branches.", "Faça commit ou guarde suas mudanças em um stash antes de trocar de branch."],
+    unknown_branch: ["That branch no longer exists.", "Essa branch não existe mais."],
+    stash_changed: ["The stash list changed. Reopen it and try again.", "A lista de stashes mudou. Abra de novo e tente outra vez."],
+    invalid_oid: ["That stash is not valid.", "Esse stash não é válido."],
     no_github_remote: ["This repository has no GitHub remote.", "Este repositório não tem um remote do GitHub."],
   };
   return descriptions[error]?.[Number(portuguese)] ?? (portuguese ? "Não foi possível carregar os dados. Confira sua conexão e tente atualizar." : "Could not load the data. Check your connection and try refreshing.");

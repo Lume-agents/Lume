@@ -166,6 +166,24 @@ fn run(mut command: Command, timeout: Duration) -> Result<Vec<u8>, String> {
             "identity_missing"
         } else if message.contains("nothing to commit") || message.contains("no changes added") {
             "nothing_to_commit"
+        } else if message.contains("not possible to fast-forward")
+            || message.contains("diverging branches")
+        {
+            "diverged"
+        } else if message.contains("would be overwritten") || message.contains("please commit your changes or stash") {
+            "local_changes_block"
+        } else if message.contains("authentication failed")
+            || message.contains("could not read username")
+            || message.contains("permission denied")
+        {
+            "git_auth_failed"
+        } else if message.contains("could not resolve host")
+            || message.contains("unable to access")
+            || message.contains("network is unreachable")
+        {
+            "network_failed"
+        } else if message.contains("conflict") {
+            "stash_conflict"
         } else if message.contains("hook") {
             "hook_failed"
         } else {
@@ -616,6 +634,151 @@ pub fn commit_diff(directory: &str, oid: &str, path: &str) -> Result<RepositoryD
     })
 }
 
+// ── Git actions ──────────────────────────────────────────────────────────────
+
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(90);
+
+fn invalidate(directory: &str) -> Result<RepositorySnapshot, String> {
+    snapshot(directory, true)
+}
+
+/// Downloads what the remote has, without touching the working tree. Prunes the branches deleted there.
+pub fn fetch(directory: &str) -> Result<RepositorySnapshot, String> {
+    let root = root_for(directory)?;
+    git_within(&root, &["fetch", "--prune", "--quiet"], REMOTE_TIMEOUT)?;
+    invalidate(directory)
+}
+
+/// Brings the branch up to its upstream, and only by moving it forward: a diverged branch is refused, never merged.
+pub fn pull(directory: &str) -> Result<RepositorySnapshot, String> {
+    let root = root_for(directory)?;
+    let before = snapshot(directory, true)?;
+    if before.branch == "(detached)" || before.upstream.is_none() {
+        return Err("no_upstream".into());
+    }
+    if before.conflicts > 0 {
+        return Err("has_conflicts".into());
+    }
+    git_within(&root, &["fetch", "--quiet"], REMOTE_TIMEOUT)?;
+    git_within(&root, &["merge", "--ff-only", "--quiet", "@{upstream}"], REMOTE_TIMEOUT)?;
+    invalidate(directory)
+}
+
+#[derive(Clone, Serialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StashEntry {
+    pub oid: String,
+    pub index: usize,
+    pub message: String,
+    pub at: u64,
+}
+
+pub fn stashes(directory: &str) -> Result<Vec<StashEntry>, String> {
+    let root = root_for(directory)?;
+    let text = git_text(&root, &["stash", "list", "--format=%H%x1f%ct%x1f%gs"])?;
+    Ok(text
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let mut fields = line.split('\u{1f}');
+            let oid = fields.next()?.to_string();
+            let at = fields.next()?.parse().ok()?;
+            let message = fields.next()?.to_string();
+            Some(StashEntry { oid, index, message, at })
+        })
+        .collect())
+}
+
+/// Puts the tracked and untracked changes away so the tree is clean.
+pub fn stash_push(directory: &str, message: &str) -> Result<Vec<StashEntry>, String> {
+    let root = root_for(directory)?;
+    let message: String = message.chars().filter(|c| !c.is_control()).take(120).collect();
+    let message = if message.trim().is_empty() { "Lume".to_string() } else { message };
+    git_within(
+        &root,
+        &["stash", "push", "--include-untracked", "--quiet", "-m", &message],
+        Duration::from_secs(60),
+    )?;
+    invalidate(directory)?;
+    stashes(directory)
+}
+
+/// A stash is addressed by its commit, so a list that changed since it was shown can never make Git act on another one.
+fn stash_ref(root: &Path, oid: &str, index: usize) -> Result<String, String> {
+    if !valid_oid(oid) {
+        return Err("invalid_oid".into());
+    }
+    let reference = format!("stash@{{{index}}}");
+    let current = git_text(root, &["rev-parse", "--verify", "--quiet", &reference])
+        .map_err(|_| "stash_changed".to_string())?;
+    if current != oid {
+        return Err("stash_changed".into());
+    }
+    Ok(reference)
+}
+
+/// Applies a stash and keeps it, so a conflict never loses the changes.
+pub fn stash_apply(directory: &str, oid: &str, index: usize) -> Result<RepositorySnapshot, String> {
+    let root = root_for(directory)?;
+    let reference = stash_ref(&root, oid, index)?;
+    git_within(&root, &["stash", "apply", "--quiet", &reference], Duration::from_secs(60))?;
+    invalidate(directory)
+}
+
+pub fn stash_drop(directory: &str, oid: &str, index: usize) -> Result<Vec<StashEntry>, String> {
+    let root = root_for(directory)?;
+    let reference = stash_ref(&root, oid, index)?;
+    git_within(&root, &["stash", "drop", "--quiet", &reference], Duration::from_secs(15))?;
+    stashes(directory)
+}
+
+#[derive(Clone, Serialize, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalBranch {
+    pub name: String,
+    pub current: bool,
+    pub upstream: Option<String>,
+    pub at: u64,
+}
+
+pub fn branches(directory: &str) -> Result<Vec<LocalBranch>, String> {
+    let root = root_for(directory)?;
+    let text = git_text(
+        &root,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)%1f%(HEAD)%1f%(upstream:short)%1f%(committerdate:unix)",
+            "refs/heads",
+        ],
+    )?;
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\u{1f}');
+            let name = fields.next()?.to_string();
+            let current = fields.next()? == "*";
+            let upstream = fields.next().filter(|value| !value.is_empty()).map(String::from);
+            let at = fields.next()?.parse().unwrap_or(0);
+            Some(LocalBranch { name, current, upstream, at })
+        })
+        .collect())
+}
+
+/// Switches to another local branch, only with no change that the switch could carry along or lose.
+pub fn switch_branch(directory: &str, name: &str) -> Result<RepositorySnapshot, String> {
+    let root = root_for(directory)?;
+    if !branches(directory)?.iter().any(|branch| branch.name == name) {
+        return Err("unknown_branch".into());
+    }
+    let before = snapshot(directory, true)?;
+    if before.conflicts > 0 || before.staged > 0 || before.modified > 0 {
+        return Err("dirty_tree".into());
+    }
+    git_within(&root, &["switch", "--quiet", name], Duration::from_secs(30))?;
+    invalidate(directory)
+}
+
 pub fn diff(directory: &str, path: &str) -> Result<RepositoryDiff, String> {
     let value = snapshot(directory, true)?;
     let file = value
@@ -1001,6 +1164,106 @@ mod history_tests {
         assert!(history(&root.to_string_lossy(), 0).is_err());
         run(&root, &["init", "-q"]);
         assert_eq!(history(&root.to_string_lossy(), 0).unwrap(), []);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    fn run(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    fn identity(root: &Path) {
+        run(root, &["config", "user.name", "Ana"]);
+        run(root, &["config", "user.email", "ana@example.com"]);
+        run(root, &["config", "commit.gpgsign", "false"]);
+    }
+
+    fn commit_file(root: &Path, name: &str, text: &str) {
+        std::fs::write(root.join(name), text).unwrap();
+        run(root, &["add", "."]);
+        run(root, &["commit", "-q", "-m", name]);
+    }
+
+    #[test]
+    fn fetch_and_pull_only_move_a_branch_forward_and_refuse_a_diverged_one() {
+        let base = std::env::temp_dir().join(format!("lume-actions-{}-{}", std::process::id(), timestamp()));
+        std::fs::create_dir_all(&base).unwrap();
+        let origin = base.join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        run(&origin, &["init", "-q", "--bare", "-b", "main"]);
+        let mine = base.join("mine");
+        let other = base.join("other");
+        let origin_path = origin.to_string_lossy().into_owned();
+        run(&base, &["clone", "-q", &origin_path, "mine"]);
+        identity(&mine);
+        commit_file(&mine, "a.txt", "one\n");
+        run(&mine, &["push", "-q", "-u", "origin", "main"]);
+        run(&base, &["clone", "-q", &origin_path, "other"]);
+        identity(&other);
+        commit_file(&other, "b.txt", "two\n");
+        run(&other, &["push", "-q", "origin", "main"]);
+        let directory = mine.to_string_lossy().into_owned();
+
+        assert_eq!(snapshot(&directory, true).unwrap().behind, 0, "nothing is known before the fetch");
+        assert_eq!(fetch(&directory).unwrap().behind, 1);
+        let pulled = pull(&directory).unwrap();
+        assert_eq!((pulled.behind, pulled.ahead), (0, 0));
+        assert!(mine.join("b.txt").exists());
+
+        commit_file(&mine, "mine.txt", "local\n");
+        commit_file(&other, "c.txt", "three\n");
+        run(&other, &["push", "-q", "origin", "main"]);
+        let head = git_text(&mine, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(pull(&directory).err().unwrap(), "diverged");
+        assert_eq!(git_text(&mine, &["rev-parse", "HEAD"]).unwrap(), head, "a refused pull leaves the branch alone");
+        assert!(!mine.join("c.txt").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn switching_needs_a_clean_tree_and_a_stash_can_be_applied_then_dropped() {
+        let root = std::env::temp_dir().join(format!("lume-stash-{}-{}", std::process::id(), timestamp()));
+        std::fs::create_dir_all(&root).unwrap();
+        run(&root, &["init", "-q", "-b", "main"]);
+        identity(&root);
+        commit_file(&root, "a.txt", "one\n");
+        run(&root, &["branch", "feature"]);
+        let directory = root.to_string_lossy().into_owned();
+
+        let listed = branches(&directory).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|branch| branch.name == "main" && branch.current));
+
+        std::fs::write(root.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(root.join("new.txt"), "untracked\n").unwrap();
+        assert_eq!(switch_branch(&directory, "feature").err().unwrap(), "dirty_tree");
+        assert_eq!(switch_branch(&directory, "missing").err().unwrap(), "unknown_branch");
+        assert_eq!(switch_branch(&directory, "--detach").err().unwrap(), "unknown_branch");
+
+        let saved = stash_push(&directory, "before switching").unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].message.contains("before switching"), "{:?}", saved[0]);
+        assert!(!root.join("new.txt").exists(), "untracked files go away with the stash");
+        let switched = switch_branch(&directory, "feature").unwrap();
+        assert_eq!(switched.branch, "feature");
+
+        assert_eq!(stash_apply(&directory, &saved[0].oid, 3).err().unwrap(), "stash_changed");
+        assert_eq!(stash_drop(&directory, "not a hash", 0).err().unwrap(), "invalid_oid");
+        let applied = stash_apply(&directory, &saved[0].oid, 0).unwrap();
+        assert_eq!(applied.modified, 1);
+        assert!(root.join("new.txt").exists());
+        assert_eq!(stashes(&directory).unwrap().len(), 1, "applying keeps the stash");
+        assert!(stash_drop(&directory, &saved[0].oid, 0).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

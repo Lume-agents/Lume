@@ -4,6 +4,7 @@
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import GitHubActivity from "$lib/GitHubActivity.svelte";
   import CommitGraph from "$lib/CommitGraph.svelte";
+  import GitActions from "$lib/GitActions.svelte";
   import LumeIcon, { type LumeIconName } from "$lib/LumeIcon.svelte";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import { transientScrollbar } from "$lib/transientScrollbar";
@@ -274,6 +275,7 @@
       {/if}
     {:else if tab === "commits"}
       <div class="section-heading history-heading"><h3>{tr("History", "Histórico")}</h3><span>{local.branch === "(detached)" ? local.head?.slice(0, 7) : local.branch}</span></div>
+      {#if !session.remote}<GitActions {session} repo={local} {language} />{/if}
       <CommitGraph sessionId={session.id} {language} head={local.head} />
     {:else if !local.github}
       <p class="empty-list"><LumeIcon name="repository" size={21} />{tr("Connect a GitHub remote to use these tools.", "Conecte um remote do GitHub para usar estas ferramentas.")}</p>

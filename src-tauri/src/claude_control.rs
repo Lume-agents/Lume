@@ -146,7 +146,14 @@ pub fn initialize(working_directory: &str) -> Result<Value, String> {
 
 /// The account limits that `/usage` shows.
 pub fn usage(working_directory: &str) -> Result<Vec<AgentRateLimit>, String> {
-    let response = request(working_directory, &["initialize", "get_usage"])?
+    let response = request(working_directory, &["initialize", "get_usage"])
+        .map_err(|error| {
+            if error.contains("unsupported control request") {
+                "This Claude Code version does not report usage to Lume. Run `claude update` in a terminal.".to_string()
+            } else {
+                error
+            }
+        })?
         .remove("get_usage")
         .ok_or("Claude did not answer the usage request")?;
     rate_limits(&response)
@@ -307,8 +314,12 @@ fn exchange(
             }
         }
     });
-    // Claude exits once stdin closes, so it stays open until every answer arrives.
+    // Claude exits once stdin closes, so it stays open until every answer arrives. The requests go one at a time, each
+    // after the previous answer: a CLI still starting up can answer a request sent together with `initialize` with
+    // "unsupported control request", which is how `get_usage` sometimes failed.
     let mut stdin = child.stdin.take().ok_or("Claude closed its input")?;
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let mut responses = HashMap::new();
     for subtype in subtypes {
         let request = json!({
             "type": "control_request",
@@ -316,37 +327,34 @@ fn exchange(
             "request": { "subtype": subtype },
         });
         writeln!(stdin, "{request}").map_err(|error| error.to_string())?;
-    }
-    stdin.flush().map_err(|error| error.to_string())?;
-
-    let deadline = Instant::now() + PROBE_TIMEOUT;
-    let mut responses = HashMap::new();
-    while responses.len() < subtypes.len() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let line = receiver
-            .recv_timeout(remaining)
-            .map_err(|error| match error {
-                mpsc::RecvTimeoutError::Timeout => "Claude did not answer in time",
-                mpsc::RecvTimeoutError::Disconnected => "Claude exited before answering",
-            })?;
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if message.get("type").and_then(Value::as_str) != Some("control_response") {
-            continue;
+        stdin.flush().map_err(|error| error.to_string())?;
+        while !responses.contains_key(*subtype) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let line = receiver
+                .recv_timeout(remaining)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => "Claude did not answer in time",
+                    mpsc::RecvTimeoutError::Disconnected => "Claude exited before answering",
+                })?;
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if message.get("type").and_then(Value::as_str) != Some("control_response") {
+                continue;
+            }
+            let response = &message["response"];
+            let Some(id) = response.get("request_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if response.get("subtype").and_then(Value::as_str) == Some("error") {
+                return Err(response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Claude rejected the request")
+                    .to_string());
+            }
+            responses.insert(id.to_string(), response["response"].clone());
         }
-        let response = &message["response"];
-        let Some(id) = response.get("request_id").and_then(Value::as_str) else {
-            continue;
-        };
-        if response.get("subtype").and_then(Value::as_str) == Some("error") {
-            return Err(response
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("Claude rejected the request")
-                .to_string());
-        }
-        responses.insert(id.to_string(), response["response"].clone());
     }
     drop(stdin);
     Ok(responses)

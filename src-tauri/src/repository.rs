@@ -205,6 +205,8 @@ fn git_within(root: &Path, args: &[&str], timeout: Duration) -> Result<Vec<u8>, 
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_PAGER", "cat")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_SEQUENCE_EDITOR", "true")
         .env("GIT_CONFIG_COUNT", "0")
         .args([
             "--no-pager",
@@ -513,6 +515,7 @@ pub struct HistoryCommit {
     pub oid: String,
     pub parents: Vec<String>,
     pub author: String,
+    pub email: String,
     pub at: i64,
     pub refs: Vec<String>,
     pub subject: String,
@@ -522,6 +525,8 @@ pub struct HistoryCommit {
 #[serde(rename_all = "camelCase")]
 pub struct CommitFile {
     pub path: String,
+    /// `A`dded, `M`odified, `D`eleted, `T`ype changed.
+    pub status: String,
     pub added: Option<u32>,
     pub removed: Option<u32>,
 }
@@ -531,6 +536,13 @@ pub struct CommitFile {
 pub struct CommitDetail {
     pub oid: String,
     pub message: String,
+    pub author: String,
+    pub email: String,
+    pub at: i64,
+    pub committer: String,
+    pub committer_email: String,
+    pub committed_at: i64,
+    pub parents: Vec<String>,
     pub files: Vec<CommitFile>,
 }
 
@@ -540,26 +552,27 @@ fn valid_oid(oid: &str) -> bool {
     (7..=64).contains(&oid.len()) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// `git log` records (`%H %P %an %at %D %s`, joined by unit separators), newest first, in topological order so the
+/// `git log` records (`%H %P %an %ae %at %D %s`, joined by unit separators), newest first, in topological order so the
 /// lines of the graph never cross a commit that comes later.
 fn parse_history(bytes: &[u8]) -> Vec<HistoryCommit> {
     String::from_utf8_lossy(bytes)
         .split('\0')
         .filter_map(|record| {
             let record = record.trim_start_matches(['\n', '\r']);
-            let mut fields = record.splitn(6, '\u{1f}');
+            let mut fields = record.splitn(7, '\u{1f}');
             let oid = fields.next().filter(|oid| valid_oid(oid))?.to_string();
             let parents = fields.next()?.split_whitespace().map(str::to_string).collect();
             let author = fields.next()?.to_string();
+            let email = fields.next()?.to_string();
             let at = fields.next()?.parse().ok()?;
             let refs = fields
                 .next()?
                 .split(", ")
                 .filter(|name| !name.is_empty() && !name.ends_with("/HEAD"))
-                .map(|name| name.trim_start_matches("HEAD -> ").trim_start_matches("tag: ").to_string())
+                .map(|name| name.trim_start_matches("HEAD -> ").to_string())
                 .collect();
             let subject = fields.next()?.to_string();
-            Some(HistoryCommit { oid, parents, author, at, refs, subject })
+            Some(HistoryCommit { oid, parents, author, email, at, refs, subject })
         })
         .collect()
 }
@@ -584,19 +597,32 @@ pub fn history(directory: &str, skip: usize) -> Result<Vec<HistoryCommit>, Strin
             &skip,
             "-n",
             &limit,
-            "--format=%H%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s",
+            "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%D%x1f%s",
         ],
     )?;
     Ok(parse_history(&bytes))
 }
 
-/// A commit's full message and the files it changed with their line counts.
+/// A commit's author, committer, parents, full message and the files it changed with their line counts.
 pub fn commit_detail(directory: &str, oid: &str) -> Result<CommitDetail, String> {
     if !valid_oid(oid) {
         return Err("invalid_commit".into());
     }
     let root = root_for(directory)?;
-    let message = git_text(&root, &["show", "-s", "--format=%B", oid])?;
+    let header = git_text(&root, &["show", "-s", "--format=%an%x1f%ae%x1f%at%x1f%cn%x1f%ce%x1f%ct%x1f%P%x1f%B", oid])?;
+    let mut fields = header.splitn(8, '\u{1f}');
+    let mut next = || fields.next().unwrap_or_default().to_string();
+    let (author, email, at, committer, committer_email, committed_at, parents, message) =
+        (next(), next(), next(), next(), next(), next(), next(), next());
+    let status = git(&root, &["show", "--format=", "--name-status", "--no-renames", "-z", oid])?;
+    let mut statuses = HashMap::new();
+    let status = String::from_utf8_lossy(&status);
+    let mut parts = status.split('\0').map(|part| part.trim_start_matches(['\n', '\r']));
+    while let (Some(code), Some(path)) = (parts.next(), parts.next()) {
+        if !code.is_empty() {
+            statuses.insert(path.to_string(), code[..1].to_string());
+        }
+    }
     let stat = git(&root, &["show", "--format=", "--numstat", "--no-renames", "-z", oid])?;
     let files = String::from_utf8_lossy(&stat)
         .split('\0')
@@ -605,11 +631,23 @@ pub fn commit_detail(directory: &str, oid: &str) -> Result<CommitDetail, String>
             let added = parts.next()?;
             let removed = parts.next()?;
             let path = parts.next()?.to_string();
-            Some(CommitFile { path, added: added.parse().ok(), removed: removed.parse().ok() })
+            let status = statuses.get(&path).cloned().unwrap_or_else(|| "M".into());
+            Some(CommitFile { path, status, added: added.parse().ok(), removed: removed.parse().ok() })
         })
         .take(500)
         .collect();
-    Ok(CommitDetail { oid: oid.to_string(), message: message.trim().to_string(), files })
+    Ok(CommitDetail {
+        oid: oid.to_string(),
+        message: message.trim().to_string(),
+        author,
+        email,
+        at: at.parse().unwrap_or(0),
+        committer,
+        committer_email,
+        committed_at: committed_at.parse().unwrap_or(0),
+        parents: parents.split_whitespace().map(str::to_string).collect(),
+        files,
+    })
 }
 
 /// One file's diff in a commit.
@@ -642,10 +680,12 @@ fn invalidate(directory: &str) -> Result<RepositorySnapshot, String> {
     snapshot(directory, true)
 }
 
-/// Downloads what the remote has, without touching the working tree. Prunes the branches deleted there.
-pub fn fetch(directory: &str) -> Result<RepositorySnapshot, String> {
+/// Downloads what the remote has, without touching the working tree. With `prune`, the remote branches deleted there
+/// are removed here too.
+pub fn fetch(directory: &str, prune: bool) -> Result<RepositorySnapshot, String> {
     let root = root_for(directory)?;
-    git_within(&root, &["fetch", "--prune", "--quiet"], REMOTE_TIMEOUT)?;
+    let args: &[&str] = if prune { &["fetch", "--prune", "--quiet"] } else { &["fetch", "--quiet"] };
+    git_within(&root, args, REMOTE_TIMEOUT)?;
     invalidate(directory)
 }
 
@@ -661,6 +701,39 @@ pub fn pull(directory: &str) -> Result<RepositorySnapshot, String> {
     }
     git_within(&root, &["fetch", "--quiet"], REMOTE_TIMEOUT)?;
     git_within(&root, &["merge", "--ff-only", "--quiet", "@{upstream}"], REMOTE_TIMEOUT)?;
+    invalidate(directory)
+}
+
+/// Replays this branch's own commits on top of `onto` (its upstream, or a local branch). It needs a clean tree, and a
+/// rebase that stops on a conflict is aborted at once, so the branch is either rebased or exactly as it was.
+pub fn rebase(directory: &str, onto: &str) -> Result<RepositorySnapshot, String> {
+    let root = root_for(directory)?;
+    let before = snapshot(directory, true)?;
+    if before.branch == "(detached)" {
+        return Err("no_branch".into());
+    }
+    if before.conflicts > 0 || before.staged > 0 || before.modified > 0 {
+        return Err("dirty_tree".into());
+    }
+    let target = if onto == "@{upstream}" {
+        before.upstream.clone().ok_or("no_upstream")?
+    } else if branches(directory)?.iter().any(|branch| branch.name == onto && !branch.current) {
+        onto.to_string()
+    } else {
+        return Err("unknown_branch".into());
+    };
+    if let Err(error) = git_within(&root, &["rebase", "--quiet", &target], Duration::from_secs(120)) {
+        let stopped = ["rebase-merge", "rebase-apply"].iter().any(|name| {
+            git_text(&root, &["rev-parse", "--git-path", name]).is_ok_and(|path| root.join(path).exists())
+        });
+        if stopped {
+            let _ = git_within(&root, &["rebase", "--abort"], Duration::from_secs(30));
+            invalidate(directory)?;
+            return Err("rebase_conflict".into());
+        }
+        invalidate(directory)?;
+        return Err(error);
+    }
     invalidate(directory)
 }
 
@@ -763,6 +836,78 @@ pub fn branches(directory: &str) -> Result<Vec<LocalBranch>, String> {
             Some(LocalBranch { name, current, upstream, at })
         })
         .collect())
+}
+
+static AVATARS: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+
+/// GitHub's no-reply addresses carry the account, so their picture needs no request.
+fn noreply_avatar(email: &str) -> Option<String> {
+    let local = email.strip_suffix("@users.noreply.github.com")?;
+    match local.split_once('+') {
+        Some((id, _)) if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) => {
+            Some(format!("https://avatars.githubusercontent.com/u/{id}?s=64&v=4"))
+        }
+        None if !local.is_empty() && local.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') => {
+            Some(format!("https://github.com/{local}.png?size=64"))
+        }
+        _ => None,
+    }
+}
+
+/// The GitHub picture of each author, keyed by e-mail. `authors` pairs an e-mail with one of its commits; GitHub is
+/// asked once for all the commits it has not answered yet, and an author it does not know keeps its initials.
+pub fn author_avatars(directory: &str, authors: &[(String, String)]) -> Result<HashMap<String, String>, String> {
+    let cache = AVATARS.get_or_init(Default::default);
+    let mut found = HashMap::new();
+    let mut ask: Vec<(String, String)> = Vec::new();
+    {
+        let cache = cache.lock().map_err(|_| "repository_busy")?;
+        for (email, oid) in authors.iter().take(60) {
+            if email.is_empty() || email.len() > 254 || found.contains_key(email) || ask.iter().any(|(known, _)| known == email) {
+                continue;
+            }
+            if let Some(url) = noreply_avatar(email) {
+                found.insert(email.clone(), url);
+                continue;
+            }
+            match cache.get(email) {
+                Some(Some(url)) => {
+                    found.insert(email.clone(), url.clone());
+                }
+                Some(None) => {}
+                None if valid_oid(oid) && matches!(oid.len(), 40 | 64) => ask.push((email.clone(), oid.clone())),
+                None => {}
+            }
+        }
+    }
+    if ask.is_empty() {
+        return Ok(found);
+    }
+    let Some(name) = snapshot(directory, false)?.github else { return Ok(found) };
+    let Some((owner, repo)) = name.split_once('/') else { return Ok(found) };
+    let fields: String = ask
+        .iter()
+        .enumerate()
+        .map(|(index, (_, oid))| format!("c{index}: object(oid: \"{oid}\") {{ ... on Commit {{ author {{ avatarUrl(size: 64) }} }} }} "))
+        .collect();
+    let query = format!("query($owner:String!,$name:String!){{repository(owner:$owner,name:$name){{ {fields}}}}}");
+    let Ok(response) = graphql(&query, &[("owner", owner), ("name", repo)]) else { return Ok(found) };
+    let repository = &response["data"]["repository"];
+    let mut cache = cache.lock().map_err(|_| "repository_busy")?;
+    if cache.len() > 2000 {
+        cache.clear();
+    }
+    for (index, (email, _)) in ask.into_iter().enumerate() {
+        let url = repository[format!("c{index}")]["author"]["avatarUrl"]
+            .as_str()
+            .filter(|url| url.starts_with("https://"))
+            .map(String::from);
+        if let Some(url) = &url {
+            found.insert(email.clone(), url.clone());
+        }
+        cache.insert(email, url);
+    }
+    Ok(found)
 }
 
 /// Switches to another local branch, only with no change that the switch could carry along or lose.
@@ -1140,7 +1285,7 @@ mod history_tests {
         let merge = &commits[0];
         assert_eq!(merge.subject, "merge feature");
         assert_eq!(merge.parents.len(), 2, "a merge has two parents");
-        assert!(merge.refs.contains(&"main".to_string()) && merge.refs.contains(&"v1".to_string()), "{:?}", merge.refs);
+        assert!(merge.refs.contains(&"main".to_string()) && merge.refs.contains(&"tag: v1".to_string()), "{:?}", merge.refs);
         assert!(commits.iter().any(|commit| commit.refs.contains(&"feature".to_string())));
         assert_eq!(commits.last().unwrap().parents.len(), 0, "the root commit has none");
         assert_eq!(history(&directory, 3).unwrap().len(), 1, "a page can start later");
@@ -1148,7 +1293,10 @@ mod history_tests {
         let on_branch = commits.iter().find(|commit| commit.subject == "on a branch").unwrap();
         let detail = commit_detail(&directory, &on_branch.oid).unwrap();
         assert_eq!(detail.message, "on a branch");
-        assert_eq!(detail.files, [CommitFile { path: "b.txt".into(), added: Some(2), removed: Some(0) }]);
+        assert_eq!(detail.files, [CommitFile { path: "b.txt".into(), status: "A".into(), added: Some(2), removed: Some(0) }]);
+        assert_eq!((detail.author.as_str(), detail.email.as_str(), detail.parents.len()), ("Ana", "ana@example.com", 1));
+        assert!(detail.at > 0 && detail.committed_at > 0);
+        assert_eq!(commits[0].email, "ana@example.com");
         let diff = commit_diff(&directory, &on_branch.oid, "b.txt").unwrap();
         assert!(diff.diff.contains("+three") && !diff.binary);
         assert!(commit_diff(&directory, &on_branch.oid, "../x").is_err());
@@ -1215,7 +1363,7 @@ mod action_tests {
         let directory = mine.to_string_lossy().into_owned();
 
         assert_eq!(snapshot(&directory, true).unwrap().behind, 0, "nothing is known before the fetch");
-        assert_eq!(fetch(&directory).unwrap().behind, 1);
+        assert_eq!(fetch(&directory, true).unwrap().behind, 1);
         let pulled = pull(&directory).unwrap();
         assert_eq!((pulled.behind, pulled.ahead), (0, 0));
         assert!(mine.join("b.txt").exists());
@@ -1227,6 +1375,26 @@ mod action_tests {
         assert_eq!(pull(&directory).err().unwrap(), "diverged");
         assert_eq!(git_text(&mine, &["rev-parse", "HEAD"]).unwrap(), head, "a refused pull leaves the branch alone");
         assert!(!mine.join("c.txt").exists());
+
+        let rebased = rebase(&directory, "@{upstream}").unwrap();
+        assert_eq!((rebased.ahead, rebased.behind), (1, 0), "the local commit now sits on top of the remote's");
+        assert!(mine.join("c.txt").exists() && mine.join("mine.txt").exists());
+
+        std::fs::write(mine.join("a.txt"), "mine\n").unwrap();
+        run(&mine, &["commit", "-q", "-am", "mine edits a"]);
+        run(&other, &["pull", "-q", "--rebase", "origin", "main"]);
+        std::fs::write(other.join("a.txt"), "theirs\n").unwrap();
+        run(&other, &["commit", "-q", "-am", "theirs edits a"]);
+        run(&other, &["push", "-q", "origin", "main"]);
+        fetch(&directory, false).unwrap();
+        let head = git_text(&mine, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(rebase(&directory, "@{upstream}").err().unwrap(), "rebase_conflict");
+        assert_eq!(git_text(&mine, &["rev-parse", "HEAD"]).unwrap(), head, "a conflicting rebase is aborted");
+        assert_eq!(std::fs::read_to_string(mine.join("a.txt")).unwrap(), "mine\n");
+        assert_eq!(snapshot(&directory, true).unwrap().conflicts, 0);
+        assert_eq!(rebase(&directory, "--onto").err().unwrap(), "unknown_branch");
+        std::fs::write(mine.join("a.txt"), "dirty\n").unwrap();
+        assert_eq!(rebase(&directory, "@{upstream}").err().unwrap(), "dirty_tree");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1265,5 +1433,13 @@ mod action_tests {
         assert_eq!(stashes(&directory).unwrap().len(), 1, "applying keeps the stash");
         assert!(stash_drop(&directory, &saved[0].oid, 0).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_github_no_reply_address_gives_its_picture_without_a_request() {
+        assert_eq!(noreply_avatar("123+ana@users.noreply.github.com").as_deref(), Some("https://avatars.githubusercontent.com/u/123?s=64&v=4"));
+        assert_eq!(noreply_avatar("ana-dev@users.noreply.github.com").as_deref(), Some("https://github.com/ana-dev.png?size=64"));
+        assert_eq!(noreply_avatar("ana@example.com"), None);
+        assert_eq!(noreply_avatar("../x@users.noreply.github.com"), None);
     }
 }

@@ -116,8 +116,9 @@ export function observeRepository(session: Pick<AgentSession, "id" | "workingDir
 export const getGitHubAccount = (refresh = false) => invoke<GitHubAccountSnapshot>("get_github_account", { refresh });
 export const getSessionGitHub = (sessionId: string, refresh = false) => invoke<GitHubRepoSnapshot>("get_session_github", { sessionId, refresh });
 export const getRepositorySnapshot = (sessionId: string, refresh = true) => invoke<RepositorySnapshot>("get_session_repository", { sessionId, refresh });
-export interface HistoryCommit { oid: string; parents: string[]; author: string; at: number; refs: string[]; subject: string }
-export interface CommitDetail { oid: string; message: string; files: Array<{ path: string; added: number | null; removed: number | null }> }
+export interface HistoryCommit { oid: string; parents: string[]; author: string; email: string; at: number; refs: string[]; subject: string }
+export interface CommitFile { path: string; status: string; added: number | null; removed: number | null }
+export interface CommitDetail { oid: string; message: string; author: string; email: string; at: number; committer: string; committerEmail: string; committedAt: number; parents: string[]; files: CommitFile[] }
 export const getSessionHistory = (sessionId: string, skip = 0) => invoke<HistoryCommit[]>("get_session_history", { sessionId, skip });
 export const getSessionCommit = (sessionId: string, oid: string) => invoke<CommitDetail>("get_session_commit", { sessionId, oid });
 export const getSessionCommitDiff = (sessionId: string, oid: string, path: string) => invoke<RepositoryDiff>("get_session_commit_diff", { sessionId, oid, path });
@@ -125,7 +126,9 @@ export interface StashEntry { oid: string; index: number; message: string; at: n
 export interface LocalBranch { name: string; current: boolean; upstream: string | null; at: number }
 export interface GitTools { stashes: StashEntry[]; branches: LocalBranch[]; busy: boolean }
 export const getSessionGitTools = (sessionId: string) => invoke<GitTools>("get_session_git_tools", { sessionId });
-export const gitFetch = (sessionId: string) => invoke<unknown>("git_fetch_session", { sessionId });
+export const gitFetch = (sessionId: string, prune = false) => invoke<unknown>("git_fetch_session", { sessionId, prune });
+export const gitRebase = (sessionId: string, onto: string) => invoke<unknown>("git_rebase_session", { sessionId, onto });
+export const getAuthorAvatars = (sessionId: string, authors: Array<[string, string]>) => invoke<Record<string, string>>("get_session_author_avatars", { sessionId, authors });
 export const gitPull = (sessionId: string) => invoke<unknown>("git_pull_session", { sessionId });
 export const gitStash = (sessionId: string, message: string) => invoke<StashEntry[]>("git_stash_session", { sessionId, message });
 export const gitStashApply = (sessionId: string, oid: string, index: number) => invoke<unknown>("git_stash_apply_session", { sessionId, oid, index });
@@ -169,6 +172,8 @@ export function repositoryError(error: string, portuguese: boolean) {
     dirty_tree: ["Commit or stash your changes before switching branches.", "Faça commit ou guarde suas mudanças em um stash antes de trocar de branch."],
     unknown_branch: ["That branch no longer exists.", "Essa branch não existe mais."],
     stash_changed: ["The stash list changed. Reopen it and try again.", "A lista de stashes mudou. Abra de novo e tente outra vez."],
+    rebase_conflict: ["The rebase hit a conflict, so Lume cancelled it. The branch is exactly as it was.", "O rebase encontrou um conflito, então o Lume o cancelou. A branch está exatamente como antes."],
+    no_branch: ["Check out a branch first.", "Entre em uma branch primeiro."],
     invalid_oid: ["That stash is not valid.", "Esse stash não é válido."],
     no_github_remote: ["This repository has no GitHub remote.", "Este repositório não tem um remote do GitHub."],
   };

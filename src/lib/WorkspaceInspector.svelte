@@ -4,6 +4,8 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import LumeSelect, { type LumeSelectOption } from "$lib/LumeSelect.svelte";
   import RepositoryPanel from "$lib/RepositoryPanel.svelte";
+  import { fly } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import { transientScrollbar } from "$lib/transientScrollbar";
   import { displayFileChangePath } from "$lib/fileChanges";
@@ -22,6 +24,7 @@
     language = "en",
     onClose,
     onOpenReview,
+    onOpenCommitFile,
     variant = "workspace",
     showCloseButton = true,
     section = $bindable("session"),
@@ -33,6 +36,7 @@
     language?: Language;
     onClose?: () => void;
     onOpenReview?: (path?: string) => void;
+    onOpenCommitFile?: (commit: { oid: string; subject: string }, path: string) => void;
     variant?: "workspace" | "orb";
     showCloseButton?: boolean;
     section?: "session" | "repository";
@@ -258,9 +262,9 @@
       <button type="button" class:active={section === "repository"} aria-pressed={section === "repository"} onclick={() => (section = "repository")}><LumeIcon name="repository" size={14} />{tr("Repository", "Repositório")}</button>
     </nav>
     {#if section === "repository"}
-      <div class="inspector-scroll" use:transientScrollbar><RepositoryPanel {session} {language} compact /></div>
+      <div class="inspector-scroll" use:transientScrollbar in:fly={{ y: 8, duration: 200, easing: cubicOut }}><RepositoryPanel {session} {language} compact {onOpenCommitFile} /></div>
     {:else}
-    <div class="inspector-scroll" use:transientScrollbar>
+    <div class="inspector-scroll" use:transientScrollbar in:fly={{ y: 8, duration: 200, easing: cubicOut }}>
       {#if hasUsage(session.agent)}
         <section class="usage-section" class:stacked={usageStacked} aria-label={tr(`${session.agentLabel} usage`, `Uso do ${session.agentLabel}`)}>
           <div class="usage-gauges" class:loading={usageRefreshing && !usageGroups.length} aria-busy={usageLoading}>

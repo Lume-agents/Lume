@@ -303,6 +303,9 @@
   let reviewOpen = $state(false);
   let reviewWide = $state(false);
   let reviewInitialPath = $state<string | undefined>();
+  // A commit opened from the repository history shows its review over the chats, beside the open inspector.
+  let reviewCommit = $state<{ oid: string; subject: string } | null>(null);
+  let reviewOverlay = $state(false);
   let inspectorBeforeReview = $state(false);
   let splitRatio = $state(0.5);
   let tertiaryRatio = $state(0.34);
@@ -1597,6 +1600,14 @@
   }
 
   function toggleInspector() {
+    if (reviewOpen && reviewOverlay) {
+      reviewOpen = false;
+      reviewCommit = null;
+      reviewInitialPath = undefined;
+      inspectorOpen = false;
+      persistWorkspaceLayout();
+      return;
+    }
     if (reviewOpen) {
       reviewOpen = false;
       reviewInitialPath = undefined;
@@ -1723,8 +1734,21 @@
     if (!sessionId) return;
     focusedPaneId = sessionId;
     reviewInitialPath = path;
+    reviewCommit = null;
+    reviewOverlay = false;
     if (!reviewOpen) inspectorBeforeReview = inspectorOpen;
     inspectorOpen = false;
+    reviewOpen = true;
+  }
+
+  function openCommitReview(commit: { oid: string; subject: string }, path: string) {
+    if (!focusedSession) return;
+    if (reviewOpen && !reviewOverlay) closeReview();
+    reviewCommit = commit;
+    reviewInitialPath = path;
+    reviewOverlay = true;
+    reviewWide = false;
+    inspectorBeforeReview = false;
     reviewOpen = true;
   }
 
@@ -1738,6 +1762,7 @@
   function closeReview() {
     reviewOpen = false;
     reviewInitialPath = undefined;
+    reviewCommit = null;
     if (inspectorBeforeReview) inspectorOpen = true;
     inspectorBeforeReview = false;
   }
@@ -3312,7 +3337,7 @@
     </div>
   {/if}
 
-  <section class:inspector-open={inspectorOpen && !stageTakeover} class:review-open={reviewOpen && !stageTakeover} class:maximized={Boolean(maximizedSession) && !stageTakeover} class:review-wide={reviewWide && reviewOpen && !stageTakeover} class="workspace-stage">
+  <section class:inspector-open={inspectorOpen && !stageTakeover} class:review-open={reviewOpen && !reviewOverlay && !stageTakeover} class:review-overlay={reviewOverlay && !stageTakeover} class:maximized={Boolean(maximizedSession) && !stageTakeover} class:review-wide={reviewWide && reviewOpen && !stageTakeover} class="workspace-stage">
     <section
       bind:this={workbenchElement}
       class:split={Boolean(secondary) && !maximizedSession}
@@ -3514,14 +3539,14 @@
     <div class:open={inspectorOpen && !stageTakeover} class="inspector-shell" aria-hidden={!inspectorOpen || stageTakeover} inert={!inspectorOpen || stageTakeover}>
       {#if inspectorOpen}
         <div class="inspector-content" in:fade={{ duration: motionDuration(140) }} out:fade={{ duration: motionDuration(100) }}>
-          <WorkspaceInspector session={focusedSession} {language} {loading} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} />
+          <WorkspaceInspector session={focusedSession} {language} {loading} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} onOpenCommitFile={openCommitReview} />
         </div>
       {/if}
     </div>
     <div class:open={reviewOpen && !stageTakeover} class="review-shell" aria-hidden={!reviewOpen || stageTakeover} inert={!reviewOpen || stageTakeover}>
       {#if reviewOpen && focusedSession}
         <div class="review-content" in:fly={{ x: 22, duration: motionDuration(220), easing: cubicOut }} out:fly={{ x: 16, duration: motionDuration(145), easing: cubicOut }}>
-          <WorkspaceReviewCenter session={focusedSession} {language} initialPath={reviewInitialPath} wide={reviewWide} onToggleWide={() => (reviewWide = !reviewWide)} onClose={closeReview} />
+          <WorkspaceReviewCenter session={focusedSession} {language} initialPath={reviewInitialPath} commit={reviewCommit} wide={reviewWide} onToggleWide={reviewOverlay ? undefined : () => (reviewWide = !reviewWide)} onClose={closeReview} />
         </div>
       {/if}
     </div>
@@ -3878,6 +3903,8 @@
   .review-shell { min-width: 0; min-height: 0; height: 100%; overflow: hidden; border-left: 0 solid transparent; pointer-events: none; }
   .review-shell.open { border-left-width: 1px; border-left-color: var(--workspace-line); pointer-events: auto; }
   .review-content { min-width: 0; width: 100%; height: 100%; }
+  .workspace-stage.review-overlay .review-shell { position: absolute; z-index: 30; top: 0; bottom: 0; left: 0; right: clamp(270px, 23vw, 350px); border-left: 0; border-right: 1px solid transparent; background: transparent; }
+  .workspace-stage.review-overlay .review-shell.open { border-right-color: var(--workspace-line); background: var(--workspace-pane, var(--workspace-bg)); box-shadow: 12px 0 34px rgba(4, 15, 9, .14); }
   .workbench { position: relative; width: 100%; max-width: 100%; min-width: 0; min-height: 0; isolation: isolate; contain: inline-size; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; background: transparent; }
   .board-chat-layer { display: contents; }
   /* The board covers the chats: they stay mounted (scroll and drafts survive) but stop painting and animating. */
@@ -3975,6 +4002,7 @@
     .inspector-shell { position: absolute; z-index: 34; top: 0; right: 0; bottom: 0; width: min(350px, calc(100% - 44px)); opacity: 0; transform: translateX(20px); transition: opacity 130ms ease, transform 170ms cubic-bezier(.16, 1, .3, 1); }
     .inspector-shell.open { opacity: 1; transform: translateX(0); box-shadow: -16px 0 40px rgba(4, 15, 9, .16); }
     .workspace-stage.review-open { grid-template-columns: minmax(300px, 1fr) 0px minmax(420px, 48vw); }
+    .workspace-stage.review-overlay .review-shell { right: min(350px, calc(100% - 44px)); }
   }
   /* Small or low-resolution screens get a larger list, so names and folders stay readable. */
   @media (max-width: 1366px), (max-height: 760px) { .session-copy strong { font-size: 12px; } .session-copy small, .session-copy em { font-size: 10px; } }

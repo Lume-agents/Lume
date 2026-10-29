@@ -12,7 +12,7 @@
   import { displayFileChangePath } from "$lib/fileChanges";
   import { buildReviewTurns, parseReviewDiff, type ReviewDiffLine } from "$lib/reviewDiffs";
   import { approveWorkflowHandoff, deleteReviewNote, loadReviewDecisions, loadReviewNotes, loadWorkflowHistory, loadWorkflowRun, saveReviewNote, setReviewDecision, submitPrompt } from "$lib/lume";
-  import { getRepositoryDiff, getRepositorySnapshot, repositoryError, type RepositoryFile } from "$lib/repositories";
+  import { getRepositoryDiff, getRepositorySnapshot, getSessionCommit, getSessionCommitDiff, repositoryError, type CommitFile, type RepositoryFile } from "$lib/repositories";
   import { listen } from "@tauri-apps/api/event";
   import { renderSafeMarkdown } from "$lib/markdown.js";
   import { foldUnchanged, pairForSplit, presentLines } from "$lib/diffPresentation";
@@ -22,10 +22,12 @@
   type GitDiff = { diff: string; binary: boolean } | { error: string };
   const GIT_TURN = "git:worktree";
 
-  let { session, language = "en", initialPath, wide = false, onToggleWide, onClose } = $props<{
+  let { session, language = "en", initialPath, commit = null, wide = false, onToggleWide, onClose } = $props<{
     session: HubSession;
     language?: Language;
     initialPath?: string;
+    /** A commit from the repository history to review instead of a task. */
+    commit?: { oid: string; subject: string } | null;
     wide?: boolean;
     onToggleWide?: () => void;
     onClose: () => void;
@@ -52,6 +54,9 @@
   let gitState = $state<"idle" | "loading" | "ready" | "error">("idle");
   let gitMessage = $state("");
   let gitDiffs = $state<Record<string, GitDiff>>({});
+  let commitFiles = $state<CommitFile[]>([]);
+  let shownCommit = "";
+  let loadedCommit = "";
   let reviewedPaths = $state<string[]>([]);
   let comments = $state<ReviewComment[]>([]);
   let composer = $state<{ path: string; side: CommentSide; line: number; excerpt: string; body: string; editId?: string } | null>(null);
@@ -66,10 +71,15 @@
   let decisionSaving = $state(false);
   const turns = $derived(buildReviewTurns(session.activities, session.results, session.workingDirectory));
   const gitMode = $derived(selectedTurnId === GIT_TURN);
-  const selectedTurn = $derived(gitMode ? null : turns.find((turn) => turn.id === selectedTurnId) ?? turns[0] ?? null);
-  const turnKey = $derived(gitMode ? GIT_TURN : selectedTurn?.id ?? "");
+  const commitTurn = $derived(commit ? `commit:${commit.oid}` : "");
+  const commitMode = $derived(Boolean(commit) && selectedTurnId === commitTurn);
+  const selectedTurn = $derived(gitMode || commitMode ? null : turns.find((turn) => turn.id === selectedTurnId) ?? turns[0] ?? null);
+  const turnKey = $derived(gitMode ? GIT_TURN : commitMode ? commitTurn : selectedTurn?.id ?? "");
   const loadedGitDiff = (path: string) => { const entry = gitDiffs[path]; return entry && "diff" in entry ? entry : null; };
   const files = $derived.by(() => {
+    if (commitMode) {
+      return commitFiles.map((file) => ({ path: file.path, added: file.added ?? 0, removed: file.removed ?? 0, diff: loadedGitDiff(file.path)?.diff, loaded: file.added !== null }));
+    }
     if (gitMode) {
       return gitFiles.map((file) => {
         const loaded = loadedGitDiff(file.path);
@@ -93,7 +103,7 @@
   const selectedFileHasCapturedDiff = $derived(Boolean(
     selectedTurn?.files.find((file) => file.path === selectedFile?.path)?.diff,
   ));
-  const selectedFileUsesGitFallback = $derived(!gitMode && Boolean(selectedFile?.diff) && !selectedFileHasCapturedDiff);
+  const selectedFileUsesGitFallback = $derived(!gitMode && !commitMode && Boolean(selectedFile?.diff) && !selectedFileHasCapturedDiff);
   const diffLines = $derived(selectedFile?.diff ? parseReviewDiff(selectedFile.diff) : []);
   const cells = $derived(presentLines(diffLines.filter((line) => line.kind !== "meta"), selectedFile?.path ?? ""));
   const expandedSet = $derived(new Set(expandedFolds));
@@ -180,11 +190,31 @@
       .catch((error) => { gitState = "error"; gitMessage = repositoryError(String(error).replace(/^Error:\s*/, ""), language === "pt-BR"); });
   });
 
+  // A commit opened from the history is shown at once, and its files are read from git.
+  $effect(() => {
+    if (!commitTurn || commitTurn === shownCommit) return;
+    shownCommit = commitTurn;
+    selectedTurnId = commitTurn;
+  });
+  $effect(() => {
+    if (!commitMode || !commit) { loadedCommit = ""; return; }
+    const { oid } = commit;
+    const key = `${session.id}:${oid}`;
+    if (loadedCommit === key) return;
+    loadedCommit = key;
+    gitDiffs = {};
+    commitFiles = [];
+    gitState = "loading";
+    void getSessionCommit(session.id, oid)
+      .then((detail) => { if (commit?.oid === oid) { commitFiles = detail.files; gitState = "ready"; } })
+      .catch((error) => { gitState = "error"; gitMessage = repositoryError(String(error).replace(/^Error:\s*/, ""), language === "pt-BR"); });
+  });
+
   $effect(() => {
     // Load missing captured diffs from the repository; this is a working-tree
     // fallback, not a historical snapshot of the selected prompt.
     if (!selectedFile || gitDiffs[selectedFile.path]) return;
-    if (gitMode || !selectedFileHasCapturedDiff) void loadGitDiff(selectedFile.path);
+    if (gitMode || commitMode || !selectedFileHasCapturedDiff) void loadGitDiff(selectedFile.path);
   });
 
   $effect(() => {
@@ -414,7 +444,7 @@
   async function loadGitDiff(path: string) {
     gitDiffs = { ...gitDiffs, [path]: { error: "" } };
     try {
-      const result = await getRepositoryDiff(session.id, repositoryPath(path));
+      const result = commitMode && commit ? await getSessionCommitDiff(session.id, commit.oid, path) : await getRepositoryDiff(session.id, repositoryPath(path));
       gitDiffs = { ...gitDiffs, [path]: { diff: result.diff, binary: result.binary } };
     } catch (error) {
       const code = String(error).replace(/^Error:\s*/, "");
@@ -541,8 +571,8 @@
     <div class="turn-picker">
       <LumeSelect
         ariaLabel={tr("Choose a task to review", "Escolha uma tarefa para revisar")}
-        value={gitMode ? GIT_TURN : selectedTurn?.id ?? ""}
-        options={[...turns.map((turn) => ({ value: turn.id, label: turnLabel(turn) })), { value: GIT_TURN, label: tr("Git · pending changes", "Git · mudanças pendentes") }]}
+        value={gitMode ? GIT_TURN : commitMode ? commitTurn : selectedTurn?.id ?? ""}
+        options={[...(commit ? [{ value: commitTurn, label: `${tr("Commit", "Commit")} ${commit.oid.slice(0, 7)} · ${commit.subject}` }] : []), ...turns.map((turn) => ({ value: turn.id, label: turnLabel(turn) })), { value: GIT_TURN, label: tr("Git · pending changes", "Git · mudanças pendentes") }]}
         minWidth={220}
         onValueChange={(value) => void selectTurn(value)}
       />
@@ -574,6 +604,7 @@
       <button class="comments-chip" type="button" title={tr("Open the request with these comments", "Abrir o pedido com estes comentários")} onclick={() => correctionOpen = true}><LumeIcon name="note" size={12} />{pendingComments.length} {tr(pendingComments.length === 1 ? "comment" : "comments", pendingComments.length === 1 ? "comentário" : "comentários")}</button>
     {/if}
     {#if handoff}<span class="handoff-chip" title={tr("This result's workflow handoff is waiting for your approval", "O handoff do workflow deste resultado aguarda sua aprovação")}><LumeIcon name="shield" size={12} />{tr("Handoff pending", "Handoff pendente")}{#if handoff.target} → {handoff.target}{/if}</span>{/if}
+    {#if !commitMode}
     <div class="review-decisions" aria-label={tr("Result decision", "Decisão sobre o resultado")}>
       {#if selectedReviewDecision}
         <span class="decision-state {selectedReviewDecision.decision}"><LumeIcon name={selectedReviewDecision.decision === "approved" ? "check" : "note"} size={12} />{selectedReviewDecision.decision === "approved" ? tr("Approved", "Aprovado") : tr("Changes requested", "Correções solicitadas")}</span>
@@ -581,6 +612,7 @@
       <button class="request-changes" type="button" disabled={(!selectedTurn?.result && !gitMode) || decisionSaving || correctionSending} onclick={() => correctionOpen = !correctionOpen}><LumeIcon name="refresh" size={13} /><span>{tr("Request changes", "Solicitar correções")}</span></button>
       <button class="approve-result" type="button" title={handoff ? tr(`Approves the result and releases the handoff${handoff.target ? " to " + handoff.target : ""}.`, `Aprova o resultado e libera o handoff${handoff.target ? " para " + handoff.target : ""}.`) : tr("Records a review decision; it does not advance a workflow handoff.", "Registra a revisão; não avança o handoff do workflow.")} disabled={!selectedTurn?.result || decisionSaving || correctionSending} onclick={() => void approveSelectedResult()}><LumeIcon name={handoff ? "arrow-right" : "check"} size={13} /><span>{decisionSaving ? tr("Saving…", "Salvando…") : handoff ? tr("Approve and advance", "Aprovar e avançar") : tr("Approve", "Aprovar")}</span></button>
     </div>
+    {/if}
   </div>
 
   {#if correctionOpen}
@@ -620,19 +652,23 @@
               </button>
             </div>
           {:else}
-            <p>{gitMode
+            <p>{commitMode
+              ? gitState === "loading" ? tr("Reading the commit…", "Lendo o commit…") : gitState === "error" ? gitMessage : tr("This commit changed no files.", "Este commit não mudou arquivos.")
+              : gitMode
               ? gitState === "loading" ? tr("Reading the repository…", "Lendo o repositório…") : gitState === "error" ? gitMessage : tr("The git working tree has no pending changes.", "A árvore de trabalho do git não tem mudanças pendentes.")
               : selectedTurn && !selectedTurn.activityAvailable
                 ? tr("This result is older than the loaded activity history.", "Este resultado é mais antigo que o histórico de atividades carregado.")
                 : tr("No file changes were captured for this task.", "Nenhuma alteração foi capturada nesta tarefa.")}</p>
-            {#if !gitMode}<button class="empty-action" type="button" onclick={() => void selectTurn(GIT_TURN)}>{tr("See pending changes in git", "Ver mudanças pendentes no git")}</button>{/if}
+            {#if !gitMode && !commitMode}<button class="empty-action" type="button" onclick={() => void selectTurn(GIT_TURN)}>{tr("See pending changes in git", "Ver mudanças pendentes no git")}</button>{/if}
           {/each}
         </nav>
         {#if files.length}<footer><kbd>j</kbd><kbd>k</kbd> {tr("files", "arquivos")} · <kbd>v</kbd> {tr("reviewed", "revisado")}</footer>{/if}
       </aside>
 
-      <main class="diff-workspace" class:has-answer={Boolean(answerSummary) || gitMode}>
-        {#if gitMode || selectedFileUsesGitFallback}
+      <main class="diff-workspace" class:has-answer={Boolean(answerSummary) || gitMode || commitMode}>
+        {#if commitMode && commit}
+          <p class="git-note"><LumeIcon name="commit" size={12} /> {tr(`What commit ${commit.oid.slice(0, 7)} changed, compared with its parent.`, `O que o commit ${commit.oid.slice(0, 7)} mudou, comparado com o commit pai.`)}</p>
+        {:else if gitMode || selectedFileUsesGitFallback}
           <p class="git-note"><LumeIcon name="branch" size={12} /> {gitMode
             ? tr("Pending changes in the git working tree (compared with HEAD), not tied to one result.", "Mudanças pendentes na árvore de trabalho do git (comparadas com o HEAD), sem vínculo com um resultado.")
             : tr("This diff is from the current git working tree; it may include changes beyond this prompt.", "Este diff vem da árvore de trabalho atual do git e pode incluir mudanças além deste prompt.")}</p>

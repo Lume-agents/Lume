@@ -51,7 +51,12 @@
     | "server"
     | "database"
     | "compact"
-    | "warning";
+    | "warning"
+    | "menu"
+    | "minus"
+    | "stash"
+    | "rebase"
+    | "dot";
 </script>
 
 <script lang="ts">
@@ -114,6 +119,18 @@
     <path d="M4 12h16m-6-6 6 6-6 6" />
   {:else if name === "arrow-up"}
     <path d="M12 20V4M6 10l6-6 6 6" />
+  {:else if name === "menu"}
+    <path d="M4 7h16M4 12h16M4 17h16" />
+  {:else if name === "minus"}
+    <path d="M5 12h14" />
+  {:else if name === "stash"}
+    <path d="M4 8h16v10.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5Z" />
+    <path d="M3 4.5h18V8H3ZM10 12h4" />
+  {:else if name === "rebase"}
+    <circle cx="6" cy="5" r="2" /><circle cx="6" cy="19" r="2" /><circle cx="18" cy="9" r="2" />
+    <path d="M6 7v10M18 11v1a4 4 0 0 1-4 4H8.5" />
+  {:else if name === "dot"}
+    <circle cx="12" cy="12" r="4" fill="currentColor" stroke="none" />
   {:else if name === "warning"}
     <path d="M10.3 4.1 2.9 17a2 2 0 0 0 1.8 3h14.6a2 2 0 0 0 1.8-3L13.7 4.1a2 2 0 0 0-3.4 0Z" />
     <path d="M12 9v4.5M12 17h.01" />

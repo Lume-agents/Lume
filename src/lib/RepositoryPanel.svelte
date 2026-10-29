@@ -5,13 +5,18 @@
   import GitHubActivity from "$lib/GitHubActivity.svelte";
   import CommitGraph from "$lib/CommitGraph.svelte";
   import GitActions from "$lib/GitActions.svelte";
+  import FileStatusMark from "$lib/FileStatusMark.svelte";
+  import { workingStatus } from "$lib/fileStatus";
+  import { fly } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import LumeIcon, { type LumeIconName } from "$lib/LumeIcon.svelte";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import { transientScrollbar } from "$lib/transientScrollbar";
   import type { AgentSession } from "$lib/domain";
-  import { commitRepository, getGitHubAccount, getRepositoryDiff, getSessionGitHub, observeRepository, openGitHub, repositoryError, type GitHubAccountSnapshot, type GitHubRepoSnapshot, type RepositoryCommit, type RepositoryDiff, type RepositoryState } from "$lib/repositories";
+  import { commitRepository, getGitHubAccount, getRepositoryDiff, getSessionGitHub, observeRepository, openGitHub, repositoryError, type GitHubAccountSnapshot, type GitHubRepoSnapshot, type RepositoryDiff, type RepositoryState } from "$lib/repositories";
 
-  let { session, language = "en", compact = false } = $props<{ session: AgentSession; language?: "en" | "pt-BR"; compact?: boolean }>();
+  let { session, language = "en", compact = false, onOpenCommitFile } = $props<{ session: AgentSession; language?: "en" | "pt-BR"; compact?: boolean; onOpenCommitFile?: (commit: { oid: string; subject: string }, path: string) => void }>();
+  let focusCommit = $state<string | null>(null);
   let repository = $state<RepositoryState>({ loading: true, value: null, error: "" });
   let github = $state<GitHubRepoSnapshot | null>(null);
   let githubLoading = $state(false);
@@ -101,17 +106,18 @@
     untrack(() => reportNotices(notices));
   });
 
+  // The session object is replaced on every streamed update; only a change of chat or folder starts the panel over,
+  // so an open diff or selection survives while the agent works.
+  const repositoryKey = $derived(JSON.stringify([session.id, session.workingDirectory ?? "", session.nativeSessionId ?? ""]));
   $effect(() => {
-    const id = session.id;
-    const directory = session.workingDirectory;
-    const nativeSessionId = session.nativeSessionId;
+    const [id, directory, nativeSessionId] = JSON.parse(repositoryKey) as [string, string, string];
     generation += 1;
     fileLimit = 100;
     previewGeneration += 1;
     github = null; requestedGitHub = ""; preview = null; previewPath = ""; previewError = ""; actionError = "";
     githubLoading = false;
     githubError = "";
-    const observer = observeRepository({ id, nativeSessionId, workingDirectory: directory });
+    const observer = observeRepository({ id, nativeSessionId: nativeSessionId || undefined, workingDirectory: directory || undefined });
     return observer.subscribe((state) => { repository = state; });
   });
   $effect(() => {
@@ -171,17 +177,6 @@
   }
   function fileName(path: string) { return path.split("/").at(-1) ?? path; }
   function fileDirectory(path: string) { return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ""; }
-  function fileLabel(file: NonNullable<typeof local>["files"][number]) {
-    if (file.conflict) return tr("Conflict", "Conflito");
-    if (file.untracked) return tr("New", "Novo");
-    if (`${file.index}${file.worktree}`.includes("D")) return tr("Deleted", "Removido");
-    if (`${file.index}${file.worktree}`.includes("R")) return tr("Renamed", "Renomeado");
-    return file.worktree === "." ? tr("Staged", "Preparado") : tr("Modified", "Modificado");
-  }
-  function commitDate(value: string) {
-    const date = new Date(`${value}T00:00:00Z`);
-    return Number.isFinite(date.getTime()) ? new Intl.DateTimeFormat(language, { day: "numeric", month: "short", timeZone: "UTC" }).format(date) : value;
-  }
   const diffLines = $derived.by(() => {
     let before = 0; let after = preview?.untracked ? 1 : 0;
     return (preview?.diff ?? "").split("\n").map((text) => {
@@ -196,14 +191,6 @@
 </script>
 
 
-{#snippet commitHistory(commits: RepositoryCommit[])}
-  <ol class="commit-list">{#each commits as commit (commit.oid)}
-    <li>
-      <span class="commit-mark" aria-hidden="true"><LumeIcon name="commit" size={16} /></span>
-      <div class="commit-copy"><strong>{commit.subject}</strong><div class="commit-meta"><span>{commit.author}</span><time datetime={commit.date} title={commit.date}>{commitDate(commit.date)}</time>{#if local?.github}<button class="commit-hash" type="button" title={tr("Open commit on GitHub", "Abrir commit no GitHub")} onclick={() => void open(`https://github.com/${local?.github}/commit/${commit.oid}`)}>{commit.oid.slice(0, 7)}</button>{:else}<code>{commit.oid.slice(0, 7)}</code>{/if}</div></div>
-    </li>
-  {/each}</ol>
-{/snippet}
 
 <section class="repository-panel" class:compact aria-label={tr("Chat repository", "Repositório do chat")}>
   {#if repository.loading && !local}
@@ -226,14 +213,16 @@
     <nav class="repository-navigation" aria-label={tr("Repository tools", "Ferramentas do repositório")}>
       {#each sections as section (section.value)}<button type="button" class:active={tab === section.value} aria-pressed={tab === section.value} aria-label={section.label} title={section.label} onclick={() => selectSection(section.value)}><LumeIcon name={section.icon} size={18} /><span>{section.short}</span></button>{/each}
     </nav>
+    {#key tab}
+    <div class="tab-body" in:fly={{ y: 8, duration: 200, easing: cubicOut }}>
     {#if tab === "activity"}
       <div class="activity-scope" role="group" aria-label={tr("Activity source", "Origem da atividade")}><button type="button" class:active={activityScope === "repository"} aria-pressed={activityScope === "repository"} onclick={() => (activityScope = "repository")}><LumeIcon name="branch" size={13} />{tr("This repository", "Este repositório")}</button><button type="button" class:active={activityScope === "account"} aria-pressed={activityScope === "account"} onclick={() => (activityScope = "account")}><BrandIcon name="github" size={13} />{tr("My account", "Minha conta")}</button></div>
+      {#key activityScope}<div class="tab-body" in:fly={{ y: 6, duration: 180, easing: cubicOut }}>
       {#if activityScope === "repository"}
       <GitHubActivity days={local.days} {language} kind="commits" rangeDays={90} compact />
       {#if local.activityLimited || local.shallow}<p class="source-note">{local.shallow ? tr("Shallow clone: activity covers downloaded history.", "Clone raso: a atividade cobre o histórico baixado.") : tr("Activity is limited to 20,000 recent commits.", "A atividade está limitada aos 20.000 commits mais recentes.")}</p>{/if}
       <div class="section-heading"><h3>{tr("Recent commits", "Commits recentes")}</h3><button type="button" onclick={() => (tab = "commits")}>{tr("View history", "Ver histórico")}<LumeIcon name="arrow-right" size={12} /></button></div>
-      {@render commitHistory(local.commits.slice(0, 3))}
-      {#if !local.commits.length}<p class="empty-list">{tr("This branch has no commits yet.", "Esta branch ainda não tem commits.")}</p>{/if}
+      <CommitGraph sessionId={session.id} {language} head={local.head} branch={local.branch} readonly limit={5} onPick={(oid) => { focusCommit = oid; selectSection("commits"); }} />
       {:else if accountLoading && !account}
         <div class="repository-skeleton" role="status" aria-label={tr("Loading account activity", "Carregando atividade da conta")}><i></i><i></i><i></i></div>
       {:else if account?.state === "connected"}
@@ -242,16 +231,18 @@
       {:else}
         <div class="github-connection"><p>{repositoryError(account?.state ?? "command_failed", language === "pt-BR")}</p>{#if ["auth_required", "cli_missing"].includes(account?.state ?? "")}<code>gh auth login --hostname github.com --scopes read:user</code>{/if}<button class="text-action" type="button" disabled={accountLoading} onclick={() => void loadAccount(true)}><LumeIcon name="refresh" size={13} />{tr("Try again", "Tentar novamente")}</button></div>
       {/if}
+      </div>{/key}
     {:else if tab === "changes"}
       <div class="change-summary"><span><strong>{local.staged}</strong>{tr("staged", local.staged === 1 ? "preparado" : "preparados")}</span><span><strong>{local.modified}</strong>{tr("modified", local.modified === 1 ? "modificado" : "modificados")}</span><span><strong>{local.untracked}</strong>{tr("new", local.untracked === 1 ? "novo" : "novos")}</span>{#if local.conflicts}<span class="conflict"><strong>{local.conflicts}</strong>{tr("conflicts", "conflitos")}</span>{/if}</div>
       <p class="source-note">{tr("Shared working tree · not attributed to this chat", "Árvore de trabalho compartilhada · sem atribuição a este chat")}</p>
       {#if !local.files.length}<p class="empty-list"><LumeIcon name="check" size={18} />{tr("Working tree is clean.", "Árvore de trabalho limpa.")}</p>{/if}
       <div class="repository-list">{#each local.files.slice(0, fileLimit) as file (file.path)}
-        <div class="file-row">
-        <input class="file-check" type="checkbox" checked={ticked.includes(file.path)} disabled={file.conflict || committing} aria-label={tr("Include in the commit: ", "Incluir no commit: ") + file.path} onchange={() => toggleTicked(file.path)} />
+        {@const included = ticked.includes(file.path)}
+        <div class="file-row" class:excluded={!included && !file.conflict}>
         <button type="button" class:selected={previewPath === file.path} onclick={() => void showDiff(file.path)} title={file.path} aria-pressed={previewPath === file.path}>
-          <FileTypeIcon path={file.path} size={16} /><span class="file-copy"><strong>{fileName(file.path)}</strong>{#if fileDirectory(file.path)}<small>{fileDirectory(file.path)}</small>{/if}</span><span class="file-status" class:conflict={file.conflict} class:new-file={file.untracked}>{fileLabel(file)}</span>
+          <FileStatusMark status={workingStatus(file)} {language} /><FileTypeIcon path={file.path} size={15} /><span class="file-copy"><strong>{fileName(file.path)}</strong>{#if fileDirectory(file.path)}<small>{fileDirectory(file.path)}</small>{/if}</span>
         </button>
+        {#if !file.conflict}<button class="include-toggle" type="button" disabled={committing} title={included ? tr("Leave out of the commit", "Deixar fora do commit") : tr("Include in the commit", "Incluir no commit")} aria-label={(included ? tr("Leave out of the commit: ", "Deixar fora do commit: ") : tr("Include in the commit: ", "Incluir no commit: ")) + file.path} aria-pressed={included} onclick={() => toggleTicked(file.path)}><LumeIcon name={included ? "minus" : "plus"} size={12} /></button>{/if}
         </div>
       {/each}</div>
       {#if local.files.length}
@@ -276,7 +267,7 @@
     {:else if tab === "commits"}
       <div class="section-heading history-heading"><h3>{tr("History", "Histórico")}</h3><span>{local.branch === "(detached)" ? local.head?.slice(0, 7) : local.branch}</span></div>
       {#if !session.remote}<GitActions {session} repo={local} {language} />{/if}
-      <CommitGraph sessionId={session.id} {language} head={local.head} />
+      <CommitGraph sessionId={session.id} {language} head={local.head} branch={local.branch} focus={focusCommit} onOpenFile={onOpenCommitFile} />
     {:else if !local.github}
       <p class="empty-list"><LumeIcon name="repository" size={21} />{tr("Connect a GitHub remote to use these tools.", "Conecte um remote do GitHub para usar estas ferramentas.")}</p>
     {:else if githubLoading && !github}
@@ -299,6 +290,8 @@
       <div class="github-items">{#each github.workflows ?? [] as run (run.id)}<button type="button" onclick={() => void open(run.url)}><span class="item-mark" class:passed={run.conclusion === "success"} class:failed={run.conclusion === "failure"}><LumeIcon name={run.conclusion === "success" ? "check" : run.conclusion === "failure" ? "warning" : "bolt"} size={18} /></span><span class="item-copy"><strong>{run.title || run.name}</strong><span class="item-meta"><span>{run.name}</span><span>{statusLabel(run.conclusion ?? run.status)}</span></span><small class="pr-branches"><LumeIcon name="branch" size={11} />{run.branch}</small></span><LumeIcon name="external" size={11} /></button>{/each}</div>
       {#if github.workflowsError}{#if !bannerReporter}<p class="inline-error" role="alert">{repositoryError(github.workflowsError, language === "pt-BR")}</p>{/if}{:else if !github.workflows?.length}<p class="empty-list"><LumeIcon name="bolt" size={21} />{tr("No workflow runs available.", "Nenhuma execução de workflow disponível.")}</p>{/if}
     {/if}
+    </div>
+    {/key}
     {#if !bannerReporter && actionError}<p class="inline-error" role="alert">{actionError}</p>{/if}
   {/if}
 </section>
@@ -353,10 +346,14 @@
   .change-summary > span { display: flex; align-items: baseline; gap: 5px; font-size: 10px; }
   .change-summary strong { color: var(--workspace-strong); font-weight: 600; font-size: 13px; font-variant-numeric: tabular-nums; }
   .conflict, .failed { color: #c36c60; }
+  .tab-body { min-width: 0; }
   .repository-list { display: grid; gap: 2px; margin-inline: -5px; }
-  .file-row { display: flex; align-items: center; gap: 2px; }
-  .file-row > button { flex: 1; min-width: 0; }
-  .file-check { width: 15px; height: 15px; margin: 0 0 0 5px; flex: 0 0 auto; accent-color: var(--workspace-accent); }
+  .file-row { position: relative; display: flex; align-items: center; gap: 2px; transition: opacity .18s ease; }
+  .file-row > button:first-child { flex: 1; min-width: 0; }
+  .file-row.excluded > button:first-child { opacity: .5; }
+  .include-toggle { position: absolute; right: 6px; width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-raised, var(--workspace-bg)); opacity: 0; cursor: pointer; transition: opacity .15s ease, color .15s ease; }
+  .file-row:hover .include-toggle, .include-toggle:focus-visible, .file-row.excluded .include-toggle { opacity: 1; }
+  .include-toggle:hover { color: var(--workspace-accent); }
   .commit-box { margin-top: 10px; padding: 9px; display: grid; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }
   .commit-head { display: flex; align-items: center; justify-content: space-between; color: var(--workspace-muted); font-size: 10px; }
   .commit-box textarea { box-sizing: border-box; width: 100%; padding: 7px 9px; resize: vertical; border: 1px solid var(--workspace-line); border-radius: 8px; outline: 0; color: var(--workspace-strong); background: var(--workspace-raised); font: inherit; font-size: 11px; line-height: 1.45; }
@@ -367,10 +364,12 @@
   .commit-done { margin: 0; color: var(--workspace-text); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
   .commit-done :global(.lume-icon) { margin-right: 4px; color: #3f9b69; vertical-align: -2px; }
   .commit-done small { color: var(--workspace-muted); }
-  .repository-list .file-row > button { width: 100%; min-width: 0; min-height: 48px; display: flex; align-items: center; gap: 9px; padding: 8px 7px; border: 0; border-radius: 6px; color: var(--workspace-text); background: transparent; text-align: left; }
-  .repository-list .file-row > button:hover { background: var(--workspace-subtle); }
-  .repository-list .file-row > button.selected { background: var(--workspace-accent-soft); }
-  .file-copy { min-width: 0; flex: 1; display: grid; gap: 4px; }
+  .repository-list .file-row > button:first-child { width: 100%; min-width: 0; min-height: 30px; display: flex; align-items: center; gap: 7px; padding: 4px 34px 4px 7px; border: 1px solid transparent; border-radius: 7px; color: var(--workspace-text); background: transparent; text-align: left; transition: background-color .15s ease, border-color .15s ease; }
+  .repository-list .file-row > button:first-child:hover { background: var(--workspace-subtle); }
+  .repository-list .file-row > button.selected { border-color: color-mix(in srgb, var(--workspace-accent) 60%, transparent); background: var(--workspace-accent-soft); }
+  .file-copy { min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; }
+  .file-copy strong { flex: 0 1 auto; }
+  .file-copy small { min-width: 0; flex: 1 1 0; }
   .file-copy strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
   .file-copy small { color: var(--workspace-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-status { flex: 0 0 auto; color: var(--workspace-muted); font-size: 9px; }
@@ -395,16 +394,6 @@
   .diff-code .meta { color: var(--workspace-muted); }
   .diff-code .meta > code, .diff-code .hunk > code { grid-column: 1 / -1; padding-inline: 10px; }
   .diff-code .meta > .line-number, .diff-code .hunk > .line-number { display: none; }
-  .commit-list { margin: 0; padding: 0; list-style: none; }
-  .commit-list > li { position: relative; min-width: 0; display: flex; align-items: flex-start; gap: 9px; padding: 13px 0; }
-  .commit-list > li + li { border-top: 1px solid var(--workspace-line); }
-  .commit-mark { margin-top: 1px; flex: 0 0 auto; color: var(--workspace-muted); }
-  .commit-copy { min-width: 0; display: grid; gap: 7px; flex: 1; }
-  .commit-copy > strong { color: var(--workspace-text); font-size: 11px; font-weight: 500; line-height: 1.55; overflow-wrap: anywhere; }
-  .commit-meta { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; color: var(--workspace-muted); font-size: 10px; }
-  .commit-meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .commit-hash, .commit-meta code { padding: 1px 0; border: 0; background: transparent; color: var(--workspace-muted); font: 9px var(--lume-font-code, ui-monospace, monospace); }
-  .commit-hash:hover { color: var(--workspace-accent); }
   .github-items { margin-top: 4px; }
   .github-items > button { width: 100%; min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 13px 5px; border: 0; border-bottom: 1px solid var(--workspace-line); color: var(--workspace-muted); background: transparent; text-align: left; }
   .github-items > button:hover { background: var(--workspace-subtle); }

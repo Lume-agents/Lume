@@ -600,8 +600,25 @@ async fn get_session_git_tools(state: State<'_, AppState>, session_id: String) -
 }
 
 #[tauri::command]
-async fn git_fetch_session(state: State<'_, AppState>, session_id: String) -> Result<repository::RepositorySnapshot, String> {
-    git_action(state, session_id, false, |directory| repository::fetch(directory)).await
+async fn git_fetch_session(state: State<'_, AppState>, session_id: String, prune: bool) -> Result<repository::RepositorySnapshot, String> {
+    git_action(state, session_id, false, move |directory| repository::fetch(directory, prune)).await
+}
+
+#[tauri::command]
+async fn git_rebase_session(state: State<'_, AppState>, session_id: String, onto: String) -> Result<repository::RepositorySnapshot, String> {
+    git_action(state, session_id, true, move |directory| repository::rebase(directory, &onto)).await
+}
+
+#[tauri::command]
+async fn get_session_author_avatars(
+    state: State<'_, AppState>,
+    session_id: String,
+    authors: Vec<(String, String)>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || repository::author_avatars(&repository_directory(&state, &session_id)?, &authors))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -3810,6 +3827,8 @@ pub fn run() {
             get_session_commit_diff,
             get_session_git_tools,
             git_fetch_session,
+            git_rebase_session,
+            get_session_author_avatars,
             git_pull_session,
             git_stash_session,
             git_stash_apply_session,

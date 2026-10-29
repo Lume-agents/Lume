@@ -1,14 +1,30 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { slide } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
+  import AuthorAvatar from "$lib/AuthorAvatar.svelte";
+  import FileStatusMark from "$lib/FileStatusMark.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import { layoutGraph, graphWidth } from "$lib/commitGraph";
-  import { getSessionCommit, getSessionCommitDiff, getSessionHistory, repositoryError, type CommitDetail, type HistoryCommit, type RepositoryDiff } from "$lib/repositories";
+  import { commitStatus } from "$lib/fileStatus";
+  import { getAuthorAvatars, getSessionCommit, getSessionCommitDiff, getSessionHistory, repositoryError, type CommitDetail, type HistoryCommit, type RepositoryDiff } from "$lib/repositories";
   import { transientScrollbar } from "$lib/transientScrollbar";
 
   // The repository's history as a graph, like the one in VS Code: lines for branches and merges, the branches and tags
-  // at their commits, and the files and diff of any commit one click away.
-  let { sessionId, language = "en", head = null }: { sessionId: string; language?: "en" | "pt-BR"; head?: string | null } = $props();
+  // at their commits, each author's picture, and everything about a commit one click away. `readonly` shows only the
+  // latest commits, and a click hands the commit to `onPick`.
+  type Props = {
+    sessionId: string;
+    language?: "en" | "pt-BR";
+    head?: string | null;
+    branch?: string;
+    readonly?: boolean;
+    limit?: number;
+    focus?: string | null;
+    onPick?: (oid: string) => void;
+    onOpenFile?: (commit: { oid: string; subject: string }, path: string) => void;
+  };
+  let { sessionId, language = "en", head = null, branch = "", readonly = false, limit = 0, focus = null, onPick, onOpenFile }: Props = $props();
   const tr = (english: string, portuguese: string) => (language === "pt-BR" ? portuguese : english);
 
   const ROW = 40;
@@ -16,6 +32,7 @@
   const colors = ["#4daa77", "#4d99cc", "#d6a441", "#b57edc", "#d0625c", "#3fb8af", "#e0869a", "#8f9e5a"];
 
   let commits = $state<HistoryCommit[]>([]);
+  let avatars = $state<Record<string, string>>({});
   let loading = $state(true);
   let more = $state(true);
   let error = $state("");
@@ -25,13 +42,22 @@
   let filePath = $state("");
   let diff = $state<RepositoryDiff | null>(null);
   let diffError = $state("");
+  let copied = $state(false);
+  let appliedFocus = "";
   let generation = 0;
+  let list = $state<HTMLOListElement | null>(null);
 
-  const rows = $derived(layoutGraph(commits));
+  const shown = $derived(limit ? commits.slice(0, limit) : commits);
+  const rows = $derived(layoutGraph(shown));
   const lanes = $derived(graphWidth(rows));
   const graphPixels = $derived(Math.max(lanes, 1) * LANE + 8);
   const x = (lane: number) => 8 + lane * LANE + LANE / 2 - 4;
   const color = (lane: number) => colors[lane % colors.length];
+  // The lanes that go on below a commit, drawn beside its open details so the graph does not break there.
+  const below = (index: number) => { const next = rows[index + 1]; return next ? [...new Set([...next.through, ...next.from])] : []; };
+  const totals = $derived(detail ? detail.files.reduce((sum, file) => ({ added: sum.added + (file.added ?? 0), removed: sum.removed + (file.removed ?? 0) }), { added: 0, removed: 0 }) : null);
+
+  const clean = (reason: unknown) => repositoryError(String(reason).replace(/^Error:\s*/, ""), language === "pt-BR");
 
   async function load(skip: number) {
     const current = generation;
@@ -42,40 +68,56 @@
       if (current !== generation) return;
       commits = skip === 0 ? page : [...commits, ...page];
       more = page.length >= 200;
+      void loadAvatars(page, current);
     } catch (reason) {
-      if (current === generation) error = repositoryError(String(reason).replace(/^Error:\s*/, ""), language === "pt-BR");
+      if (current === generation) error = clean(reason);
     } finally {
       if (current === generation) loading = false;
     }
   }
 
+  async function loadAvatars(page: HistoryCommit[], current: number) {
+    const authors = new Map<string, string>();
+    for (const commit of page) if (commit.email && !avatars[commit.email] && !authors.has(commit.email)) authors.set(commit.email, commit.oid);
+    if (!authors.size) return;
+    try {
+      const found = await getAuthorAvatars(sessionId, [...authors].slice(0, 60));
+      if (current === generation) avatars = { ...avatars, ...found };
+    } catch { /* Initials stay. */ }
+  }
+
   async function select(oid: string) {
+    if (readonly) { onPick?.(oid); return; }
     if (selected === oid) { selected = null; detail = null; filePath = ""; diff = null; return; }
     selected = oid;
     detail = null;
     detailError = "";
     filePath = "";
     diff = null;
+    copied = false;
     try {
       const value = await getSessionCommit(sessionId, oid);
       if (selected === oid) detail = value;
     } catch (reason) {
-      if (selected === oid) detailError = repositoryError(String(reason).replace(/^Error:\s*/, ""), language === "pt-BR");
+      if (selected === oid) detailError = clean(reason);
     }
   }
 
-  async function openFile(path: string) {
-    if (!selected) return;
-    const oid = selected;
+  async function openFile(commit: HistoryCommit, path: string) {
     filePath = path;
+    if (onOpenFile) { onOpenFile({ oid: commit.oid, subject: commit.subject }, path); return; }
     diff = null;
     diffError = "";
     try {
-      const value = await getSessionCommitDiff(sessionId, oid, path);
-      if (filePath === path && selected === oid) diff = value;
+      const value = await getSessionCommitDiff(sessionId, commit.oid, path);
+      if (filePath === path && selected === commit.oid) diff = value;
     } catch (reason) {
-      if (filePath === path) diffError = repositoryError(String(reason).replace(/^Error:\s*/, ""), language === "pt-BR");
+      if (filePath === path) diffError = clean(reason);
     }
+  }
+
+  async function copyHash(oid: string) {
+    try { await navigator.clipboard.writeText(oid); copied = true; setTimeout(() => (copied = false), 1400); } catch { /* Clipboard unavailable. */ }
   }
 
   const diffLines = $derived.by(() => {
@@ -97,8 +139,13 @@
       ? new Intl.DateTimeFormat(language, { hour: "2-digit", minute: "2-digit" }).format(date)
       : new Intl.DateTimeFormat(language, { day: "numeric", month: "short", ...(days > 300 ? { year: "2-digit" } : {}) }).format(date);
   }
-
+  const fullDate = (seconds: number) => new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(seconds * 1000));
   const fileName = (path: string) => path.split("/").at(-1) ?? path;
+  const fileFolder = (path: string) => path.split("/").slice(0, -1).join("/");
+  const body = (message: string) => message.split("\n").slice(1).join("\n").trim();
+  const isHead = (oid: string) => !!head && oid.startsWith(head);
+  const refName = (name: string) => name.replace(/^tag: /, "");
+  const loaded = (oid: string) => commits.some((commit) => commit.oid === oid);
 
   // The history is read again when the repository's head moves (a commit made from the chat, a pull).
   $effect(() => {
@@ -106,10 +153,16 @@
     generation += 1;
     void load(0);
   });
-  onMount(() => () => { generation += 1; });
+  // A commit picked elsewhere (the overview) opens here once it is loaded.
+  $effect(() => {
+    if (!focus || appliedFocus === focus || !commits.some((commit) => commit.oid === focus)) return;
+    appliedFocus = focus;
+    if (selected !== focus) void select(focus);
+    requestAnimationFrame(() => list?.querySelector(`[data-oid="${focus}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+  });
 </script>
 
-<div class="history">
+<div class="history" class:readonly>
   {#if loading && !commits.length}
     <div class="skeleton" role="status" aria-label={tr("Loading history", "Carregando histórico")}><i></i><i></i><i></i></div>
   {:else if error}
@@ -117,11 +170,12 @@
   {:else if !commits.length}
     <p class="empty">{tr("This repository has no commits yet.", "Este repositório ainda não tem commits.")}</p>
   {:else}
-    <ol class="rows" aria-label={tr("Commit history", "Histórico de commits")}>
-      {#each commits as commit, index (commit.oid)}
+    <ol class="rows" bind:this={list} aria-label={tr("Commit history", "Histórico de commits")}>
+      {#each shown as commit, index (commit.oid)}
         {@const row = rows[index]}
-        <li class:selected={selected === commit.oid}>
-          <button type="button" class="commit" aria-expanded={selected === commit.oid} onclick={() => void select(commit.oid)}>
+        {@const open = selected === commit.oid && !readonly}
+        <li class:selected={open} data-oid={commit.oid}>
+          <button type="button" class="commit" aria-expanded={readonly ? undefined : open} title={readonly ? tr("Open in History", "Abrir no Histórico") : undefined} onclick={() => void select(commit.oid)}>
             <svg class="graph" width={graphPixels} height={ROW} viewBox={`0 0 ${graphPixels} ${ROW}`} aria-hidden="true">
               {#each row.through as lane (lane)}<line x1={x(lane)} y1="0" x2={x(lane)} y2={ROW} stroke={color(lane)} />{/each}
               {#each row.from as lane (lane)}
@@ -134,69 +188,125 @@
               {/each}
               <circle cx={x(row.lane)} cy={ROW / 2} r={commit.parents.length > 1 ? 3.2 : 4} fill={commit.parents.length > 1 ? "var(--workspace-bg, #1c1f1e)" : color(row.lane)} stroke={color(row.lane)} stroke-width="1.8" />
             </svg>
+            <AuthorAvatar name={commit.author} email={commit.email} url={avatars[commit.email]} size={20} />
             <span class="copy">
               <strong>{commit.subject}</strong>
               <span class="meta-row">
-                {#each commit.refs.slice(0, 3) as name (name)}<span class="ref" class:current={name.startsWith("HEAD")}>{name.replace(/^HEAD -> /, "")}</span>{/each}
+                {#each commit.refs.slice(0, 3) as name (name)}<span class="ref" class:current={name === branch && isHead(commit.oid)} class:tag={name.startsWith("tag: ")}>{refName(name)}</span>{/each}
                 {#if commit.refs.length > 3}<span class="ref">+{commit.refs.length - 3}</span>{/if}
-                <small>{commit.oid.slice(0, 7)} · {commit.author} · {when(commit.at)}</small>
+                <small>{commit.oid.slice(0, 7)} · {when(commit.at)}</small>
               </span>
             </span>
+            {#if !readonly}<span class="chevron" class:open aria-hidden="true"><LumeIcon name="chevron-down" size={12} /></span>{/if}
           </button>
-          {#if selected === commit.oid}
-            <div class="detail">
-              {#if detailError}<p class="inline-error" role="alert">{detailError}</p>
-              {:else if !detail}<p class="empty" role="status">{tr("Reading commit…", "Lendo commit…")}</p>
-              {:else}
-                {#if detail.message.includes("\n")}<pre class="message">{detail.message.split("\n").slice(1).join("\n").trim()}</pre>{/if}
-                <ul class="files">
-                  {#each detail.files as file (file.path)}
-                    <li><button type="button" class:active={filePath === file.path} onclick={() => void openFile(file.path)} title={file.path}>
-                      <FileTypeIcon path={file.path} size={14} /><span class="path">{fileName(file.path)}</span>
-                      <span class="stat">{#if file.added !== null}<b class="plus">+{file.added}</b><b class="minus">−{file.removed ?? 0}</b>{:else}<b>{tr("binary", "binário")}</b>{/if}</span>
-                    </button></li>
-                  {/each}
-                  {#if !detail.files.length}<li class="empty">{tr("No file changes (a merge or an empty commit).", "Sem mudanças em arquivos (um merge ou um commit vazio).")}</li>{/if}
-                </ul>
-                {#if filePath}
-                  <section class="diff" aria-label={tr("File changes", "Mudanças do arquivo")}>
-                    {#if diffError}<p class="inline-error" role="alert">{diffError}</p>
-                    {:else if !diff}<p class="empty" role="status">{tr("Reading changes…", "Lendo mudanças…")}</p>
-                    {:else if diff.binary}<p class="empty">{tr("Binary file. Preview unavailable.", "Arquivo binário. Visualização indisponível.")}</p>
-                    {:else}<div class="diff-code" use:transientScrollbar tabindex="0" role="textbox" aria-readonly="true" aria-multiline="true">{#each diffLines as line}<div class="diff-line {line.kind}"><span class="line-number" aria-hidden="true">{line.before}</span><span class="line-number" aria-hidden="true">{line.after}</span><code>{line.text || " "}</code></div>{/each}</div>{/if}
-                  </section>
+          {#if open}
+            <div class="detail-wrap" transition:slide={{ duration: 200, easing: cubicOut }}>
+              <svg class="gutter" width={graphPixels} aria-hidden="true">
+                {#each below(index) as lane (lane)}<line x1={x(lane)} y1="0" x2={x(lane)} y2="100%" stroke={color(lane)} />{/each}
+              </svg>
+              <div class="detail">
+                {#if detailError}<p class="inline-error" role="alert">{detailError}</p>
+                {:else if !detail}<p class="empty" role="status">{tr("Reading commit…", "Lendo commit…")}</p>
+                {:else}
+                  <div class="people">
+                    <AuthorAvatar name={detail.author} email={detail.email} url={avatars[detail.email]} size={30} />
+                    <span><strong>{detail.author}</strong><small>{detail.email}</small><small>{fullDate(detail.at)}</small></span>
+                  </div>
+                  {#if detail.committer !== detail.author || detail.committedAt !== detail.at}
+                    <p class="committed">{tr("Committed by", "Commit feito por")} <b>{detail.committer}</b> · {fullDate(detail.committedAt)}</p>
+                  {/if}
+                  <dl class="facts">
+                    <dt>{tr("Commit", "Commit")}</dt>
+                    <dd class="hash"><code>{detail.oid}</code><button type="button" class="copy-hash" title={tr("Copy hash", "Copiar hash")} aria-label={tr("Copy hash", "Copiar hash")} onclick={() => void copyHash(detail!.oid)}><LumeIcon name={copied ? "check" : "copy"} size={12} /></button></dd>
+                    {#if detail.parents.length}
+                      <dt>{detail.parents.length > 1 ? tr("Parents", "Pais") : tr("Parent", "Pai")}</dt>
+                      <dd>{#each detail.parents as parent (parent)}<button type="button" class="parent" title={parent} disabled={!loaded(parent)} onclick={() => { void select(parent); requestAnimationFrame(() => list?.querySelector(`[data-oid="${parent}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" })); }}>{parent.slice(0, 7)}</button>{/each}</dd>
+                    {/if}
+                    {#if commit.refs.length}
+                      <dt>{tr("Refs", "Refs")}</dt>
+                      <dd class="ref-list">{#each commit.refs as name (name)}<span class="ref" class:tag={name.startsWith("tag: ")}>{refName(name)}</span>{/each}</dd>
+                    {/if}
+                    {#if totals}
+                      <dt>{tr("Changes", "Mudanças")}</dt>
+                      <dd>{detail.files.length} {detail.files.length === 1 ? tr("file", "arquivo") : tr("files", "arquivos")} · <b class="plus">+{totals.added}</b> <b class="minus">−{totals.removed}</b></dd>
+                    {/if}
+                  </dl>
+                  {#if body(detail.message)}<pre class="message">{body(detail.message)}</pre>{/if}
+                  <ul class="files">
+                    {#each detail.files as file (file.path)}
+                      <li><button type="button" class:active={filePath === file.path} onclick={() => void openFile(commit, file.path)} title={file.path}>
+                        <FileStatusMark status={commitStatus(file.status)} {language} />
+                        <FileTypeIcon path={file.path} size={14} />
+                        <span class="path"><span>{fileName(file.path)}</span>{#if fileFolder(file.path)}<small>{fileFolder(file.path)}</small>{/if}</span>
+                        <span class="stat">{#if file.added !== null}<b class="plus">+{file.added}</b><b class="minus">−{file.removed ?? 0}</b>{:else}<b>{tr("binary", "binário")}</b>{/if}</span>
+                      </button></li>
+                    {/each}
+                    {#if !detail.files.length}<li class="empty">{tr("No file changes (a merge or an empty commit).", "Sem mudanças em arquivos (um merge ou um commit vazio).")}</li>{/if}
+                  </ul>
+                  {#if filePath && !onOpenFile}
+                    <section class="diff" aria-label={tr("File changes", "Mudanças do arquivo")}>
+                      {#if diffError}<p class="inline-error" role="alert">{diffError}</p>
+                      {:else if !diff}<p class="empty" role="status">{tr("Reading changes…", "Lendo mudanças…")}</p>
+                      {:else if diff.binary}<p class="empty">{tr("Binary file. Preview unavailable.", "Arquivo binário. Visualização indisponível.")}</p>
+                      {:else}<div class="diff-code" use:transientScrollbar tabindex="0" role="textbox" aria-readonly="true" aria-multiline="true">{#each diffLines as line}<div class="diff-line {line.kind}"><span class="line-number" aria-hidden="true">{line.before}</span><span class="line-number" aria-hidden="true">{line.after}</span><code>{line.text || " "}</code></div>{/each}</div>{/if}
+                    </section>
+                  {/if}
                 {/if}
-              {/if}
+              </div>
             </div>
           {/if}
         </li>
       {/each}
     </ol>
-    {#if more}<button class="more" type="button" disabled={loading} onclick={() => void load(commits.length)}>{loading ? tr("Loading…", "Carregando…") : tr("Load more", "Carregar mais")}</button>{/if}
+    {#if more && !readonly}<button class="more" type="button" disabled={loading} onclick={() => void load(commits.length)}>{loading ? tr("Loading…", "Carregando…") : tr("Load more", "Carregar mais")}</button>{/if}
   {/if}
 </div>
 
 <style>
   .history { min-width: 0; display: grid; gap: 6px; }
   .rows { margin: 0; padding: 0; list-style: none; }
-  .rows > li { border-radius: 8px; }
+  .rows > li { border-radius: 8px; transition: background-color .18s ease; }
   .rows > li.selected { background: color-mix(in srgb, var(--workspace-accent) 7%, transparent); }
-  .commit { width: 100%; min-width: 0; padding: 0 6px 0 0; display: flex; align-items: center; gap: 4px; border: 0; border-radius: 8px; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+  .commit { width: 100%; min-width: 0; padding: 0 6px 0 0; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 8px; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; transition: background-color .15s ease; }
   .commit:hover { background: color-mix(in srgb, var(--workspace-muted) 9%, transparent); }
-  .graph { flex: 0 0 auto; overflow: visible; }
-  .graph line, .graph path { stroke-width: 1.8; stroke-linecap: round; }
+  .graph, .gutter { flex: 0 0 auto; overflow: visible; }
+  .graph line, .graph path, .gutter line { stroke-width: 1.8; stroke-linecap: round; }
   .copy { min-width: 0; flex: 1; display: grid; gap: 0; }
   .meta-row { min-width: 0; display: flex; align-items: center; gap: 5px; }
   .copy strong { min-width: 0; overflow: hidden; color: var(--workspace-strong); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
   .copy small { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--workspace-muted); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+  .chevron { flex: 0 0 auto; display: inline-flex; color: var(--workspace-muted); opacity: .6; transition: transform .2s ease, opacity .15s ease; }
+  .commit:hover .chevron { opacity: 1; }
+  .chevron.open { transform: rotate(180deg); opacity: 1; }
   .ref { max-width: 45%; flex: 0 1 auto; overflow: hidden; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 35%, transparent); border-radius: 999px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 9%, transparent); font-size: 9px; font-weight: 650; line-height: 1.6; text-overflow: ellipsis; white-space: nowrap; }
+  .ref.tag { color: #d6a441; border-color: rgba(214, 164, 65, .4); background: rgba(214, 164, 65, .1); }
   .ref.current { color: #fff; background: var(--workspace-accent); }
-  .detail { padding: 2px 8px 8px 22px; display: grid; gap: 6px; }
-  .message { margin: 0; color: var(--workspace-text); font: inherit; font-size: 10.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .files { margin: 0; padding: 0; list-style: none; display: grid; gap: 1px; }
-  .files button { width: 100%; min-width: 0; padding: 4px 6px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 6px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 10.5px; text-align: left; cursor: pointer; }
-  .files button:hover, .files button.active { background: color-mix(in srgb, var(--workspace-accent) 10%, transparent); }
-  .path { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detail-wrap { display: flex; align-items: stretch; overflow: hidden; }
+  .gutter { height: auto; align-self: stretch; }
+  .detail { min-width: 0; flex: 1; padding: 2px 8px 10px 2px; display: grid; gap: 8px; }
+  .people { display: flex; align-items: center; gap: 9px; }
+  .people span { min-width: 0; display: grid; }
+  .people strong { color: var(--workspace-strong); font-size: 11.5px; }
+  .people small, .committed { overflow: hidden; color: var(--workspace-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  .committed { margin: 0; }
+  .committed b { color: var(--workspace-text); font-weight: 600; }
+  .facts { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; align-items: center; font-size: 10px; }
+  .facts dt { color: var(--workspace-muted); }
+  .facts dd { min-width: 0; margin: 0; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; color: var(--workspace-text); }
+  .facts dd.hash { flex-wrap: nowrap; }
+  .facts code { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--workspace-text); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+  .copy-hash, .parent { height: 20px; padding: 0 6px; display: inline-flex; align-items: center; border: 1px solid var(--workspace-line); border-radius: 6px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 9.5px; cursor: pointer; }
+  .parent { font-family: ui-monospace, monospace; }
+  .copy-hash:hover, .parent:hover { border-color: color-mix(in srgb, var(--workspace-accent) 45%, transparent); color: var(--workspace-accent); }
+  .ref-list .ref { max-width: 100%; }
+  .message { margin: 0; padding: 8px 10px; border-radius: 8px; color: var(--workspace-text); background: color-mix(in srgb, var(--workspace-muted) 7%, transparent); font: inherit; font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .files { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+  .files button { width: 100%; min-width: 0; padding: 4px 6px; display: flex; align-items: center; gap: 7px; border: 1px solid transparent; border-radius: 7px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 10.5px; text-align: left; cursor: pointer; transition: background-color .15s ease, border-color .15s ease; }
+  .files button:hover { background: color-mix(in srgb, var(--workspace-muted) 9%, transparent); }
+  .files button.active { border-color: color-mix(in srgb, var(--workspace-accent) 55%, transparent); background: color-mix(in srgb, var(--workspace-accent) 10%, transparent); }
+  .path { min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; }
+  .path > span { flex: 0 0 auto; }
+  .path small { min-width: 0; overflow: hidden; color: var(--workspace-muted); font-size: 9.5px; text-overflow: ellipsis; }
   .stat { display: flex; gap: 6px; font-size: 9.5px; font-variant-numeric: tabular-nums; }
   .plus { color: var(--workspace-accent); font-weight: 650; }
   .minus { color: #c36c60; font-weight: 650; }

@@ -65,5 +65,6 @@ const icon = read("src/lib/ActivityTypeIcon.svelte");
 assert.match(icon, /category === "files-read"/);
 assert.match(icon, /category === "read" \|\| category === "analysis"/);
 assert.ok(!/@keyframes/.test(icon), "the book is a still drawing");
+assert.match(icon, /A page with a large pencil that leaves it at the lower right/, "the edited-files pencil is large and sticks out of the page");
 
 console.log("interface scale test passed");

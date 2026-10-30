@@ -17,7 +17,12 @@
     <rect x="4" y="3" width="16" height="18" rx="2" />
     <path d="m8 12 2.5 2.5 5.5-5.5" />
   {:else if category === "edit"}
-    <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 16l5.7-5.7 2 2L11 18H9z" />
+    <!-- A page with a large pencil that leaves it at the lower right. -->
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5" />
+    <path d="M14 3l4 4v2" />
+    <path d="M14 3v4h4" />
+    <path d="M21.2 10.1a2.1 2.1 0 0 0-3-3L10 15.3l-.9 3.6 3.6-.9Z" />
+    <path d="m16.6 8.7 2.4 2.4" />
   {:else if category === "read" || category === "analysis"}
     <path d="M8 16.5a4.5 4.5 0 0 1-3.6-7.2A4.5 4.5 0 0 1 11.8 5a4.5 4.5 0 0 1 7.6 4.3A4.5 4.5 0 0 1 16 16.5Z" />
     <circle cx="5.5" cy="19" r="1.1" />

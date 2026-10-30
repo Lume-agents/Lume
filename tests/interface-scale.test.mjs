@@ -12,7 +12,8 @@ const backend = read("src-tauri/src/lib.rs");
 // The whole window zooms and the chat content undoes it, so the chat keeps its own text size.
 assert.match(scale, /setZoom\(scale\)/);
 assert.match(scale, /--lume-chat-unzoom", String\(1 \/ scale\)/);
-assert.match(pane, /\.conversation-content \{[^}]*zoom: var\(--lume-chat-unzoom, 1\)/);
+assert.ok(!/zoom: var\(--lume-chat-unzoom/.test(pane), "no counter-zoom on the chat layout, which rounded icons into fractional pixels");
+assert.match(pane, /--workspace-chat-font-size: calc\(calc\(12px \+ var\(--workspace-chat-font-adjust\)\) \* var\(--lume-chat-unzoom, 1\)\)/, "chat text sizes cancel the interface size");
 assert.ok(capability.permissions.includes("core:webview:allow-set-webview-zoom"));
 assert.match(workspace, /applyInterfaceScale\(preferences\.interfaceScale\)/);
 assert.match(terminal, /applyInterfaceScale\(nextPreferences\.interfaceScale\)/);
@@ -47,6 +48,10 @@ assert.match(inspector, /<ChatConfiguration \{session\} \{language\} \/>/);
 assert.ok(!/prompt-events|Latest prompts/.test(inspector), "the latest prompts section is gone");
 const config = read("src/lib/ChatConfiguration.svelte");
 for (const kind of ["plugin", "skill", "instruction", "command", "subagent"]) assert.match(config, new RegExp(`kind: "${kind}"`));
+
+// The sections under the usage show a loading state while they are read.
+assert.match(config, /class="config-loading" role="status"/);
+assert.match(inspector, /class="mcp-loading" role="status"/);
 
 // The subagent card floats over the chat instead of reserving a band of its own.
 const portals = read("src/lib/SubagentPortals.svelte");

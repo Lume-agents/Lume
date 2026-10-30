@@ -3306,7 +3306,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .find-bar button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .find-bar button:disabled { opacity: .35; cursor: default; }
   .find-bar .flip { display: grid; transform: rotate(180deg); }
-  .session-pane { --pane-status-color: #84948c; --workspace-chat-font-size: calc(12px + var(--workspace-chat-font-adjust)); --workspace-chat-small-size: calc(10px + var(--workspace-chat-small-adjust)); --workspace-chat-tiny-size: calc(8px + var(--workspace-chat-tiny-adjust)); --chat-small-font-size: var(--workspace-chat-small-size); --chat-tiny-font-size: var(--workspace-chat-tiny-size); --activity-summary-height: calc(44px + var(--workspace-chat-font-adjust)); --activity-row-height: calc(42px + var(--workspace-chat-font-adjust)); --activity-title-size: calc(11px + var(--workspace-chat-small-adjust)); --activity-detail-size: calc(9px + var(--workspace-chat-tiny-adjust)); position: relative; min-width: 0; min-height: 0; height: 100%; container-type: inline-size; display: flex; flex-direction: column; overflow: hidden; background: transparent; animation: pane-arrive 280ms cubic-bezier(.16, 1, .3, 1) both; }
+  .session-pane { --pane-status-color: #84948c; --workspace-chat-font-size: calc(calc(12px + var(--workspace-chat-font-adjust)) * var(--lume-chat-unzoom, 1)); --workspace-chat-small-size: calc(calc(10px + var(--workspace-chat-small-adjust)) * var(--lume-chat-unzoom, 1)); --workspace-chat-tiny-size: calc(calc(8px + var(--workspace-chat-tiny-adjust)) * var(--lume-chat-unzoom, 1)); --chat-small-font-size: var(--workspace-chat-small-size); --chat-tiny-font-size: var(--workspace-chat-tiny-size); --activity-summary-height: calc(calc(44px + var(--workspace-chat-font-adjust)) * var(--lume-chat-unzoom, 1)); --activity-row-height: calc(calc(42px + var(--workspace-chat-font-adjust)) * var(--lume-chat-unzoom, 1)); --activity-title-size: calc(calc(11px + var(--workspace-chat-small-adjust)) * var(--lume-chat-unzoom, 1)); --activity-detail-size: calc(calc(9px + var(--workspace-chat-tiny-adjust)) * var(--lume-chat-unzoom, 1)); position: relative; min-width: 0; min-height: 0; height: 100%; container-type: inline-size; display: flex; flex-direction: column; overflow: hidden; background: transparent; animation: pane-arrive 280ms cubic-bezier(.16, 1, .3, 1) both; }
   .session-pane.status-running { --pane-status-color: #4e98ca; }
   .session-pane.status-completed { --pane-status-color: #50aa79; }
   .session-pane.status-permission_required { --pane-status-color: #d0a142; }
@@ -3402,8 +3402,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .portal-anchor { position: relative; z-index: 3; height: 0; flex: 0 0 0; }
   .conversation-shell { position: relative; z-index: 0; isolation: isolate; min-width: 0; min-height: 0; display: flex; flex: 1 1 auto; overflow: hidden; }
   .conversation { --chat-edge-gutter: clamp(28px, 5cqw, 54px); min-width: 0; min-height: 0; width: 100%; padding: 25px var(--chat-edge-gutter) calc(26px + var(--composer-overlap, 0px)); display: flex; flex-direction: column-reverse; flex: 1 1 auto; overflow: auto; overflow-anchor: none; overscroll-behavior: none; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
-  /* The interface size does not change the chat, which has its own text size. */
-  .conversation-content { width: 100%; max-width: 1040px; min-width: 0; margin-inline: auto; display: flex; flex-direction: column; gap: 15px; flex: 1 0 auto; zoom: var(--lume-chat-unzoom, 1); }
+  .conversation-content { width: 100%; max-width: 1040px; min-width: 0; margin-inline: auto; display: flex; flex-direction: column; gap: 15px; flex: 1 0 auto; }
   .conversation-shell.under-composer .conversation { background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--workspace-pane) 13%, transparent) 30%, color-mix(in srgb, var(--workspace-pane) 69%, transparent) 60%, color-mix(in srgb, var(--workspace-pane) 74%, transparent) 64%) right bottom / 9px calc(var(--composer-overlap) + 34px) no-repeat; }
   .conversation::-webkit-scrollbar { width: 9px; height: 9px; }.conversation::-webkit-scrollbar-track { background: transparent; }.conversation::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: var(--workspace-scroll-thumb); background-clip: content-box; }
   .load-earlier-chat { max-width: min(240px, 100%); min-height: 30px; margin: 0 auto 7px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: var(--workspace-chat-tiny-size); font-weight: 700; cursor: pointer; }
@@ -3416,7 +3415,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .conversation-row { position: relative; width: 100%; min-width: 0; }
   .conversation-entry { min-width: 0; display: flex; flex-direction: column; gap: 9px; }
   .time-gutter { position: absolute; top: 0; bottom: 0; left: calc(-1 * var(--chat-edge-gutter)); width: var(--chat-edge-gutter); padding: 6px 4px 0 0; display: flex; justify-content: flex-end; align-items: flex-start; box-sizing: border-box; cursor: default; }
-  .time-gutter time { font-size: calc(11px + var(--workspace-chat-small-adjust)); opacity: 0; transform: translateX(3px); transition: opacity 120ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
+  .time-gutter time { font-size: calc(calc(11px + var(--workspace-chat-small-adjust)) * var(--lume-chat-unzoom, 1)); opacity: 0; transform: translateX(3px); transition: opacity 120ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
   .time-gutter:hover time, .conversation-row:focus-within .time-gutter time { opacity: 1; transform: translateX(0); }
   .message { width: min(92%, 940px); min-width: 0; color: var(--workspace-text); font-size: var(--workspace-chat-font-size); }
   .user-message { --message-collapse-surface: var(--workspace-user); --user-message-font: inherit; --user-message-muted: var(--workspace-muted); --user-message-accent: var(--workspace-accent); width: fit-content; max-width: min(92%, 940px); align-self: flex-end; padding: 9px 12px; border: 1px solid var(--workspace-user-line); border-radius: 14px 14px 4px 14px; background: var(--workspace-user); }
@@ -3438,9 +3437,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .final-actions button:disabled { cursor: wait; opacity: .55; }
   .final-actions button.loading :global(.lume-icon) { animation: history-loading 800ms linear infinite; }
   .markdown-content { min-width: 0; overflow-wrap: anywhere; font-size: var(--workspace-chat-font-size); line-height: 1.68; word-break: break-word; }
-  .agent-message .markdown-content { font-family: var(--lume-font-ui, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); font-size: calc(13.5px + var(--workspace-chat-font-adjust)); font-weight: 430; line-height: 1.72; letter-spacing: -.012em; font-kerning: normal; }
+  .agent-message .markdown-content { font-family: var(--lume-font-ui, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); font-size: calc(calc(13.5px + var(--workspace-chat-font-adjust)) * var(--lume-chat-unzoom, 1)); font-weight: 430; line-height: 1.72; letter-spacing: -.012em; font-kerning: normal; }
   .agent-message .markdown-content :global(strong) { font-weight: 720; letter-spacing: -.018em; }
-  .agent-message .markdown-content :global(pre) { font-size: calc(11px + var(--workspace-chat-small-adjust)); line-height: 1.62; }
+  .agent-message .markdown-content :global(pre) { font-size: calc(calc(11px + var(--workspace-chat-small-adjust)) * var(--lume-chat-unzoom, 1)); line-height: 1.62; }
   .markdown-content :global(p) { margin: 0 0 .75em; }.markdown-content :global(p:last-child) { margin-bottom: 0; }
   .markdown-content :global(strong) { color: var(--workspace-strong); font-weight: 790; }
   .markdown-content :global(em) { font-style: italic; }
@@ -3485,7 +3484,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .interrupt-notice { margin: 2px 0 4px; padding: 3px 9px 3px 7px; width: fit-content; max-width: 100%; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 999px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: var(--workspace-chat-tiny-size); font-weight: 680; }
   .interrupt-notice :global(.lume-icon) { color: #d85c64; }
   .analysis-message { min-width: 0; padding: 5px 0 7px; color: var(--workspace-muted); }
-  .analysis-message .markdown-content { font-size: calc(11px + var(--workspace-chat-small-adjust)); line-height: 1.62; }
+  .analysis-message .markdown-content { font-size: calc(calc(11px + var(--workspace-chat-small-adjust)) * var(--lume-chat-unzoom, 1)); line-height: 1.62; }
   .changed-files { width: fit-content; max-width: 100%; min-width: 0; margin-top: 2px; }
   .changed-files.open { width: min(100%, 560px); }
   .changed-files-toggle { min-height: 29px; max-width: 100%; padding: 5px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font: 720 var(--workspace-chat-tiny-size)/1.3 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
@@ -3494,7 +3493,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .changed-files-toggle > :global(.lume-icon:last-child) { margin-left: 3px; transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }
   .changed-files.open .changed-files-toggle > :global(.lume-icon:last-child) { transform: rotate(180deg); }
   .changed-files-list { min-width: 0; margin: 4px 0 0 2px; display: grid; gap: 2px; }
-  .changed-file { min-width: 0; min-height: 28px; padding: 3px 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font: calc(9px + var(--workspace-chat-tiny-adjust))/1.4 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); text-align: left; cursor: pointer; transition: color 120ms ease, background 120ms ease; }
+  .changed-file { min-width: 0; min-height: 28px; padding: 3px 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font: calc(calc(9px + var(--workspace-chat-tiny-adjust)) * var(--lume-chat-unzoom, 1))/1.4 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); text-align: left; cursor: pointer; transition: color 120ms ease, background 120ms ease; }
   .changed-file:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
   .changed-file > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .changed-file > :global(.lume-icon:last-child) { color: var(--workspace-faint); opacity: 0; transform: translateX(-3px) rotate(-90deg); transition: color 120ms ease, opacity 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }

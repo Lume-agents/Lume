@@ -17,6 +17,7 @@
   let settings = $state<Row[]>([]);
   let items = $state<ExtensionItem[]>([]);
   let loadedKey = "";
+  let loading = $state(true);
   let expanded = $state<Record<string, boolean>>({});
   const LIMIT = 6;
 
@@ -76,6 +77,7 @@
     if (loadedKey !== `${id}|${folder ?? ""}`) return;
     settings = rows;
     items = found;
+    loading = false;
   }
 
   // Read again when the chat or its folder changes, not on every streamed update of the session.
@@ -85,12 +87,20 @@
     if (loadedKey === current) return;
     loadedKey = current;
     settings = []; items = []; expanded = {};
-    if (session.remote) { settings = [{ label: tr("Agent", "Agente"), value: session.agentLabel }, { label: tr("Computer", "Computador"), value: session.remote.computer }]; return; }
+    if (session.remote) { settings = [{ label: tr("Agent", "Agente"), value: session.agentLabel }, { label: tr("Computer", "Computador"), value: session.remote.computer }]; loading = false; return; }
+    loading = true;
     void load(session.id, session.agent, session.workingDirectory ?? undefined);
   });
 </script>
 
-{#if settings.length}
+{#if loading}
+  <section class="config-loading" role="status" aria-label={tr("Loading this chat's settings", "Carregando os ajustes deste chat")}>
+    <div class="bar head"></div>
+    {#each [62, 78, 54, 70, 48] as width}<div class="bar" style:width="{width}%"></div>{/each}
+    <div class="bar head"></div>
+    <div class="bar head"></div>
+  </section>
+{:else if settings.length}
   <details class="inspector-section config-section" open>
     <summary><LumeIcon name="settings" size={14} /><span>{tr("Settings", "Ajustes")}</span><em>{settings.length}</em></summary>
     <dl class="config-rows">
@@ -99,6 +109,7 @@
   </details>
 {/if}
 
+{#if !loading}
 {#each grouped as group (group.kind)}
   <details class="inspector-section config-section">
     <summary><LumeIcon name={group.icon} size={14} /><span>{tr(group.label[0], group.label[1])}</span><em>{group.items.length}</em></summary>
@@ -117,8 +128,14 @@
     {/if}
   </details>
 {/each}
+{/if}
 
 <style>
+  .config-loading { padding: 14px 0 16px; display: grid; gap: 10px; border-bottom: 1px solid var(--workspace-line); }
+  .config-loading .bar { height: 12px; border-radius: 6px; background: var(--workspace-line); opacity: .5; animation: config-pulse 1.2s ease-in-out infinite alternate; }
+  .config-loading .bar.head { width: 40%; height: 14px; margin-top: 4px; }
+  @keyframes config-pulse { from { opacity: .22; } to { opacity: .5; } }
+  @media (prefers-reduced-motion: reduce) { .config-loading .bar { animation: none; } }
   .config-rows { margin: 0 0 8px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; font-size: 10.5px; }
   .config-rows dt { color: var(--workspace-muted); }
   .config-rows dd { min-width: 0; margin: 0; overflow: hidden; color: var(--workspace-strong); font-weight: 560; text-align: right; text-overflow: ellipsis; white-space: nowrap; }

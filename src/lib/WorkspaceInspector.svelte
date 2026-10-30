@@ -48,6 +48,7 @@
 
   let mcpServers = $state<McpServer[]>([]);
   let mcpProbing = $state(false);
+  let mcpLoading = $state(false);
   let mcpKey = "";
   const mcpAgents = ["codex", "claude_code", "opencode"];
   const mcpOrder = ["connected", "needs_auth", "failed", "unknown", "disabled"];
@@ -58,6 +59,7 @@
     if (mcpKey === id) return;
     mcpKey = id;
     mcpServers = [];
+    mcpLoading = true;
     void loadMcp(id, agent);
   });
   async function loadMcp(id: string, agent: string) {
@@ -65,12 +67,13 @@
       const configured = await listSessionMcpServers(id, false);
       if (mcpKey !== id) return;
       mcpServers = configured;
+      mcpLoading = false;
       if (agent !== "claude_code") return;
       mcpProbing = true;
       const live = await listSessionMcpServers(id, true);
       if (mcpKey === id) mcpServers = live;
     } catch { /* The list is informational; the section stays with what was read. */ }
-    finally { if (mcpKey === id) mcpProbing = false; }
+    finally { if (mcpKey === id) { mcpProbing = false; mcpLoading = false; } }
   }
   const sortedMcp = $derived([...mcpServers].sort((a, b) => mcpOrder.indexOf(a.status) - mcpOrder.indexOf(b.status)));
   function mcpStatusLabel(status: string) {
@@ -267,7 +270,9 @@
         </section>
       {/if}
 
-      {#if mcpAgents.includes(session.agent) && (mcpServers.length || mcpProbing)}
+      {#if mcpAgents.includes(session.agent) && mcpLoading && !mcpServers.length}
+        <section class="mcp-loading" role="status" aria-label={tr("Loading MCP servers", "Carregando servidores MCP")}><div class="loading-rows" aria-hidden="true"><i></i><i></i><i></i></div></section>
+      {:else if mcpAgents.includes(session.agent) && (mcpServers.length || mcpProbing)}
         <details class="inspector-section mcp-section" open>
           <summary><LumeIcon name="sources" size={14} /><span>MCP</span><em>{mcpServers.length}</em></summary>
           <p class="section-description">{mcpProbing ? tr("Checking connections…", "Verificando conexões…") : tr("Tool servers this agent can use", "Servidores de ferramentas que este agente pode usar")}</p>
@@ -411,6 +416,8 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   .token-graph.loading { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
   .inspector-loading { padding-top: 1px; }
+  .mcp-loading { padding: 0 0 16px; border-bottom: 1px solid var(--workspace-line); }
+  .mcp-loading .loading-rows { margin-top: 14px; }
   .loading-rows { margin-top: 18px; display: grid; gap: 10px; }
   .loading-rows > i { height: 12px; border-radius: 6px; background: var(--workspace-line); opacity: .5; animation: usage-pulse 1.2s ease-in-out infinite alternate; }
   .loading-rows > i:nth-child(2) { width: 78%; }

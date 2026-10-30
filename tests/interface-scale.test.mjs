@@ -26,11 +26,39 @@ assert.match(workspace, /\.session-context-command, \.session-context-actions bu
 assert.ok(!/<span>\{orderedSessions\.length\}<\/span>/.test(workspace), "the agent count is gone");
 assert.match(workspace, /\.session-heading\.searching \.heading-actions \{[^}]*opacity: 0/);
 
-// Subagents: one rail from under the parent's avatar, behind each subagent's avatar, growing with them, ten rows at most.
-assert.match(workspace, /class="subagent-rail" aria-hidden="true"/);
-assert.match(workspace, /\.subagent-rail \{[^}]*height: calc\(16px \+ var\(--rows, 1\) \* 35px - 17\.5px\)[^}]*transition: height/);
+// Subagents: one line from under the parent's avatar with a branch per subagent that grows with it, ten rows at most.
+assert.match(workspace, /\.subagent-track::before \{[^}]*animation: subagent-rail-grow/);
+assert.match(workspace, /class="subagent-branch" aria-hidden="true"/);
+assert.match(workspace, /\.subagent-branch \{[^}]*border-bottom-left-radius[^}]*animation: subagent-branch-in/);
+assert.match(workspace, /\.subagent-row:not\(:last-child\)::after \{[^}]*animation: subagent-rail-grow/);
 assert.match(workspace, /\.subagent-list \{[^}]*max-height: calc\(16px \+ 10 \* 35px\)[^}]*overflow-y: auto/);
-assert.match(workspace, /\.subagent-avatar \{ position: relative; z-index: 1;/);
-assert.ok(!/class="subagent-branch"/.test(workspace), "the per-row elbows are gone");
+assert.ok(!/class="subagent-rail"/.test(workspace), "one line with branches, not a rail through the avatars");
+
+// The chat header no longer has a maximize button; the prompt index and the text size also live in the agent's menu.
+assert.ok(!/name="maximize"/.test(pane), "the header has no full-screen button");
+assert.match(pane, /addEventListener\("lume:chat-command"/);
+assert.match(workspace, /chatCommand\(contextSession, "prompts", true\)/);
+assert.match(workspace, /chatCommand\(contextSession, "text-bigger", false\)/);
+assert.match(workspace, /chatCommand\(contextSession, "text-smaller", false\)/);
+
+// The inspector shows the chat's own settings and extensions instead of its latest prompts.
+const inspector = read("src/lib/WorkspaceInspector.svelte");
+assert.match(inspector, /<ChatConfiguration \{session\} \{language\} \/>/);
+assert.ok(!/prompt-events|Latest prompts/.test(inspector), "the latest prompts section is gone");
+const config = read("src/lib/ChatConfiguration.svelte");
+for (const kind of ["plugin", "skill", "instruction", "command", "subagent"]) assert.match(config, new RegExp(`kind: "${kind}"`));
+
+// The subagent card floats over the chat instead of reserving a band of its own.
+const portals = read("src/lib/SubagentPortals.svelte");
+assert.match(portals, /\.portal-host \{ position: absolute;[^}]*pointer-events: none/);
+assert.match(pane, /<div class="portal-anchor"><SubagentPortals/);
+
+// "Files read" gets the open book; "inspected context" keeps the thought bubble.
+const trace = read("src/lib/ActivityTraceGroup.svelte");
+assert.match(trace, /run\.category === "read" \? "files-read" : run\.category/);
+const icon = read("src/lib/ActivityTypeIcon.svelte");
+assert.match(icon, /category === "files-read"/);
+assert.match(icon, /category === "read" \|\| category === "analysis"/);
+assert.ok(!/@keyframes/.test(icon), "the book is a still drawing");
 
 console.log("interface scale test passed");

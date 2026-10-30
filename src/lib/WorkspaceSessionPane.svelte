@@ -923,6 +923,19 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-120);
   }
 
+  // The sidebar's context menu drives the same two controls as the header: the prompt index and the chat text size.
+  $effect(() => {
+    const handle = (event: Event) => {
+      const { sessionId, command } = (event as CustomEvent<{ sessionId: string; command: string }>).detail ?? {};
+      if (sessionId !== session.id) return;
+      if (command === "prompts" && !promptIndexOpen) togglePromptIndex();
+      else if (command === "text-bigger") setTextZoom(textZoom + 0.1);
+      else if (command === "text-smaller") setTextZoom(textZoom - 0.1);
+    };
+    window.addEventListener("lume:chat-command", handle);
+    return () => window.removeEventListener("lume:chat-command", handle);
+  });
+
   function setTextZoom(value: number) {
     textZoom = Math.round(Math.max(textZoomMin, Math.min(textZoomMax, value)) * 10) / 10;
     try {
@@ -2484,21 +2497,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             </div>
           {/if}
         </div>
-        {#if onToggleMaximize}
-          <button
-            type="button"
-            title={maximized ? tr("Restore pane", "Restaurar painel") : tr("Maximize pane", "Maximizar painel")}
-            aria-label={maximized ? tr("Restore pane", "Restaurar painel") : tr("Maximize pane", "Maximizar painel")}
-            aria-pressed={maximized}
-            onclick={onToggleMaximize}
-          >
-            {#if maximized}
-              <WorkspaceChatIcon name="restore" size={18} active />
-            {:else}
-              <WorkspaceChatIcon name="maximize" size={18} />
-            {/if}
-          </button>
-        {/if}
         {#if closable}
         <button type="button" title={tr("Close pane", "Fechar painel")} aria-label={tr("Close pane", "Fechar painel")} onclick={onClose}>
           <WorkspaceChatIcon name="close" size={18} />
@@ -2509,7 +2507,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   {/if}
 
   {#if subagents.length}
-    <SubagentPortals {session} children={subagents} {language} />
+    <div class="portal-anchor"><SubagentPortals {session} children={subagents} {language} /></div>
   {/if}
 
   <WorkspaceWorkBookmarks {session} {language} hasSubagents={subagents.length > 0} />
@@ -3401,6 +3399,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .controls-saving { margin: 10px 0 0; color: var(--workspace-muted); font-size: 8px; }
   .agent-controls-popover input:disabled { opacity: .45; cursor: default; }
   /* Event popovers stay above messages, never above the sibling composer or header. */
+  .portal-anchor { position: relative; z-index: 3; height: 0; flex: 0 0 0; }
   .conversation-shell { position: relative; z-index: 0; isolation: isolate; min-width: 0; min-height: 0; display: flex; flex: 1 1 auto; overflow: hidden; }
   .conversation { --chat-edge-gutter: clamp(28px, 5cqw, 54px); min-width: 0; min-height: 0; width: 100%; padding: 25px var(--chat-edge-gutter) calc(26px + var(--composer-overlap, 0px)); display: flex; flex-direction: column-reverse; flex: 1 1 auto; overflow: auto; overflow-anchor: none; overscroll-behavior: none; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   /* The interface size does not change the chat, which has its own text size. */

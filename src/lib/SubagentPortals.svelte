@@ -489,8 +489,10 @@
 <style>
   /* The card hangs from the header like a bubble sized to its subagents only; it spans the chat once they no longer fit.
      The timeline panel belongs to the host, so opening it never changes the card's width. */
-  .portal-host { position: relative; z-index: 3; box-sizing: border-box; width: 100%; margin: -1px 0 6px; padding: 0 10px; display: flex; flex: 0 0 auto; justify-content: center; }
-  .portal-host.compact { margin: 0; padding: 0; }
+  /* The host floats over the chat, so it neither reserves a band of its own nor covers what sits beside its card. */
+  .portal-host { position: absolute; z-index: 3; top: -1px; right: 0; left: 0; box-sizing: border-box; padding: 0 10px; display: flex; justify-content: center; pointer-events: none; }
+  .portal-host.compact { padding: 0; }
+  .portal-host > :global(*) { pointer-events: auto; }
   .subagent-portals { position: relative; width: fit-content; min-width: min(100%, 176px); max-width: 100%; flex: 0 1 auto; border: 1px solid var(--workspace-line); border-top: 0; border-radius: 0 0 18px 18px; background: color-mix(in srgb, var(--workspace-pane) 96%, var(--workspace-raised)); box-shadow: 0 12px 26px rgba(0, 0, 0, .13); }
   .subagent-portals.compact { width: auto; min-width: 0; max-width: none; margin: 0; border: 0; border-radius: 0; background: none; box-shadow: none; }
   .portal-rail-content { display: grid; grid-template-rows: minmax(0, 1fr); overflow: hidden; opacity: 1; transform: translateY(0); transition: grid-template-rows 240ms cubic-bezier(.16, 1, .3, 1), opacity 170ms ease, transform 240ms cubic-bezier(.16, 1, .3, 1); }

@@ -4,17 +4,16 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import LumeSelect, { type LumeSelectOption } from "$lib/LumeSelect.svelte";
   import RepositoryPanel from "$lib/RepositoryPanel.svelte";
+  import ChatConfiguration from "$lib/ChatConfiguration.svelte";
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import { transientScrollbar } from "$lib/transientScrollbar";
   import { displayFileChangePath } from "$lib/fileChanges";
-  import { cleanPromptTransport } from "$lib/chatAttachments";
   import type { AgentSession, SessionActivity } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
-  import { dedupePromptEntries } from "$lib/promptHistory";
-  import { listSessionMcpServers, loadWorkspacePromptIndexPage, refreshAgentRateLimits, type McpServer, type WorkspacePromptIndexEntry } from "$lib/lume";
+  import { listSessionMcpServers, refreshAgentRateLimits, type McpServer } from "$lib/lume";
   import { buildLatestReviewTurn } from "$lib/reviewDiffs";
   import { subagentsForSession } from "$lib/workspaceAgents";
   import { expectedUsageLimitCount, stacksUsageGauges, usageGaugeGroups } from "$lib/usageGauges";
@@ -90,26 +89,6 @@
   let usageSettledKey = $state("");
   let usagePendingKey = $state("");
   let requestedUsageKey = "";
-  let indexedPrompts = $state<WorkspacePromptIndexEntry[]>([]);
-  let promptIndexLoading = $state(false);
-  let promptIndexFailed = $state(false);
-  let promptReload = $state(0);
-  const promptSessionId = $derived(session?.id ?? "");
-  const promptSourceKey = $derived(section === "session" && session?.nativeSessionId
-    ? `${session.id}:${session.nativeSessionId}:${session.activities.filter((activity: SessionActivity) => activity.kind === "prompt").at(-1)?.id ?? ""}`
-    : "");
-  const recentPrompts = $derived.by(() => {
-    const byId = new Map(indexedPrompts.map((prompt) => [prompt.id, prompt]));
-    for (const activity of session?.activities ?? []) {
-      if (activity.kind === "prompt") byId.set(activity.id, {
-        id: activity.id, createdAt: activity.createdAt, detail: activity.detail ?? "",
-      });
-    }
-    return [...byId.values()]
-      .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id))
-      .slice(0, 5);
-  });
-
   const latestTurn = $derived(session ? buildLatestReviewTurn(session.activities, session.results, session.workingDirectory) : null);
   const changes = $derived(latestTurn?.files ?? []);
   const visibleChanges = $derived(changes.slice(0, 6));
@@ -142,28 +121,8 @@
     void refreshUsage(key);
   });
 
-  $effect(() => {
-    const key = promptSourceKey;
-    const sessionId = promptSessionId;
-    void promptReload;
-    indexedPrompts = [];
-    promptIndexFailed = false;
-    promptIndexLoading = Boolean(key);
-    if (!key) return;
-    let active = true;
-    void loadWorkspacePromptIndexPage(sessionId)
-      .then((page) => { if (active) indexedPrompts = dedupePromptEntries(page.prompts).slice(0, 5); })
-      .catch(() => { if (active) promptIndexFailed = true; })
-      .finally(() => { if (active) promptIndexLoading = false; });
-    return () => { active = false; };
-  });
-
   function tr(english: string, portuguese: string) {
     return language === "pt-BR" ? portuguese : english;
-  }
-
-  function promptTime(value: number) {
-    return new Intl.DateTimeFormat(language, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
   }
 
   function tokenGraphGeometry(samples: NonNullable<AgentSession["promptTokenUsage"]>) {
@@ -324,25 +283,7 @@
         </details>
       {/if}
 
-      <details class="inspector-section events-section" open>
-        <summary><LumeIcon name="send" size={14} /><span>{tr("Events", "Eventos")}</span><em>{recentPrompts.length}</em></summary>
-        <p class="section-description">{tr("Latest prompts", "Últimos prompts")}</p>
-        {#if recentPrompts.length}
-          <ol class="prompt-events">
-            {#each recentPrompts as prompt (prompt.id)}
-              {@const text = cleanPromptTransport(prompt.detail) || tr("Prompt sent", "Prompt enviado")}
-              <li><span class="event-mark"><LumeIcon name="send" size={12} /></span><div><time datetime={new Date(prompt.createdAt).toISOString()}>{promptTime(prompt.createdAt)}</time><p title={text}>{text}</p></div></li>
-            {/each}
-          </ol>
-        {:else if promptIndexLoading}
-          <p class="empty-section" role="status">{tr("Loading recent prompts…", "Carregando prompts recentes…")}</p>
-        {:else if promptIndexFailed}
-          <p class="empty-section" role="status">{tr("Could not load recent prompts.", "Não foi possível carregar os prompts recentes.")}</p>
-        {:else}
-          <p class="empty-section">{tr("No prompts recorded yet.", "Nenhum prompt registrado ainda.")}</p>
-        {/if}
-        {#if promptIndexFailed}<button class="event-retry" type="button" onclick={() => (promptReload += 1)}><LumeIcon name="refresh" size={12} />{tr("Retry history", "Recarregar histórico")}</button>{/if}
-      </details>
+      <ChatConfiguration {session} {language} />
 
       {#if subagents.length}
         <details class="inspector-section" open>
@@ -445,16 +386,7 @@
   .usage-gauges > i { width: 56px; min-width: 0; flex: 0 1 56px; height: 30px; border: 5px solid var(--workspace-line); border-bottom: 0; border-radius: 32px 32px 0 0; opacity: .5; }
   .usage-gauges.loading > i { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
   .token-chart { min-width: 0; display: grid; grid-template-rows: auto 48px auto; gap: 3px; }.token-chart > span, .token-chart > small { color: var(--workspace-muted); font-size: 10px; font-weight: 720; line-height: 1.2; }.token-chart > small { color: var(--workspace-faint); text-align: right; }.token-graph { width: 100%; min-width: 0; height: 48px; overflow: visible; }.token-graph .graph-grid { fill: none; stroke: color-mix(in srgb, var(--workspace-line) 54%, transparent); stroke-width: .7; }.token-graph polygon { fill: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }.token-graph polyline { fill: none; stroke: var(--workspace-accent); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }.token-graph.empty polyline { stroke: var(--workspace-line); stroke-dasharray: 3 4; }.token-graph circle { fill: var(--workspace-raised); stroke: var(--workspace-accent); stroke-width: 1.3; }
-  .inspector-section { border-bottom: 1px solid var(--workspace-line); }.inspector-section > summary { min-height: 40px; display: flex; align-items: center; gap: 7px; color: var(--workspace-strong); font-size: 11px; font-weight: 600; list-style: none; cursor: pointer; }.inspector-section > summary::-webkit-details-marker { display: none; }.inspector-section > summary::after { width: 6px; height: 6px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .5; transform: rotate(45deg); transition: transform 160ms ease; }.inspector-section[open] > summary::after { transform: rotate(225deg); }.inspector-section > summary em { min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 9px; font-style: normal; }.inspector-section[open] { padding-bottom: 13px; }
-  .prompt-events { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
-  .prompt-events > li { min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 9px 0; }
-  .prompt-events > li + li { border-top: 1px solid var(--workspace-line); }
-  .event-mark { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 6px; color: var(--workspace-accent); background: var(--workspace-accent-soft); }
-  .prompt-events > li > div { min-width: 0; flex: 1; }
-  .prompt-events time { color: var(--workspace-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
-  .prompt-events p { margin: 4px 0 0; color: var(--workspace-text); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
-  .event-retry { display: inline-flex; align-items: center; gap: 5px; padding: 6px 0; border: 0; color: var(--workspace-accent); background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
-  .event-retry:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+  :global(.inspector-section) { border-bottom: 1px solid var(--workspace-line); }:global(.inspector-section > summary) { min-height: 40px; display: flex; align-items: center; gap: 7px; color: var(--workspace-strong); font-size: 11px; font-weight: 600; list-style: none; cursor: pointer; }:global(.inspector-section > summary::-webkit-details-marker) { display: none; }:global(.inspector-section > summary::after) { width: 6px; height: 6px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .5; transform: rotate(45deg); transition: transform 160ms ease; }:global(.inspector-section[open] > summary::after) { transform: rotate(225deg); }:global(.inspector-section > summary em) { min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 9px; font-style: normal; }:global(.inspector-section[open]) { padding-bottom: 13px; }
   .subagent-list { display: grid; gap: 3px; }.subagent-list > div { min-width: 0; min-height: 36px; padding: 4px 5px; display: flex; align-items: center; gap: 8px; border-radius: 8px; }.subagent-list > div:hover { background: var(--workspace-subtle); }.subagent-list > div > span { min-width: 0; display: grid; gap: 2px; }.subagent-list strong { overflow: hidden; color: var(--workspace-text); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }.subagent-list small { color: var(--workspace-faint); font-size: 8px; }.subagent-list small.status-running { color: #4e98ca; }.subagent-list small.status-failed { color: #c66762; }.subagent-list small.status-completed { color: #50aa79; }
   .files-toolbar { min-height: 40px; margin-bottom: 4px; padding-bottom: 8px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 65%, transparent); }.files-toolbar > span { min-width: 0; display: grid; gap: 2px; flex: 1; }.files-toolbar > span > strong { color: var(--workspace-text); font-size: 9px; }.files-toolbar > span small { display: flex; gap: 5px; font-size: 8px; }.files-toolbar b, .inspector-files b { color: #43a873; }.files-toolbar i, .inspector-files i { color: #c16660; font-style: normal; }.files-toolbar button { min-height: 28px; padding: 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 28%, var(--workspace-line)); border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 8px; font-weight: 740; cursor: pointer; }.files-toolbar button:hover { border-color: color-mix(in srgb, var(--workspace-accent) 52%, var(--workspace-line)); }
   .inspector-files { display: grid; gap: 1px; }.inspector-files > button, .inspector-files > .inspector-file-entry { width: 100%; min-width: 0; min-height: 31px; padding: 0 5px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font-size: 9px; text-align: left; }.inspector-files > button { cursor: pointer; }.inspector-files > button:hover { background: var(--workspace-subtle); }.inspector-files > button > span, .inspector-file-entry > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.inspector-files > button > small, .inspector-file-entry > small { display: flex; gap: 4px; flex: 0 0 auto; font-size: 7px; }.review-more { margin: 5px 0 0 4px; padding: 3px 0; border: 0; color: var(--workspace-accent); background: transparent; font-size: 8px; font-weight: 720; cursor: pointer; }

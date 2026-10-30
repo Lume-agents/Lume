@@ -188,7 +188,7 @@
                 {#if status === "completed"}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
                 {:else}<i></i>{/if}
               </span>
-              <span class="activity-type"><ActivityTypeIcon category={run.category} /></span>
+              <span class="activity-type"><ActivityTypeIcon category={run.category === "read" ? "files-read" : run.category} /></span>
               <span class="activity-copy"><strong>{activityRunTitle(run, language)}</strong></span>
               <svg class="row-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
             </button>

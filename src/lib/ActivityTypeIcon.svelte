@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ActivityCategory } from "$lib/activityPresentation";
 
-  let { category, size = 15 }: { category: ActivityCategory | "analysis"; size?: number } = $props();
+  let { category, size = 15 }: { category: ActivityCategory | "analysis" | "files-read"; size?: number } = $props();
 </script>
 
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -22,6 +22,12 @@
     <path d="M8 16.5a4.5 4.5 0 0 1-3.6-7.2A4.5 4.5 0 0 1 11.8 5a4.5 4.5 0 0 1 7.6 4.3A4.5 4.5 0 0 1 16 16.5Z" />
     <circle cx="5.5" cy="19" r="1.1" />
     <circle cx="2.8" cy="21.5" r=".6" fill="currentColor" stroke="none" />
+  {:else if category === "files-read"}
+    <!-- An open book with a page caught mid-turn. -->
+    <path d="M12 19.2c-1.7-1.3-4.5-1.8-8.3-1.6V5.8c3.8-.2 6.6.3 8.3 1.6" />
+    <path d="M12 7.4V19.2" />
+    <path d="M12 19.2c1.7-1.3 4.5-1.8 8.3-1.6V8.2" />
+    <path d="M12 19.2V8.8c0-2.6 1.9-4.6 5.4-4.9 1 0 2 .2 2.9.5C18.6 5.8 17 7 15.5 8.6 13.6 10.7 12.4 14.3 12 19.2Z" />
   {:else if category === "search"}
     <circle cx="10.5" cy="10.5" r="5.5" />
     <path d="m15 15 4.5 4.5" />

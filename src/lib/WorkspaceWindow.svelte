@@ -3852,7 +3852,7 @@
   .launcher-loading-note { min-height: 30px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); font-size: 8px; }
   .session-launcher-popover p { margin: 8px 3px; color: var(--workspace-muted); font-size: 8px; line-height: 1.45; }
   .session-filters { margin: 0 11px 10px; padding: 3px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--workspace-line); border-radius: 9px; background: color-mix(in srgb, var(--workspace-sidebar) 76%, var(--workspace-bg)); }
-  .session-filters button { min-width: 0; height: 25px; padding: 0 5px; overflow: hidden; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font-size: 8px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .session-filters button { min-width: 0; height: 25px; padding: 0 5px; overflow: hidden; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font-size: 9.5px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .session-filters button:hover { color: var(--workspace-strong); }
   .session-filters button.active { color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(26, 42, 34, .08); }
   .session-filters button:active { transform: scale(.97); }

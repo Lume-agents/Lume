@@ -67,4 +67,9 @@ assert.match(icon, /category === "read" \|\| category === "analysis"/);
 assert.ok(!/@keyframes/.test(icon), "the book is a still drawing");
 assert.match(icon, /A page with a large pencil that leaves it at the lower right/, "the edited-files pencil is large and sticks out of the page");
 
+// Small texts: "load earlier messages" and the changed-files toggle use the chat's small size, the sidebar filters 9.5px.
+assert.match(pane, /\.load-earlier-chat \{[^}]*font-size: var\(--workspace-chat-small-size\)/);
+assert.match(pane, /\.changed-files-toggle \{[^}]*font: 720 var\(--workspace-chat-small-size\)/);
+assert.match(workspace, /\.session-filters button \{[^}]*font-size: 9\.5px/);
+
 console.log("interface scale test passed");

@@ -3405,7 +3405,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .conversation-content { width: 100%; max-width: 1040px; min-width: 0; margin-inline: auto; display: flex; flex-direction: column; gap: 15px; flex: 1 0 auto; }
   .conversation-shell.under-composer .conversation { background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--workspace-pane) 13%, transparent) 30%, color-mix(in srgb, var(--workspace-pane) 69%, transparent) 60%, color-mix(in srgb, var(--workspace-pane) 74%, transparent) 64%) right bottom / 9px calc(var(--composer-overlap) + 34px) no-repeat; }
   .conversation::-webkit-scrollbar { width: 9px; height: 9px; }.conversation::-webkit-scrollbar-track { background: transparent; }.conversation::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: var(--workspace-scroll-thumb); background-clip: content-box; }
-  .load-earlier-chat { max-width: min(240px, 100%); min-height: 30px; margin: 0 auto 7px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: var(--workspace-chat-tiny-size); font-weight: 700; cursor: pointer; }
+  .load-earlier-chat { max-width: min(240px, 100%); min-height: 30px; margin: 0 auto 7px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: var(--workspace-chat-small-size); font-weight: 700; cursor: pointer; }
   .load-earlier-chat:hover:not(:disabled) { color: var(--workspace-accent); border-color: color-mix(in srgb, var(--workspace-accent) 32%, var(--workspace-line)); }
   .load-earlier-chat:disabled { opacity: .65; cursor: wait; }
   .load-earlier-icon { display: inline-flex; transform: rotate(180deg); }
@@ -3487,7 +3487,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .analysis-message .markdown-content { font-size: calc(calc(11px + var(--workspace-chat-small-adjust)) * var(--lume-chat-unzoom, 1)); line-height: 1.62; }
   .changed-files { width: fit-content; max-width: 100%; min-width: 0; margin-top: 2px; }
   .changed-files.open { width: min(100%, 560px); }
-  .changed-files-toggle { min-height: 29px; max-width: 100%; padding: 5px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font: 720 var(--workspace-chat-tiny-size)/1.3 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
+  .changed-files-toggle { min-height: 29px; max-width: 100%; padding: 5px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: var(--workspace-subtle); font: 720 var(--workspace-chat-small-size)/1.3 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .changed-files-toggle:hover, .changed-files-toggle:focus-visible { color: var(--workspace-strong); border-color: var(--workspace-accent); }
   .changed-files-toggle > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .changed-files-toggle > :global(.lume-icon:last-child) { margin-left: 3px; transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }

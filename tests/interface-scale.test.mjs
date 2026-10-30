@@ -26,4 +26,11 @@ assert.match(workspace, /\.session-context-command, \.session-context-actions bu
 assert.ok(!/<span>\{orderedSessions\.length\}<\/span>/.test(workspace), "the agent count is gone");
 assert.match(workspace, /\.session-heading\.searching \.heading-actions \{[^}]*opacity: 0/);
 
+// Subagents: one rail from under the parent's avatar, behind each subagent's avatar, growing with them, ten rows at most.
+assert.match(workspace, /class="subagent-rail" aria-hidden="true"/);
+assert.match(workspace, /\.subagent-rail \{[^}]*height: calc\(16px \+ var\(--rows, 1\) \* 35px - 17\.5px\)[^}]*transition: height/);
+assert.match(workspace, /\.subagent-list \{[^}]*max-height: calc\(16px \+ 10 \* 35px\)[^}]*overflow-y: auto/);
+assert.match(workspace, /\.subagent-avatar \{ position: relative; z-index: 1;/);
+assert.ok(!/class="subagent-branch"/.test(workspace), "the per-row elbows are gone");
+
 console.log("interface scale test passed");

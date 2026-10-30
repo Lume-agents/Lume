@@ -2889,14 +2889,16 @@
           </div>
           {#if childAgents.length}
             <div id={`workspace-subagents-${session.id}`} class:open={expandedSubagentSessions.has(session.id)} class="subagent-list-shell" aria-hidden={!expandedSubagentSessions.has(session.id)}>
-            <div class="subagent-list" role="list" aria-label={tr(`Subagents of ${sessionName(session)}`, `Subagentes de ${sessionName(session)}`)}>
+            <div class="subagent-list" role="list" style:--rows={childAgents.length} aria-label={tr(`Subagents of ${sessionName(session)}`, `Subagentes de ${sessionName(session)}`)}>
+              <div class="subagent-track">
+              <span class="subagent-rail" aria-hidden="true"></span>
               {#each childAgents as child (child.id)}
                 <div class="subagent-row" role="listitem">
-                  <span class="subagent-branch" aria-hidden="true"></span>
                   <span class="subagent-avatar"><ThreadAvatar seed={`${session.id}:subagent:${child.id}`} label={child.label} size={24} /></span>
                   <span class="subagent-copy"><strong>{child.label}</strong><small class="subagent-status status-{child.status}">{child.status === "running" ? tr("Working", "Executando") : child.status === "failed" ? tr("Failed", "Falhou") : child.status === "waiting" ? tr("Waiting", "Aguardando") : child.status === "interrupted" ? tr("Interrupted", "Interrompido") : tr("Finished", "Concluído")}</small></span>
                 </div>
               {/each}
+              </div>
             </div>
             </div>
           {/if}
@@ -3897,13 +3899,15 @@
   .subagent-toggle { min-width: 22px; margin: auto 1px auto auto; display: flex; align-items: center; justify-content: center; gap: 2px; flex: 0 0 auto; color: var(--workspace-muted); font-size: 8px; font-weight: 750; pointer-events: none; }
   .session-select:hover .subagent-toggle, .subagent-toggle.open { color: var(--workspace-accent); }
   .subagent-toggle :global(.lume-icon) { transition: transform 160ms cubic-bezier(.16, 1, .3, 1); }.subagent-toggle.open :global(.lume-icon) { transform: rotate(180deg); }
-  .subagent-list-shell { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 180ms cubic-bezier(.16, 1, .3, 1); }.subagent-list-shell.open { grid-template-rows: 1fr; }
-  .subagent-list { min-height: 0; margin: 0 8px 3px 22px; overflow: hidden; }
-  .subagent-row { position: relative; min-height: 35px; padding: 4px 6px 4px 19px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); }
-  .subagent-list-shell.open .subagent-row { animation: subagent-enter 210ms cubic-bezier(.16, 1, .3, 1) both; }
-  .subagent-branch { position: absolute; top: 0; left: 0; width: 15px; height: 50%; border-bottom: 1px solid var(--workspace-line); border-left: 1px solid var(--workspace-line); border-bottom-left-radius: 8px; }
-  .subagent-row:not(:last-child)::after { position: absolute; top: 50%; bottom: 0; left: 0; border-left: 1px solid var(--workspace-line); content: ""; }
-  .subagent-avatar { width: 24px; height: 24px; display: grid; place-items: center; flex: 0 0 auto; }
+  /* The rail leaves from under the parent's avatar, runs behind each subagent's avatar and grows as they appear; past ten the list scrolls. */
+  .subagent-list-shell { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 220ms cubic-bezier(.16, 1, .3, 1), margin-top 220ms cubic-bezier(.16, 1, .3, 1); }.subagent-list-shell.open { grid-template-rows: 1fr; margin-top: -17px; }
+  .subagent-list { min-height: 0; max-height: calc(16px + 10 * 35px); margin: 0 8px 3px 0; overflow-x: hidden; overflow-y: auto; scrollbar-width: none; pointer-events: none; }
+  .subagent-list::-webkit-scrollbar { display: none; }
+  .subagent-track { position: relative; padding-top: 16px; }
+  .subagent-rail { position: absolute; z-index: 0; top: 0; left: 26px; width: 2px; height: calc(16px + var(--rows, 1) * 35px - 17.5px); border-radius: 1px; background: color-mix(in srgb, var(--workspace-muted) 42%, transparent); transform-origin: top; transition: height 280ms cubic-bezier(.16, 1, .3, 1); animation: subagent-rail-grow 340ms cubic-bezier(.16, 1, .3, 1) both; }
+  .subagent-row { position: relative; height: 35px; padding: 0 6px 0 15px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); pointer-events: auto; }
+  .subagent-list-shell.open .subagent-row { animation: subagent-enter 240ms cubic-bezier(.16, 1, .3, 1) 80ms both; }
+  .subagent-avatar { position: relative; z-index: 1; width: 24px; height: 24px; display: grid; place-items: center; flex: 0 0 auto; }
   .subagent-copy { min-width: 0; display: grid; gap: 1px; }.subagent-copy strong { max-width: 165px; overflow: hidden; color: var(--workspace-text); font-size: 9px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }.subagent-copy small { color: var(--workspace-faint); font-size: 7px; }.subagent-copy small.status-running { color: #4d99cc; }.subagent-copy small.status-failed { color: #c86662; }
   .internal-heading { margin: 14px 7px 5px; padding-top: 11px; display: flex; align-items: center; gap: 7px; border-top: 1px solid var(--workspace-line); color: var(--workspace-faint); font-size: 8px; font-weight: 750; letter-spacing: .02em; }.internal-heading span { flex: 1; }.internal-heading small { color: var(--workspace-muted); font-size: 8px; }
   .internal-row { min-width: 0; min-height: 49px; padding: 7px 9px; display: flex; align-items: center; gap: 9px; border-radius: 9px; color: var(--workspace-muted); background: var(--workspace-subtle); }.internal-row .session-copy { gap: 3px; }.internal-live { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--workspace-accent); }
@@ -3990,6 +3994,7 @@
   @keyframes live-pulse { 0%, 45% { box-shadow: 0 0 0 0 rgba(77, 153, 204, .28); } 80%, 100% { box-shadow: 0 0 0 4px rgba(77, 153, 204, 0); } }
   @keyframes session-menu-in { from { opacity: 0; transform: translateY(-4px); } }
   @keyframes subagent-enter { from { opacity: 0; transform: translateY(3px); } }
+  @keyframes subagent-rail-grow { from { transform: scaleY(0); } }
   @keyframes layout-editor-arrive { from { opacity: 0; transform: translateY(-3px); } }
   @keyframes drop-preview-arrive { from { opacity: 0; transform: scale(.985); } }
   @keyframes add-pane-preview { 0% { opacity: 0; transform: scaleX(.76); } 65% { opacity: 1; transform: scaleX(1.015); } 100% { transform: scaleX(1); } }

@@ -1390,7 +1390,8 @@ mod action_tests {
         let head = git_text(&mine, &["rev-parse", "HEAD"]).unwrap();
         assert_eq!(rebase(&directory, "@{upstream}").err().unwrap(), "rebase_conflict");
         assert_eq!(git_text(&mine, &["rev-parse", "HEAD"]).unwrap(), head, "a conflicting rebase is aborted");
-        assert_eq!(std::fs::read_to_string(mine.join("a.txt")).unwrap(), "mine\n");
+        // Git on Windows may write the file with CRLF line endings.
+        assert_eq!(std::fs::read_to_string(mine.join("a.txt")).unwrap().replace("\r\n", "\n"), "mine\n");
         assert_eq!(snapshot(&directory, true).unwrap().conflicts, 0);
         assert_eq!(rebase(&directory, "--onto").err().unwrap(), "unknown_branch");
         std::fs::write(mine.join("a.txt"), "dirty\n").unwrap();

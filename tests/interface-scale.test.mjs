@@ -19,8 +19,10 @@ assert.match(terminal, /applyInterfaceScale\(nextPreferences\.interfaceScale\)/)
 assert.match(backend, /interface_scale\.clamp\(80, 140\)/);
 
 // The sidebar heading: new group beside the search, reload beside the launcher, no count, and searching folds both away.
-assert.match(workspace, /class="heading-fold"[\s\S]*name="folder-plus"/);
-assert.match(workspace, /class="heading-actions"[\s\S]*class="heading-icon refresh-agents"[\s\S]*class="session-launcher"/);
+assert.match(workspace, /class="search-toggle"[\s\S]*class="heading-fold"[^>]*>\s*<strong>/, "the title comes right after the search");
+assert.match(workspace, /class="heading-actions"[\s\S]*name="folder-plus"[\s\S]*class="heading-icon refresh-agents"[\s\S]*class="session-launcher"/, "new group, reload and the launcher sit together on the right");
+assert.match(workspace, /<small class="group-count">\{row\.count\}<\/small>/, "a group's count is the last thing in its heading");
+assert.match(workspace, /\.session-context-command, \.session-context-actions button \{[^}]*background: transparent/, "context menu buttons only fill on hover");
 assert.ok(!/<span>\{orderedSessions\.length\}<\/span>/.test(workspace), "the agent count is gone");
 assert.match(workspace, /\.session-heading\.searching \.heading-actions \{[^}]*opacity: 0/);
 

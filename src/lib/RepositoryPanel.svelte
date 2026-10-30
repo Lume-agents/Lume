@@ -244,12 +244,17 @@
       {#if !local.files.length}<p class="empty-list"><LumeIcon name="check" size={18} />{tr("Working tree is clean.", "Árvore de trabalho limpa.")}</p>{/if}
       {#if local.files.length}
         <section class="commit-box" aria-label={tr("Commit", "Commit")}>
-          <div class="commit-head"><button class="text-action" type="button" disabled={committing} onclick={toggleAllTicked}>{ticked.length === local.files.filter((file) => !file.conflict).length ? tr("Clear selection", "Limpar seleção") : tr("Select all", "Selecionar tudo")}</button><small>{ticked.length}/{local.files.length}</small></div>
           <textarea rows="3" bind:value={commitMessage} disabled={committing} maxlength="20000" placeholder={tr("Commit message", "Mensagem do commit")} aria-label={tr("Commit message", "Mensagem do commit")} onkeydown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void commitTicked(); } }}></textarea>
           <button class="commit-button" type="button" disabled={committing || !ticked.length || !commitMessage.trim()} onclick={() => void commitTicked()}><LumeIcon name="commit" size={14} />{committing ? tr("Committing…", "Commitando…") : tr(`Commit ${ticked.length} file${ticked.length === 1 ? "" : "s"}`, `Commitar ${ticked.length} arquivo${ticked.length === 1 ? "" : "s"}`)}</button>
           {#if commitError}<p class="commit-error" role="alert">{commitError}</p>{/if}
           {#if commitDone}<p class="commit-done" role="status"><LumeIcon name="check" size={13} />{tr("Committed", "Commit criado")} · {commitDone}<br /><small>{tr("Nothing was pushed.", "Nada foi enviado ao remoto.")}</small></p>{/if}
         </section>
+      {/if}
+      {#if local.files.length}
+        <div class="select-bar">
+          <button class="text-action" type="button" disabled={committing} onclick={toggleAllTicked}><LumeIcon name={ticked.length === local.files.filter((file) => !file.conflict).length ? "close" : "task-list"} size={13} />{ticked.length === local.files.filter((file) => !file.conflict).length ? tr("Clear selection", "Limpar seleção") : tr("Select all", "Selecionar tudo")}</button>
+          <small>{ticked.length}/{local.files.length}</small>
+        </div>
       {/if}
       <div class="repository-list">{#each local.files.slice(0, fileLimit) as file (file.path)}
         {@const included = ticked.includes(file.path)}
@@ -361,7 +366,7 @@
   .file-row:hover .include-toggle, .include-toggle:focus-visible, .file-row.excluded .include-toggle { opacity: 1; }
   .include-toggle:hover { color: var(--workspace-accent); }
   .commit-box { margin: 2px 0 10px; padding: 9px; display: grid; gap: 7px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-subtle); }
-  .commit-head { display: flex; align-items: center; justify-content: space-between; color: var(--workspace-muted); font-size: 10px; }
+  .select-bar { margin: 0 0 4px; display: flex; align-items: center; justify-content: space-between; color: var(--workspace-muted); font-size: 10px; }
   .commit-box textarea { box-sizing: border-box; width: 100%; padding: 7px 9px; resize: vertical; border: 1px solid var(--workspace-line); border-radius: 8px; outline: 0; color: var(--workspace-strong); background: var(--workspace-raised); font: inherit; font-size: 11px; line-height: 1.45; }
   .commit-box textarea:focus { border-color: var(--workspace-accent); }
   .commit-button { height: 30px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 8px; color: #fff; background: var(--workspace-accent); font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }

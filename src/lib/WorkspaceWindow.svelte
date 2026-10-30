@@ -2741,7 +2741,6 @@
     <div class:searching={searchOpen} class="session-heading">
       <button class="search-toggle" class:active={searchOpen} type="button" aria-label={tr("Search agents", "Buscar agentes")} title={tr("Search agents · /", "Buscar agentes · /")} onclick={() => (searchOpen ? closeAgentSearch() : void openAgentSearch())}><LumeIcon name="search" size={16} /></button>
       <div class="heading-fold" inert={searchOpen}>
-        {#if !sidebarCollapsed}<button class="heading-icon" type="button" aria-label={tr("New group", "Novo grupo")} title={tr("New group", "Novo grupo")} onclick={createSidebarGroup}><LumeIcon name="folder-plus" size={16} /></button>{/if}
         <strong>{tr("Agents", "Agentes")}</strong>
       </div>
       {#if searchOpen}
@@ -2751,6 +2750,7 @@
         </div>
       {/if}
       <div class="heading-actions" inert={searchOpen}>
+      {#if !sidebarCollapsed}<button class="heading-icon" type="button" aria-label={tr("New group", "Novo grupo")} title={tr("New group", "Novo grupo")} onclick={createSidebarGroup}><LumeIcon name="folder-plus" size={18} /></button>{/if}
       <button class="heading-icon refresh-agents" class:spinning={reloadingAgents} type="button" disabled={reloadingAgents} aria-label={tr("Reload agents", "Recarregar agentes")} title={tr("Reload agents", "Recarregar agentes")} onclick={() => void reloadAgents()}><LumeIcon name="refresh" size={15} /></button>
       <div class="session-launcher" data-tour="new-chat" bind:this={launcherRoot}>
         <button class:active={launcherOpen} type="button" aria-label={launcherOpen ? tr("Close session launcher", "Fechar iniciador de sessões") : tr("New or resume chat", "Novo chat ou retomar")} title={launcherOpen ? tr("Close session launcher", "Fechar iniciador de sessões") : tr("New or resume chat", "Novo chat ou retomar")} aria-controls="workspace-session-launcher" aria-expanded={launcherOpen} onclick={() => void toggleLauncher()}><LumeIcon name="plus" size={16} /></button>
@@ -2836,12 +2836,13 @@
                   </form>
                 {:else}
                   <button class="group-toggle" type="button" aria-expanded={!row.group.collapsed} onclick={() => toggleSidebarGroup(row.group!.id)}>
-                    <span class="group-chevron"><LumeIcon name="chevron-down" size={12} /></span><LumeIcon name="folder" size={13} /><strong>{row.group.name}</strong><small>{row.count}</small>
+                    <span class="group-chevron"><LumeIcon name="chevron-down" size={12} /></span><LumeIcon name="folder" size={13} /><strong>{row.group.name}</strong>
                   </button>
                   <span class="group-actions">
                     <button type="button" title={tr("Rename group", "Renomear grupo")} aria-label={tr("Rename group", "Renomear grupo")} onclick={() => { renamingGroupId = row.group!.id; groupNameDraft = row.group!.name; }}><LumeIcon name="rename" size={12} /></button>
                     <button class:confirm={confirmingGroupId === row.group.id} type="button" title={confirmingGroupId === row.group.id ? tr("Click again: agents stay, only the group goes", "Clique de novo: os agentes ficam, só o grupo some") : tr("Delete group", "Excluir grupo")} aria-label={tr("Delete group", "Excluir grupo")} onclick={() => requestDeleteGroup(row.group!.id)}><LumeIcon name="trash" size={12} /></button>
                   </span>
+                  <small class="group-count">{row.count}</small>
                 {/if}
               {:else}
                 <span class="group-label">{tr("No group", "Sem grupo")}</span><small>{row.count}</small>
@@ -3792,7 +3793,7 @@
   .search-toggle:hover, .search-toggle.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .session-launcher { position: relative; }
   .heading-fold { min-width: 0; max-width: 220px; display: flex; align-items: center; gap: 4px; overflow: hidden; white-space: nowrap; transition: max-width 220ms cubic-bezier(.16, 1, .3, 1), opacity 160ms ease; }
-  .heading-actions { margin-left: auto; max-width: 90px; display: flex; align-items: center; gap: 2px; transition: max-width 220ms cubic-bezier(.16, 1, .3, 1), opacity 160ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1); }
+  .heading-actions { margin-left: auto; max-width: 120px; display: flex; align-items: center; gap: 2px; transition: max-width 220ms cubic-bezier(.16, 1, .3, 1), opacity 160ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1); }
   .session-heading.searching .heading-fold { max-width: 0; opacity: 0; }
   .session-heading.searching .heading-actions { max-width: 0; margin-left: 0; overflow: hidden; opacity: 0; transform: translateX(8px); pointer-events: none; }
   .heading-icon { width: 26px; height: 26px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
@@ -3841,7 +3842,8 @@
   .group-heading.drop-target { background: var(--workspace-accent-soft); outline: 1px dashed var(--workspace-accent); }
   .group-toggle { min-width: 0; height: 24px; padding: 0 6px 0 2px; flex: 1; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font: inherit; text-align: left; cursor: pointer; }
   .group-toggle strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--workspace-strong); font-size: 10px; font-weight: 720; }
-  .group-toggle small, .group-label + small { margin-left: auto; font-size: 9px; font-variant-numeric: tabular-nums; }
+  .group-count, .group-label + small { margin-left: 2px; padding-right: 4px; color: var(--workspace-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+  .group-label { flex: 1; }
   .group-chevron { display: grid; transition: transform 160ms ease; }
   .group-heading.collapsed .group-chevron { transform: rotate(-90deg); }
   .group-label { padding: 0 6px; font-size: 9px; font-weight: 720; letter-spacing: .04em; text-transform: uppercase; }
@@ -3916,7 +3918,7 @@
   .session-context-rename label { padding: 0 2px; color: var(--workspace-muted); font-size: 8px; font-weight: 700; }
   .session-context-rename input { width: 100%; min-width: 0; height: 33px; padding: 0 9px; border: 1px solid var(--workspace-line); border-radius: 8px; outline: 0; color: var(--workspace-strong); background: var(--workspace-subtle); font-size: 10px; }
   .session-context-rename input:focus { border-color: color-mix(in srgb, var(--workspace-accent) 55%, var(--workspace-line)); box-shadow: 0 0 0 2px var(--workspace-accent-soft); }
-  .session-context-command, .session-context-actions button { min-height: 32px; padding: 0 9px; border: 0; border-radius: 8px; color: var(--workspace-text); background: var(--workspace-subtle); font-size: 9px; cursor: pointer; }
+  .session-context-command, .session-context-actions button { min-height: 32px; padding: 0 9px; border: 0; border-radius: 8px; color: var(--workspace-text); background: transparent; font-size: 9px; cursor: pointer; }
   .session-context-command { display: flex; align-items: center; gap: 8px; text-align: left; transition: color 130ms ease, background 130ms ease, transform 130ms cubic-bezier(.16, 1, .3, 1); }
   .session-context-command:hover, .session-context-actions button:hover { color: var(--workspace-strong); background: var(--workspace-line); }
   .session-context-command.danger-command { color: #b45c58; }

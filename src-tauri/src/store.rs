@@ -146,6 +146,11 @@ impl Store {
                     ON conversation_activities(thread_key, created_at ASC);
                  -- omp JSONL is the conversation source; do not retain a second copy in Lume.
                  DELETE FROM conversation_activities WHERE thread_key LIKE 'omp:%';
+                 -- Claude's internal helper forks (recap, prompt suggestion) were once recorded as subagents named claude.
+                 DELETE FROM conversation_activities
+                    WHERE activity_id LIKE 'claude:%:subagent:%'
+                      AND payload LIKE '%\"kind\":\"subagent\"%'
+                      AND payload LIKE '%\"title\":\"claude\"%';
                  CREATE TABLE IF NOT EXISTS managed_sessions (
                     session_id TEXT PRIMARY KEY,
                     payload TEXT NOT NULL,
@@ -1881,4 +1886,32 @@ mod tests {
             AgentKind::Claude
         );
     }
+    #[test]
+    fn helper_forks_recorded_as_subagents_named_claude_are_removed_on_open() {
+        let path = std::env::temp_dir().join(format!("lume-helper-forks-{}-{}.sqlite3", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos())));
+        {
+            let store = Store::open(&path).expect("database");
+            let insert = |id: &str, payload: &str| {
+                store.connection.execute(
+                    "INSERT INTO conversation_activities(thread_key, activity_id, payload, created_at) VALUES ('claude:s', ?1, ?2, 1)",
+                    params![id, payload],
+                ).expect("insert");
+            };
+            insert("claude:s:subagent:helper", r#"{"id":"claude:s:subagent:helper","kind":"subagent","title":"claude","detail":"pode começar a spec 001"}"#);
+            insert("claude:s:subagent:real", r#"{"id":"claude:s:subagent:real","kind":"subagent","title":"Explore","detail":"done"}"#);
+            insert("claude:s:prompt:1", r#"{"id":"claude:s:prompt:1","kind":"prompt","title":"claude","detail":"hi"}"#);
+        }
+        let store = Store::open(&path).expect("reopened database");
+        let remaining: Vec<String> = store
+            .connection
+            .prepare("SELECT activity_id FROM conversation_activities ORDER BY activity_id")
+            .and_then(|mut statement| statement.query_map([], |row| row.get(0))?.collect())
+            .expect("rows");
+        assert_eq!(remaining, ["claude:s:prompt:1", "claude:s:subagent:real"]);
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
 }

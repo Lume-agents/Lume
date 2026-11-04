@@ -184,12 +184,16 @@ fn map_event_with_context(
         return None;
     }
     // Claude's internal forks (recap, prompt suggestion) also fire SubagentStop and run tools of their
-    // own, all tagged with an agent_id but without an agent_type; only real subagents carry one.
-    // Their text and tool calls are not part of the conversation, so none of their events count.
+    // own, all tagged with an agent_id. Older versions leave their agent_type empty and newer ones call
+    // it "claude"; real subagents carry the name of their role. Their text and tool calls are not part
+    // of the conversation, so none of their events count.
     if provider == "claude"
         && (matches!(hook_name.as_str(), "SubagentStart" | "SubagentStop")
             || string(raw, "agent_id").is_some_and(|agent_id| !agent_id.trim().is_empty()))
-        && string(raw, "agent_type").is_none_or(|agent_type| agent_type.trim().is_empty())
+        && string(raw, "agent_type").is_none_or(|agent_type| {
+            let agent_type = agent_type.trim();
+            agent_type.is_empty() || agent_type.eq_ignore_ascii_case("claude")
+        })
     {
         return None;
     }
@@ -3215,6 +3219,34 @@ mod tests {
             assert_eq!(unwrap_pasted_content(text), text);
         }
         assert!(matches!(unwrap_pasted_content("sem tags"), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn claude_helper_forks_named_claude_are_not_subagents() {
+        for hook in ["SubagentStart", "SubagentStop", "PreToolUse", "PostToolUse"] {
+            for agent_type in ["claude", "Claude", " claude "] {
+                let raw = json!({
+                    "session_id": "claude-session",
+                    "cwd": "/work/project",
+                    "hook_event_name": hook,
+                    "tool_name": "Read",
+                    "tool_input": { "file_path": "/work/project/a.rs" },
+                    "agent_id": "ad04d277ba54e581c",
+                    "agent_type": agent_type,
+                    "last_assistant_message": "Estamos preparando o PR para o merge."
+                });
+                assert!(map_event("claude", &raw).is_none(), "{hook} from a helper fork named {agent_type:?}");
+            }
+        }
+        let real = json!({
+            "session_id": "claude-session",
+            "cwd": "/work/project",
+            "hook_event_name": "SubagentStop",
+            "agent_id": "agent-1",
+            "agent_type": "Explore",
+            "last_assistant_message": "Found it."
+        });
+        assert!(map_event("claude", &real).is_some_and(|event| event.activity.is_some()), "a real subagent still shows");
     }
 
 }

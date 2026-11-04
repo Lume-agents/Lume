@@ -32,9 +32,10 @@ assert.deepEqual(
   parseWorkflowPrompt("# Lume workflow\n\nThe previous **Tester** step was skipped by the user. Continue without its result.\n\n## Objective\n\nShip it\n\n## Instructions\n\nGo"),
   { kind: "skipped", role: "Tester", objective: "Ship it" },
 );
-// A blur behind content inside the scrolling chat makes the whole chat go soft while it scrolls (and flicker on WebKitGTK).
+// A message that arrives only fades in: an animated filter can stall on its first frame and leave the chat blurred until the next scroll.
 import { readFileSync } from "node:fs";
 const collapsible = readFileSync(new URL("../src/lib/CollapsibleUserMessage.svelte", import.meta.url), "utf8");
-assert.ok(!/backdrop-filter/.test(collapsible), "the collapsed message fades with a gradient only, never a backdrop blur");
+assert.ok(!/@keyframes message-reveal \{[^}]*filter/.test(collapsible), "the reveal animation has no filter");
+assert.match(collapsible, /\.message-fade \{[^}]*backdrop-filter: blur\(2\.5px\)/, "the fade of a collapsed message keeps its blur");
 
 console.log("Workflow prompt presentation tests passed");

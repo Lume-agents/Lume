@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   cleanPromptTransport,
+  isSyntheticPromptText,
   extractResponseFileCards,
   extractResponseFiles,
   promptTextKey,
@@ -121,5 +122,13 @@ assert.deepEqual(
     isImage: false,
   }],
 );
+
+// Text pasted into Claude Code's CLI arrives wrapped in <pasted_content> tags; only the text is the message.
+assert.equal(cleanPromptTransport('olhe isto\n\n<pasted_content id="5f7b">\n<\\pasted_content id="f83e">\nLeia o AGENTS.md\n<\\/pasted_content>\n</pasted_content>'), "olhe isto\n\nLeia o AGENTS.md");
+assert.equal(cleanPromptTransport('<pasted_content id="a">oi</pasted_content>'), "oi");
+assert.equal(cleanPromptTransport("a < b e <pasted_contents>x</pasted_contents>"), "a < b e <pasted_contents>x</pasted_contents>");
+// "Tool loaded." is Claude Code's own note beside a loaded deferred tool, not something a person wrote.
+assert.equal(isSyntheticPromptText("Tool loaded."), true);
+assert.equal(isSyntheticPromptText("Tool loaded. Now what?"), false);
 
 console.log("chat attachment test suite passed");

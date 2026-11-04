@@ -15,8 +15,15 @@ export interface ResponseFileCard extends ResponseFileReference {
   downloadable: boolean;
 }
 
+/** Claude Code wraps text pasted into its CLI in `<pasted_content id="…">…</pasted_content>`; the text itself is what was sent. */
+const pastedContentTag = /<\\?\/?\\?pasted_content\b[^>\n]*>[ \t]*\n?/g;
+
+export function unwrapPastedContent(value: string): string {
+  return value.includes("pasted_content") ? value.replace(pastedContentTag, "") : value;
+}
+
 export function cleanPromptTransport(value?: string): string {
-  const normalized = String(value ?? "").replace(/\r\n?/g, "\n");
+  const normalized = unwrapPastedContent(String(value ?? "").replace(/\r\n?/g, "\n"));
   const marker = normalized.indexOf(lumeAttachedFilesMarker);
   return (marker >= 0 ? normalized.slice(0, marker) : normalized).trim();
 }
@@ -26,6 +33,8 @@ const syntheticPromptPrefixes = ["<task-notification>", "<system-reminder>", "<c
 /** Providers also record notices and injected project/environment context with the user role. */
 export function isSyntheticPromptText(value?: string): boolean {
   const text = String(value ?? "").trim();
+  // Claude Code adds "Tool loaded." beside the result of loading a deferred tool.
+  if (text === "Tool loaded.") return true;
   if (syntheticPromptPrefixes.some((prefix) => text.startsWith(prefix))) return true;
   const environment = (content: string) => content.startsWith("<environment_context>") && content.endsWith("</environment_context>");
   if (environment(text)) return true;

@@ -388,7 +388,8 @@ fn hook_activity(
             .into_iter()
             .find_map(|key| string(raw, key))
             // The hook also fires for Claude's own notices; they are not something the user said.
-            .filter(|prompt| provider != "claude" || visible_claude_user_text(prompt));
+            .filter(|prompt| provider != "claude" || visible_claude_user_text(prompt))
+            .map(|prompt| unwrap_pasted_content(&prompt).into_owned());
         return prompt.map(|prompt| SessionActivity {
             id: format!("{provider}:{session_id}:prompt:{}", now_millis()),
             kind: "prompt".into(),
@@ -2005,6 +2006,8 @@ fn push_claude_user_text(
         None => text,
     };
     let text = claude_queued_message(text).unwrap_or(text);
+    let text = unwrap_pasted_content(text);
+    let text = text.as_ref();
     if visible_claude_user_text(text) {
         push_claude_transcript_activity(
             activities,
@@ -2031,11 +2034,61 @@ pub(crate) fn claude_queued_message(value: &str) -> Option<&str> {
     Some(message.trim())
 }
 
+/// Claude Code wraps text pasted into its CLI in `<pasted_content id="…">…</pasted_content>`. The text inside is what the
+/// person sent, so only the tags go (also in the escaped forms `<\pasted_content>` and `<\/pasted_content>`).
+pub(crate) fn unwrap_pasted_content(value: &str) -> std::borrow::Cow<'_, str> {
+    const NAME: &str = "pasted_content";
+    if !value.contains(NAME) {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    let bytes = value.as_bytes();
+    let mut result = String::with_capacity(value.len());
+    let mut copied = 0;
+    let mut index = 0;
+    while let Some(offset) = value[index..].find('<') {
+        let start = index + offset;
+        let mut cursor = start + 1;
+        for expected in [b'\\', b'/', b'\\'] {
+            if bytes.get(cursor) == Some(&expected) {
+                cursor += 1;
+            }
+        }
+        let is_tag = value[cursor..].starts_with(NAME)
+            && !value[cursor + NAME.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_');
+        let end = if is_tag {
+            value[cursor + NAME.len()..]
+                .find(['>', '\n'])
+                .filter(|at| value.as_bytes()[cursor + NAME.len() + at] == b'>')
+                .map(|at| cursor + NAME.len() + at + 1)
+        } else {
+            None
+        };
+        match end {
+            Some(mut end) => {
+                result.push_str(&value[copied..start]);
+                while matches!(bytes.get(end), Some(b' ' | b'\t')) {
+                    end += 1;
+                }
+                if bytes.get(end) == Some(&b'\n') {
+                    end += 1;
+                }
+                copied = end;
+                index = end;
+            }
+            None => index = start + 1,
+        }
+    }
+    result.push_str(&value[copied..]);
+    std::borrow::Cow::Owned(result)
+}
+
 /// Whether a user-role message is something the person wrote. Claude Code also records its own
 /// notices in that role, such as the one that tells it a background command finished.
 pub(crate) fn visible_claude_user_text(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
+        // Claude Code adds this text beside the result of loading a deferred tool.
+        && value != "Tool loaded."
         && !value.starts_with(CLAUDE_QUEUED_HEADER)
         && ![
             "<command-",
@@ -2826,6 +2879,7 @@ mod tests {
             "<system-reminder>\nContext\n</system-reminder>",
             "<command-name>/compact</command-name>",
             "<local-command-stdout>ok</local-command-stdout>",
+            "Tool loaded.",
         ] {
             assert!(!visible_claude_user_text(notice), "{notice}");
         }
@@ -3151,4 +3205,16 @@ mod tests {
         let real = json!({ "type": "assistant", "message": { "role": "assistant", "model": "claude-opus-4", "content": [{ "type": "text", "text": "No response requested." }] } });
         assert!(!is_claude_resume_filler(&real), "only the CLI's own synthetic answer is dropped");
     }
+    #[test]
+    fn pasted_content_loses_its_tags_and_keeps_its_text() {
+        let wrapped = "ver isto\n\n<pasted_content id=\"5f7b\">\n<\\pasted_content id=\"f83e\">\nLeia o AGENTS.md\n<\\/pasted_content>\n</pasted_content>";
+        assert_eq!(unwrap_pasted_content(wrapped), "ver isto\n\nLeia o AGENTS.md\n");
+        assert_eq!(unwrap_pasted_content("<pasted_content id=\"a\">oi</pasted_content>"), "oi");
+        // Anything that only looks similar is left alone.
+        for text in ["sem tags", "<pasted_contents>x</pasted_contents>", "a < b e pasted_content", "<pasted_content sem fechar\nlinha"] {
+            assert_eq!(unwrap_pasted_content(text), text);
+        }
+        assert!(matches!(unwrap_pasted_content("sem tags"), std::borrow::Cow::Borrowed(_)));
+    }
+
 }

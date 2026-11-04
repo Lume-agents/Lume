@@ -614,7 +614,9 @@ fn hook_activity(
     let is_command = lower_tool.contains("bash")
         || lower_tool.contains("shell")
         || lower_tool.contains("command");
-    let kind = if is_todo_tool {
+    // An MCP tool is its own kind of event whatever its name says: `editJiraIssue` edits a ticket, not a file.
+    let is_mcp = tool_name.starts_with("mcp__");
+    let kind = if is_todo_tool || is_mcp {
         "tool"
     } else if is_command && is_test_command(&lower_resource) {
         "test"
@@ -661,10 +663,21 @@ fn hook_activity(
         .flatten();
     let detail_limit = if file_diff.is_some() {
         48 * 1024
+    } else if is_mcp {
+        MCP_DETAIL_LIMIT + 1024
     } else {
         16 * 1024
     };
-    let detail = if is_todo_tool {
+    let detail = if is_mcp {
+        Some(mcp_activity_detail(
+            input,
+            raw.get("tool_response")
+                .or_else(|| raw.get("tool_result"))
+                .or_else(|| raw.get("toolResponse"))
+                .or_else(|| raw.get("result")),
+            string(raw, "error").as_deref(),
+        ))
+    } else if is_todo_tool {
         input_detail
     } else if file_diff.is_some() {
         file_diff
@@ -690,7 +703,7 @@ fn hook_activity(
     Some(SessionActivity {
         id: format!("{provider}:{session_id}:tool:{tool_id}"),
         kind: kind.into(),
-        title: truncate(if is_todo_tool { &tool_name } else { &resource }, 240),
+        title: truncate(if is_todo_tool || is_mcp { &tool_name } else { &resource }, 240),
         detail: detail.map(|detail| truncate(&detail, detail_limit)),
         status: status.into(),
         created_at: now_millis(),
@@ -698,6 +711,36 @@ fn hook_activity(
         attachments: Vec::new(),
         append_detail: false,
     })
+}
+
+const MCP_DETAIL_LIMIT: usize = 30 * 1024;
+
+/// What an MCP tool was asked and what it answered, as one JSON object the chat reads back (`{input, result, error}`).
+/// A call too large to keep whole stays valid JSON: the biggest parts become truncated text.
+fn mcp_activity_detail(input: Option<&Value>, result: Option<&Value>, error: Option<&str>) -> String {
+    let mut object = serde_json::Map::new();
+    if let Some(input) = input {
+        object.insert("input".into(), input.clone());
+    }
+    if let Some(result) = result {
+        object.insert("result".into(), result.clone());
+    }
+    if let Some(error) = error.filter(|error| !error.trim().is_empty()) {
+        object.insert("error".into(), Value::String(truncate(error, 2 * 1024)));
+    }
+    let render = |object: &serde_json::Map<String, Value>| Value::Object(object.clone()).to_string();
+    let mut text = render(&object);
+    for (key, keep) in [("result", 12 * 1024), ("input", 8 * 1024), ("result", 2 * 1024), ("input", 2 * 1024)] {
+        if text.len() <= MCP_DETAIL_LIMIT {
+            break;
+        }
+        if let Some(value) = object.get(key) {
+            let shortened = truncate(&value.to_string(), keep);
+            object.insert(key.into(), Value::String(shortened));
+            text = render(&object);
+        }
+    }
+    text
 }
 
 /// The files a shell command changed, as a file edit after it. Before the command runs the hook keeps a
@@ -3247,6 +3290,38 @@ mod tests {
             "last_assistant_message": "Found it."
         });
         assert!(map_event("claude", &real).is_some_and(|event| event.activity.is_some()), "a real subagent still shows");
+    }
+
+    #[test]
+    fn an_mcp_tool_is_a_tool_event_with_its_name_and_a_json_detail() {
+        let raw = json!({
+            "session_id": "claude-session",
+            "cwd": "/work/project",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "mcp__atlassian__editJiraIssue",
+            "tool_input": { "issueIdOrKey": "IPG-258", "fields": { "description": "ipg-mobile#7" } },
+            "tool_response": [{ "type": "text", "text": "{\"data\":{\"message\":\"ok\"}}" }],
+            "tool_use_id": "toolu_1"
+        });
+        let activity = map_event("claude", &raw).and_then(|event| event.activity).expect("an activity");
+        assert_eq!(activity.kind, "tool", "editJiraIssue is not a file edit");
+        assert_eq!(activity.title, "mcp__atlassian__editJiraIssue");
+        assert!(activity.files.is_empty());
+        let detail: Value = serde_json::from_str(activity.detail.as_deref().unwrap()).expect("JSON detail");
+        assert_eq!(detail["input"]["issueIdOrKey"], "IPG-258");
+        assert_eq!(detail["result"][0]["type"], "text");
+    }
+
+    #[test]
+    fn a_huge_mcp_answer_stays_valid_json() {
+        let big = "x".repeat(200_000);
+        let text = mcp_activity_detail(Some(&json!({ "jql": "project = IPG" })), Some(&json!([{ "type": "text", "text": big }])), None);
+        assert!(text.len() <= MCP_DETAIL_LIMIT, "{}", text.len());
+        let parsed: Value = serde_json::from_str(&text).expect("still JSON");
+        assert_eq!(parsed["input"]["jql"], "project = IPG");
+        assert!(parsed["result"].is_string(), "the answer became truncated text");
+        let failed = mcp_activity_detail(None, None, Some("denied"));
+        assert_eq!(serde_json::from_str::<Value>(&failed).unwrap()["error"], "denied");
     }
 
 }

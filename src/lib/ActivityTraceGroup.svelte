@@ -6,6 +6,9 @@
   import ActivityTypeIcon from "$lib/ActivityTypeIcon.svelte";
   import GitEventChips from "$lib/GitEventChips.svelte";
   import GitEventDetails from "$lib/GitEventDetails.svelte";
+  import McpEventChips from "$lib/McpEventChips.svelte";
+  import McpEventDetails from "$lib/McpEventDetails.svelte";
+  import { mcpActivityInfo, mcpRunChips } from "$lib/mcpEvents";
   import { gitActivityInfo } from "$lib/gitEvents";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import { displayFileChangePath, normalizeFileChangePath } from "$lib/fileChanges";
@@ -171,6 +174,7 @@
         {@const activity = run.activities[0]}
         {@const preview = activityPreview(activity)}
         {@const gitInfo = run.category === "git" ? gitActivityInfo(activity) : null}
+        {@const mcpInfo = run.category === "mcp" && run.activities.length === 1 ? mcpActivityInfo(activity, language) : null}
         {@const runFiles = plain ? activityRunFiles(run) : []}
         {#if plain && runFiles.length > 0}
           {@const status = runStatus(run)}
@@ -255,16 +259,24 @@
                 {#if status === "completed"}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
                 {:else}<i></i>{/if}
               </span>
-              <span class="activity-type"><ActivityTypeIcon category={run.category} /></span>
-              <span class="activity-copy"><strong>{activityRunTitle(run, language)}</strong></span>
+              <span class="activity-type" class:mcp-type={run.category === "mcp"}><ActivityTypeIcon category={run.category} /></span>
+              <span class="activity-copy">
+                <strong>{activityRunTitle(run, language)}</strong>
+                {#if run.category === "mcp"}<McpEventChips chips={mcpRunChips(run.activities)} serverLabel={mcpActivityInfo(activity, language)?.serverLabel} {language} />{/if}
+              </span>
               <svg class="row-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
             </button>
             {#if expandedRuns.includes(run.id)}
             <div class="grouped-activity-details" in:slide={{ duration: motionDuration(180), easing: cubicOut }} out:slide={{ duration: motionDuration(120), easing: cubicOut }}>
               {#each run.activities as grouped, detailIndex (grouped.id)}
-                <div class="grouped-activity-detail">
+                {@const groupedMcp = run.category === "mcp" ? mcpActivityInfo(grouped, language) : null}
+                <div class="grouped-activity-detail" class:mcp-line={Boolean(groupedMcp)}>
                   <span aria-hidden="true">{detailIndex + 1}</span>
-                  <pre>{grouped.detail || activityDisplayTitle(grouped, language)}</pre>
+                  {#if groupedMcp}
+                    <span class="mcp-line-copy"><strong>{groupedMcp.presenter === "jira:transition" && groupedMcp.facts.key ? groupedMcp.facts.key : activityDisplayTitle(grouped, language)}</strong><McpEventChips chips={[...groupedMcp.chips, ...(groupedMcp.failed ? [{ label: language === "pt-BR" ? "Falhou" : "Failed", tone: "bad" as const }] : [])]} {language} /></span>
+                  {:else}
+                    <pre>{grouped.detail || activityDisplayTitle(grouped, language)}</pre>
+                  {/if}
                 </div>
               {/each}
             </div>
@@ -321,6 +333,34 @@
               <svg class="row-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
             </summary>
             <GitEventDetails info={gitInfo} {language} />
+          </details>
+        {:else if mcpInfo}
+          <details
+            class:failed={activity.status === "failed" || mcpInfo.failed}
+            class:interrupted={activity.status === "interrupted"}
+            class:running={activity.status === "running"}
+            class:waiting={activity.status === "waiting"}
+            class="activity-row mcp-row"
+            style={`--step-delay: ${Math.min(index, 4) * 22}ms`}
+          >
+            <summary>
+              <span class="activity-status" aria-label={activity.status}>
+                {#if activity.status === "completed" && !mcpInfo.failed}
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
+                {:else if activity.status === "failed" || mcpInfo.failed}
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6m0-6-6 6" /></svg>
+                {:else}
+                  <i></i>
+                {/if}
+              </span>
+              <span class="activity-type mcp-type"><ActivityTypeIcon category="mcp" /></span>
+              <span class="activity-copy">
+                <strong>{activityDisplayTitle(activity, language)}</strong>
+                <McpEventChips info={mcpInfo} {language} />
+              </span>
+              <svg class="row-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
+            </summary>
+            <McpEventDetails info={mcpInfo} {language} />
           </details>
         {:else}
           <details
@@ -393,7 +433,12 @@
   .event-trigger { border: 0; background: transparent; text-align: left; }
   .activity-type { width: 15px; height: 15px; display: grid; place-items: center; flex: 0 0 auto; color: var(--workspace-accent, #428066); }
   .activity-copy { min-width: 0; flex: 1; display: grid; gap: 2px; }
-  .git-row .activity-copy { gap: 4px; }
+  .git-row .activity-copy, .mcp-row .activity-copy { gap: 4px; }
+  .mcp-type { color: #6b7bd6; }
+  :global(.terminal-window.dark) .mcp-type, :global(.workspace.dark) .mcp-type { color: #8d9bf0; }
+  .mcp-line { align-items: center; }
+  .mcp-line-copy { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+  .mcp-line-copy strong { color: var(--workspace-strong, #52665c); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.4 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); }
   .git-type { color: #cf673d; }
   :global(.terminal-window.dark) .git-type, :global(.workspace.dark) .git-type { color: #e48a62; }
   .activity-copy strong { overflow: hidden; color: var(--workspace-strong, #52665c); font: 700 var(--activity-title-size, var(--chat-small-font-size, 9px))/1.25 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }

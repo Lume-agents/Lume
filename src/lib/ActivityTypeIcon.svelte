@@ -33,6 +33,10 @@
     <path d="M12 7.4V19.2" />
     <path d="M12 19.2c1.7-1.3 4.5-1.8 8.3-1.6V8.2" />
     <path d="M12 19.2V8.8c0-2.6 1.9-4.6 5.4-4.9 1 0 2 .2 2.9.5C18.6 5.8 17 7 15.5 8.6 13.6 10.7 12.4 14.3 12 19.2Z" />
+  {:else if category === "mcp"}
+    <!-- A plug: a tool of another service. -->
+    <path d="M9 3v4M15 3v4M6 7h12v3a6 6 0 0 1-12 0Z" />
+    <path d="M12 16v5" />
   {:else if category === "search"}
     <circle cx="10.5" cy="10.5" r="5.5" />
     <path d="m15 15 4.5 4.5" />

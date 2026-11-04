@@ -5,8 +5,10 @@ import type { Language } from "$lib/i18n";
 import { gitActivityInfo, gitEventTitle } from "./gitEvents.ts";
 // @ts-expect-error Node runs the same source in the focused presentation tests.
 import { isUsageLimitActivity } from "./agentNotices.ts";
+// @ts-expect-error Node runs the same source in the focused presentation tests.
+import { mcpActivityInfo, mcpEventTitle, mcpRunTitle, parseMcpToolName, sameMcpTool } from "./mcpEvents.ts";
 
-export type ActivityCategory = "edit" | "git" | "read" | "search" | "test" | "command" | "tool" | "plan" | "skill" | "instruction";
+export type ActivityCategory = "edit" | "git" | "read" | "search" | "test" | "command" | "tool" | "plan" | "skill" | "instruction" | "mcp";
 export type ActivityThinkingState = "working" | "searching" | "solving" | "listening" | "connecting" | "weaving" | "composing" | "breathing" | "shaping";
 
 function firstLine(value?: string): string {
@@ -42,6 +44,8 @@ export function activityInstructionFile(activity: SessionActivity): string | nul
 }
 
 export function activityCategory(activity: SessionActivity): ActivityCategory {
+  // An MCP tool is named after its server whatever it does, so its name decides before the guesses below.
+  if (activity.kind === "tool" && parseMcpToolName(activity.title)) return "mcp";
   if (activitySkill(activity)) return "skill";
   if (activityInstructionFile(activity)) return "instruction";
   const title = normalizedToolTitle(activity.title).toLowerCase();
@@ -187,6 +191,10 @@ export function activityDisplayTitle(activity: SessionActivity, language: Langua
     const file = activityInstructionFile(activity);
     return pt ? `Leu as instruções de ${file}` : `Read the instructions in ${file}`;
   }
+  if (category === "mcp") {
+    const info = mcpActivityInfo(activity, language);
+    if (info) return mcpEventTitle(info, language);
+  }
   if (category === "read") return pt ? "Contexto inspecionado" : "Inspected context";
   if (category === "search") return pt ? "Busca no projeto" : "Searched the project";
   if (category === "test") return pt ? "Validação executada" : "Ran a check";
@@ -238,6 +246,8 @@ export function groupConsecutiveTraceActivities(activities: SessionActivity[]): 
       && activity.status !== "failed";
     const previous = runs.at(-1);
     if (groupable && previous?.category === category
+      // MCP calls only group with the same tool: moving tickets and creating them are two things.
+      && (category !== "mcp" || sameMcpTool(previous.activities[0], activity))
       && previous.activities.every((item) => item.status !== "failed")
       && previous.activities.every((item) => !["permission", "question", "subagent"].includes(item.kind))) {
       previous.activities.push(activity);
@@ -267,6 +277,7 @@ export function activityRunTitle(run: ActivityRun, language: Language): string {
   }
   if (run.category === "read") return pt ? `${count} leituras de contexto` : `${count} context reads`;
   if (run.category === "search") return pt ? `${count} buscas no projeto` : `${count} project searches`;
+  if (run.category === "mcp") return mcpRunTitle(run.activities, language);
   if (run.category === "skill") return pt ? `${count} skills usadas` : `${count} skills used`;
   if (run.category === "instruction") return pt ? `${count} arquivos de instruções lidos` : `Read ${count} instruction files`;
   return pt ? `${count} ferramentas utilizadas` : `${count} tools used`;
@@ -283,6 +294,7 @@ function phrase(language: Language, category: ActivityCategory, count: number, f
   if (category === "test") return pt ? `${count} validaç${count === 1 ? "ão" : "ões"}` : `${count} check${count === 1 ? "" : "s"}`;
   if (category === "command") return pt ? `${count} comando${count === 1 ? "" : "s"}` : `${count} command${count === 1 ? "" : "s"}`;
   if (category === "git") return pt ? `${count} operaç${count === 1 ? "ão" : "ões"} git` : `${count} git operation${count === 1 ? "" : "s"}`;
+  if (category === "mcp") return pt ? `${count} chamada${count === 1 ? "" : "s"} MCP` : `${count} MCP call${count === 1 ? "" : "s"}`;
   if (category === "skill") return pt ? `${count} skill${count === 1 ? "" : "s"}` : `${count} skill${count === 1 ? "" : "s"}`;
   if (category === "instruction") return pt ? "instruções lidas" : "read instructions";
   return pt ? `${count} ferramenta${count === 1 ? "" : "s"}` : `${count} tool${count === 1 ? "" : "s"}`;
@@ -297,7 +309,7 @@ export function activityGroupSummary(activities: SessionActivity[], language: La
     counts.set(category, (counts.get(category) ?? 0) + 1);
     if (category === "edit") activity.files.forEach((file) => files.add(file));
   }
-  const order: ActivityCategory[] = ["skill", "instruction", "edit", "git", "read", "search", "test", "command", "tool"];
+  const order: ActivityCategory[] = ["skill", "instruction", "edit", "git", "read", "search", "test", "command", "mcp", "tool"];
   const parts = order.flatMap((category) => {
     const count = counts.get(category) ?? 0;
     return count ? [phrase(language, category, count, files.size)] : [];

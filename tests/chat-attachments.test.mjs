@@ -131,4 +131,10 @@ assert.equal(cleanPromptTransport("a < b e <pasted_contents>x</pasted_contents>"
 assert.equal(isSyntheticPromptText("Tool loaded."), true);
 assert.equal(isSyntheticPromptText("Tool loaded. Now what?"), false);
 
+// What the person ran with ! in Claude Code's CLI, and its output, are not messages either.
+for (const text of ["<bash-input> claude mcp add atlassian</bash-input>", "<bash-stdout>Added HTTP MCP server</bash-stdout><bash-stderr></bash-stderr>"]) {
+  assert.equal(isSyntheticPromptText(text), true, text);
+}
+assert.equal(isSyntheticPromptText("use <bash-input> to run things"), false);
+
 console.log("chat attachment test suite passed");

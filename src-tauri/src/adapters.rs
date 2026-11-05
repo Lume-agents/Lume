@@ -2140,6 +2140,10 @@ pub(crate) fn visible_claude_user_text(value: &str) -> bool {
         && ![
             "<command-",
             "<local-command-",
+            // What the person ran with `!` in the CLI, and what it printed.
+            "<bash-input>",
+            "<bash-stdout>",
+            "<bash-stderr>",
             "<system-reminder>",
             "<available-deferred-tools>",
             "<task-notification>",
@@ -2927,6 +2931,8 @@ mod tests {
             "<command-name>/compact</command-name>",
             "<local-command-stdout>ok</local-command-stdout>",
             "Tool loaded.",
+            "<bash-input> claude mcp add --transport http atlassian https://mcp.atlassian.com/v2/mcp</bash-input>",
+            "<bash-stdout>Added HTTP MCP server atlassian</bash-stdout><bash-stderr></bash-stderr>",
         ] {
             assert!(!visible_claude_user_text(notice), "{notice}");
         }

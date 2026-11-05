@@ -121,6 +121,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     onOpenRepository,
     onFork,
     onNewConversation,
+    onContextMenu,
     onToggleMaximize,
     onDismissExternalWriterConflict,
     onResolveExternalWriterConflict,
@@ -140,6 +141,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     onOpenRepository?: () => void;
     onFork?: (threadId: string) => void | Promise<void>;
     onNewConversation?: () => void | Promise<void>;
+    onContextMenu?: (x: number, y: number) => void;
     onToggleMaximize?: () => void;
     onDismissExternalWriterConflict?: (conflict: ExternalWriterConflict) => void;
     onResolveExternalWriterConflict?: (action: "keep_lume" | "open_branch") => void | Promise<void>;
@@ -2403,6 +2405,18 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       : [...expandedFileSummaries, id];
   }
 
+  // A right click on an empty part of the chat opens the same menu as the agent's row in the sidebar. Text, links,
+  // code, images and the composer keep their own menus.
+  function openAgentMenuOnEmptySpace(event: MouseEvent) {
+    if (!onContextMenu || event.defaultPrevented) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    if (target.closest("a, button, input, textarea, select, pre, code, img, video, summary, [contenteditable='true'], [role='dialog'], [role='menu'], .markdown-content, .user-message, .agent-message, .composer, .find-bar, .github-ref-panel, .changed-files, .workspace-event-trace")) return;
+    if (window.getSelection()?.toString()) return;
+    event.preventDefault();
+    onContextMenu(event.clientX, event.clientY);
+  }
+
   function motionDuration(duration: number) {
     return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration;
   }
@@ -2410,6 +2424,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
 <article
   bind:this={paneElement}
+  oncontextmenu={openAgentMenuOnEmptySpace}
   class:focused
   class:has-environments={hasEnvironments}
   class="session-pane status-{session.status}"

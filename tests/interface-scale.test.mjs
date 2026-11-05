@@ -39,8 +39,13 @@ assert.ok(!/class="subagent-rail"/.test(workspace), "one line with branches, not
 assert.ok(!/name="maximize"/.test(pane), "the header has no full-screen button");
 assert.match(pane, /addEventListener\("lume:chat-command"/);
 assert.match(workspace, /chatCommand\(contextSession, "prompts", true\)/);
-assert.match(workspace, /chatCommand\(contextSession, "text-bigger", false\)/);
-assert.match(workspace, /chatCommand\(contextSession, "text-smaller", false\)/);
+// One stepper (minus, current size, plus) replaces the two buttons, and the chat's empty space opens the same menu.
+assert.match(workspace, /stepChatTextZoom\(contextSession, -1\)/);
+assert.match(workspace, /stepChatTextZoom\(contextSession, 1\)/);
+assert.match(workspace, /chatCommand\(session, direction > 0 \? "text-bigger" : "text-smaller", false\)/);
+assert.ok(!/Select project/.test(workspace), "the sidebar has no project selector button");
+assert.match(pane, /oncontextmenu=\{openAgentMenuOnEmptySpace\}/);
+assert.match(workspace, /onContextMenu=\{\(x, y\) => openSessionContextMenu\(primary, x, y\)\}/);
 
 // The inspector shows the chat's own settings and extensions instead of its latest prompts.
 const inspector = read("src/lib/WorkspaceInspector.svelte");

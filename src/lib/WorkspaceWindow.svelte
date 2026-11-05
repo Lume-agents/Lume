@@ -1635,6 +1635,20 @@
     return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration;
   }
 
+  // The chat keeps its own text size (see WorkspaceSessionPane); the menu shows and steps the same value.
+  const chatTextZoomRange = { min: 0.8, max: 1.8 };
+  let menuTextZoom = $state(1);
+  function readChatTextZoom(session: HubSession) {
+    try {
+      const saved = Number(localStorage.getItem(`lume-workspace-text-zoom-v1:${session.id}`));
+      return saved >= chatTextZoomRange.min && saved <= chatTextZoomRange.max ? saved : 1;
+    } catch { return 1; }
+  }
+  function stepChatTextZoom(session: HubSession, direction: 1 | -1) {
+    menuTextZoom = Math.round(Math.max(chatTextZoomRange.min, Math.min(chatTextZoomRange.max, menuTextZoom + direction * 0.1)) * 10) / 10;
+    void chatCommand(session, direction > 0 ? "text-bigger" : "text-smaller", false);
+  }
+
   function openSessionContextMenu(session: HubSession, x: number, y: number) {
     sessionContextError = "";
     sessionContextMenu = {
@@ -1644,6 +1658,7 @@
       confirming: false,
       renaming: false,
     };
+    menuTextZoom = readChatTextZoom(session);
     void tick().then(() => (sessionContextNode?.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? sessionContextNode)?.focus());
   }
 
@@ -2720,23 +2735,9 @@
         <button class="sidebar-toggle" type="button" aria-label={sidebarCollapsed ? tr("Expand sidebar", "Expandir barra lateral") : tr("Collapse sidebar", "Recolher barra lateral")} title={sidebarCollapsed ? tr("Expand sidebar", "Expandir barra lateral") : tr("Collapse sidebar", "Recolher barra lateral")} onclick={() => void toggleSidebar()}><WorkspaceSidebarToggleIcon collapsed={sidebarCollapsed} /></button>
       </div>
     <div class:expanded={headerControl !== null} class="header-selectors">
-      {#if headerControl === "project"}
-        <div class="project-picker">
-          <LumeSelect
-            ariaLabel={tr("Workspace project", "Projeto do Workspace")}
-            value={projectFilter}
-            options={[{ value: "all", label: tr("All projects", "Todos os projetos") }, ...workspaceProjects]}
-            minWidth={0}
-            onValueChange={selectProject}
-          />
-        </div>
-        <button class="header-control-close" type="button" aria-label={tr("Close project selector", "Fechar seletor de projetos")} onclick={() => (headerControl = null)}><LumeIcon name="close" size={14} /></button>
-      {:else}
-        <button class="header-control-icon" type="button" aria-label={tr("Select project", "Selecionar projeto")} title={tr("Select project", "Selecionar projeto")} onclick={() => openHeaderControl("project")}><WorkspaceHeaderIcon name="project" /></button>
         <button class:active={extensionsOpen} class="inspector-button" data-tour="extensions" type="button" title={tr("Extensions", "Extensões")} aria-label={tr("Extensions", "Extensões")} aria-pressed={extensionsOpen} onclick={() => showExtensions(!extensionsOpen)}><WorkspaceHeaderIcon name="extensions" /></button>
         <button class:active={inspectorOpen && !stageTakeover} class="inspector-button" data-tour="inspector" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen && !stageTakeover} onclick={() => { if (stageTakeover) { showWorkflowBoard(false); showExtensions(false); if (!inspectorOpen) toggleInspector(); } else toggleInspector(); }}><WorkspaceHeaderIcon name="inspector" /></button>
         <button class:active={boardOpen} class="inspector-button" data-tour="board" type="button" title={tr("Workflow board", "Board de workflow")} aria-label={tr("Workflow board", "Board de workflow")} aria-pressed={boardOpen} onclick={() => showWorkflowBoard(!boardOpen)}><WorkspaceHeaderIcon name="workflow" /></button>
-      {/if}
       {#if headerControl === null}
       <div class="header-utilities">
         <button class:active={settingsOpen} class="settings-button" data-tour="settings" type="button" title={tr("Workspace settings", "Ajustes do Workspace")} aria-label={tr("Workspace settings", "Ajustes do Workspace")} aria-expanded={settingsOpen} onclick={() => settingsOpen ? closeSettings() : void openSettings()}><WorkspaceHeaderIcon name="settings" /></button>
@@ -2965,14 +2966,14 @@
           <LumeIcon name="task-list" size={15} />
           <span>{tr("Browse prompts", "Navegar pelos prompts")}</span>
         </button>
-        <button class="session-context-command" type="button" role="menuitem" onclick={() => void chatCommand(contextSession, "text-bigger", false)}>
-          <LumeIcon name="plus" size={15} />
-          <span>{tr("Increase text size", "Aumentar a fonte")}</span>
-        </button>
-        <button class="session-context-command" type="button" role="menuitem" onclick={() => void chatCommand(contextSession, "text-smaller", false)}>
-          <LumeIcon name="minus" size={15} />
-          <span>{tr("Decrease text size", "Diminuir a fonte")}</span>
-        </button>
+        <div class="session-context-zoom" role="group" aria-label={tr("Chat text size", "Tamanho do texto do chat")}>
+          <span>{tr("Text size", "Tamanho do texto")}</span>
+          <div class="zoom-stepper">
+            <button type="button" disabled={menuTextZoom <= chatTextZoomRange.min} aria-label={tr("Decrease text size", "Diminuir textos")} onclick={() => stepChatTextZoom(contextSession, -1)}>−</button>
+            <output>{Math.round(menuTextZoom * 100)}%</output>
+            <button type="button" disabled={menuTextZoom >= chatTextZoomRange.max} aria-label={tr("Increase text size", "Aumentar textos")} onclick={() => stepChatTextZoom(contextSession, 1)}>+</button>
+          </div>
+        </div>
         <div class="session-context-groups" role="group" aria-label={tr("Group", "Grupo")}>
           <small>{tr("Group", "Grupo")}</small>
           {#each sidebarGroups as group (group.id)}
@@ -3435,6 +3436,7 @@
           onFocus={() => focusPane(maximizedSession.id)}
           onFork={(threadId) => openForkedCodexSession(threadId, maximizedSession)}
           onNewConversation={() => startNewConversation(maximizedSession)}
+          onContextMenu={(x, y) => openSessionContextMenu(maximizedSession, x, y)}
           onOpenReview={(path) => openReview(path, maximizedSession.id)}
           onOpenRepository={() => openRepository(maximizedSession.id)}
           onToggleMaximize={() => togglePaneMaximize(maximizedSession.id)}
@@ -3453,6 +3455,7 @@
           onFocus={() => focusPane(primary.id)}
           onFork={(threadId) => openForkedCodexSession(threadId, primary)}
           onNewConversation={() => startNewConversation(primary)}
+          onContextMenu={(x, y) => openSessionContextMenu(primary, x, y)}
           onOpenReview={(path) => openReview(path, primary.id)}
           onOpenRepository={() => openRepository(primary.id)}
           onToggleMaximize={() => togglePaneMaximize(primary.id)}
@@ -3490,6 +3493,7 @@
             onFocus={() => focusPane(secondary.id)}
             onFork={(threadId) => openForkedCodexSession(threadId, secondary)}
           onNewConversation={() => startNewConversation(secondary)}
+          onContextMenu={(x, y) => openSessionContextMenu(secondary, x, y)}
           onOpenReview={(path) => openReview(path, secondary.id)}
           onOpenRepository={() => openRepository(secondary.id)}
             onToggleMaximize={() => togglePaneMaximize(secondary.id)}
@@ -3527,6 +3531,7 @@
               onFocus={() => focusPane(tertiary.id)}
               onFork={(threadId) => openForkedCodexSession(threadId, tertiary)}
           onNewConversation={() => startNewConversation(tertiary)}
+          onContextMenu={(x, y) => openSessionContextMenu(tertiary, x, y)}
               onOpenReview={(path) => openReview(path, tertiary.id)}
               onOpenRepository={() => openRepository(tertiary.id)}
               onToggleMaximize={() => togglePaneMaximize(tertiary.id)}
@@ -3796,10 +3801,6 @@
   .header-utilities { margin-left: auto; display: flex; align-items: center; gap: 5px; }
   .header-selectors.expanded .header-utilities { width: 100%; justify-content: flex-end; }
   .header-selectors.expanded { animation: layout-editor-arrive 160ms cubic-bezier(.16, 1, .3, 1) both; }
-  .project-picker { min-width: 0; flex: 1; }
-  .project-picker :global(.lume-select) { width: 100%; min-width: 0 !important; }
-  .header-control-icon, .header-control-close { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
-  .header-control-icon:hover, .header-control-close:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .session-heading { position: relative; z-index: 20; padding: 13px 15px 8px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); }
   .session-heading strong { flex: 1; color: var(--workspace-strong); font-size: 10px; font-weight: 720; }
   .session-heading span { font-size: 8px; font-variant-numeric: tabular-nums; }
@@ -3874,6 +3875,12 @@
   .group-actions button.confirm { color: #c0554f; background: color-mix(in srgb, #c0554f 14%, transparent); }
   .group-rename { flex: 1; min-width: 0; }
   .group-rename input { box-sizing: border-box; width: 100%; height: 24px; padding: 0 7px; border: 1px solid var(--workspace-accent); border-radius: 6px; outline: 0; color: var(--workspace-strong); background: var(--workspace-raised); font: inherit; font-size: 11px; }
+  .session-context-zoom { min-height: 36px; padding: 2px 6px 2px 9px; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--workspace-text); font-size: 11px; font-weight: 600; }
+  .zoom-stepper { width: 122px; padding: 3px; display: grid; grid-template-columns: 28px 1fr 28px; align-items: center; gap: 2px; border: 1px solid var(--workspace-line); border-radius: 9px; background: var(--workspace-subtle); }
+  .zoom-stepper output { color: var(--workspace-strong); font-size: 11px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; }
+  .zoom-stepper button { width: 28px; height: 26px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 15px; cursor: pointer; }
+  .zoom-stepper button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-raised); }
+  .zoom-stepper button:disabled { opacity: .35; cursor: default; }
   .session-context-groups { margin: 2px 0; padding: 4px 0; display: grid; border-block: 1px solid var(--workspace-line); }
   .session-context-groups > small { padding: 2px 9px 3px; color: var(--workspace-faint); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
   .session-context-groups .current { color: var(--workspace-accent); }

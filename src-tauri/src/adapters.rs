@@ -1777,6 +1777,8 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
 
     let mut turn: Option<ClaudeTurnTokens> = None;
     let mut fork_origin: Option<String> = None;
+    // A command the person ran with `!` is recorded as two user messages: the command, then what it printed.
+    let mut pending_bash: Option<(String, String, i64)> = None;
     for line in reader.lines().map_while(Result::ok) {
         if line.len() > CLAUDE_TRANSCRIPT_LINE_LIMIT {
             continue;
@@ -1824,7 +1826,17 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
         match content {
             Value::String(text) => {
                 if role == Some("user") {
-                    push_claude_user_text(activities, session_id, &entry_id, 0, text, created_at);
+                    if let Some(command) = tagged_text(text, "bash-input") {
+                        if let Some((id, earlier, at)) = pending_bash.replace((entry_id.clone(), command.to_string(), created_at)) {
+                            push_claude_bash_command(activities, session_id, &id, &earlier, None, at);
+                        }
+                    } else if let Some(output) = claude_bash_output(text) {
+                        if let Some((id, command, at)) = pending_bash.take() {
+                            push_claude_bash_command(activities, session_id, &id, &command, Some(&output), at);
+                        }
+                    } else {
+                        push_claude_user_text(activities, session_id, &entry_id, 0, text, created_at);
+                    }
                 } else {
                     push_claude_transcript_activity(
                         activities, session_id, &entry_id, 0, "message", "Claude", text, created_at,
@@ -1864,10 +1876,59 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
             _ => {}
         }
     }
+    if let Some((id, command, at)) = pending_bash {
+        push_claude_bash_command(activities, session_id, &id, &command, None, at);
+    }
     if let Some(turn) = turn {
         activities.extend(turn.finish(session_id));
     }
     activities.extend(fork_origin.map(|origin| fork_origin_activity(session_id, origin)));
+}
+
+/// The text between `<tag>` and `</tag>` of a message that is made of that one tag.
+fn tagged_text<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let rest = text.trim().strip_prefix(&format!("<{tag}>"))?;
+    Some(rest.split_once(&format!("</{tag}>")).map_or(rest, |(inner, _)| inner).trim())
+}
+
+/// What a command run with `!` printed: its stdout, then its stderr when it has any.
+fn claude_bash_output(text: &str) -> Option<String> {
+    let text = text.trim();
+    let stdout = tagged_text(text, "bash-stdout")?;
+    let stderr = text
+        .split_once("<bash-stderr>")
+        .map(|(_, rest)| rest.split_once("</bash-stderr>").map_or(rest, |(inner, _)| inner).trim())
+        .unwrap_or("");
+    Some(match (stdout.is_empty(), stderr.is_empty()) {
+        (_, true) => stdout.to_string(),
+        (true, false) => stderr.to_string(),
+        (false, false) => format!("{stdout}\n{stderr}"),
+    })
+}
+
+/// A command the person ran with `!`, shown like any other command event with what it printed.
+fn push_claude_bash_command(
+    activities: &mut Vec<SessionActivity>,
+    session_id: &str,
+    entry_id: &str,
+    command: &str,
+    output: Option<&str>,
+    created_at: i64,
+) {
+    if command.is_empty() {
+        return;
+    }
+    activities.push(SessionActivity {
+        id: format!("claude:{session_id}:bash:{entry_id}"),
+        kind: "command".into(),
+        title: truncate(command, 240),
+        detail: output.filter(|output| !output.is_empty()).map(|output| truncate(output, 32 * 1024)),
+        status: "completed".into(),
+        created_at,
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    });
 }
 
 /// Carries a conversation's fork origin to the session (see `remember_activity`).
@@ -3328,6 +3389,29 @@ mod tests {
         assert!(parsed["result"].is_string(), "the answer became truncated text");
         let failed = mcp_activity_detail(None, None, Some("denied"));
         assert_eq!(serde_json::from_str::<Value>(&failed).unwrap()["error"], "denied");
+    }
+
+    #[test]
+    fn a_command_run_with_bang_is_one_command_event_with_its_output() {
+        let path = std::env::temp_dir().join(format!("lume-bash-{}-{}.jsonl", std::process::id(), now_millis()));
+        let lines = [
+            json!({ "uuid": "u1", "type": "user", "timestamp": "2026-11-05T13:27:00.000Z", "message": { "role": "user", "content": "<bash-input> claude mcp add atlassian</bash-input>" } }),
+            json!({ "uuid": "u2", "parentUuid": "u1", "type": "user", "timestamp": "2026-11-05T13:27:01.000Z", "message": { "role": "user", "content": "<bash-stdout>Added HTTP MCP server atlassian</bash-stdout><bash-stderr>warning: x</bash-stderr>" } }),
+            json!({ "uuid": "u3", "type": "user", "timestamp": "2026-11-05T13:28:00.000Z", "message": { "role": "user", "content": "<bash-input>ls</bash-input>" } }),
+            json!({ "uuid": "u4", "type": "user", "timestamp": "2026-11-05T13:29:00.000Z", "message": { "role": "user", "content": "e agora?" } }),
+        ];
+        std::fs::write(&path, lines.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        let activities = claude_transcript_activities(&json!({ "transcript_path": path.to_string_lossy() }), "s1");
+        let _ = std::fs::remove_file(&path);
+        let commands: Vec<_> = activities.iter().filter(|activity| activity.kind == "command").collect();
+        assert_eq!(commands.len(), 2, "{activities:?}");
+        assert_eq!(commands[0].title, "claude mcp add atlassian");
+        assert_eq!(commands[0].detail.as_deref(), Some("Added HTTP MCP server atlassian\nwarning: x"));
+        assert_eq!(commands[1].title, "ls");
+        assert_eq!(commands[1].detail, None, "a command with no output yet is still shown");
+        let prompts: Vec<_> = activities.iter().filter(|activity| activity.kind == "prompt").collect();
+        assert_eq!(prompts.len(), 1, "only the real message is a prompt");
+        assert_eq!(prompts[0].detail.as_deref(), Some("e agora?"));
     }
 
 }

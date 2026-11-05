@@ -715,6 +715,39 @@ fn hook_activity(
 
 const MCP_DETAIL_LIMIT: usize = 30 * 1024;
 
+/// An MCP answer as plain data: its content blocks of text are joined, and parsed when they hold JSON.
+pub(crate) fn mcp_answer_value(result: &Value) -> Value {
+    let text = match result {
+        Value::Array(blocks) if !blocks.is_empty() && blocks.iter().all(|block| block.get("text").is_some()) => {
+            Some(blocks.iter().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n"))
+        }
+        Value::String(text) => Some(text.clone()),
+        _ => None,
+    };
+    match text {
+        Some(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        None => result.clone(),
+    }
+}
+
+/// The tickets a Jira answer lists, reduced to what the chat shows of each, in the same shape as the answer.
+pub(crate) fn mcp_issue_digest(result: &Value, limit: usize, summary_chars: usize) -> Option<Value> {
+    let answer = mcp_answer_value(result);
+    let holder = answer.get("data").filter(|data| data.is_object()).unwrap_or(&answer);
+    let issues = holder.get("issues")?.as_array()?;
+    let kept: Vec<Value> = issues
+        .iter()
+        .filter_map(|issue| {
+            let key = issue.get("key")?.as_str()?;
+            let summary = issue.pointer("/fields/summary").and_then(Value::as_str).unwrap_or("");
+            let status = issue.pointer("/fields/status/name").and_then(Value::as_str).unwrap_or("");
+            Some(json!({ "key": key, "fields": { "summary": truncate(summary, summary_chars), "status": { "name": status } } }))
+        })
+        .take(limit)
+        .collect();
+    Some(json!({ "issues": kept, "total": issues.len(), "isLast": holder.get("isLast").cloned().unwrap_or(Value::Bool(true)) }))
+}
+
 /// What an MCP tool was asked and what it answered, as one JSON object the chat reads back (`{input, result, error}`).
 /// A call too large to keep whole stays valid JSON: the biggest parts become truncated text.
 fn mcp_activity_detail(input: Option<&Value>, result: Option<&Value>, error: Option<&str>) -> String {
@@ -730,6 +763,13 @@ fn mcp_activity_detail(input: Option<&Value>, result: Option<&Value>, error: Opt
     }
     let render = |object: &serde_json::Map<String, Value>| Value::Object(object.clone()).to_string();
     let mut text = render(&object);
+    // A long list keeps its tickets: only what the chat shows of each one has to fit.
+    if text.len() > MCP_DETAIL_LIMIT {
+        if let Some(digest) = object.get("result").and_then(|result| mcp_issue_digest(result, 120, 160)) {
+            object.insert("result".into(), digest);
+            text = render(&object);
+        }
+    }
     for (key, keep) in [("result", 12 * 1024), ("input", 8 * 1024), ("result", 2 * 1024), ("input", 2 * 1024)] {
         if text.len() <= MCP_DETAIL_LIMIT {
             break;
@@ -3412,6 +3452,22 @@ mod tests {
         let prompts: Vec<_> = activities.iter().filter(|activity| activity.kind == "prompt").collect();
         assert_eq!(prompts.len(), 1, "only the real message is a prompt");
         assert_eq!(prompts[0].detail.as_deref(), Some("e agora?"));
+    }
+
+    #[test]
+    fn a_long_jira_list_keeps_its_tickets() {
+        let issues: Vec<Value> = (0..100).map(|n| json!({ "id": n.to_string(), "key": format!("IPG-{n}"), "fields": {
+            "summary": format!("Ticket {n}"), "description": "d".repeat(2_000), "status": { "name": "REVISÃO", "statusCategory": { "name": "x" } } } })).collect();
+        let answer = json!([{ "type": "text", "text": json!({ "data": { "isLast": false, "issues": issues } }).to_string() }]);
+        let text = mcp_activity_detail(Some(&json!({ "jql": "project = IPG" })), Some(&answer), None);
+        assert!(text.len() <= MCP_DETAIL_LIMIT, "{}", text.len());
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["result"]["issues"].as_array().unwrap().len(), 100);
+        assert_eq!(parsed["result"]["issues"][7]["key"], "IPG-7");
+        assert_eq!(parsed["result"]["issues"][7]["fields"]["summary"], "Ticket 7");
+        assert_eq!(parsed["result"]["issues"][7]["fields"]["status"]["name"], "REVISÃO");
+        assert_eq!(parsed["result"]["isLast"], false);
+        assert!(mcp_issue_digest(&json!([{ "type": "text", "text": "not a list" }]), 10, 10).is_none());
     }
 
 }

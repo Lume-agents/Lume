@@ -6,7 +6,9 @@
   import ActivityTypeIcon from "$lib/ActivityTypeIcon.svelte";
   import GitEventChips from "$lib/GitEventChips.svelte";
   import GitEventDetails from "$lib/GitEventDetails.svelte";
+  import ActivityStatusMark from "$lib/ActivityStatusMark.svelte";
   import McpEventChips from "$lib/McpEventChips.svelte";
+  import McpServerIcon from "$lib/McpServerIcon.svelte";
   import McpEventDetails from "$lib/McpEventDetails.svelte";
   import { mcpActivityInfo, mcpRunChips } from "$lib/mcpEvents";
   import { gitActivityInfo } from "$lib/gitEvents";
@@ -45,8 +47,8 @@
   const visibleRuns: ActivityRun[] = $derived(plain
     ? groupConsecutiveTraceActivities(visibleActivities)
     : visibleActivities.map((activity: SessionActivity) => ({ id: activity.id, category: activity.kind === "analysis" ? "analysis" : activityCategory(activity), activities: [activity] })));
-  const hasTimeline = $derived(visibleRuns.length > 1
-    || (plain && visibleRuns.some((run) => activityRunFiles(run).length > 0)));
+  // From the first event on, so the rail is already there when the next one arrives.
+  const hasTimeline = $derived(visibleRuns.length > 0);
   let expanded = $state(true);
   let expandedRuns = $state<string[]>([]);
   let collapsedFileRuns = $state<string[]>([]);
@@ -134,6 +136,14 @@
     return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration;
   }
 
+  // A row can be drawn anew when its run grows or the group reopens; only a row seen for the first time arrives.
+  const firstSeen = new Map<string, number>();
+  function settled(id: string) {
+    const at = firstSeen.get(id);
+    if (at === undefined) { firstSeen.set(id, Date.now()); return false; }
+    return Date.now() - at > 500;
+  }
+
   function runStatus(run: ActivityRun) {
     return run.activities.some((item) => item.status === "failed") ? "failed"
       : run.activities.some((item) => item.status === "running") ? "running"
@@ -184,14 +194,11 @@
             class:running={status === "running"}
             class:waiting={status === "waiting"}
             class:open={!collapsedFileRuns.includes(run.id)}
-            class="activity-row file-tree-row"
+            class:settled={settled(run.id)} class="activity-row file-tree-row"
             style={`--step-delay: ${Math.min(index, 4) * 22}ms`}
           >
             <button class="event-trigger" type="button" aria-expanded={!collapsedFileRuns.includes(run.id)} onclick={() => toggleFileRun(run.id)}>
-              <span class="activity-status" aria-label={status}>
-                {#if status === "completed"}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
-                {:else}<i></i>{/if}
-              </span>
+              <span class="activity-status" aria-label={status}><ActivityStatusMark status={status} /></span>
               <span class="activity-type"><ActivityTypeIcon category={run.category === "read" ? "files-read" : run.category} /></span>
               <span class="activity-copy"><strong>{activityRunTitle(run, language)}</strong></span>
               <svg class="row-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
@@ -245,24 +252,22 @@
           </div>
         {:else if run.activities.length > 1}
           {@const status = runStatus(run)}
+          {@const runMcp = run.category === "mcp" ? mcpActivityInfo(activity, language) : null}
           <div
             class:failed={status === "failed"}
             class:interrupted={status === "interrupted"}
             class:running={status === "running"}
             class:waiting={status === "waiting"}
             class:open={expandedRuns.includes(run.id)}
-            class="activity-row grouped-row"
+            class:settled={settled(run.id)} class="activity-row grouped-row"
             style={`--step-delay: ${Math.min(index, 4) * 22}ms`}
           >
             <button class="event-trigger" type="button" aria-expanded={expandedRuns.includes(run.id)} onclick={() => toggleRun(run.id)}>
-              <span class="activity-status" aria-label={status}>
-                {#if status === "completed"}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
-                {:else}<i></i>{/if}
-              </span>
-              <span class="activity-type" class:mcp-type={run.category === "mcp"}><ActivityTypeIcon category={run.category} /></span>
+              <span class="activity-status" aria-label={status}><ActivityStatusMark status={status} /></span>
+              <span class="activity-type" class:mcp-type={run.category === "mcp"}>{#if runMcp}<McpServerIcon server={runMcp.server} label={runMcp.serverLabel} />{:else}<ActivityTypeIcon category={run.category} />{/if}</span>
               <span class="activity-copy">
                 <strong>{activityRunTitle(run, language)}</strong>
-                {#if run.category === "mcp"}<McpEventChips chips={mcpRunChips(run.activities)} serverLabel={mcpActivityInfo(activity, language)?.serverLabel} {language} />{/if}
+                {#if run.category === "mcp"}<McpEventChips chips={mcpRunChips(run.activities, language)} serverLabel={runMcp?.serverLabel} {language} />{/if}
               </span>
               <svg class="row-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
             </button>
@@ -273,7 +278,10 @@
                 <div class="grouped-activity-detail" class:mcp-line={Boolean(groupedMcp)}>
                   <span aria-hidden="true">{detailIndex + 1}</span>
                   {#if groupedMcp}
-                    <span class="mcp-line-copy"><strong>{groupedMcp.presenter === "jira:transition" && groupedMcp.facts.key ? groupedMcp.facts.key : activityDisplayTitle(grouped, language)}</strong><McpEventChips chips={[...groupedMcp.chips, ...(groupedMcp.failed ? [{ label: language === "pt-BR" ? "Falhou" : "Failed", tone: "bad" as const }] : [])]} {language} /></span>
+                    <details class="mcp-line-details">
+                      <summary class="mcp-line-copy"><strong>{groupedMcp.presenter === "jira:transition" && groupedMcp.facts.key ? groupedMcp.facts.key : activityDisplayTitle(grouped, language)}</strong><McpEventChips chips={[...groupedMcp.chips, ...(groupedMcp.failed ? [{ label: language === "pt-BR" ? "Falhou" : "Failed", tone: "bad" as const }] : [])]} {language} /></summary>
+                      <McpEventDetails info={groupedMcp} {language} />
+                    </details>
                   {:else}
                     <pre>{grouped.detail || activityDisplayTitle(grouped, language)}</pre>
                   {/if}
@@ -288,19 +296,11 @@
             class:interrupted={activity.status === "interrupted"}
             class:running={activity.status === "running"}
             class:waiting={activity.status === "waiting"}
-            class="activity-row reasoning-row"
+            class:settled={settled(run.id)} class="activity-row reasoning-row"
             style={`--step-delay: ${Math.min(index, 4) * 22}ms`}
           >
             <div class="reasoning-summary">
-              <span class="activity-status" aria-label={activity.status}>
-                {#if activity.status === "completed"}
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
-                {:else if activity.status === "failed"}
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6m0-6-6 6" /></svg>
-                {:else}
-                  <i></i>
-                {/if}
-              </span>
+              <span class="activity-status" aria-label={activity.status}><ActivityStatusMark status={activity.status} /></span>
               <span class="activity-type"><ActivityTypeIcon category="analysis" /></span>
               <span class="activity-copy"><strong>{activityDisplayTitle(activity, language)}</strong></span>
             </div>
@@ -312,19 +312,11 @@
             class:interrupted={activity.status === "interrupted"}
             class:running={activity.status === "running"}
             class:waiting={activity.status === "waiting"}
-            class="activity-row git-row"
+            class:settled={settled(run.id)} class="activity-row git-row"
             style={`--step-delay: ${Math.min(index, 4) * 22}ms`}
           >
             <summary>
-              <span class="activity-status" aria-label={activity.status}>
-                {#if activity.status === "completed"}
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
-                {:else if activity.status === "failed"}
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6m0-6-6 6" /></svg>
-                {:else}
-                  <i></i>
-                {/if}
-              </span>
+              <span class="activity-status" aria-label={activity.status}><ActivityStatusMark status={activity.status} /></span>
               <span class="activity-type git-type"><ActivityTypeIcon category="git" /></span>
               <span class="activity-copy">
                 <strong>{activityDisplayTitle(activity, language)}</strong>
@@ -340,20 +332,12 @@
             class:interrupted={activity.status === "interrupted"}
             class:running={activity.status === "running"}
             class:waiting={activity.status === "waiting"}
-            class="activity-row mcp-row"
+            class:settled={settled(run.id)} class="activity-row mcp-row"
             style={`--step-delay: ${Math.min(index, 4) * 22}ms`}
           >
             <summary>
-              <span class="activity-status" aria-label={activity.status}>
-                {#if activity.status === "completed" && !mcpInfo.failed}
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
-                {:else if activity.status === "failed" || mcpInfo.failed}
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6m0-6-6 6" /></svg>
-                {:else}
-                  <i></i>
-                {/if}
-              </span>
-              <span class="activity-type mcp-type"><ActivityTypeIcon category="mcp" /></span>
+              <span class="activity-status" aria-label={activity.status}><ActivityStatusMark status={mcpInfo.failed ? "failed" : activity.status} /></span>
+              <span class="activity-type mcp-type"><McpServerIcon server={mcpInfo.server} label={mcpInfo.serverLabel} /></span>
               <span class="activity-copy">
                 <strong>{activityDisplayTitle(activity, language)}</strong>
                 <McpEventChips info={mcpInfo} {language} />
@@ -368,19 +352,11 @@
             class:interrupted={activity.status === "interrupted"}
             class:running={activity.status === "running"}
             class:waiting={activity.status === "waiting"}
-            class="activity-row"
+            class:settled={settled(run.id)} class="activity-row"
             style={`--step-delay: ${Math.min(index, 4) * 22}ms`}
           >
             <summary>
-              <span class="activity-status" aria-label={activity.status}>
-                {#if activity.status === "completed"}
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 8 2.5 2.5L12 5" /></svg>
-                {:else if activity.status === "failed"}
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 5 6 6m0-6-6 6" /></svg>
-                {:else}
-                  <i></i>
-                {/if}
-              </span>
+              <span class="activity-status" aria-label={activity.status}><ActivityStatusMark status={activity.status} /></span>
               <span class="activity-type"><ActivityTypeIcon category={activityCategory(activity)} /></span>
               <span class="activity-copy">
                 <strong>{activityDisplayTitle(activity, language)}</strong>
@@ -421,7 +397,10 @@
   .load-earlier-activities:hover { color: #3f7f61; }
   .activity-row { position: relative; min-width: 0; min-height: var(--activity-row-height, 34px); height: auto; display: block; flex: 0 0 auto; overflow: visible; }
   .has-timeline .activity-row::before, .has-timeline .load-earlier-activities::before { position: absolute; top: 0; bottom: 0; left: 0; width: 1px; background: var(--activity-rail-color); content: ""; pointer-events: none; }
-  .has-timeline .activity-row:last-child::before { bottom: auto; height: calc(var(--activity-row-height, 34px) / 2); }
+  /* The rail stops at the last event's mark and descends when the next one appears. */
+  .has-timeline .activity-row::before { transform-origin: top; transition: bottom 340ms cubic-bezier(.16, 1, .3, 1); animation: rail-descend 280ms cubic-bezier(.16, 1, .3, 1) both; }
+  .has-timeline .activity-row:last-child::before { bottom: calc(100% - var(--activity-row-height, 34px) / 2); }
+  .has-timeline .activity-row.settled::before { animation: none; }
   /* Expanded file rows own their rail segments, so the endpoint follows the final file's height. */
   .has-timeline .file-tree-row:has(> .file-tree)::before { bottom: auto; height: calc(var(--activity-row-height, 34px) / 2); }
   .has-timeline .file-tree-row:has(> .file-tree) > .event-trigger { position: relative; }
@@ -437,17 +416,16 @@
   .mcp-type { color: #6b7bd6; }
   :global(.terminal-window.dark) .mcp-type, :global(.workspace.dark) .mcp-type { color: #8d9bf0; }
   .mcp-line { align-items: center; }
-  .mcp-line-copy { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+  .mcp-line-details { min-width: 0; flex: 1; }
+  .mcp-line-copy { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; list-style: none; cursor: pointer; }
+  .mcp-line-copy::-webkit-details-marker { display: none; }
   .mcp-line-copy strong { color: var(--workspace-strong, #52665c); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.4 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); }
   .git-type { color: #cf673d; }
   :global(.terminal-window.dark) .git-type, :global(.workspace.dark) .git-type { color: #e48a62; }
   .activity-copy strong { overflow: hidden; color: var(--workspace-strong, #52665c); font: 700 var(--activity-title-size, var(--chat-small-font-size, 9px))/1.25 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
   .activity-copy code { overflow: hidden; color: var(--workspace-faint, #89958f); font: var(--activity-detail-size, var(--chat-tiny-font-size, 7px))/1.3 var(--lume-font-code, "SFMono-Regular", Consolas, monospace); text-overflow: ellipsis; white-space: nowrap; }
-  .activity-status { position: absolute; z-index: 1; top: calc((var(--activity-row-height, 34px) - 16px) / 2); left: -8px; width: 16px; height: 16px; display: grid; place-items: center; border: 1px solid color-mix(in srgb, var(--workspace-accent, #428066) 28%, transparent); border-radius: 50%; color: #4a956b; background: var(--workspace-pane, #f8fbf9); }
-  .activity-status svg { width: 11px; height: 11px; stroke-width: 1.9; }
-  .activity-status i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .activity-status { position: absolute; z-index: 1; top: calc((var(--activity-row-height, 34px) - 16px) / 2); left: -8px; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%; color: #4a956b; transition: color 320ms ease; background: var(--workspace-pane, #f8fbf9); }
   .activity-row.running .activity-status { color: #4e91bf; border-color: rgba(78, 145, 191, .3); }
-  .activity-row.running .activity-status i { will-change: transform, opacity; animation: activity-pulse 1s ease-in-out infinite; }
   .activity-row.running .activity-copy strong { color: #4e7fa6; }
   .activity-row.failed .activity-status { color: #b85d59; border-color: rgba(184, 93, 89, .28); }
   .activity-row.waiting .activity-status { color: #c2943f; border-color: rgba(194, 148, 63, .28); }
@@ -520,18 +498,26 @@
   :global(.terminal-window.dark) .activity-cluster.plain .cluster-mark, :global(.terminal-window.dark) .activity-cluster.plain .cluster-summary > small, :global(.terminal-window.dark) .activity-cluster.plain .activity-row pre { background: transparent; }
   :global(.terminal-window.dark) .load-earlier-activities { color: #8fa198; border-color: rgba(177, 207, 191, .08); }
   :global(.terminal-window.dark) .load-earlier-activities:hover { color: #8bc5a8; }
-  @keyframes activity-pulse { 50% { opacity: .38; transform: scale(.62); } }
   @keyframes step-arrive { from { opacity: 0; transform: translateY(5px); } }
+  @keyframes rail-descend { from { transform: scaleY(0); } }
   @keyframes cluster-icon-arrive { from { opacity: 0; transform: translateX(-4px) scale(.92); } }
   @keyframes file-node-arrive { from { opacity: 0; transform: translateY(3px); } }
-  .activity-row { animation: step-arrive 240ms cubic-bezier(.16, 1, .3, 1) both; animation-delay: var(--step-delay); }
+  /* The content arrives after the rail has come down to it, so the row's own line is never faded with it. */
+  .activity-row > summary, .activity-row > .event-trigger, .activity-row > .reasoning-summary, .activity-row > .reasoning-text { animation: step-arrive 260ms cubic-bezier(.16, 1, .3, 1) both; animation-delay: calc(var(--step-delay) + 90ms); }
+  .activity-row.settled > summary, .activity-row.settled > .event-trigger, .activity-row.settled > .reasoning-summary, .activity-row.settled > .reasoning-text { animation: none; }
+  .activity-copy strong { transition: color 320ms ease; }
+  /* Where the engine animates a details element, opening and closing a row glide. */
+  .activity-cluster { interpolate-size: allow-keywords; }
+  details.activity-row::details-content, .mcp-line-details::details-content { block-size: 0; overflow: clip; opacity: 0; transition: block-size 220ms cubic-bezier(.16, 1, .3, 1), opacity 180ms ease, content-visibility 220ms allow-discrete; }
+  details.activity-row[open]::details-content, .mcp-line-details[open]::details-content { block-size: auto; opacity: 1; }
   @media (prefers-reduced-motion: reduce) {
     .activity-cluster, .cluster-chevron, .row-chevron { transition: none; }
     .cluster-type-icon { animation: none; }
-    .activity-row { animation: none; }
+    .activity-row > summary, .activity-row > .event-trigger, .activity-row > .reasoning-summary, .activity-row > .reasoning-text { animation: none; }
+    .has-timeline .activity-row::before { animation: none; transition: none; }
+    details.activity-row::details-content, .mcp-line-details::details-content { transition: none; }
     .file-node { animation: none; }
     .activity-row.running .activity-copy strong { color: #4e7fa6; }
     :global(.terminal-window.dark) .activity-row.running .activity-copy strong { color: #72a9cf; }
-    .activity-row.running .activity-status i { animation: none; }
   }
 </style>

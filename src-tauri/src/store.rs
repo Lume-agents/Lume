@@ -579,19 +579,10 @@ impl Store {
             );
         }
         if let Some(result) = object.get("result") {
-            // MCP answers come as content blocks of text, which are often JSON themselves.
-            let text = match result {
-                Value::Array(blocks) if blocks.iter().all(|block| block.get("text").is_some()) => Some(
-                    blocks.iter().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n"),
-                ),
-                Value::String(text) => Some(text.clone()),
-                _ => None,
-            };
-            let answer = match text {
-                Some(text) => serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)),
-                None => result.clone(),
-            };
-            kept.insert("result".into(), shrink(answer));
+            // A list of tickets stays a list; anything else keeps its facts or becomes cut text.
+            let answer = crate::adapters::mcp_issue_digest(result, 40, 90).unwrap_or_else(|| crate::adapters::mcp_answer_value(result));
+            let is_digest = answer.get("issues").is_some() && answer.get("total").is_some();
+            kept.insert("result".into(), if is_digest { answer } else { shrink(answer) });
         }
         if let Some(error) = object.get("error").and_then(Value::as_str) {
             kept.insert("error".into(), Value::String(error.chars().take(CUT).collect()));
@@ -2010,6 +2001,16 @@ mod tests {
         let mut plain = SessionActivity { title: "Bash".into(), kind: "command".into(), detail: Some("ls\nsecond line".into()), ..moved };
         Store::lighten_event(&mut plain);
         assert_eq!(plain.detail.as_deref(), Some("ls"), "other events keep only their first line");
+    }
+
+    #[test]
+    fn an_archived_jira_search_keeps_its_tickets() {
+        let issues: Vec<serde_json::Value> = (0..60).map(|n| serde_json::json!({ "key": format!("IPG-{n}"), "fields": { "summary": "s".repeat(300), "status": { "name": "REVISÃO" } } })).collect();
+        let detail = serde_json::json!({ "input": { "jql": "x" }, "result": [{ "type": "text", "text": serde_json::json!({ "data": { "issues": issues } }).to_string() }] });
+        let kept: serde_json::Value = serde_json::from_str(&Store::lighten_mcp_detail(&detail.to_string()).unwrap()).unwrap();
+        assert_eq!(kept["result"]["issues"].as_array().unwrap().len(), 40);
+        assert_eq!(kept["result"]["total"], 60);
+        assert_eq!(kept["result"]["issues"][3]["key"], "IPG-3");
     }
 
 }

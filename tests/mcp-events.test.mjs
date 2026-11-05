@@ -72,4 +72,10 @@ const legacy = { id: "l", kind: "tool", title: '{"cloudId":"vibetex.atlassian.ne
 assert.equal(mcpActivityInfo(legacy), null);
 assert.equal(activityCategory(legacy), "tool");
 
+// The archive keeps a call as small JSON whose answer is already data (not content blocks); it reads the same.
+const archived = { id: "a", kind: "tool", title: "mcp__atlassian__transitionJiraIssue", status: "completed", createdAt: 1, files: [], attachments: [],
+  detail: JSON.stringify({ input: { issueIdOrKey: "IPG-911", statusName: "REVISÃO" }, result: { data: { message: "Issue IPG-911 transitioned successfully", transitionId: 2, statusName: "REVISÃO" } } }) };
+assert.equal(activityDisplayTitle(archived, "pt-BR"), "IPG-911 → REVISÃO");
+assert.equal(mcpActivityInfo(archived).chips[0].label, "REVISÃO");
+
 console.log("mcp events test passed");

@@ -521,17 +521,82 @@ impl Store {
     /// Keeps what names the event (its title and the first line of its detail, which tell a command from a
     /// skill or a git operation) and drops what it produced: diffs, command output, file contents.
     fn lighten_event(activity: &mut SessionActivity) {
-        activity.detail = activity
-            .detail
-            .as_deref()
-            .and_then(|detail| detail.lines().map(str::trim).find(|line| !line.is_empty()))
-            .map(|line| line.chars().take(EVENT_DETAIL_CHARS).collect());
+        // An MCP call is one line of JSON that the chat reads back, so it is shortened by part, never cut through.
+        let mcp = activity
+            .title
+            .starts_with("mcp__")
+            .then(|| activity.detail.as_deref().and_then(Self::lighten_mcp_detail))
+            .flatten();
+        activity.detail = mcp.or_else(|| {
+            activity
+                .detail
+                .as_deref()
+                .and_then(|detail| detail.lines().map(str::trim).find(|line| !line.is_empty()))
+                .map(|line| line.chars().take(EVENT_DETAIL_CHARS).collect())
+        });
         activity.files.truncate(EVENT_FILES);
         activity.attachments.clear();
         // A history entry is never "running": the live copy shows the real state while the event lasts.
         if activity.status == "running" {
             activity.status = "completed".into();
         }
+    }
+
+    /// What an MCP call keeps in the archive: its arguments and the answer's facts (a ticket's new status, the key of
+    /// a created one), each as small JSON, or as cut text when it is too big to keep whole.
+    fn lighten_mcp_detail(detail: &str) -> Option<String> {
+        use serde_json::Value;
+        const WHOLE: usize = 700;
+        const CUT: usize = 300;
+        fn shrink(value: Value) -> Value {
+            let text = value.to_string();
+            if text.chars().count() <= WHOLE {
+                value
+            } else {
+                Value::String(text.chars().take(CUT).collect())
+            }
+        }
+        let value: Value = serde_json::from_str(detail).ok()?;
+        let object = value.as_object()?;
+        let mut kept = serde_json::Map::new();
+        if let Some(input) = object.get("input") {
+            let fits = input.to_string().chars().count() <= WHOLE;
+            kept.insert(
+                "input".into(),
+                match input {
+                    // A big argument list keeps its short values, which name what the call was about.
+                    Value::Object(map) if !fits => Value::Object(
+                        map.iter()
+                            .filter(|(_, value)| matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_)))
+                            .map(|(key, value)| match value {
+                                Value::String(text) => (key.clone(), Value::String(text.chars().take(80).collect())),
+                                other => (key.clone(), other.clone()),
+                            })
+                            .collect(),
+                    ),
+                    other => shrink(other.clone()),
+                },
+            );
+        }
+        if let Some(result) = object.get("result") {
+            // MCP answers come as content blocks of text, which are often JSON themselves.
+            let text = match result {
+                Value::Array(blocks) if blocks.iter().all(|block| block.get("text").is_some()) => Some(
+                    blocks.iter().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n"),
+                ),
+                Value::String(text) => Some(text.clone()),
+                _ => None,
+            };
+            let answer = match text {
+                Some(text) => serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)),
+                None => result.clone(),
+            };
+            kept.insert("result".into(), shrink(answer));
+        }
+        if let Some(error) = object.get("error").and_then(Value::as_str) {
+            kept.insert("error".into(), Value::String(error.chars().take(CUT).collect()));
+        }
+        Some(Value::Object(kept).to_string())
     }
 
     pub fn is_archivable_conversation_activity(activity: &SessionActivity) -> bool {
@@ -1912,6 +1977,39 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+
+    #[test]
+    fn an_archived_mcp_call_keeps_the_facts_the_chat_needs() {
+        let mut moved = SessionActivity {
+            id: "claude:s:tool:1".into(),
+            kind: "tool".into(),
+            title: "mcp__atlassian__transitionJiraIssue".into(),
+            detail: Some(r#"{"input":{"issueIdOrKey":"IPG-901","statusName":"REVISÃO"},"result":[{"text":"{\"data\": {\"message\": \"Issue IPG-901 transitioned successfully\", \"transitionId\": 2, \"statusName\": \"REVISÃO\"}}","type":"text"}]}"#.into()),
+            status: "completed".into(),
+            created_at: 1,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        };
+        Store::lighten_event(&mut moved);
+        let kept: serde_json::Value = serde_json::from_str(moved.detail.as_deref().unwrap()).expect("still JSON");
+        assert_eq!(kept["input"]["issueIdOrKey"], "IPG-901");
+        assert_eq!(kept["result"]["data"]["statusName"], "REVISÃO", "the answer's JSON is kept as data");
+
+        let big = serde_json::json!({ "input": { "jql": "project = IPG", "fields": "x".repeat(2_000) }, "result": [{ "type": "text", "text": "y".repeat(5_000) }] });
+        let mut search = SessionActivity { title: "mcp__atlassian__searchJiraIssuesUsingJql".into(), detail: Some(big.to_string()), ..moved.clone() };
+        Store::lighten_event(&mut search);
+        let detail = search.detail.unwrap();
+        assert!(detail.chars().count() < 1_200, "{}", detail.chars().count());
+        let kept: serde_json::Value = serde_json::from_str(&detail).expect("a big call is still JSON");
+        assert_eq!(kept["input"]["jql"], "project = IPG");
+        assert!(kept["input"].get("fields").is_some_and(|fields| fields.as_str().is_some_and(|text| text.len() <= 80)));
+        assert!(kept["result"].is_string());
+
+        let mut plain = SessionActivity { title: "Bash".into(), kind: "command".into(), detail: Some("ls\nsecond line".into()), ..moved };
+        Store::lighten_event(&mut plain);
+        assert_eq!(plain.detail.as_deref(), Some("ls"), "other events keep only their first line");
     }
 
 }

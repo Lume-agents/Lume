@@ -2834,7 +2834,7 @@
         {#each sidebarLayout.rows as row (row.key)}
           {#if row.kind === "header"}
             <div class:drop-target={groupDropTarget === (row.group?.id ?? "none")} class:collapsed={row.group?.collapsed} class:dragging-section={draggingSectionId === (row.group?.id ?? "none")} class:reorder-before={reorderTarget?.id === (row.group?.id ?? "none") && !reorderTarget.after} class:reorder-after={reorderTarget?.id === (row.group?.id ?? "none") && reorderTarget.after} class="group-heading" role="group" aria-label={row.group?.name ?? tr("No group", "Sem grupo")}
-              draggable={renamingGroupId === null} title={tr("Drag to reorder", "Arraste para reordenar")}
+              draggable={renamingGroupId === null}
               ondragstart={(event) => beginSectionDrag(event, row.group?.id ?? "none")} ondragend={endSectionDrag}
               ondragenter={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragover={(event) => dragOverGroup(event, row.group?.id ?? "none")} ondragleave={() => { groupDropTarget = null; reorderTarget = null; }} ondrop={(event) => dropOnGroup(event, row.group?.id ?? null)}>
               {#if row.group}
@@ -2868,7 +2868,7 @@
             class="session-row"
             role="group"
             aria-label={sessionName(session)}
-            title={sidebarCollapsed ? sessionName(session) : tr("Drag to arrange this agent", "Arraste para organizar este agente")}
+            title={sidebarCollapsed ? sessionName(session) : undefined}
             draggable={true}
             ondragstart={(event) => beginSidebarSessionDrag(event, session.id)}
             ondragend={finishSidebarSessionDrag}
@@ -3047,12 +3047,12 @@
             <div class="workspace-setting-row font-setting">
               <span><strong>{tr("Interface font", "Fonte da interface")}</strong></span>
               <LumeSelect ariaLabel={tr("Interface font", "Fonte da interface")} value={preferences.uiFont} minWidth={150} options={fontOptions(uiFonts)} onValueChange={(value) => void savePreferencePatch({ uiFont: value })} />
-              <button class="font-import" type="button" title={tr("Import a font file", "Importar um arquivo de fonte")} onclick={() => void importFont("uiFont")}><LumeIcon name="plus" size={14} />{tr("Import", "Importar")}</button>
+              <button class="font-import" type="button" onclick={() => void importFont("uiFont")}><LumeIcon name="plus" size={14} />{tr("Import", "Importar")}</button>
             </div>
             <div class="workspace-setting-row font-setting">
               <span><strong>{tr("Code and terminal font", "Fonte de código e terminal")}</strong></span>
               <LumeSelect ariaLabel={tr("Code and terminal font", "Fonte de código e terminal")} value={preferences.codeFont} minWidth={150} options={fontOptions(codeFonts)} onValueChange={(value) => void savePreferencePatch({ codeFont: value })} />
-              <button class="font-import" type="button" title={tr("Import a font file", "Importar um arquivo de fonte")} onclick={() => void importFont("codeFont")}><LumeIcon name="plus" size={14} />{tr("Import", "Importar")}</button>
+              <button class="font-import" type="button" onclick={() => void importFont("codeFont")}><LumeIcon name="plus" size={14} />{tr("Import", "Importar")}</button>
             </div>
             {#each customFonts as font (font.id)}
               <div class="workspace-setting-row font-setting imported-font">
@@ -3472,7 +3472,6 @@
           aria-valuemin="25"
           aria-valuemax="75"
           aria-valuenow={Math.round(splitRatio * 100)}
-          title={tr("Drag to resize", "Arraste para redimensionar")}
           onpointerdown={(event) => beginSplitResize(event, 0)}
           onpointermove={moveSplitResize}
           onpointerup={endSplitResize}
@@ -3510,8 +3509,7 @@
             aria-valuemin="22"
             aria-valuemax="50"
             aria-valuenow={Math.round(tertiaryRatio * 100)}
-            title={tr("Drag to resize", "Arraste para redimensionar")}
-            onpointerdown={(event) => beginSplitResize(event, 1)}
+              onpointerdown={(event) => beginSplitResize(event, 1)}
             onpointermove={moveSplitResize}
             onpointerup={endSplitResize}
             onpointercancel={endSplitResize}

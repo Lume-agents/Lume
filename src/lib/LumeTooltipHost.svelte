@@ -138,7 +138,7 @@
   }
 
   onMount(() => {
-    const hoverDelay = 600;
+    const hoverDelay = 800;
     const focusDelay = 190;
     const pointerOver = (event: PointerEvent) => {
       const target = tooltipAnchor(event.target);

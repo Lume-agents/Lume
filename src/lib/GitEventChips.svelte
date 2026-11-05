@@ -26,7 +26,7 @@
     <span class="git-chip place" title={place}><LumeIcon name="repository" size={10} /><span>{place}</span></span>
   {/if}
   {#if showsFlow}
-    <span class="git-chip branch" title={`${info.fromBranch} → ${info.branch}`}><LumeIcon name="branch" size={10} /><span>{info.fromBranch}</span><i aria-hidden="true">→</i><span>{info.branch}</span></span>
+    <span class="git-chip branch"><LumeIcon name="branch" size={10} /><span>{info.fromBranch}</span><i aria-hidden="true">→</i><span>{info.branch}</span></span>
   {:else if info.branch || info.fromBranch}
     <span class="git-chip branch" title={info.branch ?? info.fromBranch}><LumeIcon name="branch" size={10} /><span>{info.branch ?? info.fromBranch}</span></span>
   {/if}
@@ -49,7 +49,7 @@
     <span class="git-chip clean">{pt ? "limpo" : "clean"}</span>
   {/if}
   {#if info.stats && (info.stats.files || info.stats.added || info.stats.removed)}
-    <span class="git-chip stats" title={pt ? "Mudanças" : "Changes"}>
+    <span class="git-chip stats">
       {#if info.stats.files}<span>{info.stats.files} {pt ? (info.stats.files === 1 ? "arquivo" : "arquivos") : (info.stats.files === 1 ? "file" : "files")}</span>{/if}
       {#if info.stats.added}<b class="added">+{info.stats.added}</b>{/if}
       {#if info.stats.removed}<b class="removed">−{info.stats.removed}</b>{/if}

@@ -603,8 +603,8 @@
       <button class:active={viewMode === "deliverables"} type="button" aria-pressed={viewMode === "deliverables"} onclick={() => viewMode = "deliverables"}><span>{tr("Deliverables", "Entregáveis")}</span><small>{deliverableFiles.length}</small></button>
     </nav>
     {#if files.length}
-      <span class="totals" title={tr("Lines added and removed", "Linhas adicionadas e removidas")}><b>+{totalAdded}</b><i>−{totalRemoved}</i></span>
-      <span class="progress" title={tr("Files marked as reviewed", "Arquivos marcados como revisados")}><span class="bar" aria-hidden="true"><i style:width={(reviewedCount / files.length) * 100 + "%"}></i></span>{reviewedCount}/{files.length} {tr("reviewed", "revisados")}</span>
+      <span class="totals"><b>+{totalAdded}</b><i>−{totalRemoved}</i></span>
+      <span class="progress"><span class="bar" aria-hidden="true"><i style:width={(reviewedCount / files.length) * 100 + "%"}></i></span>{reviewedCount}/{files.length} {tr("reviewed", "revisados")}</span>
     {/if}
     {#if selectedTurn?.checks.length}
       <button class="checks-chip" type="button" title={selectedTurn.checks.join("\n")} onclick={() => viewMode = "context"}><LumeIcon name="check" size={12} />{selectedTurn.checks.length} {tr(selectedTurn.checks.length === 1 ? "check" : "checks", selectedTurn.checks.length === 1 ? "validação" : "validações")}</button>

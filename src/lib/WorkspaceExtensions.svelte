@@ -397,7 +397,7 @@
                   {installsLabel(plugin.githubStars)} {tr("GitHub stars", "estrelas no GitHub")}
                 </button>
               {/if}
-              {#if plugin.updatedAt && dateLabel(plugin.updatedAt)}<time datetime={new Date(plugin.updatedAt).toISOString()} title={tr("Updated or published on this date", "Atualizado ou publicado nesta data")}>{dateLabel(plugin.updatedAt)}</time>{/if}
+              {#if plugin.updatedAt && dateLabel(plugin.updatedAt)}<time datetime={new Date(plugin.updatedAt).toISOString()}>{dateLabel(plugin.updatedAt)}</time>{/if}
               {#if installed}
                 <span class="installed-mark"><LumeIcon name="check" size={12} />{tr("Installed", "Instalado")}</span>
               {:else}

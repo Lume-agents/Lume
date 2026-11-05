@@ -200,12 +200,12 @@
         <small>{tr("Inspector", "Inspector")} · {displayText(language, session.statusLabel)}</small>
       </span>
       {#if automaticAccess}
-        <span class="inspector-access-badge auto-review" title={tr("Approve for me", "Aprovar por mim")}>
+        <span class="inspector-access-badge auto-review">
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6.8.8 2.9 6.3h2.5L4.9 11l4.2-5.7H6.5Z" /></svg>
           <span>{tr("Approve for me", "Aprovar por mim")}</span>
         </span>
       {:else if fullAccess}
-        <span class="inspector-access-badge full-access" title={tr("Full access", "Acesso total")}>
+        <span class="inspector-access-badge full-access">
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 5V3.7a3 3 0 0 1 5.6-1.5M2.2 5.2h7.6v5.5H2.2Z" /></svg>
           <span>{tr("Full access", "Acesso total")}</span>
         </span>

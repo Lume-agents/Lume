@@ -3359,7 +3359,7 @@
           </span>
         {/if}
         {#if session.permissionProfile.mode === "full_access"}
-          <span class="access-badge full-access" title={tr("Full access", "Acesso total")}>
+          <span class="access-badge full-access">
             <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 5V3.7a3 3 0 0 1 5.6-1.5M2.2 5.2h7.6v5.5H2.2Z" /></svg>
             <span class="badge-label">{tr("Full access", "Acesso total")}</span>
           </span>

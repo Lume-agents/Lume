@@ -588,8 +588,8 @@
     </div>
     {#if workflowLink}<span class="workflow-tag" title={workflowLink.objective}><LumeIcon name="bolt" size={11} />{workflowLink.role}</span>{/if}
     <div class="mode-switch" role="group" aria-label={tr("Diff layout", "Layout do diff")}>
-      <button class:active={mode === "unified"} type="button" aria-pressed={mode === "unified"} title={tr("Unified", "Unificado")} onclick={() => mode = "unified"}><LumeIcon name="diff" size={13} /><span>{tr("Unified", "Unificado")}</span></button>
-      <button class:active={mode === "split"} type="button" aria-pressed={mode === "split"} title={tr("Split", "Lado a lado")} onclick={() => mode = "split"}><LumeIcon name="columns" size={13} /><span>{tr("Split", "Lado a lado")}</span></button>
+      <button class:active={mode === "unified"} type="button" aria-pressed={mode === "unified"} onclick={() => mode = "unified"}><LumeIcon name="diff" size={13} /><span>{tr("Unified", "Unificado")}</span></button>
+      <button class:active={mode === "split"} type="button" aria-pressed={mode === "split"} onclick={() => mode = "split"}><LumeIcon name="columns" size={13} /><span>{tr("Split", "Lado a lado")}</span></button>
     </div>
     {#if onToggleWide}<button class:active={wide} class="icon-button" type="button" title={wide ? tr("Show the chat", "Mostrar o chat") : tr("Use the full window", "Usar a janela inteira")} aria-label={wide ? tr("Show the chat", "Mostrar o chat") : tr("Use the full window", "Usar a janela inteira")} aria-pressed={wide} onclick={onToggleWide}><LumeIcon name={wide ? "restore" : "maximize"} size={15} /></button>{/if}
     <button class:active={notesOpen} class="icon-button review-note-toggle" type="button" title={tr("Review note", "Nota de revisão")} aria-label={tr("Review note", "Nota de revisão")} aria-pressed={notesOpen} onclick={() => notesOpen = !notesOpen}><LumeIcon name="note" size={15} />{#if selectedReviewNote}<i aria-hidden="true"></i>{/if}</button>

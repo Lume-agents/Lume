@@ -34,6 +34,25 @@
     return explicit || native || originalTitles.get(target) || "";
   }
 
+  const flat = (value: string) => value.replace(/\s+/g, " ").trim();
+
+  /** Whether the anchor or something inside it is cut off (ellipsis or a clamped line), so its title shows more than the screen does. */
+  function isTruncated(target: HTMLElement) {
+    const cut = (element: HTMLElement) => element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1;
+    if (cut(target)) return true;
+    for (const child of Array.from(target.querySelectorAll<HTMLElement>("*")).slice(0, 40)) {
+      if (child.clientWidth > 0 && cut(child)) return true;
+    }
+    return false;
+  }
+
+  /** A title that only repeats the text already on screen says nothing, unless that text is cut off. */
+  function repeatsVisibleText(target: HTMLElement, tip: string) {
+    if (target.dataset.tooltip?.trim()) return false;
+    const visible = flat(target.textContent ?? "");
+    return visible !== "" && visible === flat(tip) && !isTruncated(target);
+  }
+
   function clearTimers() {
     if (showTimer) clearTimeout(showTimer);
     if (hideTimer) clearTimeout(hideTimer);
@@ -83,7 +102,7 @@
     }
     if (target === pendingAnchor) return;
     const nextText = tooltipText(target);
-    if (!nextText) return;
+    if (!nextText || repeatsVisibleText(target, nextText)) return;
     clearTimers();
     if (anchor && anchor !== target) {
       restoreDescription(anchor);
@@ -139,7 +158,8 @@
     };
     const focusIn = (event: FocusEvent) => {
       const target = tooltipAnchor(event.target);
-      if (target) show(target, focusDelay);
+      // A click also focuses a control; only the keyboard asks for its tooltip that way.
+      if (target?.matches(":focus-visible")) show(target, focusDelay);
     };
     const focusOut = (event: FocusEvent) => {
       const target = tooltipAnchor(event.target);

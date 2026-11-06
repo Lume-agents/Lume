@@ -1440,27 +1440,7 @@
     return visibleEntries.at(-1)?.id === latestAgentMessage.id ? latestAgentMessage.id : null;
   });
 
-  async function revealEarlierChatItems() {
-    const previousHeight = outputElement?.scrollHeight ?? 0;
-    const previousTop = outputElement?.scrollTop ?? 0;
-    visibleChatItemLimit += 60;
-    outputFollowingTail = false;
-    chatFollowingTail = false;
-    await refresh();
-    await tick();
-    if (outputElement) {
-      outputElement.scrollTop = previousTop + outputElement.scrollHeight - previousHeight;
-    }
-  }
 
-  function traceHandoffEntry(item: Extract<ChatFeedItem, { kind: "trace" }>): ChatEntry {
-    const source = item.entries[item.entries.length - 1];
-    return {
-      ...source,
-      activity: { ...source.activity, detail: undefined },
-      files: item.files,
-    };
-  }
 
   onMount(() => {
     let disposed = false;
@@ -2005,13 +1985,6 @@
     promptInput?.focus();
   }
 
-  function activityTime(createdAt: number) {
-    return new Intl.DateTimeFormat(language, {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    }).format(new Date(createdAt));
-  }
 
   function noteDate(updatedAt: number) {
     return new Intl.DateTimeFormat(language, {
@@ -2026,52 +1999,6 @@
       || target.session.capabilities.promptDeliveries.includes("queue");
   }
 
-  async function openHandoff(entry: ChatEntry) {
-    if (!session || !windowState?.groupId) {
-      message = tr(
-        "Dock this terminal to another one before sharing context.",
-        "Acople este terminal a outro antes de compartilhar contexto.",
-      );
-      return;
-    }
-    handoffLoading = true;
-    handoffError = null;
-    try {
-      const [terminals, snapshot] = await Promise.all([
-        loadTerminalWindows(),
-        loadHubSnapshot(),
-      ]);
-      handoffTargets = terminals.flatMap((terminal) => {
-        if (
-          terminal.label === label
-          || terminal.groupId !== windowState?.groupId
-        ) return [];
-        const targetSession = resolveTerminalSession(terminal, snapshot.sessions);
-        return targetSession ? [{ terminal, session: targetSession }] : [];
-      });
-      if (handoffTargets.length === 0) {
-        message = tr(
-          "No other active terminal is connected to this docked group.",
-          "Nenhum outro terminal ativo está conectado a este grupo.",
-        );
-        return;
-      }
-      handoffDraft = {
-        text: entry.activity.detail?.trim() ?? "",
-        files: entry.files,
-        includeText: Boolean(entry.activity.detail?.trim()),
-        includeFiles: entry.files.length > 0,
-        note: "",
-        targetSessionId:
-          handoffTargets.find(handoffTargetCanReceive)?.session.id
-          ?? handoffTargets[0].session.id,
-      };
-    } catch (error) {
-      message = String(error).replace(/^Error:\s*/, "");
-    } finally {
-      handoffLoading = false;
-    }
-  }
 
   function handoffPreview(draft: HandoffDraft): string {
     return buildHandoffBody(draft);
@@ -3221,30 +3148,7 @@
     }
   }
 
-  async function selectQuestionOption(questionId: string, value: string) {
-    if (!session?.pendingQuestion) return;
-    questionSelections = { ...questionSelections, [questionId]: value };
-    if (session.pendingQuestion.questions.length === 1) {
-      await submitQuestionAnswers([{ questionId, answers: [value] }]);
-    }
-  }
 
-  async function submitSelectedQuestionAnswers() {
-    if (!session?.pendingQuestion) return;
-    const answers = session.pendingQuestion.questions
-      .map((question) => ({
-        questionId: question.id,
-        answers: questionSelections[question.id]
-          ? [questionSelections[question.id]]
-          : [],
-      }))
-      .filter((answer) => answer.answers.length > 0);
-    if (answers.length !== session.pendingQuestion.questions.length) {
-      message = tr("Choose one option for each question.", "Escolha uma opção para cada pergunta.");
-      return;
-    }
-    await submitQuestionAnswers(answers);
-  }
 
   async function submitQuestionAnswers(answers: QuestionAnswer[]) {
     if (!session?.pendingQuestion || sending) return;
@@ -3271,15 +3175,6 @@
     }
   }
 
-  function actionLabel(action: PermissionAction) {
-    if (session?.agent === "omp" && action === "allow_once") return tr("Allow once", "Permitir uma vez");
-    return {
-      allow_once: tr("Allow", "Permitir"),
-      allow_session: tr("For session", "Na sessão"),
-      deny: tr("Deny", "Recusar"),
-      open_source: tr("Open source", "Abrir origem"),
-    }[action];
-  }
 </script>
 
 <main class:dark={effectiveDark} class="terminal-window" data-appearance={appearanceTheme} style={baseCss} style:--lume-accent={colorWithOpacity(accentColor, accentOpacity)} style:--lume-accent-strong={colorWithOpacity(accentColor, accentOpacity)} onpointerdown={() => void currentWindow.setFocus().catch(() => undefined)}>
@@ -4451,9 +4346,6 @@
   .terminal-card.joined-right { border-right-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0; }
   .terminal-card.joined-top { border-top-width: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
   .terminal-card.joined-bottom { border-bottom-width: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-  .dock-silhouette { position: absolute; z-index: 30; inset: 5px; overflow: hidden; border: 1px solid rgba(71, 155, 117, 0.62); border-radius: 13px; background: rgba(76, 161, 121, 0.075); box-shadow: inset 0 0 0 1px rgba(225, 249, 238, 0.48); pointer-events: none; animation: dock-breathe 900ms ease-in-out infinite alternate; }
-  .dock-silhouette::before { position: absolute; border: 1px solid rgba(65, 149, 111, 0.68); border-radius: 9px; content: ""; background: linear-gradient(135deg, rgba(77, 164, 121, 0.32), rgba(77, 164, 121, 0.12)); box-shadow: 0 6px 18px rgba(38, 105, 76, 0.14); }
-  .dock-silhouette span { position: absolute; z-index: 1; padding: 3px 6px; border-radius: 999px; color: #39755a; background: rgba(232, 246, 239, 0.9); font-size: 7px; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
   .terminal-card.workflow-preview { transition: border-color 90ms ease, transform 110ms cubic-bezier(0.22, 0.8, 0.3, 1); }
   .terminal-card.workflow-preview.dock-target,
   .terminal-card.workflow-preview.dock-moving { border-color: rgba(103, 126, 116, 0.2); box-shadow: none; transform: none; }
@@ -4525,16 +4417,6 @@
   .dock-ready .workflow-merge-preview { opacity: 0.92; }
   .dock-ready .workflow-merge-preview::before { filter: saturate(0.92) brightness(1.08); }
   .dock-ready .workflow-merge-preview::after { background: rgba(112, 186, 145, 0.84); transform: scale(1.08); }
-  .dock-left .dock-silhouette::before, .dock-right .dock-silhouette::before { top: 12%; bottom: 12%; width: 31%; }
-  .dock-left .dock-silhouette::before { left: 7px; }
-  .dock-right .dock-silhouette::before { right: 7px; }
-  .dock-left .dock-silhouette span { top: 50%; left: 12px; transform: translateY(-50%); }
-  .dock-right .dock-silhouette span { top: 50%; right: 12px; transform: translateY(-50%); }
-  .dock-top .dock-silhouette::before, .dock-bottom .dock-silhouette::before { right: 12%; left: 12%; height: 31%; }
-  .dock-top .dock-silhouette::before { top: 7px; }
-  .dock-bottom .dock-silhouette::before { bottom: 7px; }
-  .dock-top .dock-silhouette span { top: 12px; left: 50%; transform: translateX(-50%); }
-  .dock-bottom .dock-silhouette span { bottom: 12px; left: 50%; transform: translateX(-50%); }
   @keyframes dock-breathe { from { opacity: 0.7; } to { opacity: 1; } }
   .agent-icon { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 8px; background: rgba(80, 105, 94, 0.06); }
   .identity { min-width: 0; flex: 1; display: grid; gap: 1px; }
@@ -4701,35 +4583,11 @@
   .terminal-output.with-workflow-role { padding-top: 49px; }
   .terminal-output p { max-width: 100%; margin: 0 0 6px; overflow-wrap: anywhere; line-height: 1.45; word-break: break-word; }
   .terminal-output i { color: #8a9690; font-style: normal; }
-  .load-earlier-chat { width: min(240px, 88%); min-height: 29px; margin: 1px auto 8px; padding: 0 8px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid rgba(77, 104, 91, 0.1); border-radius: 8px; color: #6d7e76; background: rgba(69, 99, 84, 0.025); font: 700 var(--chat-tiny-font-size) var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
-  .load-earlier-chat:hover { color: #37785a; border-color: rgba(52, 139, 94, 0.18); background: rgba(52, 139, 94, 0.045); }
-  .load-earlier-chat svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; }
-  .load-earlier-chat small { padding: 2px 5px; border-radius: 999px; color: #7e8d86; background: rgba(77, 104, 91, 0.06); }
   .status-running, .status-running span { color: #4e7faf; }
   .status-permission_required, .status-permission_required span { color: #b06b25; }
   .status-waiting_for_input, .status-waiting_for_input span { color: #b0812d; }
   .status-completed, .status-completed span { color: #55a473; }
   .status-failed, .status-failed span { color: #ad4f4f; }
-  .chat-feed { min-width: 0; max-width: 100%; margin: 9px 0 7px; display: grid; gap: 7px; overflow-x: hidden; }
-  .chat-feed > * { min-width: 0; max-width: 100%; }
-  .chat-message { box-sizing: border-box; width: fit-content; min-width: 0; max-width: 94%; padding: 7px 8px; overflow: clip; overflow-clip-margin: 1px; border: 1px solid rgba(77, 104, 91, 0.09); border-radius: 9px; background: rgba(69, 99, 84, 0.035); }
-  .chat-message.user-message { --message-collapse-surface: rgba(50, 145, 99, 0.075); --user-message-content-margin-top: 5px; --user-message-font: var(--chat-font-size)/1.5 var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); --user-message-text: #4b5c54; --user-message-muted: #71837a; --user-message-accent: #2f8560; --user-message-summary-font: var(--lume-font-ui, Inter, sans-serif); --user-message-action-font: var(--lume-font-ui, Inter, sans-serif); margin-left: auto; border-bottom-right-radius: 3px; background: rgba(50, 145, 99, 0.075); }
-  .chat-message.agent-message { margin-right: auto; border-bottom-left-radius: 3px; }
-  .interrupt-notice { width: fit-content; max-width: 100%; margin: 3px 0; padding: 3px 9px 3px 7px; display: flex; align-items: center; gap: 6px; border: 1px solid rgba(74, 107, 91, 0.14); border-radius: 999px; color: #6c7d75; background: rgba(74, 107, 91, 0.05); font: 680 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); }
-  .interrupt-notice svg { width: 9px; height: 9px; fill: #d85c64; }
-  .terminal-window.dark .interrupt-notice { border-color: rgba(205, 222, 213, 0.12); color: #9eb0a7; background: rgba(205, 222, 213, 0.05); }
-  .chat-message.agent-message.intervention-required { width: min(94%, 460px); border-color: rgba(190, 132, 42, 0.18); background: rgba(196, 139, 47, 0.025); }
-  .agent-response-duration { margin-top: 7px; padding-top: 5px; display: flex; align-items: center; gap: 4px; border-top: 1px solid rgba(77, 104, 91, 0.07); color: #85958d; font: 600 var(--chat-tiny-font-size)/1.2 var(--lume-font-ui, Inter, sans-serif); }
-  .agent-response-duration svg { width: 11px; height: 11px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
-  .intervention-indicator { margin: 6px 0 2px; padding: 3px 1px; display: flex; align-items: center; gap: 7px; color: #806128; }
-  .intervention-indicator > span { width: 22px; height: 22px; display: grid; flex: 0 0 auto; place-items: center; color: #a87120; }
-  .intervention-indicator svg { width: 18px; height: 18px; overflow: visible; }
-  .intervention-indicator .indicator-shape { fill: currentColor; stroke: none; }
-  .intervention-indicator .indicator-mark { fill: none; stroke: white; stroke-linecap: round; stroke-width: 1.5; }
-  .handoff-button { width: 20px; height: 20px; padding: 3px; display: grid; place-items: center; border: 0; border-radius: 5px; color: #668076; background: transparent; cursor: pointer; transition: color 130ms ease, background 130ms ease; }
-  .handoff-button:hover:not(:disabled) { color: #2f8b63; background: rgba(47, 139, 99, 0.09); }
-  .handoff-button:disabled { opacity: 0.4; cursor: default; }
-  .handoff-button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
   .markdown-content { min-width: 0; max-width: 100%; margin-top: 5px; overflow: hidden; color: #4b5c54; font: var(--chat-font-size)/1.55 var(--lume-font-ui, Inter, sans-serif); overflow-wrap: anywhere; word-break: break-word; }
   .markdown-content :global(> :first-child) { margin-top: 0; }
   .markdown-content :global(> :last-child) { margin-bottom: 0; }
@@ -4771,31 +4629,14 @@
   .markdown-content :global(img),
   .markdown-content :global(video) { max-width: 100%; height: auto; }
   .markdown-content :global(hr) { height: 1px; margin: 8px 0; border: 0; background: rgba(77, 104, 91, 0.12); }
-  .message-images { margin-top: 7px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
-  .message-file { min-width: 0; min-height: 38px; padding: 7px 8px; display: flex; align-items: center; gap: 7px; border: 1px solid rgba(82, 106, 95, 0.14); border-radius: 7px; color: #52665d; background: rgba(52, 145, 99, 0.045); }
-  .message-file svg { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
-  .message-file small { min-width: 0; overflow: hidden; color: inherit; font: 650 var(--chat-tiny-font-size)/1.2 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
-  .agent-typing { width: fit-content; min-height: 38px; padding: 0 3px; display: flex; align-items: center; gap: 8px; color: #4e7faf; }
-  .agent-typing > span { color: transparent; background: linear-gradient(90deg, #718179 10%, #4e87b2 44%, #91bfdd 53%, #4e87b2 62%, #718179 90%); background-size: 240% 100%; background-clip: text; font: 720 max(10px, var(--chat-small-font-size)) var(--lume-font-ui, Inter, sans-serif); animation: thinking-label-shimmer 1.75s linear infinite; }
   @keyframes thinking-label-shimmer { to { background-position: -240% 0; } }
   .workflow-bridge-link { will-change: transform, opacity; }
-  .reasoning-update { min-width: 0; max-width: 94%; padding: 6px 8px 7px; border-left: 2px solid #6d91ae; border-radius: 0 8px 8px 0; background: linear-gradient(90deg, rgba(91, 133, 164, .07), rgba(91, 133, 164, .018)); }
-  .reasoning-update .markdown-content { margin: 5px 0 0 27px; color: #586961; }
   @keyframes reasoning-pulse { 50% { opacity: .55; transform: scale(.92); } }
   @container (max-width: 390px) {
     .terminal-output { padding-right: 8px; padding-left: 8px; }
-    .chat-message,
-    .reasoning-update,
-    .turn-files { box-sizing: border-box; width: 100%; max-width: 100%; }
-    .reasoning-update .markdown-content { margin-left: 0; }
-    .message-images { grid-template-columns: minmax(0, 1fr); }
   }
-  .turn-files { padding: 6px; overflow: hidden; border: 1px solid rgba(70, 139, 105, .13); border-radius: 10px; background: linear-gradient(145deg, rgba(66, 143, 104, .055), rgba(66, 143, 104, .018)); }
-  .turn-files-mark { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 6px; color: #448466; background: rgba(55, 142, 98, .085); }
-  .turn-files-mark svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.45; stroke-linecap: round; stroke-linejoin: round; }
   .change-list code .added { color: #45906a; }
   .change-list code .removed { color: #b46161; }
-  .privacy-note { padding-top: 6px; border-top: 1px solid rgba(81, 105, 94, 0.08); color: #9aa49f; font: var(--chat-tiny-font-size)/1.45 var(--lume-font-ui, Inter, sans-serif); }
   .empty-state { margin: 7px 0 10px !important; color: #909c96; font: var(--chat-small-font-size)/1.5 var(--lume-font-ui, Inter, sans-serif); }
   .changes-panel { margin-top: 9px; display: grid; gap: 7px; }
   .changes-panel > strong { color: #6a7c73; font: 760 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); letter-spacing: 0.04em; text-transform: uppercase; }
@@ -4871,16 +4712,7 @@
   .permission button { display: inline-flex; align-items: center; gap: 5px; }
   .permission button:disabled:not(.loading) { opacity: .5; cursor: default; }
   .permission button.loading { cursor: progress; }
-  .permission-spinner { width: 9px; height: 9px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: permission-spin .7s linear infinite; }
   @keyframes permission-spin { to { transform: rotate(360deg); } }
-  .agent-question { margin: 8px 0 3px; padding: 9px; display: grid; gap: 9px; border: 1px solid rgba(48, 133, 176, 0.2); border-radius: 9px; background: rgba(48, 133, 176, 0.055); }
-  .agent-question-item { min-width: 0; display: grid; gap: 5px; }
-  .question-options { display: grid; gap: 4px; }
-  .question-options button { min-width: 0; padding: 6px 7px; display: flex; align-items: flex-start; gap: 7px; border: 1px solid rgba(65, 112, 133, 0.14); border-radius: 7px; color: #425a61; background: rgba(255, 255, 255, 0.55); text-align: left; cursor: pointer; }
-  .question-options button:hover,
-  .question-options button.selected { border-color: rgba(44, 137, 178, 0.42); background: rgba(48, 145, 187, 0.1); }
-  .question-options button span { min-width: 0; display: grid; gap: 2px; font: 700 var(--chat-small-font-size)/1.3 var(--lume-font-ui, Inter, sans-serif); }
-  .agent-question .question-submit { justify-self: end; min-height: 25px; padding: 0 10px; border: 0; border-radius: 7px; color: white; background: #318e62; font: 750 var(--chat-small-font-size) var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .hint { color: #89948f; font-size: var(--chat-small-font-size); }
   .hint.docked { color: #4f7566; }
   .terminate-backdrop { position: absolute; z-index: 80; inset: 49px 0 64px; padding: 12px; display: grid; place-items: center; background: rgba(25, 34, 30, 0.22); backdrop-filter: blur(2px); }
@@ -5082,28 +4914,10 @@
   .terminal-window:not(.dark) .work-tray { border-color: rgba(68, 95, 82, 0.16); }
   .terminal-window:not(.dark) .work-tray { background: #cfdccd; }
   .terminal-window:not(.dark) .work-card,
-  .terminal-window:not(.dark) .plan-items li,
-  .terminal-window:not(.dark) .chat-message {
+  .terminal-window:not(.dark) .plan-items li{
     border-color: rgba(66, 94, 81, 0.18);
     background: #ebe8d6;
     box-shadow: 0 1px 3px rgba(39, 66, 53, 0.04);
-  }
-  .terminal-window:not(.dark) .chat-message.user-message {
-    --message-collapse-surface: #c7dfce;
-    border-color: rgba(46, 132, 88, 0.2);
-    background: #c7dfce;
-  }
-  .terminal-window:not(.dark) .reasoning-update {
-    border-color: #668aa6;
-    background: linear-gradient(90deg, rgba(91, 133, 164, 0.12), rgba(91, 133, 164, 0.035));
-  }
-  .terminal-window:not(.dark) .turn-files {
-    border-color: rgba(55, 132, 91, 0.22);
-    background: #cce2d1;
-  }
-  .terminal-window:not(.dark) .load-earlier-chat {
-    border-color: rgba(66, 94, 81, 0.18);
-    background: #e9e6d4;
   }
   .terminal-window:not(.dark) .slash-command-menu,
   .terminal-window:not(.dark) .header-actions-menu,
@@ -5198,10 +5012,9 @@
   .workflow-contract-toggle.open .contract-chevron { transform: rotate(180deg); }
   .workflow-contract-body { min-height: 0; display: grid; gap: 7px; }
   .workflow-instruction-meta { display: flex; align-items: center; justify-content: space-between; gap: 7px; }
-  .workflow-instruction-meta > span { padding: 3px 6px; border-radius: 999px; font: 780 7px var(--lume-font-ui, Inter, sans-serif); }
+  .workflow-instruction-meta > span { padding: 3px 6px; border-radius: 999px; font: 780 10px var(--lume-font-ui, Inter, sans-serif); }
 
-
-  .workflow-readiness-note { margin: 0; font: 7px/1.4 var(--lume-font-ui, Inter, sans-serif); }
+  .workflow-readiness-note { margin: 0; font: 10px/1.4 var(--lume-font-ui, Inter, sans-serif); }
   .role-symbol { position: relative; width: 29px; height: 29px; display: grid; flex: 0 0 auto; place-items: center; overflow: hidden; border: 1px solid rgba(73, 121, 98, 0.12); border-radius: 9px; background: rgba(70, 108, 89, 0.055); }
   .role-planner { color: #4e78a0; background: rgba(70, 123, 171, 0.08); }
   .role-implementer { color: #438c66; background: rgba(54, 145, 94, 0.08); }
@@ -5222,9 +5035,6 @@
   .terminal-window.dark .terminal-card.dock-moving,
   .terminal-window.dark .terminal-card.dock-target,
   .terminal-window.dark .terminal-card.settling { border-color: rgba(91, 186, 143, 0.5); box-shadow: inset 0 0 0 2px rgba(91, 186, 143, 0.1), inset 0 -10px 24px rgba(8, 21, 15, 0.18); }
-  .terminal-window.dark .dock-silhouette { border-color: rgba(96, 193, 149, 0.5); background: rgba(72, 157, 116, 0.06); box-shadow: inset 0 0 0 1px rgba(154, 220, 188, 0.08); }
-  .terminal-window.dark .dock-silhouette::before { border-color: rgba(99, 197, 152, 0.52); background: linear-gradient(135deg, rgba(79, 174, 128, 0.22), rgba(69, 149, 111, 0.08)); }
-  .terminal-window.dark .dock-silhouette span { color: #a8d9c2; background: rgba(27, 51, 40, 0.92); }
   .terminal-window.dark .terminal-card.workflow-preview.dock-target,
   .terminal-window.dark .terminal-card.workflow-preview.dock-moving { border-color: rgba(190, 209, 200, 0.13); box-shadow: none; }
   .terminal-window.dark .workflow-merge-preview::before { background: radial-gradient(ellipse at center, rgba(78, 156, 115, calc(0.11 + var(--dock-proximity) * 0.29)) 0 28%, rgba(39, 119, 79, calc(0.07 + var(--dock-proximity) * 0.18)) 56%, transparent 82%); }
@@ -5283,7 +5093,6 @@
   .terminal-window.dark .pending-images-label { color: #8f9f97; }
   .terminal-window.dark .rate-limit-meter > i { background: rgba(181, 207, 194, 0.12); }
   .terminal-window.dark .pending-images { background: rgba(83, 174, 129, 0.055); }
-  .terminal-window.dark .message-file,
   .terminal-window.dark .pending-images > span.file-attachment { color: #b2c2ba; border-color: rgba(205, 222, 213, 0.12); background: rgba(255, 255, 255, 0.035); }
   .terminal-window.dark .slash-command-menu { color: #b7c8bf; border-color: rgba(205, 222, 213, 0.12); background: #18231e; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.34); }
   .terminal-window.dark .slash-command-heading { border-color: rgba(205, 222, 213, 0.08); }
@@ -5333,22 +5142,8 @@
   .terminal-window.dark .note-editor-heading label { border-color: rgba(205, 222, 213, .09); }
   .terminal-window.dark .session-note-body { color: #aebfb6; }
   .terminal-window.dark .terminal-output { color: #b8c6bf; background: linear-gradient(180deg, rgba(114, 151, 134, 0.035), transparent); }
-  .terminal-window.dark .load-earlier-chat { color: #9aaba2; border-color: rgba(205, 222, 213, 0.08); background: rgba(218, 234, 226, 0.02); }
-  .terminal-window.dark .load-earlier-chat:hover { color: #88c8a8; border-color: rgba(91, 177, 137, 0.17); background: rgba(91, 177, 137, 0.045); }
-  .terminal-window.dark .load-earlier-chat small { color: #8fa198; background: rgba(205, 222, 213, 0.055); }
-  .terminal-window.dark .chat-message { border-color: rgba(205, 222, 213, 0.08); background: rgba(218, 234, 226, 0.035); }
-  .terminal-window.dark .agent-response-duration { border-top-color: rgba(205, 222, 213, 0.07); color: #81938a; }
-  .terminal-window.dark .chat-message.agent-message.intervention-required { border-color: rgba(215, 166, 78, 0.17); background: rgba(202, 149, 55, 0.025); }
-  .terminal-window.dark .intervention-indicator { color: #dfbd79; }
-  .terminal-window.dark .intervention-indicator > span { color: #e1ad51; }
-  .terminal-window.dark .handoff-button { color: #91a79c; }
   .terminal-window.dark .workflow-connection { background: linear-gradient(180deg, rgba(70, 182, 127, 0.15), #59c58b 45%, rgba(70, 182, 127, 0.15)); box-shadow: 0 0 9px rgba(75, 201, 137, 0.38); }
   .terminal-window.dark .workflow-connection-editor { color: #7ed4a6; border-color: rgba(101, 210, 153, .22); background: rgba(25, 43, 34, .97); box-shadow: 0 8px 24px rgba(0, 0, 0, .32); }
-
-
-
-
-
 
 
 
@@ -5358,8 +5153,6 @@
   .terminal-window.dark .workflow-popover-actions button.primary { color: white; border-color: #347c5a; background: #347c5a; }
   .terminal-window.dark .workflow-top,
   .terminal-window.dark .workflow-bottom { background: linear-gradient(90deg, rgba(70, 182, 127, 0.15), #59c58b 45%, rgba(70, 182, 127, 0.15)); }
-  .terminal-window.dark .agent-typing > span { color: transparent; background-image: linear-gradient(90deg, #7f948a 10%, #74acd2 44%, #c2e4f6 53%, #74acd2 62%, #7f948a 90%); }
-  .terminal-window.dark .chat-message.user-message { --message-collapse-surface: rgba(76, 169, 124, 0.09); --user-message-text: #bdcbc4; --user-message-muted: #8fa198; --user-message-accent: #69c992; background: rgba(76, 169, 124, 0.09); }
   .terminal-window.dark .markdown-content,
   .terminal-window.dark .markdown-content :global(strong),
   .terminal-window.dark .markdown-content :global(h1),
@@ -5378,22 +5171,8 @@
   .terminal-window.dark .markdown-content :global(th) { color: #d2e0d9; background: rgba(98, 178, 138, 0.08); }
   .terminal-window.dark .markdown-content :global(th),
   .terminal-window.dark .markdown-content :global(td) { border-color: rgba(205, 222, 213, 0.075); }
-  .terminal-window.dark .reasoning-update { border-color: #6c9abc; background: linear-gradient(90deg, rgba(90, 139, 174, .085), rgba(90, 139, 174, .018)); }
-  .terminal-window.dark .reasoning-update .markdown-content { color: #bccbc4; }
-  .terminal-window.dark .turn-files { border-color: rgba(104, 180, 143, .14); background: linear-gradient(145deg, rgba(91, 177, 137, .065), rgba(91, 177, 137, .018)); }
-  .terminal-window.dark .turn-files-mark { color: #8bc6a8; background: rgba(91, 177, 137, .09); }
   .terminal-window.dark .handoff-backdrop { background: rgba(4, 9, 7, 0.55); }
   .terminal-window.dark .handoff-dialog { color: #d4e1da; border-color: rgba(200, 219, 210, 0.13); background: #18221d; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36); }
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -5419,7 +5198,6 @@
   .terminal-window.dark .handoff-preview pre { color: #b8c8c0; }
   .terminal-window.dark .handoff-dialog > footer button { color: #aebfb6; border-color: rgba(205, 222, 213, 0.13); }
   .terminal-window.dark .change-list code { color: #bdcbc4; }
-  .terminal-window.dark .privacy-note { border-color: rgba(205, 222, 213, 0.07); color: #78877f; }
   .terminal-window.dark textarea { color: #d0ddd6; border-color: rgba(205, 222, 213, 0.12); background: rgba(220, 234, 227, 0.045); }
   .terminal-window.dark .terminal-composer .composer-tools-trigger { color: #a9bbb2; border-color: rgba(205, 222, 213, 0.1); background: rgba(218, 234, 226, 0.045); }
   .terminal-window.dark .terminal-composer .composer-tools-trigger:hover,
@@ -5438,25 +5216,16 @@
   .terminal-window.dark .terminal-composer .composer-resize-handle:focus-visible { background: rgba(205, 225, 215, 0.045); }
   .terminal-window.dark .pending-images button { color: #c6d5ce; border-color: rgba(205, 222, 213, 0.14); background: #26332d; }
   .terminal-window.dark .permission button { color: #bdcbc4; background: rgba(218, 232, 225, 0.055); }
-  .terminal-window.dark .agent-question { border-color: rgba(83, 165, 204, 0.2); background: rgba(55, 139, 178, 0.07); }
-  .terminal-window.dark .question-options button { color: #c5d7cf; border-color: rgba(178, 210, 224, 0.12); background: rgba(219, 235, 228, 0.045); }
   @media (prefers-reduced-motion: reduce) {
     .terminal-card { transition-duration: 0.01ms; }
-    .dock-silhouette { animation: none; }
     .workflow-merge-preview::before,
     .workflow-merge-preview::after { animation: none; }
     .send-spinner,
     .mode-spinner { animation: none; }
-    .agent-typing > span,
-    .terminal-window.dark .agent-typing > span { color: #6f9dbb; background: none; animation: none; }
     .workflow-connection { animation: none; opacity: 0.82; }
   }
   .terminal-window[data-appearance]:not(.dark) .terminal-card { background: var(--lume-surface-light); }
   .terminal-window.dark[data-appearance] .terminal-card { background: var(--lume-surface-dark); }
-  .terminal-window[data-appearance]:not(.dark) .chat-message.user-message { --message-collapse-surface: var(--lume-user-light); --user-message-text: var(--lume-ink-light); --user-message-muted: var(--lume-ink-muted-light); border-color: var(--lume-user-line-light); background: var(--lume-user-light); }
-  .terminal-window[data-appearance]:not(.dark) .chat-message.agent-message:not(.intervention-required) { border-color: var(--lume-line-light); background: var(--lume-message-light); }
-  .terminal-window.dark[data-appearance] .chat-message.user-message { --message-collapse-surface: var(--lume-user-dark); --user-message-text: var(--lume-ink-dark); --user-message-muted: var(--lume-ink-muted-dark); border-color: var(--lume-user-line-dark); background: var(--lume-user-dark); }
-  .terminal-window.dark[data-appearance] .chat-message.agent-message:not(.intervention-required) { border-color: var(--lume-line-dark); background: var(--lume-message-dark); }
   .terminal-window[data-appearance] { --dropdown-surface: var(--lume-raised-light); --dropdown-line: var(--lume-line-light); --dropdown-text: var(--lume-ink-light); --dropdown-strong: var(--lume-ink-strong-light); --dropdown-muted: var(--lume-ink-muted-light); --dropdown-accent: var(--lume-accent-strong); --dropdown-hover: var(--lume-subtle-light); }
   .terminal-window.dark[data-appearance] { --dropdown-surface: var(--lume-raised-dark); --dropdown-line: var(--lume-line-dark); --dropdown-text: var(--lume-ink-dark); --dropdown-strong: var(--lume-ink-strong-dark); --dropdown-muted: var(--lume-ink-muted-dark); --dropdown-accent: var(--lume-accent); --dropdown-hover: var(--lume-subtle-dark); }
   .terminal-window[data-appearance] .header-actions-menu,

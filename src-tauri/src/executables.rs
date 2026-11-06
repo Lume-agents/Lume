@@ -1,8 +1,14 @@
 use std::{
     env,
-    path::{Path, PathBuf},
-    process::Command,
+    io::Read,
+    path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
+
+use semver::Version;
+use serde::Deserialize;
 
 pub fn command(name: &str) -> Result<Command, String> {
     let path = resolve(name).ok_or_else(|| {
@@ -10,9 +16,136 @@ pub fn command(name: &str) -> Result<Command, String> {
             "Could not find `{name}`. Open a terminal, confirm `{name} --version`, and restart Lume."
         )
     })?;
-    let mut command = platform_command(&path);
-    prepend_parent_to_path(&mut command, &path);
-    Ok(command)
+    Ok(command_from_path(&path))
+}
+
+/// Lume runs its own app-server. A separately updated Codex daemon can have a
+/// newer binary and model catalog than the CLI that the GUI finds on PATH.
+pub fn codex_app_server_command() -> Result<Command, String> {
+    if let Some(path) = explicit_path("codex") {
+        return Ok(command_from_path(&path));
+    }
+
+    let cli = resolve("codex");
+    let daemon = codex_home().and_then(|home| codex_daemon_package(&home));
+    let path = match (cli, daemon) {
+        (Some(cli), Some(daemon)) => {
+            let version = executable_version(&cli);
+            if prefer_daemon(version.as_ref(), &daemon.version) {
+                daemon.entrypoint
+            } else {
+                cli
+            }
+        }
+        (Some(cli), None) => cli,
+        (None, Some(daemon)) => daemon.entrypoint,
+        (None, None) => {
+            return Err("Could not find `codex`. Open a terminal, confirm `codex --version`, and restart Lume.".into());
+        }
+    };
+    Ok(command_from_path(&path))
+}
+
+fn command_from_path(path: &Path) -> Command {
+    let mut command = platform_command(path);
+    prepend_parent_to_path(&mut command, path);
+    command
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexPackageManifest {
+    layout_version: u32,
+    version: String,
+    target: String,
+    variant: String,
+    entrypoint: PathBuf,
+}
+
+struct CodexDaemonPackage {
+    version: Version,
+    entrypoint: PathBuf,
+}
+
+fn codex_home() -> Option<PathBuf> {
+    env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
+        env::var_os("HOME")
+            .or_else(|| env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .map(|home| home.join(".codex"))
+    })
+}
+
+fn codex_daemon_package(codex_home: &Path) -> Option<CodexDaemonPackage> {
+    let root = codex_home.join("packages/app-server-daemon/current");
+    let manifest: CodexPackageManifest =
+        serde_json::from_slice(&std::fs::read(root.join("codex-package.json")).ok()?).ok()?;
+    if manifest.layout_version != 1
+        || manifest.variant != "codex"
+        || !package_target_matches(&manifest.target)
+        || !manifest
+            .entrypoint
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return None;
+    }
+    let entrypoint = root.join(manifest.entrypoint);
+    entrypoint.is_file().then_some(CodexDaemonPackage {
+        version: Version::parse(&manifest.version).ok()?,
+        entrypoint,
+    })
+}
+
+fn package_target_matches(target: &str) -> bool {
+    let os = match env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "windows",
+        "linux" => "linux",
+        _ => return false,
+    };
+    let mut parts = target.split('-');
+    parts.next() == Some(env::consts::ARCH) && parts.any(|part| part == os)
+}
+
+fn prefer_daemon(cli_version: Option<&Version>, daemon_version: &Version) -> bool {
+    cli_version.is_some_and(|cli_version| daemon_version > cli_version)
+}
+
+fn executable_version(path: &Path) -> Option<Version> {
+    let mut child = command_from_path(path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut output = String::new();
+                child
+                    .stdout
+                    .take()?
+                    .take(4096)
+                    .read_to_string(&mut output)
+                    .ok()?;
+                return output
+                    .split_whitespace()
+                    .find_map(|part| Version::parse(part.trim_start_matches('v')).ok());
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 pub fn available(name: &str) -> bool {
@@ -179,6 +312,68 @@ mod tests {
         let directories = unix_install_directories(Path::new("/Users/me"));
         assert!(directories.contains(&PathBuf::from("/Users/me/.claude/local")));
         assert!(directories.contains(&PathBuf::from("/opt/homebrew/bin")));
+    }
+
+    #[test]
+    fn codex_app_server_prefers_only_a_newer_daemon_package() {
+        let cli = Version::parse("0.163.0").unwrap();
+        assert!(prefer_daemon(
+            Some(&cli),
+            &Version::parse("0.165.0").unwrap()
+        ));
+        assert!(!prefer_daemon(
+            Some(&cli),
+            &Version::parse("0.162.0").unwrap()
+        ));
+        assert!(!prefer_daemon(
+            Some(&cli),
+            &Version::parse("0.163.0-rc.1").unwrap()
+        ));
+        assert!(!prefer_daemon(None, &Version::parse("0.165.0").unwrap()));
+    }
+
+    #[test]
+    fn codex_daemon_package_uses_the_installed_manifest_safely() {
+        let mut random = [0u8; 8];
+        getrandom::getrandom(&mut random).unwrap();
+        let home = env::temp_dir().join(format!(
+            "lume-codex-package-{:x}",
+            u64::from_ne_bytes(random)
+        ));
+        let root = home.join("packages/app-server-daemon/current");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let executable = if cfg!(target_os = "windows") {
+            "bin/codex.exe"
+        } else {
+            "bin/codex"
+        };
+        std::fs::write(root.join(executable), "fixture").unwrap();
+        let os = if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            env::consts::OS
+        };
+        let mut manifest = serde_json::json!({
+            "layoutVersion": 1,
+            "version": "0.165.0",
+            "target": format!("{}-unknown-{}", env::consts::ARCH, os),
+            "variant": "codex",
+            "entrypoint": executable,
+        });
+        let manifest_path = root.join("codex-package.json");
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        let package = codex_daemon_package(&home).expect("valid daemon package");
+        assert_eq!(package.version, Version::parse("0.165.0").unwrap());
+        assert_eq!(package.entrypoint, root.join(executable));
+
+        manifest["entrypoint"] = serde_json::json!("../outside");
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        assert!(codex_daemon_package(&home).is_none());
+        manifest["entrypoint"] = serde_json::json!(executable);
+        manifest["target"] = serde_json::json!("other-unknown-platform");
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        assert!(codex_daemon_package(&home).is_none());
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     /// The folder of the person who reported this had a space and an accent in its name.

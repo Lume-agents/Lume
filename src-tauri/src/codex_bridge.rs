@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs::File,
     io::{ErrorKind, Read, Seek, SeekFrom},
     net::{TcpListener, TcpStream},
@@ -1268,7 +1268,7 @@ fn early_exit_message(status: &str, output: &str) -> String {
 }
 
 fn command_for_server() -> Result<Command, String> {
-    let mut command = crate::executables::command("codex")?;
+    let mut command = crate::executables::codex_app_server_command()?;
     command
         .args(["app-server", "--listen", server_url()])
         .env("LUME_MANAGED_SESSION", "1")
@@ -2272,17 +2272,48 @@ fn default_model_settings_connection() -> Result<CodexThreadModelSettings, Strin
     let timeout_message = codex_model_settings_timeout_message();
     let deadline = Instant::now() + CODEX_MODEL_SETTINGS_TIMEOUT;
     let mut server = connect_initialized_plain_until(deadline, &timeout_message)?;
-    send_json(
-        &mut server,
-        json!({
-            "method": "model/list",
-            "id": 2,
-            "params": { "limit": 100, "includeHidden": false }
-        }),
-    )?;
-    let catalog =
-        wait_for_plain_value_response_until_deadline(&mut server, 2, deadline, &timeout_message)?;
+    let catalog = collect_model_catalog(|id, cursor| {
+        let mut params = json!({ "limit": 100, "includeHidden": false });
+        if let Some(cursor) = cursor {
+            params["cursor"] = json!(cursor);
+        }
+        send_json(
+            &mut server,
+            json!({ "method": "model/list", "id": id, "params": params }),
+        )?;
+        wait_for_plain_value_response_until_deadline(&mut server, id, deadline, &timeout_message)
+    })?;
     default_model_settings_from_catalog(&catalog)
+}
+
+fn collect_model_catalog(
+    mut fetch_page: impl FnMut(i64, Option<&str>) -> Result<Value, String>,
+) -> Result<Value, String> {
+    let mut models = Vec::new();
+    let mut cursor = None;
+    let mut seen_cursors = HashSet::new();
+    for page in 0..100 {
+        let response = fetch_page(2 + page, cursor.as_deref())?;
+        let result = response
+            .get("result")
+            .ok_or_else(|| "Codex did not return its model catalog".to_string())?;
+        models.extend(
+            result
+                .get("data")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "Codex did not return its model catalog".to_string())?
+                .iter()
+                .cloned(),
+        );
+        match result.get("nextCursor") {
+            None | Some(Value::Null) => return Ok(json!({ "result": { "data": models } })),
+            Some(Value::String(next)) if !next.is_empty() && seen_cursors.insert(next.clone()) => {
+                cursor = Some(next.clone());
+            }
+            _ => return Err("Codex returned an invalid model catalog cursor".into()),
+        }
+    }
+    Err("Codex returned too many model catalog pages".into())
 }
 
 fn thread_fast_mode_request(thread_id: &str, enabled: bool) -> Value {
@@ -4815,6 +4846,47 @@ mod tests {
         assert_eq!(settings.model, "gpt-default");
         assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(settings.models.len(), 2);
+    }
+
+    #[test]
+    fn model_catalog_loads_every_page_before_selecting_models() {
+        let mut calls = Vec::new();
+        let catalog = collect_model_catalog(|id, cursor| {
+            calls.push((id, cursor.map(str::to_string)));
+            Ok(match cursor {
+                None => json!({ "result": {
+                    "data": [{ "model": "gpt-old", "isDefault": true, "defaultReasoningEffort": "low", "supportedReasoningEfforts": [{ "reasoningEffort": "low" }] }],
+                    "nextCursor": "next"
+                }}),
+                Some("next") => json!({ "result": {
+                    "data": [{ "model": "gpt-new", "defaultReasoningEffort": "high", "supportedReasoningEfforts": [{ "reasoningEffort": "high" }] }],
+                    "nextCursor": null
+                }}),
+                _ => panic!("unexpected cursor"),
+            })
+        }).expect("complete catalog");
+        let settings = default_model_settings_from_catalog(&catalog).unwrap();
+        assert_eq!(calls, vec![(2, None), (3, Some("next".into()))]);
+        assert_eq!(settings.model, "gpt-old");
+        assert_eq!(
+            settings
+                .models
+                .iter()
+                .map(|model| model.model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-old", "gpt-new"]
+        );
+    }
+
+    #[test]
+    fn model_catalog_rejects_a_repeated_cursor() {
+        let result = collect_model_catalog(|_, _| {
+            Ok(json!({ "result": { "data": [], "nextCursor": "same" } }))
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            "Codex returned an invalid model catalog cursor"
+        );
     }
 
     #[test]

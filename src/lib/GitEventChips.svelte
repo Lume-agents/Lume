@@ -65,7 +65,7 @@
 
 <style>
   .git-chips { --git-tone: #cf673d; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-  .git-chip { box-sizing: border-box; max-width: 100%; min-height: 17px; padding: 1px 6px 1px 5px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid color-mix(in srgb, var(--git-tone) 22%, var(--workspace-line, rgba(65, 94, 80, .18))); border-radius: 999px; color: var(--workspace-strong, #52665c); background: color-mix(in srgb, var(--git-tone) 7%, transparent); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.25 var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); white-space: nowrap; }
+  .git-chip { box-sizing: border-box; max-width: 100%; min-height: 17px; padding: 1px 6px 1px 5px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid color-mix(in srgb, var(--git-tone) 22%, var(--workspace-line, rgba(65, 94, 80, .18))); border-radius: 999px; color: var(--workspace-strong, #52665c); background: color-mix(in srgb, var(--git-tone) 7%, transparent); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 10px))/1.25 var(--lume-font-code, "SFMono-Regular", Consolas, "Liberation Mono", monospace); white-space: nowrap; }
   .git-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .git-chip :global(.lume-icon) { flex: 0 0 auto; color: var(--git-tone); }
   .git-chip i { color: var(--workspace-faint, #89958f); font-style: normal; }

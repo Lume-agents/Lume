@@ -171,7 +171,7 @@
   .environment-trigger.fab:active { transform: translateY(2px); box-shadow: inset 0 1px 2px color-mix(in srgb, #000 20%, transparent), 0 0 0 color-mix(in srgb, var(--workspace-line) 90%, #000), 0 2px 5px rgba(17, 35, 27, .2); }
   .environment-trigger.compact { width: 24px; height: 24px; border-radius: 7px; background: var(--workspace-sidebar); }
   .environment-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
-  .environment-count { position: absolute; top: -3px; right: -3px; min-width: 15px; height: 15px; padding: 0 3px; display: grid; place-items: center; border-radius: 8px; color: var(--workspace-raised); background: var(--workspace-accent); font-size: 9px; font-weight: 750; font-variant-numeric: tabular-nums; }
+  .environment-count { position: absolute; top: -3px; right: -3px; min-width: 15px; height: 15px; padding: 0 3px; display: grid; place-items: center; border-radius: 8px; color: var(--workspace-raised); background: var(--workspace-accent); font-size: 10px; font-weight: 750; font-variant-numeric: tabular-nums; }
   .environment-menu { position: fixed; z-index: 300; width: min(324px, calc(100vw - 24px)); padding: 8px; overflow: auto; overscroll-behavior: contain; box-sizing: border-box; border-radius: 14px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 14px 42px rgba(8, 18, 13, .22); font-family: inherit; scrollbar-width: thin; scrollbar-color: var(--workspace-line) transparent; outline: none; }
   .environment-menu header { display: flex; align-items: center; justify-content: space-between; padding: 4px 5px 9px; }
   .environment-menu header > strong { color: var(--workspace-strong); font-size: 12px; font-weight: 700; }
@@ -192,7 +192,7 @@
   .environment-state i.live { background: #3f9b69; box-shadow: 0 0 0 3px color-mix(in srgb, #3f9b69 22%, transparent); }
   .environment-foot { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .environment-ports { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
-  .environment-pid { color: var(--workspace-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+  .environment-pid { color: var(--workspace-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
   .environment-menu .port-link, .port-label { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 6px; color: var(--workspace-accent); background: var(--workspace-raised); border: 1px solid var(--workspace-line); font-size: 10px; font-variant-numeric: tabular-nums; }
   .port-label { color: var(--workspace-muted); }
   .environment-menu .stop-environment { height: 26px; padding: 0 10px 0 8px; display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; border: 1px solid color-mix(in srgb, #c0554f 55%, transparent); border-radius: 7px; color: #c0554f; background: color-mix(in srgb, #c0554f 10%, transparent); font-size: 10px; font-weight: 750; transition: color 120ms ease, background 120ms ease; }

@@ -209,7 +209,7 @@
   .menu { position: absolute; top: calc(100% + 5px); z-index: 40; max-height: 340px; padding: 4px; overflow: auto; display: grid; gap: 1px; border: 1px solid var(--workspace-line); border-radius: 10px; background: var(--workspace-raised, #262a28); background-clip: padding-box; box-shadow: 0 16px 38px rgba(12, 20, 16, .28); scrollbar-width: thin; }
   .menu.branches { left: 0; right: 0; }
   .menu.actions { right: 0; width: min(270px, 100%); }
-  .menu-title { margin: 2px 6px 4px; color: var(--workspace-muted); font-size: 9.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+  .menu-title { margin: 2px 6px 4px; color: var(--workspace-muted); font-size: 10px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
   .item { width: 100%; min-width: 0; min-height: 30px; padding: 0 8px; display: flex; align-items: center; gap: 8px; border: 0; border-radius: 7px; color: var(--workspace-text); background: transparent; font-size: 11px; text-align: left; transition: background-color .12s ease; }
   .item:hover:not(:disabled) { background: color-mix(in srgb, var(--workspace-accent) 11%, transparent); }
   .item > span:not(.next):not(.check) { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -220,7 +220,7 @@
   .check { width: 12px; flex: 0 0 12px; color: var(--workspace-accent); }
   .check :global(svg) { color: var(--workspace-accent) !important; }
   .name { min-width: 0; flex: 1; overflow: hidden; color: var(--workspace-strong); text-overflow: ellipsis; white-space: nowrap; }
-  small { min-width: 0; max-width: 50%; flex: 0 1 auto; overflow: hidden; color: var(--workspace-muted); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+  small { min-width: 0; max-width: 50%; flex: 0 1 auto; overflow: hidden; color: var(--workspace-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   hr { width: calc(100% - 12px); height: 1px; margin: 3px 6px; border: 0; background: var(--workspace-line); }
   .back { height: 28px; padding: 0 8px; display: flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 10.5px; font-weight: 650; }
   .back :global(svg) { transform: rotate(180deg); }

@@ -29,5 +29,5 @@
   button { min-height: 54px; padding: 6px 4px; display: grid; justify-items: center; align-content: center; gap: 3px; border: 0; border-radius: 14px; color: var(--workspace-muted); background: transparent; font-size: 11.5px; font-weight: 650; }
   button.active { color: var(--workspace-accent); background: var(--workspace-accent-soft); }
   .icon { position: relative; display: grid; place-items: center; }
-  .badge { position: absolute; top: -5px; right: -9px; min-width: 17px; height: 17px; padding: 0 4px; display: grid; place-items: center; border: 2px solid var(--workspace-sidebar); border-radius: 999px; color: #1b1406; background: #e0a84a; font: 800 9.5px/1 var(--lume-font-ui, sans-serif); font-style: normal; }
+  .badge { position: absolute; top: -5px; right: -9px; min-width: 17px; height: 17px; padding: 0 4px; display: grid; place-items: center; border: 2px solid var(--workspace-sidebar); border-radius: 999px; color: #1b1406; background: #e0a84a; font: 800 10px/1 var(--lume-font-ui, sans-serif); font-style: normal; }
 </style>

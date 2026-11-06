@@ -333,7 +333,7 @@
   .state-failed { color: #d06e66; }
   .usage { --tone: #57b380; width: 30px; height: 30px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 50%; background: conic-gradient(var(--tone) var(--remaining), color-mix(in srgb, var(--workspace-muted) 22%, transparent) 0); }
   .usage::before { position: absolute; content: ""; }
-  .usage b { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; color: var(--workspace-strong); background: var(--workspace-sidebar); font-size: 9.5px; font-weight: 800; }
+  .usage b { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; color: var(--workspace-strong); background: var(--workspace-sidebar); font-size: 10px; font-weight: 800; }
   .usage.mid { --tone: #d6a24d; }
   .usage.low { --tone: #d0645c; }
   .stop { width: 38px; height: 38px; display: grid; place-items: center; flex: 0 0 auto; border: 1px solid color-mix(in srgb, #d0645c 40%, var(--workspace-line)); border-radius: 12px; color: #d76e66; background: color-mix(in srgb, #d0645c 8%, transparent); }

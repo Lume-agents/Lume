@@ -277,11 +277,11 @@
   .copy { min-width: 0; flex: 1; display: grid; gap: 0; }
   .meta-row { min-width: 0; display: flex; align-items: center; gap: 5px; }
   .copy strong { min-width: 0; overflow: hidden; color: var(--workspace-strong); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-  .copy small { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--workspace-muted); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
+  .copy small { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--workspace-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   .chevron { flex: 0 0 auto; display: inline-flex; color: var(--workspace-muted); opacity: .6; transition: transform .2s ease, opacity .15s ease; }
   .commit:hover .chevron { opacity: 1; }
   .chevron.open { transform: rotate(180deg); opacity: 1; }
-  .ref { max-width: 45%; flex: 0 1 auto; overflow: hidden; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 35%, transparent); border-radius: 999px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 9%, transparent); font-size: 9px; font-weight: 650; line-height: 1.6; text-overflow: ellipsis; white-space: nowrap; }
+  .ref { max-width: 45%; flex: 0 1 auto; overflow: hidden; padding: 0 6px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 35%, transparent); border-radius: 999px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 9%, transparent); font-size: 10px; font-weight: 650; line-height: 1.6; text-overflow: ellipsis; white-space: nowrap; }
   .ref.tag { color: #d6a441; border-color: rgba(214, 164, 65, .4); background: rgba(214, 164, 65, .1); }
   .ref.current { color: #fff; background: var(--workspace-accent); }
   .detail { min-width: 0; padding: 2px 8px 12px 2px; display: grid; gap: 9px; }
@@ -291,8 +291,8 @@
   .facts dt { color: var(--workspace-muted); }
   .facts dd { min-width: 0; margin: 0; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; color: var(--workspace-text); }
   .facts dd.hash { flex-wrap: nowrap; }
-  .facts code { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--workspace-text); font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }
-  .copy-hash, .parent { height: 20px; padding: 0 6px; display: inline-flex; align-items: center; border: 1px solid var(--workspace-line); border-radius: 6px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 9.5px; cursor: pointer; }
+  .facts code { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--workspace-text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  .copy-hash, .parent { height: 20px; padding: 0 6px; display: inline-flex; align-items: center; border: 1px solid var(--workspace-line); border-radius: 6px; color: var(--workspace-text); background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
   .parent { font-family: ui-monospace, monospace; }
   .copy-hash:hover, .parent:hover { border-color: color-mix(in srgb, var(--workspace-accent) 45%, transparent); color: var(--workspace-accent); }
   .message { margin: 0; padding: 8px 10px; border-radius: 8px; color: var(--workspace-text); background: color-mix(in srgb, var(--workspace-muted) 7%, transparent); font: inherit; font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -302,7 +302,7 @@
   .files button.active { border-color: color-mix(in srgb, var(--workspace-accent) 55%, transparent); background: color-mix(in srgb, var(--workspace-accent) 10%, transparent); }
   .path { min-width: 0; flex: 1; display: grid; gap: 1px; }
   .path > span, .path small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .path small { color: var(--workspace-muted); font-size: 9.5px; }
+  .path small { color: var(--workspace-muted); font-size: 10px; }
   .stat { display: flex; gap: 6px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
   .plus { color: var(--workspace-accent); font-weight: 650; }
   .minus { color: #c36c60; font-weight: 650; }

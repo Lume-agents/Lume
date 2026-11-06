@@ -178,7 +178,7 @@
   .level-2 { background: color-mix(in srgb, var(--workspace-accent) 52%, var(--workspace-pane)); }
   .level-3 { background: color-mix(in srgb, var(--workspace-accent) 76%, var(--workspace-pane)); }
   .level-4 { background: var(--workspace-accent); }
-  .calendar-caption { min-height: 39px; display: flex; align-items: center; margin: 0; color: var(--workspace-muted); font-size: 9px; line-height: 1.5; }
+  .calendar-caption { min-height: 39px; display: flex; align-items: center; margin: 0; color: var(--workspace-muted); font-size: 10px; line-height: 1.5; }
   .has-repositories { padding-bottom: 64px; }
   .repository-overlay { position: absolute; top: calc(100% - 62px); bottom: 8px; left: 8px; right: 8px; border-radius: 10px; background: var(--activity-surface); overflow: hidden; transition: top 380ms cubic-bezier(.22, 1, .36, 1); }
   .repository-overlay.expanded { top: 8px; display: flex; flex-direction: column; }
@@ -198,9 +198,9 @@
   .top-repositories > button:hover { background: var(--workspace-subtle); }
   .top-repositories > button:disabled { cursor: default; opacity: .5; }
   .contribution-repo { min-width: 0; flex: 1; display: grid; gap: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .contribution-repo > small { color: var(--workspace-muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .contribution-repo > small { color: var(--workspace-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .top-repositories strong { display: grid; gap: 3px; color: var(--workspace-strong); font-size: 12px; font-weight: 550; font-variant-numeric: tabular-nums; text-align: right; }
-  .top-repositories strong > small { color: var(--workspace-muted); font-size: 8px; font-weight: 400; }
+  .top-repositories strong > small { color: var(--workspace-muted); font-size: 10px; font-weight: 400; }
   .activity-error { position: relative; z-index: 1; margin: 7px 0 10px; color: var(--workspace-text); font-size: 10px; line-height: 1.5; }
   .activity-tooltip { position: fixed; z-index: 1000; pointer-events: none; max-width: calc(100vw - 16px); padding: 7px 9px; border-radius: 7px; font: 500 11px/1.4 var(--lume-font-ui, Inter, sans-serif); box-shadow: 0 4px 14px rgba(0, 0, 0, .18); box-sizing: border-box; }
   @media (prefers-reduced-motion: reduce) { .repository-overlay, .expand-chevron :global(svg) { transition: none; } }

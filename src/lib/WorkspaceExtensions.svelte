@@ -525,7 +525,7 @@
   .card-text { display: -webkit-box; overflow: hidden; color: var(--workspace-muted); font: 500 11px/1.45 var(--lume-font-ui, Inter, sans-serif); -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
   .card-meta { min-width: 0; display: flex; align-items: center; gap: 7px; overflow: hidden; color: var(--workspace-faint); font: 600 10px/1 var(--lume-font-ui, Inter, sans-serif); white-space: nowrap; }
   .card-meta > span:not(.chip):not(.installed-mark) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .chip { flex: 0 0 auto; padding: 3px 6px; border-radius: 5px; color: var(--workspace-muted); background: var(--workspace-subtle); font: 650 9.5px/1 var(--lume-font-ui, Inter, sans-serif); }
+  .chip { flex: 0 0 auto; padding: 3px 6px; border-radius: 5px; color: var(--workspace-muted); background: var(--workspace-subtle); font: 650 10px/1 var(--lume-font-ui, Inter, sans-serif); }
   .chip.muted { color: var(--workspace-faint); }
   .install, .installed-mark { margin-left: auto; flex: 0 0 auto; }
   .installs { display: inline-flex; align-items: center; gap: 4px; }
@@ -533,7 +533,7 @@
   .repo-stars svg { flex: 0 0 auto; }
   .repo-stars:hover { color: var(--workspace-accent); text-decoration: underline; text-underline-offset: 3px; }
   .repo-stars:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
-  .marketplace { max-width: 45%; overflow: hidden; color: var(--workspace-faint); font: 600 9.5px/1 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
+  .marketplace { max-width: 45%; overflow: hidden; color: var(--workspace-faint); font: 600 10px/1 var(--lume-font-ui, Inter, sans-serif); text-overflow: ellipsis; white-space: nowrap; }
   .install { height: 24px; padding: 0 9px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font: 700 10.5px/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .install:hover:not(:disabled) { background: color-mix(in srgb, var(--workspace-accent) 18%, transparent); }
   .install:disabled { opacity: .55; cursor: default; }
@@ -541,7 +541,7 @@
   .catalog-summary { margin: 0 0 11px; color: var(--workspace-faint); font: 600 11px/1 var(--lume-font-ui, Inter, sans-serif); }
   .catalog-toolbar { min-width: 0; margin-bottom: 11px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
   .catalog-toolbar .catalog-summary { margin: 0; line-height: 1.4; }
-  .official-badge { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; padding: 3px 5px; border-radius: 5px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font: 650 9px/1 var(--lume-font-ui, Inter, sans-serif); white-space: nowrap; }
+  .official-badge { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; padding: 3px 5px; border-radius: 5px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font: 650 10px/1 var(--lume-font-ui, Inter, sans-serif); white-space: nowrap; }
   .catalog-card .card-meta { min-height: 24px; flex-wrap: wrap; overflow: visible; row-gap: 6px; }
   .catalog-card .card-meta > span, .catalog-card time { white-space: nowrap; }
   .show-more { margin: 14px auto 0; height: 30px; padding: 0 14px; display: block; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-muted); background: var(--workspace-raised); font: 650 11px/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }

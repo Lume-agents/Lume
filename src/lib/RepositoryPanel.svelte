@@ -381,7 +381,7 @@
   .file-copy { min-width: 0; flex: 1; display: grid; gap: 1px; }
   .file-copy strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; }
   .file-copy small { color: var(--workspace-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .file-status { flex: 0 0 auto; color: var(--workspace-muted); font-size: 9px; }
+  .file-status { flex: 0 0 auto; color: var(--workspace-muted); font-size: 10px; }
   .file-status.new-file { color: var(--workspace-accent); }
   .file-status.conflict { color: #c36c60; }
   .empty-list { display: flex; align-items: center; gap: 9px; margin: 22px 0; color: var(--workspace-muted); font-size: 11px; line-height: 1.6; }
@@ -396,7 +396,7 @@
   .diff-code:global(.is-scrolling)::-webkit-scrollbar-thumb { background: var(--workspace-scroll-thumb); }
   .diff-line { min-width: max-content; display: grid; grid-template-columns: 26px 26px minmax(0, 1fr); white-space: pre; }
   .diff-line > code { padding: 0 10px 0 5px; }
-  .line-number { padding-inline: 3px; color: var(--workspace-muted); font: 9px var(--lume-font-code, ui-monospace, monospace); line-height: inherit; text-align: right; user-select: none; }
+  .line-number { padding-inline: 3px; color: var(--workspace-muted); font: 10px var(--lume-font-code, ui-monospace, monospace); line-height: inherit; text-align: right; user-select: none; }
   .diff-code .added { background: color-mix(in srgb, var(--workspace-accent) 10%, transparent); color: var(--workspace-accent); }
   .diff-code .removed { background: rgba(190, 81, 69, .1); color: #c36c60; }
   .diff-code .hunk { color: var(--workspace-muted); background: var(--workspace-subtle); }
@@ -413,8 +413,8 @@
   .item-copy { min-width: 0; display: grid; gap: 7px; flex: 1; }
   .item-copy strong { color: var(--workspace-strong); font-size: 12px; line-height: 1.5; font-weight: 550; overflow-wrap: anywhere; }
   .item-meta { display: flex; flex-wrap: wrap; gap: 5px 9px; color: var(--workspace-muted); font-size: 10px; }
-  .pr-branches { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; color: var(--workspace-muted); font-size: 9px; overflow-wrap: anywhere; }
-  .current-label { color: var(--workspace-accent); font-size: 9px; }
+  .pr-branches { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; color: var(--workspace-muted); font-size: 10px; overflow-wrap: anywhere; }
+  .current-label { color: var(--workspace-accent); font-size: 10px; }
   .checks-status { display: flex; align-items: center; gap: 7px; padding: 10px 0; margin: 0; color: var(--workspace-muted); font-size: 10px; }
   .repository-empty { padding: 32px 7px; display: grid; justify-items: center; gap: 13px; text-align: center; color: var(--workspace-muted); }
   .repository-empty strong { color: var(--workspace-strong); font-size: 13px; }

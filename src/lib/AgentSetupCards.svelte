@@ -159,7 +159,7 @@
 
 <style>
   .agent-setup { display: grid; gap: .9em; font-size: var(--agent-setup-font, 12px); }
-  .group-title { margin: .5em 2px 0; opacity: .62; font-size: .8em; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .group-title { margin: .5em 2px 0; opacity: .62; font-size: max(10px, .8em); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
   .agent-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .35em 1em; padding: 1em 1.1em; border: 1px solid color-mix(in srgb, currentColor 13%, transparent); border-radius: 1.1em; background: color-mix(in srgb, currentColor 4%, transparent); }
   .agent-card.step-connected { border-color: color-mix(in srgb, var(--workspace-accent, #3f9b69) 38%, transparent); }
   .compact .agent-card { padding: .7em .9em; border-radius: .9em; }
@@ -168,22 +168,22 @@
   .agent-copy { min-width: 0; display: grid; gap: 2px; }
   .agent-heading { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
   .agent-heading strong { font-size: 1.08em; }
-  .agent-copy small { opacity: .68; font-size: .9em; line-height: 1.4; overflow-wrap: anywhere; }
-  .badge { display: inline-flex; align-items: center; gap: 5px; padding: .1em .65em .1em .55em; border-radius: 999px; background: color-mix(in srgb, currentColor 8%, transparent); font-size: .8em; font-weight: 700; }
+  .agent-copy small { opacity: .68; font-size: max(10px, .9em); line-height: 1.4; overflow-wrap: anywhere; }
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: .1em .65em .1em .55em; border-radius: 999px; background: color-mix(in srgb, currentColor 8%, transparent); font-size: max(10px, .8em); font-weight: 700; }
   .badge i { width: .55em; height: .55em; border-radius: 50%; background: currentColor; opacity: .45; }
   .badge.connected { color: var(--workspace-accent, #3f9b69); background: color-mix(in srgb, var(--workspace-accent, #3f9b69) 14%, transparent); }
   .badge.connected i { background: var(--workspace-accent, #3f9b69); opacity: 1; }
   .badge.installed, .badge.ready { color: #4d8cb8; background: color-mix(in srgb, #4d8cb8 13%, transparent); }
   .badge.installed i, .badge.ready i { background: #4d8cb8; opacity: 1; }
   .agent-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
-  .agent-actions button { min-height: 2.5em; padding: 0 1.1em; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: .8em; color: inherit; background: transparent; font: inherit; font-size: .95em; font-weight: 650; cursor: pointer; }
+  .agent-actions button { min-height: 2.5em; padding: 0 1.1em; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: .8em; color: inherit; background: transparent; font: inherit; font-size: max(10px, .95em); font-weight: 650; cursor: pointer; }
   .agent-actions button:hover:not(:disabled) { background: color-mix(in srgb, currentColor 8%, transparent); }
   .agent-actions button.primary { border-color: transparent; color: #f5fbf7; background: var(--workspace-accent, #3f9b69); }
   .agent-actions button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--workspace-accent, #3f9b69); }
   .agent-actions button:disabled { opacity: .5; cursor: default; }
-  .unavailable { max-width: 13em; opacity: .6; font-size: .85em; line-height: 1.35; text-align: right; }
-  .hint { grid-column: 2 / -1; opacity: .62; font-size: .85em; line-height: 1.4; }
-  .diagnostic-list { grid-column: 1 / -1; display: grid; gap: .3em; margin-top: .4em; padding-top: .6em; border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); font-size: .9em; }
+  .unavailable { max-width: 13em; opacity: .6; font-size: max(10px, .85em); line-height: 1.35; text-align: right; }
+  .hint { grid-column: 2 / -1; opacity: .62; font-size: max(10px, .85em); line-height: 1.4; }
+  .diagnostic-list { grid-column: 1 / -1; display: grid; gap: .3em; margin-top: .4em; padding-top: .6em; border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); font-size: max(10px, .9em); }
   .diagnostic-list span { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
   .diagnostic-list i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #aab6b0; }
   .diagnostic-list .diagnostic-ok i { background: #3f9b69; }

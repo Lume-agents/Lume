@@ -19,7 +19,7 @@
 
 <style>
   .mcp-chips { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-  .mcp-chip { --tone: var(--workspace-muted, #61736a); box-sizing: border-box; max-width: 100%; min-height: 17px; padding: 1px 6px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid color-mix(in srgb, var(--tone) 28%, var(--workspace-line, rgba(65, 94, 80, .14))); border-radius: 6px; color: color-mix(in srgb, var(--tone) 78%, var(--workspace-strong, #52665c)); background: color-mix(in srgb, var(--tone) 10%, transparent); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 8px))/1.3 var(--lume-font-ui, Inter, sans-serif); }
+  .mcp-chip { --tone: var(--workspace-muted, #61736a); box-sizing: border-box; max-width: 100%; min-height: 17px; padding: 1px 6px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid color-mix(in srgb, var(--tone) 28%, var(--workspace-line, rgba(65, 94, 80, .14))); border-radius: 6px; color: color-mix(in srgb, var(--tone) 78%, var(--workspace-strong, #52665c)); background: color-mix(in srgb, var(--tone) 10%, transparent); font: 650 var(--activity-detail-size, var(--chat-tiny-font-size, 10px))/1.3 var(--lume-font-ui, Inter, sans-serif); }
   .mcp-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .server { --tone: #6b7bd6; }
   .info { --tone: #4d99cc; }

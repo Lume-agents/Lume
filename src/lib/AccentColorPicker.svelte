@@ -260,12 +260,12 @@
   .color-popover header button { width: 27px; height: 27px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--picker-muted); background: transparent; cursor: pointer; }
   .color-popover header button:hover { color: var(--picker-text); background: var(--picker-subtle); }
   .ready-section { display: grid; gap: 7px; }
-  .ready-section > span, .custom-controls label > span { display: flex; justify-content: space-between; color: var(--picker-muted); font-size: 8px; font-weight: 720; }
+  .ready-section > span, .custom-controls label > span { display: flex; justify-content: space-between; color: var(--picker-muted); font-size: 10px; font-weight: 720; }
   .ready-colors { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; }
   .ready-colors button { aspect-ratio: 1; min-width: 0; padding: 0; border: 2px solid var(--picker-surface); border-radius: 8px; background: var(--ready-color); box-shadow: 0 0 0 1px color-mix(in srgb, var(--picker-text) 12%, transparent); cursor: pointer; transition: transform 150ms cubic-bezier(.16, 1, .3, 1), box-shadow 150ms ease; }
   .ready-colors button:hover { transform: translateY(-2px) scale(1.05); }
   .ready-colors button.active { box-shadow: 0 0 0 2px var(--picker-text); }
-  .custom-toggle { min-height: 32px; padding: 0 9px; display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--picker-line); border-radius: 9px; color: var(--picker-text); background: var(--picker-pane); font-size: 8px; font-weight: 740; cursor: pointer; }
+  .custom-toggle { min-height: 32px; padding: 0 9px; display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--picker-line); border-radius: 9px; color: var(--picker-text); background: var(--picker-pane); font-size: 10px; font-weight: 740; cursor: pointer; }
   .custom-toggle :global(svg) { transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }.custom-toggle.open :global(svg) { transform: rotate(180deg); }
   .custom-controls { display: grid; gap: 10px; }
   .color-preview { height: 34px; overflow: hidden; border: 1px solid var(--picker-line); border-radius: 9px; }.color-preview i { display: block; width: 100%; height: 100%; }
@@ -280,7 +280,7 @@
   .custom-controls input::-moz-range-thumb { width: 9px; height: 9px; border: 3px solid var(--picker-surface); border-radius: 50%; background: var(--picker-preview); }
   .color-popover footer { min-height: 30px; display: flex; justify-content: flex-end; gap: 6px; }
   .color-popover footer:empty { display: none; }
-  .color-popover footer button { min-height: 30px; padding: 0 9px; border: 1px solid var(--picker-line); border-radius: 8px; color: var(--picker-muted); background: transparent; font-size: 8px; font-weight: 730; cursor: pointer; }
+  .color-popover footer button { min-height: 30px; padding: 0 9px; border: 1px solid var(--picker-line); border-radius: 8px; color: var(--picker-muted); background: transparent; font-size: 10px; font-weight: 730; cursor: pointer; }
   .color-popover footer .apply { margin-left: auto; color: var(--picker-surface); border-color: transparent; background: var(--picker-accent); }
   .color-popover footer button:hover { color: var(--picker-text); background: var(--picker-subtle); }
   .color-popover footer .apply:hover { color: var(--picker-surface); background: var(--picker-accent); filter: brightness(1.05); }

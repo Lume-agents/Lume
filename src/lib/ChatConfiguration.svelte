@@ -144,7 +144,7 @@
   .config-list li + li { border-top: 1px solid var(--workspace-line); }
   .config-list li.off { opacity: .55; }
   .config-list strong { min-width: 0; overflow: hidden; color: var(--workspace-text); font-size: 10.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-  .config-list small { flex: 0 0 auto; max-width: 45%; overflow: hidden; color: var(--workspace-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+  .config-list small { flex: 0 0 auto; max-width: 45%; overflow: hidden; color: var(--workspace-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   .config-more { padding: 6px 0 2px; border: 0; color: var(--workspace-accent); background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
   .config-more:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
 </style>

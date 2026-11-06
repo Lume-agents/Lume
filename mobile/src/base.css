@@ -28,10 +28,10 @@ button { -webkit-user-select: none; user-select: none; }
   --file-monochrome-filter: grayscale(1) brightness(0) contrast(.82);
   --file-monochrome-opacity: .78;
   --mobile-text-scale: 1;
-  --chat-font-size: calc(15px * var(--mobile-text-scale));
-  --chat-small-font-size: calc(12.5px * var(--mobile-text-scale));
-  --chat-tiny-font-size: calc(11px * var(--mobile-text-scale));
-  --activity-detail-size: calc(11.5px * var(--mobile-text-scale));
+  --chat-font-size: max(10px, calc(15px * var(--mobile-text-scale)));
+  --chat-small-font-size: max(10px, calc(12.5px * var(--mobile-text-scale)));
+  --chat-tiny-font-size: max(10px, calc(11px * var(--mobile-text-scale)));
+  --activity-detail-size: max(10px, calc(11.5px * var(--mobile-text-scale)));
   --workspace-chat-font-size: var(--chat-font-size);
   --workspace-chat-font-adjust: calc(15px * var(--mobile-text-scale) - 13.5px);
   --workspace-chat-small-adjust: calc(12px * var(--mobile-text-scale) - 11px);

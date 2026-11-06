@@ -56,5 +56,5 @@
   .attachment-image { padding: 0; display: block; overflow: hidden; border: 0; background: none; cursor: zoom-in; }
   .attachment-image:focus-visible { outline: 2px solid var(--lume-accent-strong, #4d9d76); outline-offset: 2px; }
   img { width: 100%; height: 100%; display: block; }
-  .attachment-file { max-width: 190px; padding: 6px 8px; overflow: hidden; border: 1px solid currentColor; border-radius: 7px; font-size: 9px; opacity: 0.8; text-overflow: ellipsis; white-space: nowrap; }
+  .attachment-file { max-width: 190px; padding: 6px 8px; overflow: hidden; border: 1px solid currentColor; border-radius: 7px; font-size: 10px; opacity: 0.8; text-overflow: ellipsis; white-space: nowrap; }
 </style>

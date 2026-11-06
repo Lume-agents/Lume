@@ -57,7 +57,7 @@
   .update-banner-main { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; }
   .update-logo { display: grid; place-items: center; flex: 0 0 auto; width: 40px; height: 40px; overflow: hidden; border-radius: 12px; background: color-mix(in srgb, var(--update-text) 9%, transparent); }
   .update-banner-copy { display: grid; gap: 1px; }
-  small { color: var(--update-muted); font-size: 9px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
+  small { color: var(--update-muted); font-size: 10px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
   .version { font-size: 17.5px; font-weight: 600; letter-spacing: -.01em; line-height: 1.2; }
   .update-note { margin: 10px 0 0; }
   .update-banner-copy { flex: 1 1 110px; min-width: 0; }

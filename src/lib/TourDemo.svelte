@@ -66,10 +66,10 @@
   .row-2 { animation: needs 6s infinite; }
   .row-2 .state { animation: state 6s infinite; }
   .ask { position: absolute; left: 6%; right: 6%; bottom: 7%; padding: 7px 8px; display: grid; gap: 5px; border: 1px solid color-mix(in srgb, var(--c-amber) 50%, var(--c-line)); border-radius: 9px; background: color-mix(in srgb, var(--c-raised) 92%, var(--c-amber)); box-shadow: 0 8px 20px rgba(0, 0, 0, .4); opacity: 0; transform: translateY(8px); animation: ask 6s infinite; }
-  .ask strong { color: var(--c-amber); font: 700 7.5px/1.2 var(--lume-font-ui, Inter, sans-serif); }
-  .ask code { padding: 3px 5px; border-radius: 4px; color: var(--c-strong); background: rgba(0, 0, 0, .28); font: 7px/1.3 var(--lume-font-code, monospace); }
+  .ask strong { color: var(--c-amber); font: 700 10px/1.2 var(--lume-font-ui, Inter, sans-serif); }
+  .ask code { padding: 3px 5px; border-radius: 4px; color: var(--c-strong); background: rgba(0, 0, 0, .28); font: 10px/1.3 var(--lume-font-code, monospace); }
   .buttons { display: flex; gap: 4px; }
-  .buttons i { padding: 3px 6px; border-radius: 5px; color: var(--c-muted); background: rgba(255, 255, 255, .06); font: 700 6.5px/1 var(--lume-font-ui, Inter, sans-serif); font-style: normal; }
+  .buttons i { padding: 3px 6px; border-radius: 5px; color: var(--c-muted); background: rgba(255, 255, 255, .06); font: 700 10px/1 var(--lume-font-ui, Inter, sans-serif); font-style: normal; }
   .buttons .allow { color: #0d1a13; background: var(--c-accent); animation: press 6s infinite; }
   .cursor { position: absolute; left: 70%; top: 92%; width: 14px; height: 14px; clip-path: polygon(0 0, 100% 62%, 58% 66%, 78% 100%, 62% 100%, 42% 70%, 0 92%); background: #f7faf5; filter: drop-shadow(0 1px 1px #000); animation: cursor 6s infinite; }
   @keyframes needs { 0%, 18% { background: transparent; } 24%, 62% { background: color-mix(in srgb, var(--c-amber) 16%, transparent); } 70%, 100% { background: transparent; } }
@@ -105,8 +105,8 @@
   .panel-lines { position: absolute; inset: 22% 10% 10%; display: grid; align-content: start; gap: 12%; animation: lines 6s infinite; }
   .panel-lines b { height: 6px; border-radius: 3px; background: var(--c-muted); opacity: .4; }
   .shell .dino { position: absolute; left: 10px; top: 8px; transition: none; animation: dino 6s infinite; }
-  .badge { position: absolute; right: -6px; top: -6px; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%; color: #1a1306; background: var(--c-amber); font: 800 8px/1 var(--lume-font-ui, Inter, sans-serif); font-style: normal; opacity: 0; animation: badge 6s infinite; }
-  .caption { position: absolute; left: 50%; top: 72%; color: var(--c-amber); font: 700 9px/1 var(--lume-font-ui, Inter, sans-serif); white-space: nowrap; opacity: 0; transform: translateX(-50%); animation: caption 6s infinite; }
+  .badge { position: absolute; right: -6px; top: -6px; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%; color: #1a1306; background: var(--c-amber); font: 800 10px/1 var(--lume-font-ui, Inter, sans-serif); font-style: normal; opacity: 0; animation: badge 6s infinite; }
+  .caption { position: absolute; left: 50%; top: 72%; color: var(--c-amber); font: 700 10px/1 var(--lume-font-ui, Inter, sans-serif); white-space: nowrap; opacity: 0; transform: translateX(-50%); animation: caption 6s infinite; }
   @keyframes shell { 0%, 14% { width: 40%; height: 74%; border-radius: 12px; } 30%, 78% { width: 15%; height: 15%; border-radius: 16px; } 92%, 100% { width: 40%; height: 74%; border-radius: 12px; } }
   @keyframes lines { 0%, 12% { opacity: 1; } 20%, 84% { opacity: 0; } 94%, 100% { opacity: 1; } }
   @keyframes dino { 0%, 14% { left: 10px; top: 8px; } 30%, 78% { left: calc(50% - 6px); top: calc(50% - 5px); } 92%, 100% { left: 10px; top: 8px; } }

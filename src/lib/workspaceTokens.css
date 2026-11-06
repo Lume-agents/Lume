@@ -23,7 +23,7 @@
     --file-monochrome-filter: grayscale(1) brightness(0) contrast(.82);
     --file-monochrome-opacity: .78;
     --chat-small-font-size: 10px;
-    --chat-tiny-font-size: 8px;
+    --chat-tiny-font-size: 10px;
   color: var(--workspace-text);
   font-family: var(--lume-font-ui, "Segoe UI Variable", "SF Pro Text", ui-sans-serif, system-ui, sans-serif);
   accent-color: var(--workspace-accent);

@@ -13,7 +13,8 @@ const backend = read("src-tauri/src/lib.rs");
 assert.match(scale, /setZoom\(scale\)/);
 assert.match(scale, /--lume-chat-unzoom", String\(1 \/ scale\)/);
 assert.ok(!/zoom: var\(--lume-chat-unzoom/.test(pane), "no counter-zoom on the chat layout, which rounded icons into fractional pixels");
-assert.match(pane, /--workspace-chat-font-size: calc\(calc\(12px \+ var\(--workspace-chat-font-adjust\)\) \* var\(--lume-chat-unzoom, 1\)\)/, "chat text sizes cancel the interface size");
+assert.match(pane, /--workspace-chat-font-size: calc\(max\(10px, 12px \+ var\(--workspace-chat-font-adjust\)\) \* var\(--lume-chat-unzoom, 1\)\)/, "chat text sizes cancel the interface size, with a 10px floor before the compensation");
+assert.match(pane, /--workspace-chat-tiny-size: calc\(max\(10px, 8px \+ var\(--workspace-chat-tiny-adjust\)\) \* var\(--lume-chat-unzoom, 1\)\)/, "the smallest chat text is never under 10px");
 assert.ok(capability.permissions.includes("core:webview:allow-set-webview-zoom"));
 assert.match(workspace, /applyInterfaceScale\(preferences\.interfaceScale\)/);
 assert.match(terminal, /applyInterfaceScale\(nextPreferences\.interfaceScale\)/);
@@ -75,6 +76,6 @@ assert.match(icon, /A page with a large pencil that leaves it at the lower right
 // Small texts: "load earlier messages" and the changed-files toggle use the chat's small size, the sidebar filters 9.5px.
 assert.match(pane, /\.load-earlier-chat \{[^}]*font-size: var\(--workspace-chat-small-size\)/);
 assert.match(pane, /\.changed-files-toggle \{[^}]*font: 720 var\(--workspace-chat-small-size\)/);
-assert.match(workspace, /\.session-filters button \{[^}]*font-size: 9\.5px/);
+assert.match(workspace, /\.session-filters button \{[^}]*font-size: 10px/);
 
 console.log("interface scale test passed");

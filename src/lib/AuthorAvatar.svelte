@@ -7,7 +7,7 @@
   const hue = $derived([...(email || name)].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) % 360, 7));
 </script>
 
-<span class="avatar" style:width="{size}px" style:height="{size}px" style:font-size="{Math.round(size * 0.42)}px" style:--hue={hue} title={email ? `${name} <${email}>` : name}>
+<span class="avatar" style:width="{size}px" style:height="{size}px" style:font-size="{Math.max(10, Math.round(size * 0.42))}px" style:--hue={hue} title={email ? `${name} <${email}>` : name}>
   {#if url && !failed}<img src={url} alt="" width={size} height={size} loading="lazy" referrerpolicy="no-referrer" onerror={() => (failed = true)} />{:else}{initials}{/if}
 </span>
 

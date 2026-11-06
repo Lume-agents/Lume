@@ -116,7 +116,7 @@
   .mark { width: 36px; height: 36px; display: grid; place-items: center; flex: 0 0 auto; color: var(--lume-accent-strong); }
   .heading { min-width: 0; flex: 1; display: grid; gap: 2px; }
   .heading strong { font-size: 15px; font-weight: 780; letter-spacing: -.025em; }
-  .heading small { color: #6f7e76; font-size: 9px; }
+  .heading small { color: #6f7e76; font-size: 10px; }
   .dots { display: flex; gap: 5px; }
   .dots i { width: 6px; height: 6px; border-radius: 50%; background: rgba(60, 90, 75, .2); transition: background 200ms ease, transform 200ms ease; }
   .dots i.done { background: var(--lume-accent-strong); }
@@ -125,7 +125,7 @@
   .points { margin: 0; padding: 0; display: grid; gap: 8px; list-style: none; }
   .points li { padding: 10px 12px; display: grid; gap: 3px; border: 1px solid rgba(74, 104, 89, .14); border-radius: 12px; background: rgba(255, 255, 252, .7); }
   .points b { font-size: 11px; font-weight: 750; }
-  .points span { color: #62736a; font-size: 9.5px; line-height: 1.5; }
+  .points span { color: #62736a; font-size: 10px; line-height: 1.5; }
   footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   footer button { min-height: 34px; padding: 0 16px; border: 1px solid rgba(74, 104, 89, .2); border-radius: 10px; color: inherit; background: transparent; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
   footer button.primary { margin-left: auto; border-color: transparent; color: #f5fbf7; background: var(--lume-accent-strong, #3f9b69); }

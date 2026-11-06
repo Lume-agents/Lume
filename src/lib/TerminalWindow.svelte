@@ -3584,10 +3584,10 @@
 
       <nav class="hub-tabs" inert={modalOpen} aria-label={tr("Session details", "Detalhes da sessão")}>
         <button class:active={activeTab === "chat"} type="button" onclick={() => void selectTab("chat")}>
-          {tr("Chat", "Chat")} <span>{chatEntries.length}</span>
+          {tr("Chat", "Chat")}{#if chatEntries.length} <span>{chatEntries.length}</span>{/if}
         </button>
         <button class:active={activeTab === "changes"} type="button" onclick={() => void selectTab("changes")}>
-          {tr("Changes", "Alterações")} <span>{changedFiles.length}</span>
+          {tr("Changes", "Alterações")}{#if changedFiles.length} <span>{changedFiles.length}</span>{/if}
         </button>
         {#if plan}
           <button class:active={activeTab === "plan"} type="button" onclick={() => void selectTab("plan")}>

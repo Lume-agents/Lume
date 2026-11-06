@@ -3749,11 +3749,11 @@
   .sidebar-toggle { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
   .sidebar-toggle:hover, .sidebar-toggle:focus-visible { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .brand-header strong { color: var(--workspace-strong); font-size: 14px; letter-spacing: -.02em; }
-  .brand-header small { color: var(--workspace-muted); font-size: 9px; font-weight: 650; letter-spacing: .01em; }
-  .compact-mode, .settings-button, .inspector-button { width: 29px; height: 29px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
+  .brand-header small { color: var(--workspace-muted); font-size: 10px; font-weight: 650; letter-spacing: .01em; }
+  .compact-mode, .settings-button, .inspector-button { width: 29px; height: 29px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: color-mix(in srgb, var(--workspace-text) 82%, var(--workspace-muted)); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
   .compact-mode:hover, .settings-button:hover, .settings-button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .inspector-button:hover, .inspector-button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
-  .settings-scrim { position: fixed; z-index: 30; inset: 0; display: flex; justify-content: flex-end; background: rgba(8, 17, 13, .22); }
+  .settings-scrim { position: fixed; z-index: 30; inset: 0; display: flex; justify-content: flex-end; background: rgba(8, 17, 13, .38); }
   .workspace-settings { width: min(430px, calc(100vw - 72px)); height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr); color: var(--workspace-text); background: var(--workspace-raised); box-shadow: -18px 0 52px rgba(9, 23, 16, .16); }
   .workspace-settings > header { min-height: 72px; padding: 14px 16px 13px 19px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--workspace-line); }
   .workspace-settings > header > span { min-width: 0; flex: 1; display: grid; gap: 3px; }

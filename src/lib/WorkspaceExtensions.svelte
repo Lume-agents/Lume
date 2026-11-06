@@ -288,7 +288,7 @@
 
   <nav class="agent-rail" aria-label={tr("Agents", "Agentes")}>
     {#each agents as item (item.agent)}
-      <button class:on={item.agent === agent?.agent} type="button" onclick={() => chooseAgent(item.agent)}>
+      <button class:on={item.agent === agent?.agent} class:empty={tab === "installed" && !item.items.length} type="button" onclick={() => chooseAgent(item.agent)}>
         <BrandIcon name={item.agent as never} size={18} />
         <span><strong>{item.label}</strong><small>{tab === "catalog" ? (item.managesPlugins ? tr("Plugin catalog", "Catálogo de plugins") : tr("No catalog", "Sem catálogo")) : tr(`${item.items.length} installed`, `${item.items.length} instalados`)}</small></span>
       </button>
@@ -608,4 +608,6 @@
   }
   @keyframes ext-spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .ext-card { transition: none; } .spinner { animation-duration: 2s; } }
+  /* An agent with nothing installed stays reachable but steps back from the ones that have extensions. */
+  .agent-rail button.empty:not(.on) { opacity: .55; }
 </style>

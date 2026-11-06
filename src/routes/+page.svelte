@@ -4,6 +4,8 @@
   import { onMount, setContext, tick } from "svelte";
   import { flip } from "svelte/animate";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
+  // The environments menu floats on the page body and takes its colours from the Workspace tokens.
+  import "$lib/workspaceTokens.css";
   import { groupSessions, readSidebarGroups, sidebarGroupsKey, writeSidebarGroups, type SidebarGroupState } from "$lib/sidebarGroups";
   import { cubicOut } from "svelte/easing";
   import { fade, fly, slide } from "svelte/transition";
@@ -702,6 +704,8 @@
     let resizeFrame: number | null = null;
 
     const syncHeight = (resizeWindow: boolean) => {
+      // A panel held to the window's height while the window grows is not asking for a smaller window.
+      if (resizeWindow && node.offsetHeight >= window.innerHeight - 1 && expandedHeight > window.innerHeight) return;
       applyExpandedHeight(node.offsetHeight, resizeWindow);
     };
 
@@ -761,10 +765,18 @@
       ["running", "permission_required", "waiting_for_input"].includes(session.status),
     ).length,
   );
+  /** What asks for the person: a permission, a question or a failure. A finished turn waiting for the next prompt does not. */
   function needsAttention(session: AgentSession) {
     return Boolean(session.pendingPermission || session.pendingQuestion)
-      || ["permission_required", "waiting_for_input", "failed"].includes(session.status);
+      || ["permission_required", "failed"].includes(session.status);
   }
+  const workingCount = $derived(visibleAgentSessions.filter((session) => session.status === "running").length);
+  const attentionCount = $derived(visibleAgentSessions.filter(needsAttention).length);
+  const headerSummary = $derived.by(() => {
+    const parts = [tr(`${workingCount} working`, `${workingCount} trabalhando`)];
+    if (attentionCount) parts.push(attentionCount === 1 ? tr("1 needs you", "1 precisa de você") : tr(`${attentionCount} need you`, `${attentionCount} precisam de você`));
+    return parts.join(" · ");
+  });
 
   const inspectedSession = $derived(
     visibleAgentSessions.find((session) => session.id === inspectorSessionId)
@@ -2335,7 +2347,8 @@
       const target = currentExpandedSize();
       const position = expandedPositionFromCompact(anchor, target);
       await Promise.allSettled([
-        setOverlaySurfaceSize(target.width, target.height),
+        // The webview grows with the window too, or the panel would be cut at the old height.
+        setOverlaySurfaceSize(target.width, target.height, true),
         moveOverlay(position.x, position.y, false, preferences.monitorId),
       ]);
       overlayPosition = position;
@@ -2974,7 +2987,7 @@
   function actionLabel(action: PermissionAction) {
     return {
       allow_once: tr("Allow once", "Permitir uma vez"),
-      allow_session: tr("For this session", "Nesta sessão"),
+      allow_session: tr("Allow for this session", "Permitir nesta sessão"),
       deny: tr("Deny", "Recusar"),
       open_source: tr("Open source", "Abrir origem"),
     }[action];
@@ -3113,7 +3126,7 @@
           <LumeMascot status={shellStatus} awake={mascotAwake || dragging} size={32} />
           <div>
             <strong>Lume</strong>
-            <span>{activeCount === 1 ? tr("1 active agent", "1 agente ativo") : tr(`${activeCount} active agents`, `${activeCount} agentes ativos`)}</span>
+            <span>{headerSummary}</span>
           </div>
           <ConnectionBadges language={preferences.language} large />
         </div>
@@ -3448,7 +3461,7 @@
                       <path d="m8 5 5 5-5 5" />
                     </svg>
                   </button>
-                  <span class="session-environment-marker"><SessionEnvironmentMenu sessionId={session.id} language={preferences.language} variant="sidebar" /></span>
+                  <span class="session-environment-marker workspace-tokens" class:dark={effectiveDark}><SessionEnvironmentMenu sessionId={session.id} language={preferences.language} variant="sidebar" /></span>
 
                   {#if selectedId === session.id}
                     {@const capabilities = sessionCapabilities(session)}
@@ -4375,7 +4388,8 @@
           data-tour="orb-settings"
           type="button"
           onclick={() => activateNavigation("settings")}
-          aria-label={tr("Settings", "Configurações")}
+          aria-label={updateState === "available" ? tr("Settings, an update is available", "Ajustes, há uma atualização disponível") : newMobileDevice !== null ? tr("Settings, a new mobile device", "Ajustes, um novo dispositivo mobile") : tr("Settings", "Ajustes")}
+          title={updateState === "available" ? tr("An update is available", "Há uma atualização disponível") : newMobileDevice !== null ? tr("A new mobile device connected", "Um novo dispositivo mobile se conectou") : undefined}
         >
           <OrbNavigationIcon name="settings" activation={navigationActivation.view === "settings" ? navigationActivation.count : 0} />
           <span>{tr("Settings", "Ajustes")}</span>
@@ -4502,7 +4516,9 @@
     position: relative;
     width: 100%;
     height: auto;
-    max-height: 544px;
+    /* Never taller than the window: while the window is still growing (or did not grow), the content scrolls
+       and the bottom navigation stays in view instead of being cut off. */
+    max-height: min(544px, 100vh);
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -4740,7 +4756,8 @@
   .settings::-webkit-scrollbar-thumb,
   .terminal-picker::-webkit-scrollbar-thumb { border-radius: 999px; background: #cad2ce; }
 
-  .session-list { padding: 5px 14px 8px; }
+  /* The last card fades into the navigation instead of being cut by it, so the list reads as scrollable. */
+  .session-list { padding: 5px 14px 26px; mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent); }
   .orb-group-heading { width: 100%; margin: 8px 0 2px; padding: 3px 4px; display: flex; align-items: center; gap: 6px; border: 0; border-radius: 8px; color: #73807a; background: transparent; font: inherit; font-size: 10px; text-align: left; cursor: pointer; }
   .orb-group-heading:disabled { cursor: default; }
   .orb-group-heading:not(:disabled):hover { background: rgba(76, 104, 92, 0.07); }
@@ -4765,7 +4782,9 @@
   .session-details .permission-block, .session-details .question-block { margin: 0 0 14px; padding: 11px; border: 1px solid rgba(166, 122, 49, .28); border-radius: 10px; font-size: 12px; line-height: 1.5; }
   .session-details .permission-block code { max-height: 120px; overflow: auto; text-overflow: clip; white-space: pre-wrap; overflow-wrap: anywhere; }
   .session-details .permission-actions button, .session-details .question-actions button { min-height: 32px; font-size: 11px; }
-  .overlay-shell.dark .status-line.status-permission_required, .overlay-shell.dark .status-line.status-waiting_for_input { color: #e0b777; }
+  .overlay-shell.dark .status-line.status-permission_required { color: #e0b777; }
+  /* A finished turn waiting for the next prompt reads as calm green, as in the Workspace; amber is for what needs the person. */
+  .overlay-shell.dark .status-line.status-waiting_for_input { color: #9dceb0; }
   .overlay-shell.dark .status-line.status-running { color: #91bee0; }
   .overlay-shell.dark .status-line.status-completed { color: #9dceb0; }
   .overlay-shell.dark footer button.active { color: #a4dbbc; }
@@ -4849,8 +4868,8 @@
   .status-line.status-completed { color: #4f966b; }
   .status-line.status-completed > i { background: #59aa78; box-shadow: 0 0 0 3px rgba(89, 170, 120, 0.1); }
   .status-line.status-failed > i { background: #b95454; }
-  .status-line.status-waiting_for_input { color: #a87925; }
-  .status-line.status-waiting_for_input > i { background: #c99a3f; }
+  .status-line.status-waiting_for_input { color: #4f966b; }
+  .status-line.status-waiting_for_input > i { background: #59aa78; }
 
   @keyframes status-dot-bounce {
     0%, 60%, 100% { opacity: 0.48; transform: translateY(1px); }

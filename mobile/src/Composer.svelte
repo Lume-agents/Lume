@@ -458,7 +458,7 @@
   .efforts button { height: 36px; padding: 0 13px; border: 1px solid var(--workspace-line); border-radius: 11px; color: var(--workspace-muted); background: transparent; font-size: 13px; font-weight: 680; }
   .efforts button.on { border-color: var(--workspace-accent); color: var(--workspace-accent); background: var(--workspace-accent-soft); }
   .delivery { display: inline-flex; justify-self: start; gap: 2px; padding: 3px; border-radius: 11px; background: var(--workspace-subtle); }
-  .delivery button { height: 30px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 12.5px; font-weight: 680; }
+  .delivery button { height: 36px; padding: 0 12px; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; font-size: 12.5px; font-weight: 680; }
   .delivery button.on { color: var(--workspace-strong); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(0, 0, 0, .18); }
   .attached { display: flex; gap: 8px; overflow-x: auto; }
   .attached-image { position: relative; width: 62px; height: 62px; flex: 0 0 auto; overflow: hidden; border: 1px solid var(--workspace-line); border-radius: 12px; }
@@ -484,4 +484,6 @@
   .dialog-actions button { height: 46px; flex: 1; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-strong); background: transparent; font-weight: 700; }
   .dialog-actions .primary { border-color: transparent; color: #fff; background: var(--workspace-accent); }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* The remove button keeps its small look; its touch area reaches 44px. */
+  .attached-image button::after { content: ""; position: absolute; inset: -11px; }
 </style>

@@ -369,7 +369,7 @@
   .file-chip { min-height: 32px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-strong); background: var(--workspace-raised); font-size: 12.5px; }
   .response-footer { margin-top: 8px; display: flex; align-items: center; gap: 8px; color: var(--workspace-faint); font-size: 12px; }
   .response-footer span { flex: 1; }
-  .response-footer button { width: 34px; height: 34px; display: grid; place-items: center; border: 0; border-radius: 10px; color: var(--workspace-muted); background: transparent; }
+  .response-footer button { width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 10px; color: var(--workspace-muted); background: transparent; }
   .changed-files { border: 1px solid var(--workspace-line); border-radius: 14px; background: var(--workspace-raised); }
   .changed-toggle { width: 100%; min-height: 44px; padding: 0 12px; display: flex; align-items: center; gap: 8px; border: 0; color: var(--workspace-strong); background: transparent; font-size: 13.5px; font-weight: 650; }
   .changed-toggle span { flex: 1; text-align: left; }

@@ -5,7 +5,7 @@
   import type { Preferences, WorkflowContextPolicy, WorkflowContextSelection, WorkflowGroupDefinition, WorkflowRole, WorkflowStepDefinition, WorkflowConnectionDefinition, WorkflowContextPackage, WorkflowRun } from "$lib/domain";
   import type { HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
-  import { localize } from "$lib/i18n";
+  import { displayText, localize } from "$lib/i18n";
   import { desktopWorkflowBackend, type WorkflowBoardBackend } from "$lib/workflowBoardBackend";
   import { BOARD_CARD_WIDTH, BOARD_CARD_HEIGHT, analyzeChain, checkConnection, connectionRefusalMessage, problemMessage, newGroup, newStep, preserveRoleOverrides, defaultRole, defaultContextSelection, addStep, updateStep, removeStep, addConnection, updateConnection, removeConnection, insertStep, edgeGeometry, cardRect, cardAt, placeCard, toBoardPoint, zoomAround, fitView, normalizeLayout, stepVisualState, connectionWaitsForApproval, type BoardPoint, type BoardLayout, type BoardView } from "$lib/workflowBoard";
   import { WorkflowBoardSaveQueue } from "$lib/workflowBoardPersistence";
@@ -319,7 +319,7 @@
   }
   function stepStatus(step: WorkflowStepDefinition) {
     const state = stepVisualState(run, step.id);
-    if (state === "idle") return sessionFor(step)?.statusLabel ?? tr("Unavailable", "Indisponível");
+    if (state === "idle") { const label = sessionFor(step)?.statusLabel; return label ? displayText(language, label) : tr("Unavailable", "Indisponível"); }
     return { pending: tr("Pending", "Pendente"), running: tr("Running", "Executando"), completed: tr("Completed", "Concluído"), failed: tr("Failed", "Falhou"), skipped: tr("Skipped", "Ignorado") }[state];
   }
   function notify(message: string, tone: SystemBannerItem["tone"] = "error") {

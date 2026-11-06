@@ -21,5 +21,5 @@
   .banner.error { border-color: color-mix(in srgb, #d0645c 45%, var(--workspace-line)); }
   .banner.error span { color: #d76e66; }
   .banner.success span { color: var(--workspace-accent); }
-  button { width: 30px; height: 30px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 9px; color: var(--workspace-muted); background: transparent; }
+  button { width: 40px; height: 40px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 9px; color: var(--workspace-muted); background: transparent; }
 </style>

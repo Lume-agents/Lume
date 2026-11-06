@@ -85,8 +85,23 @@ const englishDisplayText = new Map<string, string>([
   ["Não foi possível consultar a versão", "Could not read the version"],
 ]);
 
+/**
+ * Labels the app writes in English, shown in Portuguese. The rest of the app writes Portuguese, so the table above
+ * read backwards covers what it translates the other way.
+ */
+const portugueseDisplayText = new Map<string, string>([
+  ...[...englishDisplayText].map(([portuguese, english]) => [english, portuguese] as [string, string]),
+  ["Waiting for input", "Aguardando ação"],
+  ["Ready in Lume", "Pronto no Lume"],
+  ["Recovered in Lume", "Recuperado no Lume"],
+  ["Prompt interrupted", "Prompt interrompido"],
+  ["Prompt queued", "Prompt na fila"],
+  ["Finished", "Finalizado"],
+  ["Context compacted", "Contexto compactado"],
+]);
+
 export function displayText(language: Language, value: string) {
-  if (language === "pt-BR") return value;
+  if (language === "pt-BR") return portugueseDisplayText.get(value) ?? value;
   const exact = englishDisplayText.get(value);
   if (exact) return exact;
   if (value.startsWith("Finalizado há ")) return value.replace("Finalizado há ", "Completed ").replace(" min", " min ago");

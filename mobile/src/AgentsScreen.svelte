@@ -142,7 +142,7 @@
   .icon { width: 40px; height: 40px; display: grid; place-items: center; border: 0; border-radius: 12px; color: var(--workspace-muted); background: var(--workspace-subtle); }
   .icon.spinning :global(svg) { animation: spin 700ms linear infinite; }
   .filters { padding: 0 16px 10px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
-  .filters button { height: 34px; padding: 0 13px; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-radius: 999px; color: var(--workspace-muted); background: transparent; font-size: 13px; font-weight: 650; }
+  .filters button { height: 38px; padding: 0 13px; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; border: 1px solid var(--workspace-line); border-radius: 999px; color: var(--workspace-muted); background: transparent; font-size: 13px; font-weight: 650; }
   .filters button.on { border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); color: var(--workspace-accent); background: var(--workspace-accent-soft); }
   .filters small { color: var(--workspace-faint); font-size: 11.5px; }
   .list { min-height: 0; padding: 2px 12px 18px; overflow-y: auto; overscroll-behavior: contain; }

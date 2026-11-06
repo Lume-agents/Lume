@@ -43,8 +43,15 @@
     return value;
   }
 
+  const effortNames: Record<string, [string, string]> = {
+    none: ["None", "Nenhum"], minimal: ["Minimal", "Mínimo"], low: ["Low", "Baixo"], medium: ["Medium", "Médio"],
+    high: ["High", "Alto"], xhigh: ["Extra high", "Muito alto"], max: ["Max", "Máximo"],
+  };
+
   function efforts(value?: string | null) {
-    return value ? value.charAt(0).toUpperCase() + value.slice(1) : tr("Default", "Padrão");
+    if (!value) return tr("Default", "Padrão");
+    const name = effortNames[value.toLowerCase()];
+    return name ? tr(name[0], name[1]) : value.charAt(0).toUpperCase() + value.slice(1);
   }
 
   async function load(id: string, agent: string, folder: string | undefined) {

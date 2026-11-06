@@ -242,7 +242,7 @@
                         <path class="gauge-track" pathLength="100" d="M7 33a23 23 0 0 1 46 0" />
                         <path class="gauge-progress" pathLength="100" d="M7 33a23 23 0 0 1 46 0" style:stroke-dasharray={`${gauge.remaining} 100`} />
                       </svg>
-                      <strong aria-hidden="true">{gauge.remaining}</strong>
+                      <strong aria-hidden="true">{gauge.remaining}<small>%</small></strong>
                       <em aria-hidden="true">{gauge.window}</em>
                     </div>
                   {/each}
@@ -386,6 +386,8 @@
   .gauge-track { stroke: var(--workspace-line); stroke-width: 5.5; }
   .gauge-progress { stroke: var(--usage-color); stroke-width: 5.5; transition: stroke-dasharray 360ms cubic-bezier(.16, 1, .3, 1); }
   .usage-gauge strong { position: absolute; right: 0; bottom: 3px; left: 0; color: var(--workspace-strong); font-size: 15px; font-variant-numeric: tabular-nums; line-height: 1; text-align: center; }
+  /* The number is what remains of the window, as the terminal shows it. */
+  .usage-gauge strong small { margin-left: 1px; font-size: 10px; font-weight: 700; opacity: .7; }
   .usage-gauge em { position: absolute; top: 1px; right: 2px; max-width: 45%; overflow: hidden; color: var(--workspace-strong); font-size: 10px; font-style: normal; font-weight: 780; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
   .usage-error { grid-column: 1 / -1; margin: 0; color: var(--workspace-muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }.usage-error strong { color: var(--workspace-strong); font-weight: 720; }
   .usage-gauges > i { width: 56px; min-width: 0; flex: 0 1 56px; height: 30px; border: 5px solid var(--workspace-line); border-bottom: 0; border-radius: 32px 32px 0 0; opacity: .5; }

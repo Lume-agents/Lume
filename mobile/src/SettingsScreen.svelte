@@ -159,7 +159,7 @@
   .themes button.on small { color: var(--workspace-accent); font-weight: 700; }
   .themes small { font-size: 11.5px; }
   .segmented { display: inline-flex; gap: 2px; padding: 3px; border-radius: 12px; background: var(--workspace-subtle); }
-  .segmented button { height: 32px; padding: 0 11px; border: 0; border-radius: 9px; color: var(--workspace-muted); background: transparent; font-size: 13px; font-weight: 680; }
+  .segmented button { height: 38px; padding: 0 11px; border: 0; border-radius: 9px; color: var(--workspace-muted); background: transparent; font-size: 13px; font-weight: 680; }
   .segmented button.on { color: var(--workspace-strong); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(0, 0, 0, .18); }
   select { max-width: 52%; height: 36px; padding: 0 10px; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-strong); background: var(--workspace-bg); font-size: 14px; }
   .switch { position: relative; width: 46px; height: 28px; flex: 0 0 auto; border-radius: 999px; background: color-mix(in srgb, var(--workspace-muted) 35%, transparent); transition: background 160ms ease; }

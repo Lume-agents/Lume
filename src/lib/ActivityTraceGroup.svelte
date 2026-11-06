@@ -160,7 +160,7 @@
       </span>
     </span>
     <strong>{summary}</strong>
-    <small>{activities.length}</small>
+    <small title={tr(`${activities.length} events`, `${activities.length} eventos`)} aria-label={tr(`${activities.length} events`, `${activities.length} eventos`)}>{activities.length}</small>
     <svg class="cluster-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
   </button>
   {#if expanded}

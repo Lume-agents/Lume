@@ -14,9 +14,11 @@
 {/if}
 
 <style>
-  .session-repository { min-width: 0; max-width: 100%; display: inline-flex; align-items: center; gap: 5px; align-self: start; padding: 0; border: 0; background: transparent; color: var(--workspace-muted); font: inherit; font-size: 9px; text-align: left; cursor: pointer; }
+  .session-repository { min-width: 0; max-width: 100%; display: inline-flex; align-items: center; gap: 5px; align-self: start; padding: 0; border: 0; background: transparent; color: var(--workspace-muted); font: inherit; font-size: 10px; text-align: left; cursor: pointer; }
   .session-repository > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .session-repository .branch-name { color: var(--workspace-accent); }
+  /* The repository name stays whole (it is short); a long branch is what gets cut. */
+  .session-repository > span:not(.branch-name) { flex: 0 0 auto; max-width: 45%; }
+  .session-repository .branch-name { min-width: 0; flex: 0 1 auto; color: var(--workspace-accent); }
   .session-repository > i { width: 4px; height: 4px; flex: 0 0 auto; border-radius: 50%; background: var(--workspace-accent); }
   .session-repository:hover { color: var(--workspace-accent); }
   .session-repository:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 3px; border-radius: 2px; }

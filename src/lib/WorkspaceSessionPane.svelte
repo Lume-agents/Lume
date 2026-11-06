@@ -1870,7 +1870,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     if (session.agent === "omp" && action === "allow_once") return tr("Allow once", "Permitir uma vez");
     return {
       allow_once: tr("Allow", "Permitir"),
-      allow_session: tr("For this session", "Nesta sessão"),
+      allow_session: tr("Allow for this session", "Permitir nesta sessão"),
       deny: tr("Deny", "Recusar"),
       open_source: tr("Open source", "Abrir origem"),
     }[action];
@@ -2717,9 +2717,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                 />
                 {#if entry.isFinalResponse}
                   <footer class="response-footer">
-                    <span class="response-duration">{entry.durationMs !== undefined
-                      ? `${tr("Worked for", "Trabalhou por")} ${formatAgentDuration(entry.durationMs)}`
-                      : tr("Work time unavailable", "Tempo de trabalho indisponível")}</span>
+                    <!-- An unknown duration says nothing useful, so it is left out. -->
+                    {#if entry.durationMs !== undefined}<span class="response-duration">{`${tr("Worked for", "Trabalhou por")} ${formatAgentDuration(entry.durationMs)}`}</span>{/if}
                     <div class="final-actions" aria-label={tr("Response actions", "Ações da resposta")}>
                       <button type="button" title={tr("Copy response", "Copiar resposta")} aria-label={tr("Copy response", "Copiar resposta")} onclick={() => void copyResponse(item.detail ?? "")}><LumeIcon name="copy" size={14} /></button>
                       <button class:active={sourceEntryId === entry.id} type="button" title={tr("View sources", "Visualizar fontes")} aria-label={tr("View sources", "Visualizar fontes")} aria-expanded={sourceEntryId === entry.id} onclick={() => { promptIndexOpen = false; sourceEntryId = sourceEntryId === entry.id ? null : entry.id; }}><LumeIcon name="sources" size={14} /></button>

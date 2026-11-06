@@ -48,7 +48,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import { displayFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
   import { activityThinkingLabel, activityThinkingState, formatAgentDuration, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
   import { collectAgentAlerts } from "$lib/agentAlerts";
-  import { usageAlertDismissals } from "$lib/usageAlertDismissals";
+  import { hasUsageAlertDismissal, usageAlertDismissals } from "$lib/usageAlertDismissals";
   import { renderWorkspaceMarkdownWithFileBadges } from "$lib/workspaceFileReferences.js";
   import { parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { BoundedRenderCache } from "$lib/boundedRenderCache";
@@ -896,7 +896,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   const agentAlerts = $derived(collectAgentAlerts([session], language));
   const archivedAgentAlerts = $derived(
-    agentAlerts.filter((alert) => dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id)),
+    agentAlerts.filter((alert) => dismissedAgentAlertIds.includes(alert.id) || hasUsageAlertDismissal($usageAlertDismissals, alert.id)),
   );
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
     const items: SystemBannerItem[] = [];
@@ -905,7 +905,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     if (historyError) items.push({ id: "history-error", message: historyError, tone: "error", onDismiss: () => { historyError = ""; } });
     if (actionNotice) items.push({ id: "message-action", message: actionNotice, tone: "success", onDismiss: () => { actionNotice = ""; } });
     for (const alert of agentAlerts) {
-      if (alert.usage || dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id)) continue;
+      if (alert.usage || dismissedAgentAlertIds.includes(alert.id) || hasUsageAlertDismissal($usageAlertDismissals, alert.id)) continue;
       items.push({
         id: alert.id,
         message: alert.message,
@@ -919,7 +919,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   // Dismissal is shared by all views of the account's current usage window.
   const usageNotices = $derived(
-    agentAlerts.filter((alert) => alert.usage && !dismissedAgentAlertIds.includes(alert.id) && !$usageAlertDismissals.includes(alert.id)),
+    agentAlerts.filter((alert) => alert.usage && !dismissedAgentAlertIds.includes(alert.id) && !hasUsageAlertDismissal($usageAlertDismissals, alert.id)),
   );
 
   function archiveAgentAlert(id: string) {

@@ -93,9 +93,8 @@ export function collectAgentAlerts(
       const exhausted = remaining === 0;
       const windowLabel = limit.label.trim() || tr(language, "current window", "janela atual");
       add({
-        // The reset time drifts by seconds between reads, so it is rounded to the hour; otherwise every
-        // refresh looked like a new alert and brought back a banner and chime the user had already dismissed.
-        id: `usage:${session.agent}:${limit.id}:${limit.resetsAt == null ? "current" : Math.round(limit.resetsAt / 3_600_000)}:${exhausted ? "exhausted" : "low"}`,
+        // Keep the real timestamp: dismissal matching tolerates provider clock jitter even at hour boundaries.
+        id: `usage:${session.agent}:${limit.id}:${limit.resetsAt == null ? "current" : Math.trunc(limit.resetsAt)}:${exhausted ? "exhausted" : "low"}`,
         message: exhausted
           ? tr(language, `${session.agentLabel} reached the ${windowLabel} usage limit.`, `${session.agentLabel} atingiu o limite de uso de ${windowLabel}.`)
           : tr(language, `Only ${remaining}% of ${session.agentLabel}'s ${windowLabel} usage remains.`, `Restam apenas ${remaining}% do uso de ${windowLabel} do ${session.agentLabel}.`),
@@ -147,15 +146,21 @@ export function collectAgentAlerts(
       });
     }
 
+    // Providers can emit the same quota error on every poll. Keep one identity until the agent
+    // actually responds successfully, instead of treating each repeated activity as a new alert.
+    const lastSuccessfulMessage = session.activities.findLastIndex((activity) =>
+      activity.kind === "message" && activity.status === "completed" && !isUsageLimitActivity(activity));
     const recentFailures = session.activities
-      .filter((activity) => (activity.status === "failed" || isUsageLimitActivity(activity)) && now - activity.createdAt <= RECENT_FAILURE_WINDOW)
+      .filter((activity, index) => (activity.status === "failed" || isUsageLimitActivity(activity)) &&
+        (!isUsageLimitActivity(activity) || index > lastSuccessfulMessage) && now - activity.createdAt <= RECENT_FAILURE_WINDOW)
       .slice(-3).reverse();
+    const usageEpisode = session.activities.slice(lastSuccessfulMessage + 1).find(isUsageLimitFailure);
     for (const activity of recentFailures) {
       const usageFailure = isUsageLimitFailure(activity);
       if (usageFailure && !usageActive) continue;
       if (usageFailure && [...alerts.values()].some((alert) => alert.usageInfo?.agent === session.agent && alert.usageInfo.remaining === 0)) continue;
       add({
-        id: usageFailure ? `usage:failure:${session.agent}:${session.nativeSessionId ?? session.id}:${activity.id}` : `activity:${session.id}:${activity.id}`,
+        id: usageFailure ? `usage:failure:${session.agent}:${session.nativeSessionId ?? session.id}:${usageEpisode?.id ?? activity.id}` : `activity:${session.id}:${activity.id}`,
         message: failedActivityMessage(session, activity, language),
         tone: "error",
         duration: isMcpFailure(activity) || isUsageLimitFailure(activity) ? 0 : 9_000,
@@ -171,8 +176,10 @@ export function collectAgentAlerts(
 
     const latestFailure = recentFailures[0];
     if (session.status === "failed" && !latestFailure) {
+      const usageStatus = isUsageLimitText(session.statusLabel);
+      const lastSuccess = lastSuccessfulMessage >= 0 ? session.activities[lastSuccessfulMessage]?.id : "initial";
       add({
-        id: `${isUsageLimitText(session.statusLabel) ? "usage:" : ""}session:${session.id}:failed:${session.statusLabel}`,
+        id: usageStatus ? `usage:session:${session.agent}:${session.nativeSessionId ?? session.id}:${lastSuccess}` : `session:${session.id}:failed:${session.statusLabel}`,
         message: tr(language, `${name} failed: ${compact(session.statusLabel)}.`, `${name} falhou: ${compact(session.statusLabel)}.`),
         tone: "error",
         duration: 0,

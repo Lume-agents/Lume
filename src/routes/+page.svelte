@@ -56,7 +56,7 @@
   import { macosAutomationMessage } from "$lib/macosAutomation";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
-  import { usageAlertDismissals } from "$lib/usageAlertDismissals";
+  import { hasUsageAlertDismissal, usageAlertDismissals } from "$lib/usageAlertDismissals";
   import { playTone as playNotificationTone, type ToneKind } from "$lib/notificationTones";
   import { dismissLaunchSplash, rememberLaunchTheme } from "$lib/launchSplash";
   import { PAIR_REQUEST_EVENT, pairRequestBanner } from "$lib/pairRequests";
@@ -562,7 +562,7 @@
       onDismiss: () => (terminalOpenError = null),
     });
     for (const alert of collectAgentAlerts(sessions, preferences.language, Date.now(), { usageScope: "active" })) {
-      if (dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id)) continue;
+      if (dismissedAgentAlertIds.includes(alert.id) || hasUsageAlertDismissal($usageAlertDismissals, alert.id)) continue;
       visibleItems.push({
         id: alert.id,
         message: alert.message,
@@ -1013,7 +1013,7 @@
     const next = await loadSessions();
     // A usage alert that was not there before gets its own chime (the first load only records them).
     const freshUsageAlert = collectAgentAlerts(next, preferences.language, Date.now(), { usageScope: "active" })
-      .filter((alert) => alert.usage && !announcedUsageAlerts.has(alert.id) && !$usageAlertDismissals.includes(alert.id));
+      .filter((alert) => alert.usage && !hasUsageAlertDismissal([...announcedUsageAlerts], alert.id) && !hasUsageAlertDismissal($usageAlertDismissals, alert.id));
     if (!usageAlertsSeeded || withSound) freshUsageAlert.forEach((alert) => announcedUsageAlerts.add(alert.id));
     if (usageAlertsSeeded && withSound && freshUsageAlert.length && preferences.soundEnabled) playTone("usage");
     usageAlertsSeeded = true;

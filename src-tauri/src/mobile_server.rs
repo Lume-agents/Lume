@@ -1772,6 +1772,34 @@ mod tests {
             assert_eq!(decoded["type"], expected_type);
         }
 
+        protocol::record_test_usage_reset();
+        let mut found = false;
+        for _ in 0..20 {
+            let text = loop {
+                match socket.read().expect("usage event") {
+                    Message::Text(text) => break text,
+                    Message::Ping(value) => { socket.send(Message::Pong(value)).expect("pong"); }
+                    _ => {}
+                }
+            };
+            let outer: serde_json::Value = serde_json::from_str(&text).expect("envelope");
+            let sequence = outer["sequence"].as_u64().expect("sequence");
+            let encrypted = EncryptedEnvelope {
+                nonce: outer["nonce"].as_str().expect("nonce").into(),
+                ciphertext: outer["ciphertext"].as_str().expect("content").into(),
+            };
+            let update: serde_json::Value = decrypt_json(
+                &transport_key, &encrypted,
+                format!("lume-stream-message-v1:{stream_nonce}:{sequence}").as_bytes(),
+            ).expect("encrypted update");
+            if update["events"].as_array().is_some_and(|events| events.iter().any(|event|
+                event["type"] == "usage_reset" && event["agent"] == "codex" && event["windowId"] == "test-window" && event["remainingPercent"] == 0)) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "the confirmed reset reaches the encrypted mobile stream");
+
         running.store(false, Ordering::Relaxed);
         socket.close(None).expect("encerramento");
         server.join().expect("servidor");

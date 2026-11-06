@@ -624,6 +624,7 @@ class LumeNativePlugin : Plugin() {
             "update" -> {
                 val snapshot = message.getJSONObject("snapshot")
                 latestSnapshot = snapshot
+                notifier.observeEvents(message.optJSONArray("events"))
                 notifier.observe(snapshot)
                 persistSnapshot(config.deviceId, snapshot)
                 emit(

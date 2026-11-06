@@ -28,6 +28,7 @@ pub const PROTOCOL_FEATURES: &[&str] = &[
     "prompts",
     "image_prompts",
     "rate_limits",
+    "usage_reset_notifications",
     "permissions",
     "interactive_questions",
     "termination",
@@ -1668,6 +1669,7 @@ impl HubCommandResponse {
 pub enum HubEvent {
     SessionsChanged,
     WorkflowsChanged,
+    UsageReset { agent: AgentKind, window_id: String, window_label: String, remaining_percent: u8 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1764,7 +1766,22 @@ pub fn emit_workflows_changed(app: &AppHandle) {
     let _ = app.emit("lume://hub-event", event);
 }
 
+/// A fresh provider snapshot confirmed a new quota window. Mobile receives it over its existing
+/// authenticated stream, with no conversation or account information in the event.
+pub fn emit_usage_reset(app: &AppHandle, agent: AgentKind, window_id: String, window_label: String, remaining_percent: u8) {
+    let event = record_hub_event(HubEvent::UsageReset { agent, window_id, window_label, remaining_percent });
+    let _ = app.emit("lume://hub-event", event);
+}
+
+#[cfg(test)]
+pub(crate) fn record_test_usage_reset() {
+    record_hub_event(HubEvent::UsageReset { agent: AgentKind::Codex, window_id: "test-window".into(), window_label: "5h".into(), remaining_percent: 0 });
+}
+
 fn record_hub_event(event: HubEvent) -> HubEventEnvelope {
+    // Assign sequence numbers while holding the journal lock: concurrent publishers must not
+    // insert a later event first, or a mobile cursor could advance past the earlier one.
+    let mut journal = event_journal().lock().ok();
     let sequence = EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
     let occurred_at = now_millis();
     let envelope = HubEventEnvelope {
@@ -1774,7 +1791,7 @@ fn record_hub_event(event: HubEvent) -> HubEventEnvelope {
         occurred_at,
         event,
     };
-    if let Ok(mut journal) = event_journal().lock() {
+    if let Some(journal) = journal.as_mut() {
         if journal.len() == 256 {
             journal.pop_front();
         }
@@ -2577,6 +2594,7 @@ mod tests {
         assert!(hello["features"]
             .as_array()
             .is_some_and(|features| features.iter().any(|value| value == "realtime_stream")));
+        assert!(hello["features"].as_array().is_some_and(|features| features.iter().any(|value| value == "usage_reset_notifications")));
 
         let snapshot = serde_json::to_value(HubStreamMessage::Snapshot {
             sequence: 9,
@@ -2588,6 +2606,35 @@ mod tests {
         assert_eq!(snapshot["snapshot"]["sessions"][0]["id"], "codex:thread-1");
         assert!(snapshot["snapshot"]["workflowGroups"].is_array());
         assert!(snapshot["snapshot"]["workflowHistory"].is_array());
+    }
+
+    #[test]
+    fn usage_reset_event_contains_only_agent_and_window_metadata() {
+        let event = HubEventEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            event_id: "event-1".into(), sequence: 1, occurred_at: 123,
+            event: HubEvent::UsageReset { agent: AgentKind::Codex, window_id: "primary".into(), window_label: "5h".into(), remaining_percent: 0 },
+        };
+        let json = serde_json::to_value(event).expect("event");
+        assert_eq!(json["type"], "usage_reset");
+        assert_eq!(json["agent"], "codex");
+        assert_eq!(json["windowId"], "primary");
+        assert_eq!(json["windowLabel"], "5h");
+        assert_eq!(json["remainingPercent"], 0);
+        assert!(json.get("sessionId").is_none());
+        assert!(json.get("prompt").is_none());
+    }
+
+    #[test]
+    fn concurrent_events_are_journaled_in_sequence_order() {
+        let start = latest_event_sequence();
+        let threads = (0..6).map(|_| std::thread::spawn(|| {
+            for _ in 0..20 { record_hub_event(HubEvent::SessionsChanged); }
+        })).collect::<Vec<_>>();
+        for thread in threads { thread.join().expect("publisher"); }
+        let events = events_since(start);
+        assert!(!events.is_empty());
+        assert!(events.windows(2).all(|pair| pair[0].sequence < pair[1].sequence));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import type { HubCommand, HubCommandResponse, HubSession, HubSnapshot } from "$lib/hubProtocol";
+import type { HubCommand, HubCommandResponse, HubEventEnvelope, HubSession, HubSnapshot } from "$lib/hubProtocol";
 import type { Preferences, PromptDelivery, SurfacePalette, WorkflowGroupDefinition, WorkflowRun } from "$lib/domain";
 import type { WorkflowBoardBackend } from "$lib/workflowBoardBackend";
 import type { AgentSlashCommand } from "$lib/slashCommands";
@@ -7,6 +7,7 @@ import { decodeBytes, decryptPayload, encodeBytes, encryptPayload, keyFromSecret
 import { isNativeShell, nativePlatform, plugin, realtimePlugin, updaterPlugin, type MonitoringStatus, type RealtimeState } from "./native";
 import { pairingIntentUrl, parsePairingTarget, suggestedDeviceName, type PairingTarget } from "./pairing";
 import type { PreparedImage } from "./images";
+import { usageResetNotice } from "./usageReset";
 
 // Everything the phone keeps between launches. The keys are the first mobile app's, so an update keeps
 // the pairing, the device verification and the notification choices.
@@ -139,6 +140,8 @@ export class MobileClient {
   private installedVersion: string | undefined;
   private responseLoads = new Set<string>();
   private rateLimitRefreshes = new Map<string, number>();
+  private usageEventsSeeded = false;
+  private seenUsageResets = new Set<string>();
   private manifestUrl: string | null = null;
   private manifestSha: string | null = null;
   private runListeners = new Set<(run: WorkflowRun) => void>();
@@ -340,6 +343,8 @@ export class MobileClient {
     this.desktopId = null;
     this.nativeCredentials = false;
     this.realtimeConnected = false;
+    this.usageEventsSeeded = false;
+    this.seenUsageResets.clear();
     this.transportKey = undefined;
     this.showEntry();
     await cleared;
@@ -408,7 +413,9 @@ export class MobileClient {
     }
     try {
       const payload = await this.api(`/api/v1/events?since=${this.lastSequence}`);
-      const events: Array<{ sequence?: number }> = payload.events || [];
+      const events: HubEventEnvelope[] = payload.events || [];
+      if (this.usageEventsSeeded) this.notifyUsageResetEvents(events);
+      this.usageEventsSeeded = true;
       if (events.length) {
         this.lastSequence = Math.max(this.lastSequence, ...events.map((event) => event.sequence || 0));
         await this.refresh();
@@ -496,6 +503,7 @@ export class MobileClient {
       await realtime.addListener("connectionChanged", this.applyRealtimeState);
       await realtime.addListener("sessionSnapshot", ({ snapshot, sequence, cached }) => this.applyRealtimeSnapshot(snapshot, sequence, cached));
       await realtime.addListener("sessionDelta", ({ snapshot, events = [], cached }) => {
+        if (!cached) this.notifyUsageResetEvents(events);
         for (const event of events || []) this.lastSequence = Math.max(this.lastSequence, Number(event.sequence || 0));
         this.applyRealtimeSnapshot(snapshot, undefined, cached);
       });
@@ -681,6 +689,31 @@ export class MobileClient {
 
   // ---------------------------------------------------------------- notifications and verification
 
+  private notifyUsageResetEvents(events: HubEventEnvelope[]) {
+    if (!this.notifications || (nativePlatform() === "android" && this.nativeCredentials && realtimePlugin())) return;
+    for (const event of events) {
+      const notice = usageResetNotice(event, this.language);
+      if (!notice || this.seenUsageResets.has(notice.id)) continue;
+      this.seenUsageResets.add(notice.id);
+      if (this.seenUsageResets.size > 200) this.seenUsageResets.delete(this.seenUsageResets.values().next().value!);
+      void this.notifyUsageReset(notice).catch((error) => this.showBanner(error?.message || this.tr("Could not deliver the notification.", "Não foi possível mostrar a notificação."), "error"));
+    }
+  }
+
+  private async notifyUsageReset(notice: { id: string; title: string; body: string }) {
+    const local = plugin<any>("LocalNotifications");
+    if (isNativeShell() && local) {
+      let identifier = 17;
+      for (const character of `usage-reset-${notice.id}`) identifier = ((identifier * 31) + character.charCodeAt(0)) & 0x7fffffff;
+      await local.schedule({ notifications: [{ id: identifier || 1, title: notice.title, body: notice.body, channelId: "lume-agent-events", smallIcon: "ic_lume_notification" }] });
+      return;
+    }
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    const registration = await navigator.serviceWorker?.ready.catch(() => null);
+    if (registration) await registration.showNotification(notice.title, { body: notice.body, tag: `lume-usage-reset-${notice.id}`, icon: "./lume-mobile-icon.svg" });
+    else new Notification(notice.title, { body: notice.body, tag: `lume-usage-reset-${notice.id}` });
+  }
+
   private async notify(session: HubSession) {
     const name = sessionName(session);
     const messages: Record<string, string> = {
@@ -754,10 +787,10 @@ export class MobileClient {
           this.showBanner(this.tr("Notification access is blocked. Enable it in Android Settings → Apps → Lume → Notifications.", "As notificações estão bloqueadas. Ative em Configurações do Android → Apps → Lume → Notificações."), "error");
           return;
         }
-        await local.createChannel({ id: "lume-agent-events", name: "Agent activity", description: "Task completion, errors and permission requests", importance: 4, visibility: 1 });
+        await local.createChannel({ id: "lume-agent-events", name: "Agent activity", description: "Task completion, usage resets, errors and permission requests", importance: 4, visibility: 1 });
         this.setMonitoring(true, this.background);
         await this.syncMonitoring();
-        this.showBanner(this.tr("Notifications enabled for tasks, errors and approvals.", "Notificações ativadas para tarefas, erros e aprovações."), "success");
+        this.showBanner(this.tr("Notifications enabled for agent activity and usage resets.", "Notificações ativadas para atividades e limites renovados."), "success");
       } catch (error) {
         this.setMonitoring(false, false);
         void this.syncMonitoring().catch(() => undefined);

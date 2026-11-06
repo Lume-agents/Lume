@@ -78,7 +78,7 @@
     <h2>{client.tr("Notifications and security", "Notificações e segurança")}</h2>
     <div class="group">
       <button class="row toggle" type="button" onclick={() => void client.toggleNotifications()}>
-        <span><strong>{client.tr("Notifications", "Notificações")}</strong><small>{client.tr("Tasks, errors, approvals and questions", "Tarefas, erros, aprovações e perguntas")}</small></span>
+        <span><strong>{client.tr("Notifications", "Notificações")}</strong><small>{client.tr("Tasks, errors, approvals, questions and usage resets", "Tarefas, erros, aprovações, perguntas e limites renovados")}</small></span>
         <i class:on={client.notifications} class="switch"></i>
       </button>
       {#if client.nativeBackground}

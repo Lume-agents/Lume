@@ -13,7 +13,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 
 internal class LumeAgentNotifier(context: Context) {
     private val applicationContext = context.applicationContext
@@ -25,12 +27,36 @@ internal class LumeAgentNotifier(context: Context) {
         }
     }
 
+    fun observeEvents(events: JSONArray?) {
+        if (events == null || !LumeNativePreferences.notificationsEnabled(applicationContext)) return
+        synchronized(notificationLock) {
+            val stored = runCatching { JSONArray(state.getString(USAGE_RESETS, "[]")) }.getOrElse { JSONArray() }
+            val seen = linkedSetOf<String>()
+            for (index in 0 until stored.length()) stored.optString(index).takeIf(String::isNotBlank)?.let(seen::add)
+            var changed = false
+            for (index in 0 until events.length()) {
+                val event = events.optJSONObject(index) ?: continue
+                val notice = LumeUsageReset.notice(
+                    event.optString("type"), event.optString("eventId"), event.optLong("occurredAt"),
+                    event.optString("agent"), event.optString("windowLabel"), event.optInt("remainingPercent", -1), Locale.getDefault().language,
+                    System.currentTimeMillis(),
+                ) ?: continue
+                if (notice.id !in seen && notifyUsageReset(notice)) {
+                    seen.add(notice.id)
+                    changed = true
+                }
+            }
+            if (changed) state.edit { putString(USAGE_RESETS, JSONArray(seen.toList().takeLast(200)).toString()) }
+        }
+    }
+
     fun clear() {
         synchronized(notificationLock) {
             state.edit {
                 remove(STATUSES)
                 .remove(PERMISSIONS)
                 .remove(QUESTIONS)
+                .remove(USAGE_RESETS)
             }
         }
     }
@@ -139,6 +165,28 @@ internal class LumeAgentNotifier(context: Context) {
             .notify(notificationId(notificationKey), notification)
     }
 
+    private fun notifyUsageReset(notice: LumeUsageResetNotice): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return false
+        ensureChannel()
+        val id = notificationId("usage-reset:${notice.id}")
+        val intent = Intent(applicationContext, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pendingIntent = PendingIntent.getActivity(applicationContext, id, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_lume_notification)
+            .setColor(Color.rgb(104, 184, 135))
+            .setContentTitle("Lume")
+            .setContentText(notice.body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(notice.body))
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+        return runCatching { NotificationManagerCompat.from(applicationContext).notify(id, notification); true }.getOrDefault(false)
+    }
+
     private fun ensureChannel() {
         val manager = applicationContext.getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(
@@ -146,7 +194,7 @@ internal class LumeAgentNotifier(context: Context) {
             "Agent activity",
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
-            description = "Task completion, errors and permission requests"
+            description = "Task completion, usage resets, errors and permission requests"
         }
         manager.createNotificationChannel(channel)
     }
@@ -168,6 +216,7 @@ internal class LumeAgentNotifier(context: Context) {
         const val STATUSES = "session-statuses"
         const val PERMISSIONS = "session-permissions"
         const val QUESTIONS = "session-questions"
+        const val USAGE_RESETS = "usage-resets"
         val notificationLock = Any()
     }
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { collectAgentAlerts } from "../src/lib/agentAlerts.ts";
-import { createUsageAlertDismissals } from "../src/lib/usageAlertDismissals.ts";
+import { createUsageAlertDismissals, hasUsageAlertDismissal } from "../src/lib/usageAlertDismissals.ts";
 import { get } from "svelte/store";
 
 const now = 1_800_000_000_000;
@@ -69,7 +69,17 @@ const nextCycle = collectAgentAlerts([{ ...claudeIdle, rateLimits: [{ ...claudeI
 assert.ok(!get(orbDismissals).includes(nextCycle.id), "a new usage cycle must be allowed to notify");
 // The reset time drifts by seconds between reads; that must not look like a new cycle.
 const driftedReset = collectAgentAlerts([{ ...claudeIdle, rateLimits: [{ ...claudeIdle.rateLimits[0], resetsAt: now + 60_000 + 4_000 }] }], "pt-BR", now)[0];
-assert.ok(get(orbDismissals).includes(driftedReset.id), "a drifting reset time must keep a dismissed notice dismissed");
+assert.ok(hasUsageAlertDismissal(get(orbDismissals), driftedReset.id), "a drifting reset time must keep a dismissed notice dismissed");
+const boundary = now + 1_800_000;
+const beforeBoundary = collectAgentAlerts([{ ...claudeIdle, rateLimits: [{ ...claudeIdle.rateLimits[0], resetsAt: boundary - 4_000 }] }], "pt-BR", now)[0];
+const afterBoundary = collectAgentAlerts([{ ...claudeIdle, rateLimits: [{ ...claudeIdle.rateLimits[0], resetsAt: boundary + 4_000 }] }], "pt-BR", now)[0];
+assert.ok(hasUsageAlertDismissal([beforeBoundary.id], afterBoundary.id), "timestamp jitter across a rounding boundary is still the same alert");
+const legacyId = `usage:claude_code:claude:session:${Math.round(boundary / 3_600_000)}:exhausted`;
+assert.ok(hasUsageAlertDismissal([legacyId], afterBoundary.id), "dismissals saved by previous Lume versions remain valid");
+const correctedDeadline = afterBoundary.id.replace(String(boundary + 4_000), String(boundary + 3_600_000));
+assert.ok(hasUsageAlertDismissal([afterBoundary.id], correctedDeadline, now), "a corrected future deadline does not reannounce the same window");
+const shortCycle = afterBoundary.id.replace(String(boundary + 4_000), String(boundary + 64_000));
+assert.ok(!hasUsageAlertDismissal([afterBoundary.id], shortCycle, boundary + 5_000), "a genuinely new short window must not stay dismissed");
 workspaceDismissals.dismiss("permission:session:request");
 assert.ok(!get(workspaceDismissals).includes("permission:session:request"), "permission requests must remain outside account usage dismissals");
 const unavailableStorage = createUsageAlertDismissals({ localStorage: { getItem() { throw new Error("storage unavailable"); }, setItem() { throw new Error("storage unavailable"); } }, addEventListener() {} });
@@ -92,6 +102,23 @@ assert.match(usageFailure[0].message, /atingiu o limite/);
 assert.equal(usageFailure[0].usageInfo.remaining, 0);
 workspaceDismissals.dismiss(usageFailure[0].id);
 assert.ok(get(orbDismissals).includes(usageFailure[0].id), "actual quota failures must also stay dismissed across views");
+
+const repeatedLimit = (id, createdAt) => ({ id, kind: "error", title: "Usage limit reached", status: "failed", createdAt, files: [] });
+const repeatedSession = { ...session, activities: [repeatedLimit("first", now - 11 * 60_000), repeatedLimit("second", now - 50), repeatedLimit("third", now - 20)] };
+const repeatedAlerts = collectAgentAlerts([repeatedSession], "pt-BR", now);
+assert.equal(repeatedAlerts.length, 1, "repeated quota errors form one alert");
+const repeatedId = repeatedAlerts[0].id;
+orbDismissals.dismiss(repeatedId);
+const afterPoll = collectAgentAlerts([{ ...repeatedSession, activities: [...repeatedSession.activities, repeatedLimit("fourth", now)] }], "pt-BR", now)[0];
+assert.equal(afterPoll.id, repeatedId, "another poll must not reopen the dismissed quota episode");
+const recovered = { id: "answer", kind: "message", title: "Agent", detail: "Done", status: "completed", createdAt: now + 1, files: [] };
+assert.equal(collectAgentAlerts([{ ...repeatedSession, activities: [...repeatedSession.activities, recovered] }], "pt-BR", now + 1).length, 0, "an old quota failure is cleared after a successful response");
+const afterRecovery = collectAgentAlerts([{ ...repeatedSession, activities: [...repeatedSession.activities, recovered, repeatedLimit("next-window", now + 2)] }], "pt-BR", now + 2)[0];
+assert.notEqual(afterRecovery.id, repeatedId, "a real recovery permits a later usage failure to be shown");
+const failedStatus = { ...session, status: "failed", statusLabel: "You've hit your session limit · resets in 2h" };
+const firstStatus = collectAgentAlerts([failedStatus], "pt-BR", now)[0];
+const laterStatus = collectAgentAlerts([{ ...failedStatus, statusLabel: "You've hit your session limit · resets in 1h" }], "pt-BR", now)[0];
+assert.equal(firstStatus.id, laterStatus.id, "a changing countdown does not create another limit alert");
 
 for (const notice of [
   { kind: "error", title: "Erro do Claude", detail: "You've hit your session limit · resets in 2h", status: "failed" },

@@ -87,7 +87,10 @@ and REST fallback until paired again.
 ## Native notifications and background monitoring
 
 The Kotlin layer tracks authoritative snapshot transitions and emits native
-notifications only for a new permission request, completed task or failed task.
+notifications for a new permission request, completed task, failed task, or a
+confirmed agent usage-window reset. Reset events carry only the agent, usage
+window and remaining percentage; the phone deduplicates them across foreground
+and background handling and distinguishes an already-exhausted new window.
 Its last observed state is shared between the foreground bridge and background
 service to prevent duplicates.
 
@@ -100,6 +103,14 @@ is stopped before the plugin reconnects on resume, so only one realtime client
 is active. If Android rejects the service start, the preference is turned off,
 the foreground bridge remains the best-effort fallback and the UI receives the
 error. Turning off notifications also turns off background monitoring.
+
+These are native notifications delivered while the paired mobile has a live
+connection to the desktop, not a cloud push service for offline devices. The
+desktop detects resets from provider usage snapshots; it does not fabricate a
+reset when a provider omits the next reset time or when no prior snapshot was
+observed. Codex and Claude are polled, and a previously observed Antigravity
+window is checked when its deadline arrives. Other providers need to expose
+usage data before their resets can be detected.
 
 ## Updates
 

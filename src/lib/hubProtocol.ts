@@ -163,5 +163,9 @@ export interface HubEventEnvelope {
   eventId: string;
   sequence: number;
   occurredAt: number;
-  type: "sessions_changed" | "workflows_changed";
+  type: "sessions_changed" | "workflows_changed" | "usage_reset";
+  agent?: AgentKind;
+  windowId?: string;
+  windowLabel?: string;
+  remainingPercent?: number;
 }

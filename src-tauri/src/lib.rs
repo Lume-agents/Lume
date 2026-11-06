@@ -1164,12 +1164,7 @@ fn refresh_antigravity_rate_limits(app: AppHandle, state: AppState) {
     }
     std::thread::spawn(move || {
         if let Ok(limits) = antigravity_stream::fetch_rate_limits() {
-            if state
-                .set_agent_rate_limits(AgentKind::Antigravity, limits)
-                .unwrap_or(false)
-            {
-                protocol::emit_sessions_changed(&app);
-            }
+            let _ = usage_monitor::publish(&app, &state, AgentKind::Antigravity, limits);
         }
         REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
     });

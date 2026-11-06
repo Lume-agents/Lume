@@ -38,7 +38,7 @@
   import LumeSelect from "$lib/LumeSelect.svelte";
   import RemoteComputers from "$lib/RemoteComputers.svelte";
   import { collectAgentAlerts } from "$lib/agentAlerts";
-  import { usageAlertDismissals } from "$lib/usageAlertDismissals";
+  import { hasUsageAlertDismissal, usageAlertDismissals } from "$lib/usageAlertDismissals";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
   import { PAIR_REQUEST_EVENT, pairRequestBanner } from "$lib/pairRequests";
   import WorkspaceInspector from "$lib/WorkspaceInspector.svelte";
@@ -894,7 +894,7 @@
     if (sessionContextError) items.push({ id: "session-error", message: sessionContextError, tone: "error", onDismiss: () => { sessionContextError = ""; } });
     const openedSessionIds = new Set([primary?.id, secondary?.id, tertiary?.id].filter(Boolean));
     for (const alert of collectAgentAlerts(orderedSessions.filter((session) => !openedSessionIds.has(session.id)), language, Date.now(), { usageScope: "active" })) {
-      if (dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id)) continue;
+      if (dismissedAgentAlertIds.includes(alert.id) || hasUsageAlertDismissal($usageAlertDismissals, alert.id)) continue;
       items.push({
         id: alert.id,
         message: alert.message,

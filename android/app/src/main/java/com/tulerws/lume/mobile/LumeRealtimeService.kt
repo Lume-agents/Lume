@@ -223,6 +223,7 @@ internal class LumeRealtimeService : Service() {
 
             "snapshot", "update" -> {
                 val snapshot = message.getJSONObject("snapshot")
+                if (message.optString("type") == "update") notifier.observeEvents(message.optJSONArray("events"))
                 notifier.observe(snapshot)
                 scope.launch {
                     runCatching { snapshotCache.save(config.deviceId, snapshot.toString()) }

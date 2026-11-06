@@ -2479,6 +2479,7 @@ dependencies = [
  "ring",
  "rusqlite",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -2499,6 +2500,7 @@ dependencies = [
  "tungstenite",
  "windows-sys 0.61.2",
  "x11-dl",
+ "zeroize",
 ]
 
 [[package]]

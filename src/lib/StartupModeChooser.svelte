@@ -30,7 +30,7 @@
 <div class="startup-mode-chooser" role="dialog" aria-modal="true" aria-labelledby="startup-title">
   <header>
     <span class="chooser-mark"><BrandIcon name="lume" size={25} /></span>
-    <span><strong id="startup-title">{tr("How should Lume open?", "Como o Lume deve abrir?")}</strong><small>{tr("Choose the view for this session.", "Escolha a visualização desta sessão.")}</small></span>
+    <span><strong id="startup-title">{tr("How should Lume open?", "Como o Lume deve abrir?")}</strong></span>
   </header>
 
   <div class="mode-options">

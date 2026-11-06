@@ -14,18 +14,25 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 pub(crate) struct DeadlineStream {
     stream: TcpStream,
     deadline: Instant,
+    idle_timeout: Duration,
 }
 
 impl DeadlineStream {
     pub(crate) fn new(stream: TcpStream, deadline: Instant) -> Self {
-        Self { stream, deadline }
+        Self { stream, deadline, idle_timeout: IDLE_TIMEOUT }
+    }
+
+    /// Long-lived authenticated anchors refresh their own deadline; ordinary HTTP remains bounded.
+    pub(crate) fn refresh_deadline(&mut self, lifetime: Duration, idle_timeout: Duration) {
+        self.deadline = Instant::now() + lifetime;
+        self.idle_timeout = idle_timeout;
     }
 
     fn timeout(&self) -> io::Result<Duration> {
         self.deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
-            .map(|remaining| remaining.min(IDLE_TIMEOUT))
+            .map(|remaining| remaining.min(self.idle_timeout))
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::TimedOut, "Node request deadline exceeded")
             })
@@ -55,7 +62,7 @@ pub(crate) fn read_json_response(
     stream: &mut impl Read,
     maximum_bytes: usize,
 ) -> Result<Value, String> {
-    let mut response = Vec::new();
+    let mut response = zeroize::Zeroizing::new(Vec::new());
     stream
         .take((maximum_bytes + 1) as u64)
         .read_to_end(&mut response)

@@ -41,6 +41,8 @@ pub struct PairedNodeClient {
     pub scopes: Vec<NodeScope>,
     pub paired_at: i64,
     pub last_seen_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -70,6 +72,20 @@ struct PairingProofPayload {
     client_display_name: String,
     requested_scopes: Vec<NodeScope>,
     client_nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_platform: Option<String>,
+}
+
+/// Never infer the OS from a device name: old or unsupported clients remain unknown.
+pub(crate) fn supported_platform(platform: Option<&str>) -> Option<String> {
+    match platform {
+        Some("windows" | "linux" | "macos") => platform.map(str::to_owned),
+        _ => None,
+    }
+}
+
+pub(crate) fn current_platform() -> Option<String> {
+    supported_platform(Some(std::env::consts::OS))
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -160,6 +176,7 @@ pub fn accept_pairing(
         scopes: normalized_scopes(proof.requested_scopes),
         paired_at: now,
         last_seen_at: None,
+        platform: supported_platform(proof.client_platform.as_deref()),
     };
     state
         .clients
@@ -185,6 +202,7 @@ pub fn pairing_request(
         client_display_name: client_display_name.into(),
         requested_scopes,
         client_nonce: random_token(18)?,
+        client_platform: current_platform(),
     };
     Ok(NodePairingRequest {
         offer_id: offer.offer_id.clone(),
@@ -200,13 +218,23 @@ pub fn clients(directory: &Path) -> Result<Vec<PairedNodeClient>, String> {
 
 /// Records that a paired device just talked to this Node, at most every 30 seconds, so the owner can see who is connected.
 pub fn touch(directory: &Path, fingerprint: &str, now: i64) -> Result<(), String> {
+    touch_with_platform(directory, fingerprint, now, None)
+}
+
+/// The platform can only come from this paired device's verified proof or encrypted session.
+pub(crate) fn touch_with_platform(directory: &Path, fingerprint: &str, now: i64, platform: Option<&str>) -> Result<(), String> {
     let _lock = PairingLock::acquire(directory)?;
     let mut state = load_state(directory)?;
     let Some(client) = state.clients.iter_mut().find(|client| client.identity.fingerprint == fingerprint) else {
         return Ok(());
     };
-    if client.last_seen_at.is_some_and(|seen| now - seen < 30_000) {
+    let platform = supported_platform(platform);
+    let platform_changed = platform.as_ref().is_some_and(|value| client.platform.as_ref() != Some(value));
+    if !platform_changed && client.last_seen_at.is_some_and(|seen| now - seen < 30_000) {
         return Ok(());
+    }
+    if platform_changed {
+        client.platform = platform;
     }
     client.last_seen_at = Some(now);
     save_state(directory, &state)
@@ -244,6 +272,8 @@ struct StoredPairRequest {
     expires_at: i64,
     status: String,
     client: Option<PairedNodeClient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    platform: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -289,7 +319,7 @@ pub fn pair_code(node_fingerprint: &str, client_fingerprint: &str, nonce: &str, 
 /// What the device signs to ask for pairing (the nonce is also part of the code).
 pub fn pair_request_statement(identity: &NodeIdentity, node_id: &str, display_name: &str, scopes: &[NodeScope]) -> Result<(SignedDeviceStatement, String), String> {
     let nonce = random_token(18)?;
-    let payload = serde_json::json!({ "kind": REQUEST_KIND, "nodeId": node_id, "displayName": display_name, "nonce": nonce, "scopes": scopes, "at": now_millis() });
+    let payload = serde_json::json!({ "kind": REQUEST_KIND, "nodeId": node_id, "displayName": display_name, "nonce": nonce, "scopes": scopes, "at": now_millis(), "clientPlatform": current_platform() });
     Ok((identity.sign(payload)?, nonce))
 }
 
@@ -342,7 +372,8 @@ pub fn submit_request(directory: &Path, node_id: &str, statement: &SignedDeviceS
     }
     let request_id = random_token(16)?;
     let expires_at = now.saturating_add(REQUEST_TTL_MS);
-    state.requests.push(StoredPairRequest { request_id: request_id.clone(), identity: statement.identity.clone(), display_name, nonce, scopes, created_at: now, expires_at, status: "pending".into(), client: None });
+    let platform = supported_platform(payload["clientPlatform"].as_str());
+    state.requests.push(StoredPairRequest { request_id: request_id.clone(), identity: statement.identity.clone(), display_name, nonce, scopes, created_at: now, expires_at, status: "pending".into(), client: None, platform });
     save_state(directory, &state)?;
     Ok(PairRequestTicket { request_id, expires_at })
 }
@@ -388,6 +419,7 @@ pub fn decide(directory: &Path, request_id: &str, approve: bool, now: i64) -> Re
         scopes: request.scopes,
         paired_at: now,
         last_seen_at: None,
+        platform: request.platform,
     };
     state.clients.retain(|existing| existing.identity.fingerprint != client.identity.fingerprint);
     state.clients.push(client.clone());
@@ -512,12 +544,12 @@ fn save_state(directory: &Path, state: &PairingState) -> Result<(), String> {
     Ok(())
 }
 
-struct PairingLock {
+pub(crate) struct PairingLock {
     path: PathBuf,
 }
 
 impl PairingLock {
-    fn acquire(directory: &Path) -> Result<Self, String> {
+    pub(crate) fn acquire(directory: &Path) -> Result<Self, String> {
         fs::create_dir_all(directory).map_err(|error| error.to_string())?;
         restrict_directory(directory)?;
         let path = directory.join(PAIRING_LOCK_FILE);
@@ -643,6 +675,7 @@ mod tests {
         .expect("request");
         let client = accept_pairing(&directory, &request, &[NodeScope::Observe], now_millis())
             .expect("pair client");
+        assert_eq!(client.platform, current_platform());
         assert_eq!(clients(&directory).expect("clients"), vec![client.clone()]);
         assert_eq!(
             accept_pairing(&directory, &request, &[NodeScope::Observe], now_millis())
@@ -652,6 +685,43 @@ mod tests {
         );
         assert!(revoke(&directory, &client.device_id).expect("revoke"));
         assert!(clients(&directory).expect("clients").is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn legacy_pairing_and_authenticated_platform_updates_are_compatible() {
+        let directory = test_directory("legacy-platform");
+        let (node, identity) = identities(&directory);
+        let offer = begin_pairing(&directory, "node-home", &node).unwrap();
+        let mut request = pairing_request(&identity, &offer, "Legacy device", vec![NodeScope::Observe]).unwrap();
+        request.proof.payload.as_object_mut().unwrap().remove("clientPlatform");
+        request.proof = identity.sign(request.proof.payload.clone()).unwrap();
+        let client = accept_pairing(&directory, &request, &[NodeScope::Observe], now_millis()).unwrap();
+        assert_eq!(client.platform, None);
+        let mut legacy = serde_json::to_value(&client).unwrap();
+        legacy.as_object_mut().unwrap().remove("platform");
+        assert_eq!(serde_json::from_value::<PairedNodeClient>(legacy).unwrap().platform, None);
+
+        touch(&directory, &identity.public().fingerprint, 10_000).unwrap();
+        touch_with_platform(&directory, "not-a-paired-device", 10_001, Some("windows")).unwrap();
+        assert_eq!(clients(&directory).unwrap()[0].platform, None);
+        touch_with_platform(&directory, &identity.public().fingerprint, 10_001, Some("linux")).unwrap();
+        assert_eq!(clients(&directory).unwrap()[0].platform.as_deref(), Some("linux"));
+        touch_with_platform(&directory, &identity.public().fingerprint, 10_002, Some("unknown-os")).unwrap();
+        assert_eq!(clients(&directory).unwrap()[0].platform.as_deref(), Some("linux"));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn platform_is_part_of_the_signed_pairing_proof() {
+        let directory = test_directory("platform-proof");
+        let (node, client) = identities(&directory);
+        let offer = begin_pairing(&directory, "node-home", &node).unwrap();
+        let mut request = pairing_request(&client, &offer, "Laptop", vec![NodeScope::Observe]).unwrap();
+        let forged = if current_platform().as_deref() == Some("windows") { "linux" } else { "windows" };
+        request.proof.payload["clientPlatform"] = serde_json::json!(forged);
+        assert!(accept_pairing(&directory, &request, &[NodeScope::Observe], now_millis()).is_err());
+        assert!(clients(&directory).unwrap().is_empty());
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -741,6 +811,7 @@ mod tests {
         let poll = pair_status_statement(&device, &ticket.request_id).unwrap();
         assert_eq!(request_status(&directory, &poll, now_millis()).unwrap().status, "pending");
         let client = decide(&directory, &ticket.request_id, true, now_millis()).unwrap().unwrap();
+        assert_eq!(client.platform, current_platform());
         assert_eq!(clients(&directory).unwrap(), vec![client.clone()]);
         let outcome = request_status(&directory, &poll, now_millis()).unwrap();
         assert_eq!((outcome.status.as_str(), outcome.client), ("approved", Some(client)));

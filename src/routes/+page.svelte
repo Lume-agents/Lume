@@ -119,6 +119,7 @@
     defaultPreferences,
     loadDisplayBackend,
     loadResumableSessions,
+    listRemoteAuthRequired,
     loadIntegrationStatuses,
     loadCliInstallPlans,
     loadMobileGatewayStatus,
@@ -582,6 +583,14 @@
     if (preferences.soundEnabled) playTone("permission");
   }
 
+  function announceRemoteAuth({ nodeId, computer }: { nodeId: string; computer: string }) {
+    reportPanelBanner({
+      id: `remote-auth:${nodeId}`,
+      message: tr(`${computer} needs to reconnect. Open Settings > Remote computers and enter the authenticator code.`, `${computer} precisa se reconectar. Abra Ajustes > Computadores remotos e informe o código do autenticador.`),
+      tone: "warning",
+    });
+  }
+
   function reportPanelBanner(notice: SystemBannerNotice) {
     componentBanners = [
       {
@@ -816,6 +825,9 @@
     let stopListening: (() => void) | undefined;
     let stopTerminalListening: (() => void) | undefined;
     let stopPairRequestListening: (() => void) | undefined;
+    let stopRemoteAuthListening: (() => void) | undefined;
+    let stopRemoteAuthResolvedListening: (() => void) | undefined;
+    let remoteAuthRevision = 0;
     let stopShortcutListening: (() => void) | undefined;
     let stopPreferencesListening: (() => void) | undefined;
     let stopCompanionUpdateListening: (() => void) | undefined;
@@ -938,6 +950,13 @@
           }, 120);
         });
         stopPairRequestListening = await listen<PendingPairRequest>(PAIR_REQUEST_EVENT, ({ payload }) => announcePairRequest(payload));
+        stopRemoteAuthListening = await listen<{ nodeId: string; computer: string }>("lume://remote-auth-required", ({ payload }) => { remoteAuthRevision += 1; announceRemoteAuth(payload); });
+        stopRemoteAuthResolvedListening = await listen<{ nodeId: string }>("lume://remote-auth-resolved", ({ payload }) => {
+          remoteAuthRevision += 1;
+          componentBanners = componentBanners.filter((item) => item.id !== `remote-auth:${payload.nodeId}`);
+        });
+        const remoteAuthRevisionAtRequest = remoteAuthRevision;
+        void listRemoteAuthRequired().then((required) => { if (!disposed && remoteAuthRevision === remoteAuthRevisionAtRequest) required.forEach(announceRemoteAuth); }).catch(() => undefined);
         stopTerminalListening = await listen("lume://terminal-windows-changed", () => {
           void refreshTerminalWindows();
         });
@@ -964,6 +983,8 @@
       stopListening?.();
       stopTerminalListening?.();
       stopPairRequestListening?.();
+      stopRemoteAuthListening?.();
+      stopRemoteAuthResolvedListening?.();
       stopShortcutListening?.();
       stopPreferencesListening?.();
       stopCompanionUpdateListening?.();

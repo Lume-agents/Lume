@@ -5,10 +5,10 @@
 //! `remote` origin (the lists show the computer's name beside the chat's), and only the controls that computer allows (a prompt, a
 //! stop, allowing a permission once). Prompts, approvals and stops for them go back through the Relay.
 
-use std::{collections::HashMap, path::Path, thread, time::Duration};
+use std::{collections::{HashMap, HashSet}, path::Path, sync::{Mutex, OnceLock}, thread, time::Duration};
 
 use serde_json::{json, Value};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use crate::{
     domain::{AgentKind, AgentSession, PermissionAction, PermissionProfile, PermissionRequest, RemoteOrigin, SessionActivity, SessionControlOrigin, SessionSource, SessionStatus},
@@ -26,8 +26,35 @@ const KEEP_ON_FAILURE: u32 = 4;
 
 /// Set after a prompt, an approval or a stop, so the next read happens at once instead of after the interval.
 static WAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static AUTH_REQUIRED: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static CONNECTION_LOSSES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
-fn wake() {
+/// Called when an authenticated transport detects a broken connection, never for an intentional close.
+pub(crate) fn connection_lost(node_id: &str) {
+    if let Ok(mut losses) = CONNECTION_LOSSES.get_or_init(|| Mutex::new(HashSet::new())).lock() {
+        losses.insert(node_id.to_string());
+    }
+    wake();
+}
+
+/// Lets a newly opened window display a reconnect notice even if the event happened before it mounted.
+pub fn auth_required() -> Vec<Value> {
+    AUTH_REQUIRED.get_or_init(|| Mutex::new(HashMap::new())).lock().map(|required| {
+        required.iter().map(|(node_id, computer)| json!({ "nodeId": node_id, "computer": computer })).collect()
+    }).unwrap_or_default()
+}
+
+fn mark_auth_required(app: &AppHandle, node_id: &str, computer: &str) {
+    let added = AUTH_REQUIRED.get_or_init(|| Mutex::new(HashMap::new())).lock().is_ok_and(|mut required| required.insert(node_id.into(), computer.into()).is_none());
+    if added { let _ = app.emit("lume://remote-auth-required", json!({ "nodeId": node_id, "computer": computer })); }
+}
+
+fn clear_auth_required(app: &AppHandle, node_id: &str) {
+    let removed = AUTH_REQUIRED.get_or_init(|| Mutex::new(HashMap::new())).lock().is_ok_and(|mut required| required.remove(node_id).is_some());
+    if removed { let _ = app.emit("lume://remote-auth-resolved", json!({ "nodeId": node_id })); }
+}
+
+pub(crate) fn wake() {
     WAKE.store(true, std::sync::atomic::Ordering::Release);
 }
 /// The conversations read per computer and refresh: the most recently active sessions.
@@ -238,17 +265,48 @@ pub fn start(state: AppState, app: AppHandle) {
         loop {
             if let Ok(directory) = directory() {
                 let remotes = node_relay::remotes(&directory).unwrap_or_default();
+                let lan_remotes = crate::node_client::remotes(&directory).unwrap_or_default();
                 known.retain(|node_id, _| remotes.iter().any(|remote| &remote.node_id == node_id));
+                if let Ok(mut required) = AUTH_REQUIRED.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+                    required.retain(|node_id, _| remotes.iter().any(|remote| &remote.node_id == node_id) || lan_remotes.iter().any(|remote| &remote.node_id == node_id));
+                }
+                let losses = CONNECTION_LOSSES.get_or_init(|| Mutex::new(HashSet::new())).lock()
+                    .map(|mut pending| std::mem::take(&mut *pending)).unwrap_or_default();
+                for node_id in losses {
+                    let relay = remotes.iter().find(|remote| remote.node_id == node_id);
+                    let lan = lan_remotes.iter().find(|remote| remote.node_id == node_id);
+                    let fingerprint = relay.map(|remote| remote.identity.fingerprint.as_str())
+                        .or_else(|| lan.map(|remote| remote.identity.fingerprint.as_str()));
+                    if fingerprint.is_some_and(|fingerprint| crate::node_auth::client_token(fingerprint).is_none()) {
+                        let computer = known.get(&node_id).and_then(|entry| entry.0.first()).and_then(|session| session.remote.as_ref()).map(|origin| origin.computer.as_str()).unwrap_or(&node_id);
+                        mark_auth_required(&app, &node_id, computer);
+                    }
+                }
                 for remote in &remotes {
                     let entry = known.entry(remote.node_id.clone()).or_insert_with(|| (Vec::new(), 0));
                     match computer_sessions(&directory, &remote.node_id, &entry.0) {
-                        Ok(sessions) => *entry = (sessions, 0),
+                        Ok(sessions) => { *entry = (sessions, 0); clear_auth_required(&app, &remote.node_id); }
+                        Err(error) if error.contains(crate::node_auth::OTP_REQUIRED) => {
+                            let computer = entry.0.first().and_then(|session| session.remote.as_ref()).map(|origin| origin.computer.clone()).unwrap_or_else(|| remote.node_id.clone());
+                            entry.0.clear();
+                            entry.1 = 0;
+                            mark_auth_required(&app, &remote.node_id, &computer);
+                        }
                         Err(_) => {
                             entry.1 += 1;
                             if entry.1 >= KEEP_ON_FAILURE {
                                 entry.0.clear();
                             }
                         }
+                    }
+                }
+                // LAN-only Nodes do not provide chat sessions yet, but an authenticated connection
+                // still needs a heartbeat while the app is open so it does not expire between reads.
+                for remote in lan_remotes {
+                    if remotes.iter().any(|relay| relay.node_id == remote.node_id)
+                        || crate::node_auth::client_token(&remote.identity.fingerprint).is_none() { continue; }
+                    if crate::node_client::remote_health(&directory, &remote.node_id, Duration::from_secs(2)).is_ok() {
+                        clear_auth_required(&app, &remote.node_id);
                     }
                 }
             }

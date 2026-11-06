@@ -10,8 +10,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -25,9 +25,11 @@ use ring::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::{
     distributed_protocol::NodeScope,
+    node_auth,
     node_identity::{NodeIdentity, PublicDeviceIdentity},
     node_pairing::{self, NodePairingOffer, NodePairingRequest, PairedNodeClient},
     node_service,
@@ -43,6 +45,81 @@ const PAIR_RESPONSE: u8 = 0x11;
 const PAIR_AAD: &[u8] = b"lume-relay-pair-v1";
 const HEARTBEAT: Duration = Duration::from_secs(20);
 const STATUS_FILE: &str = "relay-status.json";
+// One persistent E2E connection per Node/device: all prompts and polls share its authorization,
+// and an actual disconnect ends it instead of creating a new connection for each request.
+struct ClientConnection { link: RelayLink, session: Session }
+static CLIENT_CONNECTIONS: OnceLock<Mutex<HashMap<String, Arc<Mutex<Option<ClientConnection>>>>>> = OnceLock::new();
+static CLIENT_HEARTBEATS: OnceLock<Mutex<HashMap<String, (u64, mpsc::Sender<()>)>>> = OnceLock::new();
+static NEXT_CLIENT_HEARTBEAT: AtomicU64 = AtomicU64::new(1);
+#[cfg(not(test))]
+const CLIENT_HEARTBEAT: Duration = Duration::from_secs(8);
+#[cfg(test)]
+const CLIENT_HEARTBEAT: Duration = Duration::from_millis(80);
+
+fn client_key_for(directory: &Path, fingerprint: &str) -> String {
+    format!("{}\0{fingerprint}", directory.display())
+}
+
+fn connection_slot(directory: &Path, fingerprint: &str) -> Result<Arc<Mutex<Option<ClientConnection>>>, String> {
+    let key = client_key_for(directory, fingerprint);
+    Ok(CLIENT_CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "Node connection is unavailable")?
+        .entry(key).or_insert_with(|| Arc::new(Mutex::new(None))).clone())
+}
+
+fn close_client_connection(directory: &Path, fingerprint: &str) {
+    stop_client_heartbeat(directory, fingerprint);
+    if let Ok(slot) = connection_slot(directory, fingerprint) {
+        if let Ok(mut guard) = slot.lock() {
+            if let Some(connection) = guard.take() { connection.link.close(); }
+        }
+    }
+}
+
+fn stop_client_heartbeat(directory: &Path, fingerprint: &str) {
+    if let Ok(mut heartbeats) = CLIENT_HEARTBEATS.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        if let Some((_, stop)) = heartbeats.remove(&client_key_for(directory, fingerprint)) { let _ = stop.send(()); }
+    }
+}
+
+/// Each authenticated Node has its own lightweight heartbeat; a slow or offline second Node
+/// cannot make a healthy connection expire while the app is in the background.
+fn start_client_heartbeat(directory: &Path, remote: &RelayRemote) -> Result<(), String> {
+    let key = client_key_for(directory, &remote.identity.fingerprint);
+    let generation = NEXT_CLIENT_HEARTBEAT.fetch_add(1, Ordering::Relaxed);
+    let (stop, receiver) = mpsc::channel();
+    {
+        let mut heartbeats = CLIENT_HEARTBEATS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "Node connection is unavailable")?;
+        if let Some((_, previous)) = heartbeats.insert(key.clone(), (generation, stop)) { let _ = previous.send(()); }
+    }
+    let directory = directory.to_path_buf();
+    let fingerprint = remote.identity.fingerprint.clone();
+    let node_id = remote.node_id.clone();
+    let worker_key = key.clone();
+    let worker_directory = directory.clone();
+    let worker_fingerprint = fingerprint.clone();
+    let launched = thread::Builder::new().name("lume-relay-auth".into()).spawn(move || {
+        loop {
+            match receiver.recv_timeout(CLIENT_HEARTBEAT) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if node_auth::client_token(&worker_fingerprint).is_none() {
+                crate::remote_sessions::connection_lost(&node_id);
+                break;
+            }
+            if query(&worker_directory, &node_id, "keepalive").is_err() { break; }
+        }
+        if let Ok(mut heartbeats) = CLIENT_HEARTBEATS.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+            if heartbeats.get(&worker_key).is_some_and(|(current, _)| *current == generation) { heartbeats.remove(&worker_key); }
+        }
+    });
+    if launched.is_err() {
+        node_auth::forget_client(&fingerprint);
+        close_client_connection(&directory, &fingerprint);
+        return Err("Could not maintain the authenticated Node connection".into());
+    }
+    Ok(())
+}
 
 /// Whether the running Node is connected to its Relay right now, for the app and `lume node status`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -218,7 +295,7 @@ fn serve(directory: &Path, relay_url: &str, identity: &NodeIdentity, stop: &Atom
     let mut sessions: HashMap<String, Session> = HashMap::new();
     let mut opened_offer = String::new();
     let mut last_heartbeat = Instant::now();
-    loop {
+    let result = (|| -> Result<(), String> { loop {
         if stop.load(Ordering::SeqCst) {
             link.close();
             return Ok(());
@@ -249,10 +326,14 @@ fn serve(directory: &Path, relay_url: &str, identity: &NodeIdentity, stop: &Atom
             }
             RelayEvent::Presence { fingerprint, online: false, .. } => {
                 sessions.remove(&fingerprint);
+                node_auth::disconnect(directory, &fingerprint);
             }
             _ => {}
         }
-    }
+    } })();
+    // Losing the Node's Relay connection invalidates its sessions, without stopping local tasks.
+    for fingerprint in sessions.keys() { node_auth::disconnect(directory, fingerprint); }
+    result
 }
 
 /// Makes the Relay's allow-list match the paired devices: new ones are authorized, removed ones revoked.
@@ -282,8 +363,7 @@ fn handle_message(directory: &Path, identity: &NodeIdentity, link: &mut RelayLin
             let client = node_pairing::clients(directory)?.into_iter().find(|client| client.identity.fingerprint == from && client.scopes.contains(&NodeScope::Observe)).ok_or("the device is not paired")?;
             let key = client_key(&client).ok_or("the paired key is invalid")?;
             let (reply, session) = relay_e2e::respond(identity, &key, payload)?;
-            sessions.insert(from.to_string(), session);
-            let _ = node_pairing::touch(directory, from, now_millis());
+            if sessions.insert(from.to_string(), session).is_some() { node_auth::disconnect(directory, from); }
             link.send(Some(from), "hs2", &reply)
         }
         Some(3) => {
@@ -292,12 +372,48 @@ fn handle_message(directory: &Path, identity: &NodeIdentity, link: &mut RelayLin
                 return Err("the device is no longer paired".into());
             };
             let session = sessions.get_mut(from).ok_or("no session: the device must start a handshake")?;
-            let command: Value = serde_json::from_slice(&session.open(payload)?).map_err(io)?;
-            let answer = answer_command(directory, &command, &client.scopes);
-            let frame = session.seal(&serde_json::to_vec(&answer).map_err(io)?)?;
+            let plaintext = zeroize::Zeroizing::new(session.open(payload)?);
+            let mut command: Value = serde_json::from_slice(&plaintext).map_err(io)?;
+            let mut answer = answer_authenticated_command(directory, from, &command, &client.scopes);
+            if answer["ok"] == true {
+                let _ = node_pairing::touch_with_platform(directory, from, now_millis(), command["clientPlatform"].as_str());
+            }
+            let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&answer).map_err(io)?);
+            scrub_sensitive_fields(&mut command);
+            if let Some(result) = answer.get_mut("result") { scrub_sensitive_fields(result); }
+            let frame = session.seal(&plaintext)?;
             link.send(Some(from), "reply", &frame)
         }
         _ => Err("unexpected frame".into()),
+    }
+}
+
+fn scrub_sensitive_fields(value: &mut Value) {
+    for field in ["code", "authToken", "token"] {
+        if let Some(Value::String(secret)) = value.get_mut(field) { secret.zeroize(); }
+    }
+}
+
+/// The E2E handshake already authenticated `fingerprint`; TOTP adds a session gate before *any*
+/// observation or action. The code and session grant are only present inside the encrypted frame.
+fn answer_authenticated_command(directory: &Path, fingerprint: &str, command: &Value, scopes: &[NodeScope]) -> Value {
+    let result = match command["cmd"].as_str() {
+        Some("authenticate") => command["code"].as_str().ok_or_else(|| "Invalid authenticator code".to_string())
+            .and_then(|code| node_auth::authenticate(directory, fingerprint, code))
+            .and_then(|token| { node_auth::activate_anchor(directory, fingerprint, &token)?; Ok(token) })
+            .map(|token| json!({ "token": token.as_str() })),
+        Some("disconnect") => node_auth::authorize(directory, fingerprint, command["authToken"].as_str()).map(|_| {
+            node_auth::disconnect(directory, fingerprint);
+            json!({ "disconnected": true })
+        }),
+        _ => return match node_auth::authorize(directory, fingerprint, command["authToken"].as_str()) {
+            Ok(()) => answer_command(directory, command, scopes),
+            Err(error) => json!({ "ok": false, "error": error }),
+        },
+    };
+    match result {
+        Ok(value) => json!({ "ok": true, "result": value }),
+        Err(error) => json!({ "ok": false, "error": error }),
     }
 }
 
@@ -435,6 +551,7 @@ fn approval_for(directory: &Path, command: &Value, scopes: &[NodeScope], now: i6
 /// Read-only commands, the same observations the LAN transport offers, and the prompt the owner allows.
 fn answer_command(directory: &Path, command: &Value, scopes: &[NodeScope]) -> Value {
     let result = match command["cmd"].as_str() {
+        Some("keepalive") => Ok(json!({ "connected": true })),
         Some("health") => node_service::health(directory).and_then(|health| serde_json::to_value(health).map_err(io)),
         Some("inventory") => crate::node_inventory::InventoryCache::default().snapshot(directory).and_then(|inventory| serde_json::to_value(inventory).map_err(io)),
         Some("session") => conversation_for(directory, command, scopes),
@@ -614,37 +731,110 @@ pub fn query_session(directory: &Path, node_id: &str, session_id: &str) -> Resul
 
 pub(crate) fn query_commands(directory: &Path, node_id: &str, commands: &[Value]) -> Result<Vec<Result<Value, String>>, String> {
     let remote = remotes(directory)?.into_iter().find(|remote| remote.node_id == node_id || remote.identity.fingerprint == node_id).ok_or("that Node is not paired through a Relay")?;
+    let slot = connection_slot(directory, &remote.identity.fingerprint)?;
+    let mut guard = slot.lock().map_err(|_| "Node connection is unavailable")?;
+    let token = node_auth::client_token(&remote.identity.fingerprint);
+    node_auth::touch_client_if_matches(&remote.identity.fingerprint, token.as_deref().map(String::as_str));
+    if guard.is_none() {
+        match connect_remote(directory, &remote) {
+            Ok(connection) => *guard = Some(connection),
+            Err(error) => {
+                if node_auth::forget_client_if_matches(&remote.identity.fingerprint, token.as_deref().map(String::as_str)) {
+                    crate::remote_sessions::connection_lost(&remote.node_id);
+                }
+                return Err(error);
+            }
+        }
+    }
+    let result = query_remote_commands(guard.as_mut().expect("connection created"), &remote, commands, token.as_deref().map(String::as_str));
+    if result.is_err() {
+        if let Some(connection) = guard.take() { connection.link.close(); }
+    }
+    if result.is_err() || result.as_ref().is_ok_and(|answers| answers.iter().any(|answer| answer.as_ref().err().is_some_and(|error| error == node_auth::OTP_REQUIRED))) {
+        if node_auth::forget_client_if_matches(&remote.identity.fingerprint, token.as_deref().map(String::as_str)) {
+            crate::remote_sessions::connection_lost(&remote.node_id);
+        }
+    } else if result.as_ref().is_ok_and(|answers| answers.iter().any(Result::is_ok)) {
+        node_auth::touch_client_if_matches(&remote.identity.fingerprint, token.as_deref().map(String::as_str));
+    }
+    result
+}
+
+fn connect_remote(directory: &Path, remote: &RelayRemote) -> Result<ClientConnection, String> {
     let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
     let node_key: [u8; 32] = URL_SAFE_NO_PAD.decode(&remote.identity.public_key).map_err(io)?.try_into().map_err(|_| "invalid Node key".to_string())?;
     let mut link = RelayLink::connect(&remote.relay_url, &remote.identity.fingerprint, &identity, Role::Client, None)?;
     let (state, hello) = relay_e2e::initiate(&identity)?;
     link.send(None, "hs1", &hello)?;
     let reply = wait_for(&mut link, 15, |event| payload_of(event, 2))?;
-    let mut session = state.finish(&reply, &node_key)?;
+    let session = state.finish(&reply, &node_key)?;
+    Ok(ClientConnection { link, session })
+}
+
+fn query_remote_commands(connection: &mut ClientConnection, remote: &RelayRemote, commands: &[Value], token: Option<&str>) -> Result<Vec<Result<Value, String>>, String> {
     let mut results = Vec::new();
     for command in commands {
-        link.send(None, "cmd", &session.seal(&serde_json::to_vec(command).map_err(io)?)?)?;
-        let frame = wait_for(&mut link, 15, |event| payload_of(event, 3))?;
-        let answer: Value = serde_json::from_slice(&session.open(&frame)?).map_err(io)?;
+        let mut command = command.clone();
+        if let (Some(object), Some(platform)) = (command.as_object_mut(), node_pairing::current_platform()) {
+            object.insert("clientPlatform".into(), Value::String(platform));
+        }
+        if let (Some(object), Some(token)) = (command.as_object_mut(), token) {
+            object.insert("authToken".into(), Value::String(token.to_string()));
+        }
+        let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&command).map_err(io)?);
+        scrub_sensitive_fields(&mut command);
+        connection.link.send(None, "cmd", &connection.session.seal(&plaintext)?)?;
+        let frame = wait_for(&mut connection.link, 15, |event| payload_of(event, 3))?;
+        let plaintext = zeroize::Zeroizing::new(connection.session.open(&frame)?);
+        let answer: Value = serde_json::from_slice(&plaintext).map_err(io)?;
+        if answer["error"].as_str() != Some(node_auth::OTP_REQUIRED) {
+            node_auth::touch_client_if_matches(&remote.identity.fingerprint, token);
+        }
         results.push(if answer["ok"] == true {
             Ok(answer["result"].clone())
         } else {
             Err(answer["error"].as_str().unwrap_or("the Node refused the command").to_string())
         });
     }
-    link.close();
     Ok(results)
+}
+
+/// Verifies a phone authenticator code over the pinned, encrypted Relay connection. The resulting
+/// device-bound grant stays in memory and is reused only while this Lume process remains connected.
+pub fn authenticate(directory: &Path, node_id: &str, code: &str) -> Result<(), String> {
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) { return Err("Invalid authenticator code".into()); }
+    let remote = remotes(directory)?.into_iter().find(|remote| remote.node_id == node_id || remote.identity.fingerprint == node_id).ok_or("that Node is not paired through a Relay")?;
+    let mut command = json!({ "cmd": "authenticate", "code": code });
+    let answers = query_commands(directory, node_id, std::slice::from_ref(&command));
+    scrub_sensitive_fields(&mut command);
+    let mut result = answers?.into_iter().next().ok_or("the Node did not answer")??;
+    let token = result["token"].as_str().filter(|value| value.len() == 43 && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')).ok_or("the Node returned an invalid session")?;
+    let token = zeroize::Zeroizing::new(token.to_string());
+    scrub_sensitive_fields(&mut result);
+    node_auth::remember_client(&remote.identity.fingerprint, token);
+    start_client_heartbeat(directory, &remote)
+}
+
+pub fn disconnect(directory: &Path, node_id: &str) -> Result<(), String> {
+    let remote = remotes(directory)?.into_iter().find(|remote| remote.node_id == node_id || remote.identity.fingerprint == node_id).ok_or("that Node is not paired through a Relay")?;
+    stop_client_heartbeat(directory, &remote.identity.fingerprint);
+    let result = query_commands(directory, node_id, &[json!({ "cmd": "disconnect" })]).and_then(|answers| answers.into_iter().next().ok_or("the Node did not answer".to_string())?).map(|_| ());
+    node_auth::forget_client(&remote.identity.fingerprint);
+    close_client_connection(directory, &remote.identity.fingerprint);
+    result
 }
 
 /// Forgets a Node paired through a Relay on this device. The Node's authorization is revoked on the Node.
 pub fn forget(directory: &Path, node_id: &str) -> Result<bool, String> {
     let mut all = remotes(directory)?;
+    let fingerprint = all.iter().find(|remote| remote.node_id == node_id || remote.identity.fingerprint == node_id).map(|remote| remote.identity.fingerprint.clone());
     let before = all.len();
     all.retain(|remote| remote.node_id != node_id && remote.identity.fingerprint != node_id);
     if all.len() == before {
         return Ok(false);
     }
     write_private(&remotes_path(directory), &serde_json::to_vec_pretty(&all).map_err(io)?)?;
+    if let Some(fingerprint) = fingerprint { node_auth::forget_client(&fingerprint); close_client_connection(directory, &fingerprint); }
     Ok(true)
 }
 
@@ -761,6 +951,97 @@ mod tests {
         assert!(parse_uri(&good.replace("v=1", "v=2")).is_err());
         assert!(parse_uri(&good.replace(&fingerprint, "short")).is_err());
         assert!(parse_uri("lume://pair-node?v=1").is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a loopback socket and a disposable unlocked OS credential store"]
+    fn relay_otp_is_once_per_live_connection_and_not_per_command() {
+        use ring::signature::{UnparsedPublicKey, ED25519};
+        use std::{net::TcpListener, sync::atomic::{AtomicUsize, Ordering}};
+        use tungstenite::Message;
+
+        let unique = random_token_for_test();
+        let node_dir = std::env::temp_dir().join(format!("lume-otp-relay-node-{unique}"));
+        let client_dir = std::env::temp_dir().join(format!("lume-otp-relay-client-{unique}"));
+        let health = node_service::health(&node_dir).unwrap();
+        let node = NodeIdentity::load_or_create(&node_dir).unwrap();
+        let device = NodeIdentity::load_or_create(&client_dir.join(CLIENT_IDENTITY_DIRECTORY)).unwrap();
+        let offer = node_pairing::begin_pairing(&node_dir, &health.node_id, &node).unwrap();
+        let pairing = node_pairing::pairing_request(&device, &offer, "Test laptop", vec![NodeScope::Observe]).unwrap();
+        let paired = node_pairing::accept_pairing(&node_dir, &pairing, &[NodeScope::Observe], now_millis()).unwrap();
+        let code = crate::node_auth::prepare_test_authenticator(&node_dir).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let remote = RelayRemote { node_id: health.node_id.clone(), relay_url: format!("http://{address}"), identity: node.public().clone(), device_id: paired.device_id, paired_at: now_millis() };
+        save_remote(&client_dir, remote.clone()).unwrap();
+        let handshakes = Arc::new(AtomicUsize::new(0));
+        let auth_calls = Arc::new(AtomicUsize::new(0));
+        let heartbeats = Arc::new(AtomicUsize::new(0));
+        let (thread_handshakes, thread_auth_calls, thread_heartbeats) = (handshakes.clone(), auth_calls.clone(), heartbeats.clone());
+        let server_dir = node_dir.clone();
+        let server_node = NodeIdentity::load_or_create(&node_dir).unwrap();
+        let client_key: [u8; 32] = URL_SAFE_NO_PAD.decode(&device.public().public_key).unwrap().try_into().unwrap();
+        let client_fingerprint = device.public().fingerprint.clone();
+        let node_fingerprint = node.public().fingerprint.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                let mut socket = tungstenite::accept(stream).unwrap();
+                socket.send(Message::text(json!({ "t": "challenge", "nonce": "dGVzdC1ub25jZQ" }).to_string())).unwrap();
+                let hello: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                let public = URL_SAFE_NO_PAD.decode(hello["publicKey"].as_str().unwrap()).unwrap();
+                assert_eq!(public, client_key);
+                let signature = URL_SAFE_NO_PAD.decode(hello["signature"].as_str().unwrap()).unwrap();
+                let statement = format!("LUME-RELAY-V1\n{}\ndGVzdC1ub25jZQ\nclient", node_fingerprint);
+                UnparsedPublicKey::new(&ED25519, &public).verify(statement.as_bytes(), &signature).unwrap();
+                socket.send(Message::text(json!({ "t": "ready", "role": "client" }).to_string())).unwrap();
+                let hello: Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                let payload = URL_SAFE_NO_PAD.decode(hello["c"].as_str().unwrap()).unwrap();
+                let (reply, mut session) = relay_e2e::respond(&server_node, &client_key, &payload).unwrap();
+                thread_handshakes.fetch_add(1, Ordering::SeqCst);
+                socket.send(Message::text(json!({ "t": "msg", "id": "hs2", "from": node_fingerprint, "c": URL_SAFE_NO_PAD.encode(reply) }).to_string())).unwrap();
+                while let Ok(message) = socket.read() {
+                    if message.is_close() { break; }
+                    let Ok(frame) = serde_json::from_str::<Value>(message.to_text().unwrap_or("")) else { continue };
+                    let payload = URL_SAFE_NO_PAD.decode(frame["c"].as_str().unwrap()).unwrap();
+                    let command: Value = serde_json::from_slice(&session.open(&payload).unwrap()).unwrap();
+                    if command["cmd"] == "test-drop" { break; } // Simulate a lost connection, without a close handshake.
+                    if command["cmd"] == "authenticate" { thread_auth_calls.fetch_add(1, Ordering::SeqCst); }
+                    if command["cmd"] == "keepalive" { thread_heartbeats.fetch_add(1, Ordering::SeqCst); }
+                    let answer = answer_authenticated_command(&server_dir, &client_fingerprint, &command, &[NodeScope::Observe]);
+                    let sealed = session.seal(&serde_json::to_vec(&answer).unwrap()).unwrap();
+                    socket.send(Message::text(json!({ "t": "msg", "id": "reply", "from": node_fingerprint, "c": URL_SAFE_NO_PAD.encode(sealed) }).to_string())).unwrap();
+                }
+                node_auth::disconnect(&server_dir, &client_fingerprint);
+            }
+        });
+        assert_eq!(query(&client_dir, &health.node_id, "health").unwrap_err(), node_auth::OTP_REQUIRED);
+        assert_eq!(query(&client_dir, &health.node_id, "keepalive").unwrap_err(), node_auth::OTP_REQUIRED);
+        authenticate(&client_dir, &health.node_id, &code).unwrap();
+        assert!(query(&client_dir, &health.node_id, "health").is_ok());
+        assert!(query(&client_dir, &health.node_id, "health").is_ok());
+        assert_eq!(handshakes.load(Ordering::SeqCst), 1, "requests reuse one live encrypted connection");
+        assert_eq!(auth_calls.load(Ordering::SeqCst), 1, "ordinary actions do not send an OTP");
+        for _ in 0..50 {
+            if heartbeats.load(Ordering::SeqCst) >= 2 { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(heartbeats.load(Ordering::SeqCst) >= 2, "the active connection is kept alive without reusing the OTP");
+        assert!(query(&client_dir, &health.node_id, "test-drop").is_err(), "a broken transport is detected");
+        assert!(node_auth::client_token(&remote.identity.fingerprint).is_none(), "a lost transport discards its grant");
+        assert_eq!(query(&client_dir, &health.node_id, "health").unwrap_err(), node_auth::OTP_REQUIRED);
+        assert!(authenticate(&client_dir, &health.node_id, &code).is_err(), "a previously used code cannot reconnect");
+        close_client_connection(&client_dir, &remote.identity.fingerprint);
+        server.join().unwrap();
+        crate::node_auth::disable(&node_dir).unwrap();
+        let _ = fs::remove_dir_all(node_dir);
+        let _ = fs::remove_dir_all(client_dir);
+    }
+
+    fn random_token_for_test() -> String {
+        let mut bytes = [0u8; 12];
+        getrandom::getrandom(&mut bytes).unwrap();
+        URL_SAFE_NO_PAD.encode(bytes)
     }
 
     /// Full path through a real Relay: `LUME_RELAY_URL=http://127.0.0.1:8788 cargo test node_relay -- --ignored`.

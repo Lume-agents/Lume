@@ -40,6 +40,9 @@ pub mod node_identity;
 pub mod node_inventory;
 pub mod node_network;
 pub mod node_pairing;
+mod node_totp;
+mod node_totp_secret;
+mod node_auth;
 pub mod node_relay;
 pub mod node_sessions;
 pub mod node_service;
@@ -1832,6 +1835,52 @@ fn list_relay_lume_nodes() -> Result<Vec<node_relay::RelayRemote>, String> {
     node_relay::remotes(&node_service::default_state_directory()?)
 }
 
+/// A Node's six-digit authenticator is verified only for the reconnection, not for later actions.
+#[tauri::command]
+async fn authenticate_remote_node(node_id: String, code: String) -> Result<(), String> {
+    let code = zeroize::Zeroizing::new(code);
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = node_service::default_state_directory()?;
+        let result = if node_relay::remotes(&directory)?.iter().any(|remote| remote.node_id == node_id) {
+            node_relay::authenticate(&directory, &node_id, &code)
+        } else {
+            node_client::authenticate(&directory, &node_id, &code)
+        };
+        if result.is_ok() { remote_sessions::wake(); }
+        result
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn disconnect_remote_node(node_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = node_service::default_state_directory()?;
+        let result = if node_relay::remotes(&directory)?.iter().any(|remote| remote.node_id == node_id) {
+            node_relay::disconnect(&directory, &node_id)
+        } else {
+            node_client::disconnect(&directory, &node_id)
+        };
+        remote_sessions::wake();
+        result
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn remote_node_authenticated(node_id: String) -> Result<bool, String> {
+    let directory = node_service::default_state_directory()?;
+    let relay = node_relay::remotes(&directory)?.into_iter().find(|remote| remote.node_id == node_id).map(|remote| remote.identity.fingerprint);
+    let fingerprint = match relay {
+        Some(fingerprint) => fingerprint,
+        None => node_client::remotes(&directory)?.into_iter().find(|remote| remote.node_id == node_id).map(|remote| remote.identity.fingerprint).ok_or("that Node is not paired")?,
+    };
+    Ok(node_auth::client_token(&fingerprint).is_some())
+}
+
+#[tauri::command]
+fn list_remote_auth_required() -> Vec<serde_json::Value> {
+    remote_sessions::auth_required()
+}
+
 /// One connection through the Relay that returns the computer's health and its agent sessions.
 #[tauri::command]
 async fn get_relay_lume_node_overview(node_id: String) -> Result<serde_json::Value, String> {
@@ -1913,15 +1962,18 @@ async fn interrupt_relay_lume_session(node_id: String, session_id: String, reque
 fn this_node(directory: &std::path::Path) -> Result<serde_json::Value, String> {
     let health = node_service::health(directory)?;
     let config = node_service::load_or_create_config(directory)?;
+    let otp_enabled = node_auth::enabled(directory)?;
     let devices = node_pairing::clients(directory)?
         .into_iter()
-        .map(|client| serde_json::json!({ "deviceId": client.device_id, "name": client.display_name, "pairedAt": client.paired_at, "lastSeenAt": client.last_seen_at }))
+        .map(|client| serde_json::json!({ "deviceId": client.device_id, "name": client.display_name, "pairedAt": client.paired_at, "lastSeenAt": client.last_seen_at, "platform": client.platform }))
         .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "lifecycle": health.lifecycle,
         "name": health.display_name,
         "relayUrl": health.relay_url,
         "relayConnected": health.relay_connected,
+        "otpEnabled": otp_enabled,
+        "otpRuntimeSupported": !otp_enabled || node_service::otp_runtime_supported(directory),
         "devices": devices,
         "shareConversations": config.share_conversations,
         "allowPrompts": config.allow_prompts,
@@ -1967,6 +2019,42 @@ async fn create_this_node_pairing() -> Result<serde_json::Value, String> {
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn begin_node_otp_enrollment() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let directory = node_service::default_state_directory()?;
+        if !node_service::otp_runtime_supported(&directory) { return Err("Restart this computer's Lume Node with the updated app before enabling the authenticator".into()); }
+        node_auth::begin_enrollment(&directory)
+    })
+        .await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn cancel_node_otp_enrollment() -> Result<(), String> {
+    node_auth::cancel_enrollment(&node_service::default_state_directory()?);
+    Ok(())
+}
+
+#[tauri::command]
+async fn finish_node_otp_enrollment(code: String) -> Result<serde_json::Value, String> {
+    let code = zeroize::Zeroizing::new(code);
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = node_service::default_state_directory()?;
+        if !node_service::otp_runtime_supported(&directory) { return Err("Restart this computer's Lume Node with the updated app before enabling the authenticator".into()); }
+        node_auth::finish_enrollment(&directory, &code)?;
+        this_node(&directory)
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn disable_node_otp() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let directory = node_service::default_state_directory()?;
+        node_auth::disable(&directory)?;
+        this_node(&directory)
+    }).await.map_err(|error| error.to_string())?
 }
 
 /// Removes a device's access to this computer; through the Relay it loses it within a few seconds.
@@ -3908,6 +3996,10 @@ pub fn run() {
             decide_node_pair_request,
             pair_lume_relay_node,
             list_relay_lume_nodes,
+            authenticate_remote_node,
+            disconnect_remote_node,
+            remote_node_authenticated,
+            list_remote_auth_required,
             get_relay_lume_node_overview,
             get_relay_lume_node_health,
             forget_relay_lume_node,
@@ -3917,6 +4009,10 @@ pub fn run() {
             get_this_node,
             set_this_node_on,
             create_this_node_pairing,
+            begin_node_otp_enrollment,
+            cancel_node_otp_enrollment,
+            finish_node_otp_enrollment,
+            disable_node_otp,
             revoke_this_node_device,
             interrupt_relay_lume_session,
             answer_relay_lume_permission,

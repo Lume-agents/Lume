@@ -1,11 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpStream},
     path::Path,
     process,
-    sync::{Arc, Mutex},
+    sync::{atomic::{AtomicU64, Ordering}, mpsc, Arc, Mutex, OnceLock},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -20,13 +21,15 @@ use rustls::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::{
     distributed_protocol::{NodeScope, MAX_PROTOCOL_VERSION, MIN_PROTOCOL_VERSION},
+    node_auth,
     node_http::{self, DeadlineStream},
     node_identity::{verify, NodeIdentity, PublicDeviceIdentity},
     node_inventory::NodeInventory,
-    node_network::{authenticated_request, NodeServerIdentity},
+    node_network::{authenticated_request_with_auth, NodeServerIdentity},
     node_pairing::{self, NodePairingOffer, PairedNodeClient},
     node_service::NodeHealth,
     state::now_millis,
@@ -39,6 +42,8 @@ const MAX_HTTP_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 const LAST_SEEN_WRITE_INTERVAL_MS: i64 = 30_000;
 static REMOTE_STATE_LOCK: Mutex<()> = Mutex::new(());
+static LAN_ANCHORS: OnceLock<Mutex<HashMap<String, (u64, mpsc::Sender<()>)>>> = OnceLock::new();
+static NEXT_LAN_ANCHOR: AtomicU64 = AtomicU64::new(1);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -349,14 +354,21 @@ fn health_at(directory: &Path, remote: &RemoteNode) -> Result<NodeHealth, String
 }
 
 fn observe_at(directory: &Path, remote: &RemoteNode, path: &str) -> Result<Value, String> {
+    request_with_auth(directory, remote, path, None)
+}
+
+fn request_with_auth(directory: &Path, remote: &RemoteNode, path: &str, code: Option<&str>) -> Result<Value, String> {
     let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
-    let request = authenticated_request(
+    let token = node_auth::client_token(&remote.identity.fingerprint);
+    let request = authenticated_request_with_auth(
         &identity,
         &remote.device_id,
         &remote.node_id,
         "POST",
         path,
         now_millis(),
+        token.as_deref().map(String::as_str),
+        code,
     )?;
     let discovered = DiscoveredNode {
         node_id: remote.node_id.clone(),
@@ -367,13 +379,110 @@ fn observe_at(directory: &Path, remote: &RemoteNode, path: &str) -> Result<Value
         protocol_minimum: MIN_PROTOCOL_VERSION,
         protocol_maximum: MAX_PROTOCOL_VERSION,
     };
-    tls_json_request(
+    let result = tls_json_request(
         &discovered,
         "POST",
         path,
         Some(serde_json::to_value(request).map_err(|error| error.to_string())?),
         &remote.certificate_sha256,
-    )
+    );
+    match &result {
+        Ok(_) => node_auth::touch_client_if_matches(&remote.identity.fingerprint, token.as_deref().map(String::as_str)),
+        Err(error) if error.contains(node_auth::OTP_REQUIRED) || !["(HTTP 403)", "(HTTP 429)"].iter().any(|status| error.ends_with(status)) => {
+            if node_auth::forget_client_if_matches(&remote.identity.fingerprint, token.as_deref().map(String::as_str)) {
+                stop_lan_anchor(&remote.identity.fingerprint);
+                crate::remote_sessions::connection_lost(&remote.node_id);
+            }
+        }
+        Err(_) => {}
+    }
+    result
+}
+
+/// Authenticates a paired LAN device over its pinned TLS connection. The grant stays in memory.
+pub fn authenticate(directory: &Path, node_id: &str, code: &str) -> Result<(), String> {
+    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) { return Err("Invalid authenticator code".into()); }
+    let remote = remotes(directory)?.into_iter().find(|remote| remote.node_id == node_id || remote.identity.fingerprint == node_id).ok_or("that Node is not paired on this client")?;
+    let mut response = request_with_auth(directory, &remote, "/v1/authenticate", Some(code))?;
+    let token = response["token"].as_str().filter(|value| value.len() == 43 && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')).ok_or("the Node returned an invalid session")?;
+    let token = zeroize::Zeroizing::new(token.to_string());
+    if let Some(Value::String(value)) = response.get_mut("token") { value.zeroize(); }
+    start_lan_anchor(directory, &remote, token)
+}
+
+pub fn disconnect(directory: &Path, node_id: &str) -> Result<(), String> {
+    let remote = remotes(directory)?.into_iter().find(|remote| remote.node_id == node_id || remote.identity.fingerprint == node_id).ok_or("that Node is not paired on this client")?;
+    let result = request_with_auth(directory, &remote, "/v1/disconnect", None).map(|_| ());
+    node_auth::forget_client(&remote.identity.fingerprint);
+    stop_lan_anchor(&remote.identity.fingerprint);
+    result
+}
+
+fn stop_lan_anchor(fingerprint: &str) {
+    if let Ok(mut anchors) = LAN_ANCHORS.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        if let Some((_, stop)) = anchors.remove(fingerprint) { let _ = stop.send(()); }
+    }
+}
+
+fn start_lan_anchor(directory: &Path, remote: &RemoteNode, token: zeroize::Zeroizing<String>) -> Result<(), String> {
+    let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
+    let authentication = authenticated_request_with_auth(
+        &identity, &remote.device_id, &remote.node_id, "POST", "/v1/keepalive", now_millis(), Some(&token), None,
+    )?;
+    let address = remote.address.parse::<IpAddr>().map_err(|_| "invalid Node address".to_string())?;
+    let stream = TcpStream::connect_timeout(&SocketAddr::new(address, remote.port), CONNECTION_TIMEOUT)
+        .map_err(|error| format!("could not connect to the Lume Node: {error}"))?;
+    let stream = DeadlineStream::new(stream, Instant::now() + REQUEST_DEADLINE);
+    let verifier = Arc::new(PinnedCertificateVerifier::new(&remote.certificate_sha256)?);
+    let config = ClientConfig::builder().dangerous().with_custom_certificate_verifier(verifier).with_no_client_auth();
+    let server_name = ServerName::try_from("localhost").map_err(|_| "invalid Node TLS server name".to_string())?.to_owned();
+    let connection = ClientConnection::new(Arc::new(config), server_name).map_err(|error| error.to_string())?;
+    let mut stream = StreamOwned::new(connection, stream);
+    let body = zeroize::Zeroizing::new(serde_json::to_vec(&authentication).map_err(|error| error.to_string())?);
+    let header = format!("POST /v1/keepalive HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n", body.len());
+    stream.write_all(header.as_bytes()).and_then(|_| stream.write_all(&body)).and_then(|_| stream.flush()).map_err(|error| error.to_string())?;
+    let mut ready = [0u8; 1];
+    stream.read_exact(&mut ready).map_err(|error| format!("could not establish the Node session: {error}"))?;
+    if ready[0] != 1 { return Err("The Node could not establish the authenticated session".into()); }
+
+    let fingerprint = remote.identity.fingerprint.clone();
+    let worker_fingerprint = fingerprint.clone();
+    let worker_node_id = remote.node_id.clone();
+    let worker_token = zeroize::Zeroizing::new(token.to_string());
+    let generation = NEXT_LAN_ANCHOR.fetch_add(1, Ordering::Relaxed);
+    let (stop, receiver) = mpsc::channel();
+    {
+        let mut anchors = LAN_ANCHORS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "Node connection is unavailable")?;
+        if let Some((_, previous)) = anchors.insert(fingerprint.clone(), (generation, stop)) { let _ = previous.send(()); }
+    }
+    node_auth::remember_client(&fingerprint, token);
+    let launched = thread::Builder::new().name("lume-lan-auth".into()).spawn(move || {
+        let mut failed = false;
+        loop {
+            match receiver.recv_timeout(Duration::from_secs(4)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            stream.sock.refresh_deadline(Duration::from_secs(12), Duration::from_secs(8));
+            let mut reply = [0u8; 1];
+            if stream.write_all(&[1]).and_then(|_| stream.flush()).and_then(|_| stream.read_exact(&mut reply)).is_err() || reply[0] != 1 { failed = true; break; }
+            node_auth::touch_client_if_matches(&worker_fingerprint, Some(&worker_token));
+        }
+        if node_auth::forget_client_if_matches(&worker_fingerprint, Some(&worker_token)) && failed {
+            crate::remote_sessions::connection_lost(&worker_node_id);
+        }
+        if let Ok(mut anchors) = LAN_ANCHORS.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+            if anchors.get(&worker_fingerprint).is_some_and(|(current, _)| *current == generation) { anchors.remove(&worker_fingerprint); }
+        }
+        stream.conn.send_close_notify();
+        let _ = stream.conn.complete_io(&mut stream.sock);
+    });
+    if launched.is_err() {
+        node_auth::forget_client(&fingerprint);
+        stop_lan_anchor(&fingerprint);
+        return Err("Could not maintain the authenticated Node connection".into());
+    }
+    Ok(())
 }
 
 pub fn remotes(directory: &Path) -> Result<Vec<RemoteNode>, String> {
@@ -390,11 +499,13 @@ pub fn forget(directory: &Path, node_id: &str) -> Result<bool, String> {
         .lock()
         .map_err(|_| "remote Node state is unavailable")?;
     let mut state = load_remote_state(directory)?;
+    let fingerprint = state.nodes.iter().find(|node| node.node_id == node_id).map(|node| node.identity.fingerprint.clone());
     let previous = state.nodes.len();
     state.nodes.retain(|node| node.node_id != node_id);
     let removed = state.nodes.len() != previous;
     if removed {
         save_remote_state(directory, &state)?;
+        if let Some(fingerprint) = fingerprint { node_auth::forget_client(&fingerprint); stop_lan_anchor(&fingerprint); }
     }
     Ok(removed)
 }
@@ -596,9 +707,15 @@ fn tls_json_request(
         ClientConnection::new(Arc::new(config), server_name).map_err(|error| error.to_string())?;
     let mut stream = StreamOwned::new(connection, stream);
     let body = body
-        .map(|body| serde_json::to_vec(&body).map_err(|error| error.to_string()))
+        .map(|mut body| {
+            let result = serde_json::to_vec(&body).map(zeroize::Zeroizing::new).map_err(|error| error.to_string());
+            for path in ["/secret", "/proof/signedPayload", "/proof/payload/otpCode", "/proof/payload/authToken"] {
+                if let Some(Value::String(secret)) = body.pointer_mut(path) { secret.zeroize(); }
+            }
+            result
+        })
         .transpose()?
-        .unwrap_or_default();
+        .unwrap_or_else(|| zeroize::Zeroizing::new(Vec::new()));
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -895,6 +1012,43 @@ mod tests {
         assert_eq!(health.identity_fingerprint, remote.identity.fingerprint);
 
         drop(server);
+        let _ = fs::remove_dir_all(server_directory);
+        let _ = fs::remove_dir_all(client_directory);
+    }
+
+    #[test]
+    #[ignore = "requires a loopback socket and a disposable unlocked OS credential store"]
+    fn lan_otp_session_survives_actions_but_not_a_detected_disconnect() {
+        let server_directory = test_directory("otp-server");
+        let client_directory = test_directory("otp-client");
+        let initial = crate::node_service::health(&server_directory).unwrap();
+        let identity = NodeIdentity::load_or_create(&server_directory).unwrap();
+        let server = NodeNetworkServer::start(&server_directory, &initial.node_id, std::net::Ipv4Addr::LOCALHOST.into(), 0, &identity).unwrap();
+        let offer = node_pairing::begin_pairing(&server_directory, &initial.node_id, &identity).unwrap();
+        let pairing = PairingUri { node_id: offer.node_id, offer_id: offer.offer_id, secret: offer.secret, identity_fingerprint: offer.node_identity.fingerprint };
+        let discovered = DiscoveredNode {
+            node_id: server.identity.node_id.clone(), address: "127.0.0.1".into(), port: server.port,
+            identity_fingerprint: server.identity.identity.fingerprint.clone(), certificate_sha256: server.identity.certificate_sha256.clone(),
+            protocol_minimum: server.identity.protocol_minimum, protocol_maximum: server.identity.protocol_maximum,
+        };
+        let mut remote = pair_at(&client_directory, &pairing, &discovered).unwrap();
+        let code = crate::node_auth::prepare_test_authenticator(&server_directory).unwrap();
+        assert!(remote_health(&client_directory, &remote.node_id, Duration::ZERO).unwrap_err().contains(node_auth::OTP_REQUIRED));
+        authenticate(&client_directory, &remote.node_id, &code).unwrap();
+        assert!(remote_health(&client_directory, &remote.node_id, Duration::ZERO).is_ok());
+        assert!(remote_health(&client_directory, &remote.node_id, Duration::ZERO).is_ok(), "ordinary actions do not require another code");
+
+        drop(server);
+        assert!(remote_health(&client_directory, &remote.node_id, Duration::ZERO).is_err(), "the client detects a lost transport");
+        assert!(node_auth::client_token(&remote.identity.fingerprint).is_none(), "the detected failure drops the local grant immediately");
+        let restarted = NodeNetworkServer::start(&server_directory, &initial.node_id, std::net::Ipv4Addr::LOCALHOST.into(), 0, &identity).unwrap();
+        remote.port = restarted.port;
+        upsert_remote(&client_directory, remote.clone()).unwrap();
+        assert!(remote_health(&client_directory, &remote.node_id, Duration::ZERO).unwrap_err().contains(node_auth::OTP_REQUIRED));
+        assert!(authenticate(&client_directory, &remote.node_id, &code).is_err(), "a used OTP cannot be replayed after disconnect");
+        stop_lan_anchor(&remote.identity.fingerprint);
+        crate::node_auth::disable(&server_directory).unwrap();
+        drop(restarted);
         let _ = fs::remove_dir_all(server_directory);
         let _ = fs::remove_dir_all(client_directory);
     }

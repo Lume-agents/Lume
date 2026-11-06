@@ -125,7 +125,28 @@ and a time, like prompts: a repeat does not act twice, and an answer more than a
 Settings → Remote computers accepts both `lume://pair-node?…` (same network) and `lume://pair-relay?…` (through the Relay) links.
 A computer paired through the Relay shows its agent sessions (status dot, agent, project, "needs permission" / "needs an answer") and
 refreshes them every few seconds while the window is visible. The card offers *Forget*, and an open conversation has a box to send a prompt and, when the agent waits for a permission, a card to answer it, each when its owner allows it. Each refresh
-opens one encrypted session and asks `health` and `sessions` together.
+reuses its encrypted session and asks `health` and `sessions` together.
+
+### Authenticator for reconnection
+
+On the Node, use **Settings → Remote computers → Reconnection authenticator** and scan the QR code with a TOTP app.
+Confirm the code on the Node. After pairing, the remote Lume asks for a fresh code to open an authenticated connection;
+the same code cannot be reused, so wait for the next code if it was just used to finish setup. An authenticated connection
+allows normal actions without another code, subject to each device's scopes and the Node owner's switches. When the connection
+is lost or the client restarts, a fresh code is required; a task already running on the Node is not stopped.
+
+The secret stays in the Node's system credential store (libsecret on Linux, DPAPI for the current Windows user, or Keychain
+on macOS); if it is unavailable, setup fails instead of storing the secret in plaintext. The Node and client clocks must be
+reasonably synchronized. If the authenticator is lost, the Node owner can disable it locally and configure a new one. Keep the
+QR code private: anyone who copies it can generate the same codes. TOTP is an additional factor, not phishing-resistant and
+not a replacement for the paired-device identity or an independent security review.
+
+Update both ends and restart any already-running Node before enabling this option. Older clients, including the current separate
+`lume node remote-health`, `relay-health`, `relay-inventory` and session-query CLI commands, cannot authenticate while the
+option is enabled; use the Lume app for those actions. Do not run or downgrade to an older Node binary after enabling OTP:
+older Nodes cannot enforce this policy. The updated app warns if it detects an older running Node, but cannot make an old binary
+enforce the policy.
+LAN and Relay reconnection still require validation on real devices, and the hosted Relay remains a prototype.
 
 ## Friendlier terminal
 

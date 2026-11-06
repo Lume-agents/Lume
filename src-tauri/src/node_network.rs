@@ -21,6 +21,7 @@ use rustls::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zeroize::Zeroize;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -65,6 +66,16 @@ pub struct AuthenticatedNodeRequest {
     pub proof: SignedDeviceStatement,
 }
 
+impl Drop for AuthenticatedNodeRequest {
+    fn drop(&mut self) {
+        for field in ["otpCode", "authToken"] {
+            if let Some(Value::String(secret)) = self.proof.payload.get_mut(field) { secret.zeroize(); }
+        }
+        // The signed payload is base64, not encrypted, and can also contain the code or grant.
+        self.proof.signed_payload.zeroize();
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthenticationProof {
@@ -74,6 +85,8 @@ struct AuthenticationProof {
     path: String,
     timestamp: i64,
     nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_platform: Option<String>,
 }
 
 pub struct NodeNetworkServer {
@@ -453,6 +466,19 @@ pub fn authenticated_request(
     path: &str,
     timestamp: i64,
 ) -> Result<AuthenticatedNodeRequest, String> {
+    authenticated_request_with_auth(client_identity, device_id, node_id, method, path, timestamp, None, None)
+}
+
+pub(crate) fn authenticated_request_with_auth(
+    client_identity: &NodeIdentity,
+    device_id: &str,
+    node_id: &str,
+    method: &str,
+    path: &str,
+    timestamp: i64,
+    token: Option<&str>,
+    code: Option<&str>,
+) -> Result<AuthenticatedNodeRequest, String> {
     let mut nonce = [0_u8; 18];
     getrandom::getrandom(&mut nonce).map_err(|error| error.to_string())?;
     let payload = AuthenticationProof {
@@ -462,11 +488,14 @@ pub fn authenticated_request(
         path: path.into(),
         timestamp,
         nonce: URL_SAFE_NO_PAD.encode(nonce),
+        client_platform: node_pairing::current_platform(),
     };
+    let mut payload = serde_json::to_value(payload).map_err(|error| error.to_string())?;
+    if let Some(token) = token { payload["authToken"] = serde_json::json!(token); }
+    if let Some(code) = code { payload["otpCode"] = serde_json::json!(code); }
     Ok(AuthenticatedNodeRequest {
         device_id: device_id.into(),
-        proof: client_identity
-            .sign(serde_json::to_value(payload).map_err(|error| error.to_string())?)?,
+        proof: client_identity.sign(payload)?,
     })
 }
 
@@ -487,7 +516,7 @@ fn verify_authenticated_request(
     if paired.identity != request.proof.identity || !paired.scopes.contains(&NodeScope::Observe) {
         return Err("Node client identity or scope mismatch".into());
     }
-    let proof = serde_json::from_value::<AuthenticationProof>(request.proof.payload.clone())
+    let proof = AuthenticationProof::deserialize(&request.proof.payload)
         .map_err(|_| "invalid Node authentication proof".to_string())?;
     if proof.device_id != request.device_id
         || proof.node_id != server_identity.node_id
@@ -506,7 +535,8 @@ fn verify_authenticated_request(
     replay
         .lock()
         .map_err(|_| "Node replay cache is unavailable".to_string())?
-        .accept(&request.device_id, &proof.nonce, now)
+        .accept(&request.device_id, &proof.nonce, now)?;
+    Ok(())
 }
 
 fn handle_tls_connection(
@@ -520,6 +550,10 @@ fn handle_tls_connection(
     };
     let mut stream = StreamOwned::new(connection, stream);
     let response = match read_http_request(&mut stream) {
+        Ok(request) if request.method == "POST" && request.path == "/v1/keepalive" => {
+            serve_auth_anchor(&mut stream, &state, &request);
+            return;
+        }
         Ok(request) => route(&request, &state),
         Err(error) => json_response(400, serde_json::json!({ "error": error })),
     };
@@ -529,18 +563,53 @@ fn handle_tls_connection(
     let _ = stream.conn.complete_io(&mut stream.sock);
 }
 
-#[derive(Debug)]
+/// A paired LAN device keeps this TLS connection open for its authenticated session. Losing it
+/// revokes the associated grant; the user must enter a new code before reconnecting.
+fn serve_auth_anchor(stream: &mut StreamOwned<ServerConnection, DeadlineStream>, state: &NodeNetworkState, request: &HttpRequest) {
+    let authenticated = serde_json::from_slice::<AuthenticatedNodeRequest>(&request.body).ok();
+    let ready = authenticated.as_ref().and_then(|auth| {
+        verify_authenticated_request(&state.directory, &state.server_identity, auth, "POST", "/v1/keepalive", &state.replay, now_millis()).ok()?;
+        let fingerprint = auth.proof.identity.fingerprint.clone();
+        let token = zeroize::Zeroizing::new(auth.proof.payload["authToken"].as_str()?.to_string());
+        crate::node_auth::activate_anchor(&state.directory, &fingerprint, &token).ok()?;
+        Some((fingerprint, token))
+    });
+    let Some((fingerprint, token)) = ready else { let _ = stream.write_all(&[0]).and_then(|_| stream.flush()); return; };
+    let result = stream.write_all(&[1]).and_then(|_| stream.flush());
+    if result.is_ok() {
+        loop {
+            stream.sock.refresh_deadline(Duration::from_secs(15), Duration::from_secs(8));
+            let mut ping = [0u8; 1];
+            if stream.read_exact(&mut ping).is_err() || ping[0] != 1 { break; }
+            let paired = node_pairing::clients(&state.directory).is_ok_and(|clients| clients.iter().any(|client| client.identity.fingerprint == fingerprint && client.scopes.contains(&NodeScope::Observe)));
+            if !paired || crate::node_auth::authorize(&state.directory, &fingerprint, Some(&token)).is_err() { break; }
+            if stream.write_all(&[1]).and_then(|_| stream.flush()).is_err() { break; }
+        }
+    }
+    crate::node_auth::disconnect_if_token(&state.directory, &fingerprint, &token);
+}
+
 struct HttpRequest {
     method: String,
     path: String,
     body: Vec<u8>,
 }
 
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.debug_struct("HttpRequest").field("method", &self.method).field("path", &self.path).field("body_bytes", &self.body.len()).finish()
+    }
+}
+
+impl Drop for HttpRequest {
+    fn drop(&mut self) { self.body.zeroize(); }
+}
+
 fn read_http_request(stream: &mut impl Read) -> Result<HttpRequest, String> {
-    let mut buffer = Vec::with_capacity(1024);
-    let mut chunk = [0_u8; 2048];
+    let mut buffer = zeroize::Zeroizing::new(Vec::with_capacity(1024));
+    let mut chunk = zeroize::Zeroizing::new([0_u8; 2048]);
     let header_end = loop {
-        let read = stream.read(&mut chunk).map_err(|error| error.to_string())?;
+        let read = stream.read(&mut chunk[..]).map_err(|error| error.to_string())?;
         if read == 0 {
             return Err("incomplete Node request".into());
         }
@@ -688,7 +757,7 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                 Err(error) => json_response(403, serde_json::json!({ "error": error })),
             }
         }
-        ("POST", "/v1/health" | "/v1/inventory") => {
+        ("POST", "/v1/health" | "/v1/inventory" | "/v1/authenticate" | "/v1/disconnect") => {
             let authentication =
                 match serde_json::from_slice::<AuthenticatedNodeRequest>(&request.body) {
                     Ok(authentication) => authentication,
@@ -708,7 +777,27 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                 &state.replay,
                 now_millis(),
             ) {
-                Ok(()) => observe_response(state, &authentication.device_id, &request.path),
+                Ok(()) => {
+                    let fingerprint = &authentication.proof.identity.fingerprint;
+                    let payload = &authentication.proof.payload;
+                    if request.path == "/v1/authenticate" {
+                        let result = payload["otpCode"].as_str().ok_or_else(|| "Invalid authenticator code".to_string())
+                            .and_then(|code| crate::node_auth::authenticate(&state.directory, fingerprint, code));
+                        return match result {
+                            Ok(token) => json_response(200, serde_json::json!({ "token": token.as_str() })),
+                            Err(error) => json_response(403, serde_json::json!({ "error": error })),
+                        };
+                    }
+                    if let Err(error) = crate::node_auth::authorize(&state.directory, fingerprint, payload["authToken"].as_str()) {
+                        return json_response(401, serde_json::json!({ "error": error }));
+                    }
+                    let _ = node_pairing::touch_with_platform(&state.directory, fingerprint, now_millis(), payload["clientPlatform"].as_str());
+                    if request.path == "/v1/disconnect" {
+                        crate::node_auth::disconnect(&state.directory, fingerprint);
+                        return json_response(200, serde_json::json!({ "disconnected": true }));
+                    }
+                    observe_response(state, &authentication.device_id, &request.path)
+                }
                 Err(_) => json_response(
                     401,
                     serde_json::json!({ "error": "Node authentication failed" }),
@@ -860,9 +949,11 @@ mod tests {
         let node = NodeIdentity::load_or_create(&directory).expect("node identity");
         let client = NodeIdentity::load_or_create(&client_directory).expect("client identity");
         let offer = node_pairing::begin_pairing(&directory, "node-home", &node).expect("offer");
-        let pairing =
+        let mut pairing =
             node_pairing::pairing_request(&client, &offer, "Work laptop", vec![NodeScope::Observe])
                 .expect("pairing request");
+        pairing.proof.payload.as_object_mut().unwrap().remove("clientPlatform");
+        pairing.proof = client.sign(pairing.proof.payload.clone()).unwrap();
         let paired =
             node_pairing::accept_pairing(&directory, &pairing, &[NodeScope::Observe], now_millis())
                 .expect("paired client");
@@ -879,6 +970,11 @@ mod tests {
         )
         .expect("authenticated request");
         let replay = Mutex::new(ReplayCache::default());
+        let mut forged = request.clone();
+        let wrong_platform = if node_pairing::current_platform().as_deref() == Some("windows") { "linux" } else { "windows" };
+        forged.proof.payload["clientPlatform"] = serde_json::json!(wrong_platform);
+        assert!(verify_authenticated_request(&directory, &server, &forged, "POST", "/v1/health", &replay, now_millis()).is_err());
+        assert_eq!(node_pairing::clients(&directory).unwrap()[0].platform, None);
         assert_eq!(
             verify_authenticated_request(
                 &directory,
@@ -891,6 +987,7 @@ mod tests {
             ),
             Ok(())
         );
+        assert_eq!(node_pairing::clients(&directory).unwrap()[0].platform, None, "identity verification alone does not report an authenticated session");
         assert_eq!(
             verify_authenticated_request(
                 &directory,

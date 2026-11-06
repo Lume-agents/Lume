@@ -285,6 +285,22 @@ export async function loadRelayLumeNodes(): Promise<RelayLumeNode[]> {
   return invoke<RelayLumeNode[]>("list_relay_lume_nodes");
 }
 
+export async function authenticateRemoteNode(nodeId: string, code: string): Promise<void> {
+  return invoke("authenticate_remote_node", { nodeId, code });
+}
+
+export async function disconnectRemoteNode(nodeId: string): Promise<void> {
+  return invoke("disconnect_remote_node", { nodeId });
+}
+
+export async function remoteNodeAuthenticated(nodeId: string): Promise<boolean> {
+  return invoke("remote_node_authenticated", { nodeId });
+}
+
+export async function listRemoteAuthRequired(): Promise<Array<{ nodeId: string; computer: string }>> {
+  return invoke("list_remote_auth_required");
+}
+
 export async function loadRelayLumeNodeOverview(nodeId: string): Promise<RelayLumeNodeOverview> {
   return invoke<RelayLumeNodeOverview>("get_relay_lume_node_overview", { nodeId });
 }
@@ -324,7 +340,9 @@ export interface ThisNode {
   name: string;
   relayUrl?: string | null;
   relayConnected?: boolean | null;
-  devices: Array<{ deviceId: string; name: string; pairedAt: number; lastSeenAt?: number | null }>;
+  otpEnabled?: boolean;
+  otpRuntimeSupported?: boolean;
+  devices: Array<{ deviceId: string; name: string; pairedAt: number; lastSeenAt?: number | null; platform?: "windows" | "linux" | "macos" | null }>;
   shareConversations: boolean;
   allowPrompts: boolean;
   allowApprovals: boolean;
@@ -340,6 +358,22 @@ export async function setThisNodeOn(on: boolean): Promise<ThisNode> {
 
 export async function createThisNodePairing(): Promise<{ link: string; expiresAt: number }> {
   return invoke("create_this_node_pairing");
+}
+
+export async function beginNodeOtpEnrollment(): Promise<string> {
+  return invoke("begin_node_otp_enrollment");
+}
+
+export async function cancelNodeOtpEnrollment(): Promise<void> {
+  return invoke("cancel_node_otp_enrollment");
+}
+
+export async function finishNodeOtpEnrollment(code: string): Promise<ThisNode> {
+  return invoke("finish_node_otp_enrollment", { code });
+}
+
+export async function disableNodeOtp(): Promise<ThisNode> {
+  return invoke("disable_node_otp");
 }
 
 export async function revokeThisNodeDevice(deviceId: string): Promise<ThisNode> {

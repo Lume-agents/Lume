@@ -73,6 +73,7 @@
     loadExternalPlugins,
     loadHubSnapshot,
     listExternalWriterConflicts,
+    listRemoteAuthRequired,
     loadIntegrationStatuses,
     loadCliInstallPlans,
     loadResumableSessions,
@@ -257,6 +258,8 @@
   let mobileBusy = $state(false);
   let dismissedAgentAlertIds = $state<string[]>([]);
   let pairRequestBanners = $state<SystemBannerItem[]>([]);
+  let remoteAuthBanners = $state<SystemBannerItem[]>([]);
+  let remoteAuthRevision = 0;
   let rateLimitRefreshRequested = false;
   let antigravityRateLimitRefreshRequested = false;
   let resetConfirming = $state(false);
@@ -882,7 +885,7 @@
   }
 
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
-    const items: SystemBannerItem[] = [...pairRequestBanners];
+    const items: SystemBannerItem[] = [...remoteAuthBanners, ...pairRequestBanners];
     if (settingsError) items.push({ id: "settings-error", message: settingsError, tone: "error", onDismiss: () => { settingsError = ""; } });
     if (shortcutRegistrationError) items.push({
       id: "shortcut-registration-error",
@@ -911,6 +914,16 @@
     usageAlertDismissals.dismiss(id);
     if (dismissedAgentAlertIds.includes(id)) return;
     dismissedAgentAlertIds = [...dismissedAgentAlertIds, id].slice(-200);
+  }
+
+  function announceRemoteAuth({ nodeId, computer }: { nodeId: string; computer: string }) {
+    const id = `remote-auth:${nodeId}`;
+    remoteAuthBanners = [{
+      id,
+      message: tr(`${computer} needs to reconnect. Open Settings > Remote computers and enter the authenticator code.`, `${computer} precisa se reconectar. Abra Ajustes > Computadores remotos e informe o código do autenticador.`),
+      tone: "warning" as const,
+      onDismiss: () => { remoteAuthBanners = remoteAuthBanners.filter((item) => item.id !== id); },
+    }, ...remoteAuthBanners.filter((item) => item.id !== id)].slice(0, 4);
   }
 
   function sessionName(session: HubSession) {
@@ -2653,6 +2666,11 @@
           externalWriterConflicts = Object.fromEntries(payload.map((conflict) => [conflict.sessionId, conflict]));
         })),
         startup.subscribe(() => listen("lume://sessions-changed", queueRefresh)),
+        startup.subscribe(() => listen<{ nodeId: string; computer: string }>("lume://remote-auth-required", ({ payload }) => { remoteAuthRevision += 1; announceRemoteAuth(payload); })),
+        startup.subscribe(() => listen<{ nodeId: string }>("lume://remote-auth-resolved", ({ payload }) => {
+          remoteAuthRevision += 1;
+          remoteAuthBanners = remoteAuthBanners.filter((item) => item.id !== `remote-auth:${payload.nodeId}`);
+        })),
         startup.subscribe(() => listen<PendingPairRequest>(PAIR_REQUEST_EVENT, ({ payload }) => {
           const item = pairRequestBanner(payload, language, Date.now(), () => {
             pairRequestBanners = pairRequestBanners.filter((banner) => banner.id !== `pair-request:${payload.requestId}`);
@@ -2666,6 +2684,10 @@
         })),
       ]);
       if (!startup.active) return;
+      const remoteAuthRevisionAtRequest = remoteAuthRevision;
+      void listRemoteAuthRequired()
+        .then((required) => { if (startup.active && remoteAuthRevision === remoteAuthRevisionAtRequest) required.forEach(announceRemoteAuth); })
+        .catch(() => undefined);
       const conflictRevisionAtRequest = conflictEventRevision;
       void listExternalWriterConflicts()
         .then((conflicts) => {

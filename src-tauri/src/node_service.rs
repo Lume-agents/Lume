@@ -140,6 +140,8 @@ struct NodeRuntime {
     network_address: Option<std::net::IpAddr>,
     #[serde(default)]
     discovery_available: bool,
+    #[serde(default)]
+    otp_auth_version: u8,
 }
 
 pub fn run_cli(arguments: &[String]) -> i32 {
@@ -693,6 +695,7 @@ fn run_service_inner(directory: &Path, once: bool, start_network: bool) -> Resul
                 discovery_available: network
                     .as_ref()
                     .is_some_and(|server| server.discovery_available),
+                otp_auth_version: 1,
             };
             write_json(&directory.join(RUNTIME_FILE), &runtime)?;
             last_heartbeat = now;
@@ -713,6 +716,11 @@ fn run_service_inner(directory: &Path, once: bool, start_network: bool) -> Resul
 fn read_runtime(directory: &Path) -> Option<NodeRuntime> {
     let payload = fs::read(directory.join(RUNTIME_FILE)).ok()?;
     serde_json::from_slice(&payload).ok()
+}
+
+/// An older detached Node ignores the OTP policy. Never enable it until the live daemon supports it.
+pub(crate) fn otp_runtime_supported(directory: &Path) -> bool {
+    read_runtime(directory).filter(runtime_is_live).is_some_and(|runtime| runtime.otp_auth_version >= 1)
 }
 
 fn runtime_is_live(runtime: &NodeRuntime) -> bool {
@@ -912,6 +920,7 @@ mod tests {
                 network_port: None,
                 network_address: None,
                 discovery_available: false,
+                otp_auth_version: 1,
             },
         )
         .expect("runtime");
@@ -919,7 +928,16 @@ mod tests {
             health(&directory).expect("health").lifecycle,
             NodeLifecycle::Offline
         );
+        assert!(!otp_runtime_supported(&directory), "a stale Node cannot be trusted to enforce OTP");
         let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn legacy_node_runtime_does_not_claim_otp_support() {
+        let runtime: NodeRuntime = serde_json::from_value(serde_json::json!({
+            "processId": 1, "processStartedAt": 1, "startedAt": 1, "heartbeatAt": 1
+        })).unwrap();
+        assert_eq!(runtime.otp_auth_version, 0);
     }
 
     #[test]

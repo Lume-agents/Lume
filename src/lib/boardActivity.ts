@@ -14,7 +14,7 @@ export type StepActivity = {
 };
 
 // Prompts, answers and interruptions are conversation, not work in progress.
-const conversation = new Set(["prompt", "queued_prompt", "codex_queued_prompt", "message", "interrupt", "warning"]);
+const conversation = new Set(["prompt", "queued_prompt", "codex_queued_prompt", "message", "interrupt", "compact", "connection", "warning"]);
 
 const baseName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 const shorten = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
@@ -84,7 +84,7 @@ export type FeedItem = {
   path?: string;
 };
 
-const feedHidden = new Set(["prompt", "queued_prompt", "codex_queued_prompt", "interrupt"]);
+const feedHidden = new Set(["prompt", "queued_prompt", "codex_queued_prompt", "interrupt", "compact", "connection"]);
 
 /** The agent's recent work, newest first, for the board's live panel. */
 export function activityFeed(session: HubSession | undefined, language: Language, limit = 14): FeedItem[] {

@@ -172,6 +172,23 @@ export function addFileChanges(
       target.push({ ...change, path });
     }
   }
+  absorbBareNames(target);
+}
+
+/**
+ * A final response can name a file without its folder ("ActivityTraceGroup.svelte"), and that mention reaches the
+ * list next to the edit of the same file ("src/lib/ActivityTraceGroup.svelte"). A bare name joins the one path it
+ * stands for; when two folders hold a file with that name it is left as it is.
+ */
+function absorbBareNames(list: FileChangeSummary[]): void {
+  for (const bare of [...list]) {
+    if (bare.path.includes("/")) continue;
+    const owners = list.filter((other) => other !== bare && other.path.endsWith(`/${bare.path}`));
+    if (owners.length !== 1) continue;
+    owners[0].added = Math.max(owners[0].added, bare.added);
+    owners[0].removed = Math.max(owners[0].removed, bare.removed);
+    list.splice(list.indexOf(bare), 1);
+  }
 }
 
 export function mergeFileChanges(
@@ -191,4 +208,5 @@ export function mergeFileChanges(
     }
   }
   target.splice(0, target.length, ...merged.values());
+  absorbBareNames(target);
 }

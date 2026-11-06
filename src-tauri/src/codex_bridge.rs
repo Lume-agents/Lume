@@ -3664,6 +3664,18 @@ fn activity_event(
             .join("\n");
             warning_activity(thread_id, "Aviso de configuração", &detail)
         }
+        // The connection to the model dropped and Codex is trying again: a notice in the chat, one per turn.
+        "error" if params.get("willRetry").and_then(Value::as_bool) == Some(true) => SessionActivity {
+            id: format!("codex:{thread_id}:connection:{}", text_at(params, "turnId").unwrap_or("turn")),
+            kind: "connection".into(),
+            title: "Connection lost".into(),
+            detail: params.pointer("/error/message").and_then(Value::as_str).map(str::to_string),
+            status: "running".into(),
+            created_at: now_millis(),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        },
         _ => return None,
     };
     Some(HookEvent {
@@ -3877,6 +3889,7 @@ fn codex_item_activity(
             first_value_text(item, &["text", "plan"]),
             Vec::new(),
         ),
+        "contextCompaction" if completed => ("compact", "Context compacted".into(), None, Vec::new()),
         "reasoning" => (
             "analysis",
             if completed {
@@ -5510,6 +5523,17 @@ mod tests {
         assert!(matches!(event.event, HookEventKind::WaitingForInput));
         assert_eq!(event.status_label.as_deref(), Some("Prompt interrompido"));
         assert!(event.last_response.is_none());
+    }
+
+    #[test]
+    fn a_retried_connection_error_is_a_connection_notice() {
+        let notice = activity_event(
+            &json!({ "method": "error", "params": { "threadId": "t", "turnId": "u", "willRetry": true, "error": { "message": "Reconnecting... 1/5" } } }),
+            "error",
+            None,
+        ).and_then(|event| event.activity).expect("a notice");
+        assert_eq!((notice.kind.as_str(), notice.id.as_str(), notice.detail.as_deref()), ("connection", "codex:t:connection:u", Some("Reconnecting... 1/5")));
+        assert!(activity_event(&json!({ "method": "error", "params": { "threadId": "t", "willRetry": false, "error": { "message": "x" } } }), "error", None).is_none());
     }
 
     #[test]

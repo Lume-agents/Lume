@@ -6,7 +6,8 @@
   import { buildConversationEntries, buildConversationFeed, fileChangesForFinalResponses } from "$lib/sessionConversation";
   import { displayFileChangePath, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
   import { activityDisplayTitle, activityThinkingLabel, activityThinkingState, formatAgentDuration, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
-  import { interruptNoticeText } from "$lib/interruptNotice";
+  import { compactNoticeText, connectionNoticeText, interruptNoticeText } from "$lib/interruptNotice";
+  import ChatSeparatorNotice from "$lib/ChatSeparatorNotice.svelte";
   import { renderWorkspaceMarkdownWithFileBadges } from "$lib/workspaceFileReferences.js";
   import { renderFileTypeIconHtml } from "$lib/fileTypeIcons";
   import { BoundedRenderCache } from "$lib/boundedRenderCache";
@@ -247,7 +248,11 @@
                   {/if}
                 </div>
               {:else if activity.kind === "interrupt"}
-                <p class="interrupt" role="status"><LumeIcon name="stop" size={12} />{interruptNoticeText(activity.detail, (en: string, pt: string) => client.tr(en, pt))}</p>
+                <ChatSeparatorNotice icon="stop" alert text={interruptNoticeText(activity.detail, (en: string, pt: string) => client.tr(en, pt))} />
+              {:else if activity.kind === "connection"}
+                <ChatSeparatorNotice icon="unplug" alert text={connectionNoticeText(activity.detail, (en: string, pt: string) => client.tr(en, pt))} detail={activity.detail} />
+              {:else if activity.kind === "compact"}
+                <ChatSeparatorNotice icon="compact" text={compactNoticeText((en: string, pt: string) => client.tr(en, pt))} />
               {:else if activity.kind === "analysis" && activity.detail}
                 <section class="analysis">
                   <header>{displayText(client.language, activity.title)}</header>
@@ -375,7 +380,6 @@
   .added, .removed { font: 700 12px var(--lume-font-code, monospace); font-variant-numeric: tabular-nums; }
   .added { color: #4fa877; }
   .removed { color: #cf6b66; }
-  .interrupt { margin: 0; display: flex; align-items: center; gap: 6px; color: var(--workspace-faint); font-size: 12.5px; }
   .analysis { padding: 10px 12px; border-left: 2px solid color-mix(in srgb, var(--workspace-accent) 50%, transparent); color: var(--workspace-muted); }
   .analysis header { margin-bottom: 4px; color: var(--workspace-faint); font-size: 12px; font-weight: 700; }
   .trace { min-width: 0; max-width: 100%; }

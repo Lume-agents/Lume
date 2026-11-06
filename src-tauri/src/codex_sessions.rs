@@ -289,7 +289,8 @@ fn bootstrap_session(path: &Path, file: &mut ObservedFile) -> (bool, Vec<HookEve
         }
         match record.payload.r#type.as_deref() {
             Some("task_started") => running = true,
-            Some("task_complete" | "turn_aborted" | "stream_error" | "task_failed") => {
+            // A stream error is Codex reconnecting in the middle of a turn; the turn goes on.
+            Some("task_complete" | "turn_aborted" | "error" | "task_failed") => {
                 running = false;
             }
             _ => {}
@@ -511,6 +512,12 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
         {
             file.last_chat_message = None;
         }
+        if record.kind == "compacted" {
+            if let Some(event) = activity_event_for(file, "compact", "Context compacted", "", record.timestamp.as_deref()) {
+                events.push(event);
+            }
+            continue;
+        }
         if record.kind == "response_item" {
             match record.payload.r#type.as_deref() {
                 Some("function_call" | "custom_tool_call") => {
@@ -571,7 +578,7 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
             file.prompt_started_at = None;
         } else if matches!(
             record.payload.r#type.as_deref(),
-            Some("turn_aborted" | "stream_error" | "task_failed")
+            Some("turn_aborted" | "error" | "task_failed")
         ) {
             file.prompt_token_start = None;
             file.prompt_started_at = None;
@@ -626,6 +633,14 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
             }
             continue;
         }
+        // Codex lost its connection and is trying again ("Reconnecting... 2/5"): a notice in the chat, not a failure.
+        if record.payload.r#type.as_deref() == Some("stream_error") {
+            let detail = record.payload.message.as_deref().unwrap_or_default();
+            if let Some(event) = activity_event_for(file, "connection", "Connection lost", detail, record.timestamp.as_deref()) {
+                events.push(event);
+            }
+            continue;
+        }
         let (kind, label, last_response) = match record.payload.r#type.as_deref() {
             Some("task_started") => (HookEventKind::Running, "Rodando", None),
             Some("task_complete") => (
@@ -634,7 +649,7 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
                 record.payload.last_agent_message.as_deref(),
             ),
             Some("turn_aborted") => (HookEventKind::WaitingForInput, "Tarefa interrompida", None),
-            Some("stream_error" | "task_failed") => {
+            Some("error" | "task_failed") => {
                 (HookEventKind::Failed, "Tarefa encerrada com erro", None)
             }
             _ => continue,
@@ -1315,6 +1330,10 @@ pub(crate) fn is_injected_prompt_text(text: &str) -> bool {
     if environment(text) {
         return true;
     }
+    // What Codex tells itself about a thread goal or a daemon recovery.
+    if text.starts_with("<codex_internal_context") && text.ends_with("</codex_internal_context>") {
+        return true;
+    }
     let Some((header, body)) = text.split_once('\n') else {
         return false;
     };
@@ -1915,6 +1934,42 @@ mod tests {
         assert!(session_metadata(&subagent).is_none());
         assert!(session_metadata(&memories).is_none());
         assert!(session_metadata(&diagnostic).is_none());
+    }
+
+    #[test]
+    fn codex_internal_context_is_not_a_prompt() {
+        for source in ["user_goal", "goal", "daemon_recovery"] {
+            let text = format!("<codex_internal_context source=\"{source}\">\nUser cleared the goal.\n</codex_internal_context>");
+            assert!(is_injected_prompt_text(&text), "{source}");
+        }
+        assert!(!is_injected_prompt_text("O que é <codex_internal_context>?"));
+        assert!(!is_injected_prompt_text("<codex_internal_context source=\"goal\">\nx\n</codex_internal_context>\n\nE agora?"));
+    }
+
+    #[test]
+    fn a_stream_error_is_a_connection_notice_and_does_not_fail_the_turn() {
+        let mut file = observed_file(SessionSource::Cli);
+        let events = events_from_records(vec![
+            record(r#"{"type":"event_msg","payload":{"type":"task_started"}}"#),
+            record(r#"{"timestamp":"2026-11-06T12:00:00Z","type":"event_msg","payload":{"type":"stream_error","message":"Reconnecting... 2/5"}}"#),
+        ], &mut file);
+        assert!(!events.iter().any(|event| event.event == HookEventKind::Failed), "reconnecting is not a failure");
+        let notice = events.iter().filter_map(|event| event.activity.as_ref()).find(|activity| activity.kind == "connection").expect("a connection notice");
+        assert_eq!(notice.detail.as_deref(), Some("Reconnecting... 2/5"));
+        let failed = events_from_records(vec![record(r#"{"type":"event_msg","payload":{"type":"error","message":"stream disconnected"}}"#)], &mut file);
+        assert!(failed.iter().any(|event| event.event == HookEventKind::Failed), "an error that ends the turn still fails it");
+    }
+
+    #[test]
+    fn a_compacted_record_becomes_one_compact_notice() {
+        let mut file = observed_file(SessionSource::Cli);
+        let events = events_from_records(vec![
+            record(r#"{"timestamp":"2026-10-19T15:41:49.073Z","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"resumo"}]}],"window_number":3}}"#),
+        ], &mut file);
+        let activities = events.iter().filter_map(|event| event.activity.as_ref()).collect::<Vec<_>>();
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].kind, "compact");
+        assert_eq!(activities[0].detail, None);
     }
 
     #[test]

@@ -33,6 +33,7 @@
     | "task-list"
     | "split"
     | "stop"
+    | "unplug"
     | "take-control"
     | "steer"
     | "plus"
@@ -215,6 +216,9 @@
   {:else if name === "send"}
     <path d="m3.5 11 17-7-6.5 17-3.2-7-7.3-3Z" />
     <path d="m10.8 14 4.5-5" />
+  {:else if name === "unplug"}
+    <path d="m19 5-3 3M9 15l-4 4M7.5 12.5 11.5 16.5M10.5 9.5l4 4" />
+    <path d="M7.5 12.5 6 14a3.5 3.5 0 0 0 5 5l1.5-1.5M16.5 11.5 18 10a3.5 3.5 0 0 0-5-5l-1.5 1.5" />
   {:else if name === "stop"}
     <rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor" stroke="none" />
   {:else if name === "take-control"}

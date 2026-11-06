@@ -164,3 +164,18 @@ await import("./git-events.test.mjs");
   if (title(sub, "pt-BR") !== "Subagente Reviewer") throw new Error(title(sub, "pt-BR"));
   console.log("subagent title test passed");
 }
+
+{
+  // A command that changed several files, with a detail that is not a diff of each one: no file borrows it.
+  const { activityRunFileDetail: detailFor } = await import("../src/lib/activityPresentation.ts");
+  const ev = (id, detail, files) => ({ id, kind: "file", title: "Edit", detail, status: "completed", createdAt: 1, files, attachments: [] });
+  const script = ev("bulk", "diff --git a/src/a.svelte b/src/a.svelte\n--- a/src/a.svelte\n+++ b/src/a.svelte\n@@ -1 +1 @@\n-x\n+y\n", ["src/a.svelte", "src/b.svelte", "src/c.svelte"]);
+  const run = { id: "r", category: "edit", activities: [script] };
+  if (!detailFor(run, "src/a.svelte").includes("+y")) throw new Error("the file the diff names keeps its own chunk");
+  if (detailFor(run, "src/b.svelte") !== "") throw new Error("a file the diff does not name gets no borrowed diff");
+  const single = { id: "s", category: "edit", activities: [ev("one", "rewrote it", ["src/d.svelte"])] };
+  if (detailFor(single, "src/d.svelte") !== "rewrote it") throw new Error("an event about one file still shows its detail");
+  const read = { id: "rd", category: "read", activities: [ev("rd", "file text", ["src/e.ts", "src/f.ts"])] };
+  if (detailFor(read, "src/f.ts") !== "file text") throw new Error("reads keep what was read");
+  console.log("run file detail test passed");
+}

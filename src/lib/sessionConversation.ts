@@ -12,7 +12,13 @@ export type ConversationEntry = {
   sequence: number;
   durationMs?: number;
   isFinalResponse?: boolean;
+  /** Sent while the agent was still working on the previous prompt. */
+  sentDuringTurn?: boolean;
 };
+
+/** The title the Claude adapter gives a message the person sent while Claude was working. */
+export const SENT_DURING_TURN_TITLE = "Sent while working";
+const codexTurn = (id: string) => /:turn:([^:]+):/.exec(id)?.[1];
 
 export type ConversationFeedItem =
   | { kind: "entry"; id: string; entry: ConversationEntry }
@@ -132,7 +138,13 @@ export function buildConversationEntries(
   };
 
   const entries: ConversationEntry[] = [];
+  // Codex keeps a message sent during a turn in that turn: it came while the turn's work was under way.
+  const codexTurnsWithWork = new Set<string>();
   for (const activity of sortedActivities) {
+    const turn = codexTurn(activity.id);
+    const sentDuringTurn = activity.kind === "prompt"
+      && (activity.title === SENT_DURING_TURN_TITLE || Boolean(turn && codexTurnsWithWork.has(turn)));
+    if (turn && activity.kind !== "prompt") codexTurnsWithWork.add(turn);
     if (["queued_prompt", "codex_queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
     if (activity.kind === "message" && (isResumeFiller(activity.detail) || supersededNotices.has(activity.id))) continue;
     if (activity.kind === "prompt") {
@@ -157,14 +169,15 @@ export function buildConversationEntries(
         : undefined;
       if (duplicatePrompt) {
         mergeAttachments(duplicatePrompt.activity, activity);
+        if (sentDuringTurn) duplicatePrompt.sentDuringTurn = true;
         continue;
       }
     }
 
     if (
-      activity.kind === "interrupt"
+      (activity.kind === "interrupt" || activity.kind === "compact" || activity.kind === "connection")
       && entries.some((entry) =>
-        entry.activity.kind === "interrupt"
+        entry.activity.kind === activity.kind
         && promptSegment(entry.activity.createdAt) === promptSegment(activity.createdAt)
         && Math.abs(entry.activity.createdAt - activity.createdAt) < 15_000
       )
@@ -225,6 +238,7 @@ export function buildConversationEntries(
       },
       files,
       sequence: sequence++,
+      ...(sentDuringTurn ? { sentDuringTurn: true } : {}),
     });
   }
 

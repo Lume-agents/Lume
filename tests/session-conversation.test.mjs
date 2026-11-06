@@ -223,6 +223,23 @@ test("a cancelled request is one notice in the chat, not a tool event and not tw
   );
 });
 
+test("a compaction is one notice in the chat, not a tool event and not twice", () => {
+  const notice = (id, createdAt) => activity(id, "compact", createdAt, undefined, { title: "Context compacted" });
+  const activities = [
+    activity("prompt", "prompt", 10),
+    activity("read", "command", 20),
+    // Codex can report one compaction from its live stream and from its rollout.
+    notice("stream", 30),
+    notice("rollout", 33),
+    activity("again", "prompt", 60),
+    notice("later", 90),
+  ];
+  assert.deepEqual(
+    buildConversationFeed(entriesFor(activities)).map((item) => (item.kind === "trace" ? "trace" : item.entry.activity.kind)),
+    ["prompt", "trace", "compact", "prompt", "compact"],
+  );
+});
+
 test("Claude's own notices are not shown as something the user sent", () => {
   const entries = entriesFor([
     activity("typed", "prompt", 10, "Rode os testes"),
@@ -352,4 +369,33 @@ test("two Claude edits with the same size are both kept", () => {
   ];
   const entries = entriesFor(activities, {}, () => [{ path: "src/a.ts", added: 1, removed: 1 }]);
   assert.equal(entries.filter((entry) => entry.activity.kind === "file").length, 2);
+});
+
+test("a file the final response names without its folder is not listed twice", async () => {
+  const { mergeFileChanges, addFileChanges } = await import("../src/lib/fileChanges.ts");
+  const files = [{ path: "src/lib/ActivityTraceGroup.svelte", added: 3, removed: 13 }, { path: "tests/a.test.mjs", added: 1, removed: 0 }];
+  mergeFileChanges(files, [{ path: "ActivityTraceGroup.svelte", added: 0, removed: 0 }, { path: "README.md", added: 0, removed: 0 }]);
+  assert.deepEqual(files.map((file) => [file.path, file.added, file.removed]), [
+    ["src/lib/ActivityTraceGroup.svelte", 3, 13], ["tests/a.test.mjs", 1, 0], ["README.md", 0, 0],
+  ]);
+  const twoFolders = [{ path: "src/a/index.ts", added: 1, removed: 0 }, { path: "src/b/index.ts", added: 2, removed: 0 }];
+  addFileChanges(twoFolders, [{ path: "index.ts", added: 0, removed: 0 }]);
+  assert.equal(twoFolders.length, 3, "a name two folders share stays on its own");
+});
+
+test("a message sent while the agent works is marked, for Claude's queue and for a Codex turn", async () => {
+  const { SENT_DURING_TURN_TITLE } = await import("../src/lib/sessionConversation.ts");
+  const activities = [
+    activity("claude:s:transcript:p1:0", "prompt", 10, "Corrija o login", { title: "You" }),
+    activity("claude:s:tool:a", "command", 20),
+    activity("claude:s:transcript:p2:0", "prompt", 30, "e rode os testes", { title: SENT_DURING_TURN_TITLE }),
+    activity("codex:t:turn:u1:item:p", "prompt", 40, "Revise o relay"),
+    activity("codex:t:turn:u1:item:c", "command", 50),
+    activity("codex:t:turn:u1:item:p2", "prompt", 60, "olhe o node também"),
+    activity("codex:t:turn:u2:item:p", "prompt", 90, "agora o mobile"),
+  ];
+  const marked = entriesFor(activities).filter((entry) => entry.activity.kind === "prompt").map((entry) => [entry.activity.detail, Boolean(entry.sentDuringTurn)]);
+  assert.deepEqual(marked, [
+    ["Corrija o login", false], ["e rode os testes", true], ["Revise o relay", false], ["olhe o node também", true], ["agora o mobile", false],
+  ]);
 });

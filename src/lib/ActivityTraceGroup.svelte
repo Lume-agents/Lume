@@ -14,9 +14,9 @@
   import { gitActivityInfo } from "$lib/gitEvents";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import { displayFileChangePath, normalizeFileChangePath } from "$lib/fileChanges";
-  import { fileDiffChunk, parseReviewDiff } from "$lib/reviewDiffs";
+  import { parseReviewDiff } from "$lib/reviewDiffs";
   import LumeIcon from "$lib/LumeIcon.svelte";
-  import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunFiles, activityRunTitle, groupConsecutiveTraceActivities, type ActivityCategory, type ActivityRun } from "$lib/activityPresentation";
+  import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunFileDetail, activityRunFiles, activityRunTitle, groupConsecutiveTraceActivities, type ActivityCategory, type ActivityRun } from "$lib/activityPresentation";
 
   let { activities, language = "en", active = false, plain = false, workingDirectory, onOpenReview } = $props<{
     activities: SessionActivity[];
@@ -85,16 +85,6 @@
     collapsedFileRuns = collapsedFileRuns.includes(id)
       ? collapsedFileRuns.filter((value) => value !== id)
       : [...collapsedFileRuns, id];
-  }
-
-  /** What a file node opens: for an edit, every diff the run recorded for that file; for a read, what was read. */
-  function fileDetail(run: ActivityRun, path: string): string {
-    const touching = run.activities.filter((item) => activityRunFiles({ ...run, activities: [item] }).includes(path));
-    if (run.category === "edit") {
-      const chunks = touching.map((item) => (item.detail ? fileDiffChunk(item.detail, path) : null)).filter((chunk): chunk is string => Boolean(chunk));
-      if (chunks.length) return [...new Set(chunks)].join("\n");
-    }
-    return touching[0]?.detail ?? "";
   }
 
   /** What the floating card of an edited file shows: its own diff lines, or the raw detail when it is not a diff. */
@@ -207,7 +197,7 @@
               <div class="file-tree" in:slide={{ duration: motionDuration(190), easing: cubicOut }} out:slide={{ duration: motionDuration(130), easing: cubicOut }}>
                 <div class="file-tree-files" role="list">
                   {#each runFiles as path, fileIndex (path)}
-                    {@const detail = fileDetail(run, path)}
+                    {@const detail = activityRunFileDetail(run, path)}
                     {@const fileKey = `${run.id}:${path}`}
                     {@const editRun = run.category === "edit"}
                     {@const card = editRun ? fileCard(detail) : { lines: [], added: 0, removed: 0 }}

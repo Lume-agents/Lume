@@ -13,7 +13,8 @@
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
   import StreamedMessage from "$lib/StreamedMessage.svelte";
   import { MAX_HOLD_MS } from "$lib/streamPacing";
-  import { interruptNoticeText } from "$lib/interruptNotice";
+  import { compactNoticeText, connectionNoticeText, interruptNoticeText } from "$lib/interruptNotice";
+  import ChatSeparatorNotice from "$lib/ChatSeparatorNotice.svelte";
 import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/agentControls";
   import ThinkingOrb from "$lib/ThinkingOrb.svelte";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
@@ -2354,6 +2355,24 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     promptSearchInputElement?.focus();
   }
 
+  $effect(() => {
+    const node = conversationContentElement;
+    if (!node) return;
+    node.addEventListener("pointerover", placeMessageTime);
+    return () => node.removeEventListener("pointerover", placeMessageTime);
+  });
+
+  /** Puts a message's time at the height where the pointer came into its column; it stays there while the pointer moves. */
+  function placeMessageTime(event: PointerEvent) {
+    const target = event.target instanceof Element ? event.target : null;
+    const gutter = target?.closest(".time-gutter");
+    if (!gutter || (event.relatedTarget instanceof Node && gutter.contains(event.relatedTarget))) return;
+    const row = gutter.closest<HTMLElement>(".conversation-row");
+    if (!row) return;
+    const rect = row.getBoundingClientRect();
+    row.style.setProperty("--time-y", `${Math.max(12, Math.min(rect.height - 10, event.clientY - rect.top))}px`);
+  }
+
   function togglePromptIndex() {
     promptIndexOpen = !promptIndexOpen;
     if (!promptIndexOpen) return;
@@ -2663,7 +2682,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
           <div class:targeted={activePromptId === item.id} class:outgoing-replacement={outgoingPrompts.some((outgoing) => !outgoing.flightComplete && outgoingMatches.get(outgoing.id) === item.id)} class="conversation-row user-row" data-prompt-id={item.id} tabindex="-1">
             <span class="time-gutter"><time>{time(item.createdAt)}</time></span>
             <div class="conversation-entry">
-              <section class="message user-message">
+              {#if entry.sentDuringTurn}
+                <span class="during-turn-tab" title={tr("Sent while the agent was still working", "Enviada enquanto o agente ainda trabalhava")}><LumeIcon name="send" size={10} />{tr("During the task", "Durante a tarefa")}</span>
+              {/if}
+              <section class="message user-message" class:with-tab={entry.sentDuringTurn}>
                 {#if item.detail}<CollapsibleUserMessage text={item.detail} {language} />{/if}
                 {#if item.attachments?.length}
                   <div class="attachments">
@@ -2736,11 +2758,17 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
               {/if}
             </div>
           </div>
-        {:else if item.kind === "interrupt"}
+        {:else if item.kind === "interrupt" || item.kind === "compact" || item.kind === "connection"}
           <div class="conversation-row agent-row">
             <span class="time-gutter"><time>{time(item.createdAt)}</time></span>
             <div class="conversation-entry">
-              <p class="interrupt-notice" role="status"><LumeIcon name="stop" size={11} />{interruptNoticeText(item.detail, tr)}</p>
+              {#if item.kind === "interrupt"}
+                <ChatSeparatorNotice icon="stop" alert text={interruptNoticeText(item.detail, tr)} />
+              {:else if item.kind === "connection"}
+                <ChatSeparatorNotice icon="unplug" alert text={connectionNoticeText(item.detail, tr)} detail={item.detail} />
+              {:else}
+                <ChatSeparatorNotice icon="compact" text={compactNoticeText(tr)} />
+              {/if}
             </div>
           </div>
         {:else if item.kind === "analysis" && item.detail}
@@ -3488,10 +3516,17 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .conversation-row { position: relative; width: 100%; min-width: 0; }
   .conversation-entry { min-width: 0; display: flex; flex-direction: column; gap: 9px; }
   .time-gutter { position: absolute; top: 0; bottom: 0; left: calc(-1 * var(--chat-edge-gutter)); width: var(--chat-edge-gutter); padding: 6px 4px 0 0; display: flex; justify-content: flex-end; align-items: flex-start; box-sizing: border-box; cursor: default; }
-  .time-gutter time { font-size: calc(calc(11px + var(--workspace-chat-small-adjust)) * var(--lume-chat-unzoom, 1)); opacity: 0; transform: translateX(3px); transition: opacity 120ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
-  .time-gutter:hover time, .conversation-row:focus-within .time-gutter time { opacity: 1; transform: translateX(0); }
+  /* The time sits at the height where the pointer came in, so a long message does not send the eye back to its top. */
+  .time-gutter time { position: absolute; top: var(--time-y, 14px); right: 4px; font-size: calc(max(10px, 11px + var(--workspace-chat-small-adjust)) * var(--lume-chat-unzoom, 1)); opacity: 0; transform: translate(3px, -50%); transition: opacity 120ms ease, transform 160ms cubic-bezier(.16, 1, .3, 1); }
+  .time-gutter:hover time, .conversation-row:focus-within .time-gutter time { opacity: 1; transform: translate(0, -50%); }
   .message { width: min(92%, 940px); min-width: 0; color: var(--workspace-text); font-size: var(--workspace-chat-font-size); }
   .user-message { --message-collapse-surface: var(--workspace-user); --user-message-font: inherit; --user-message-muted: var(--workspace-muted); --user-message-accent: var(--workspace-accent); width: fit-content; max-width: min(92%, 940px); align-self: flex-end; padding: 9px 12px; border: 1px solid var(--workspace-user-line); border-radius: 14px 14px 4px 14px; background: var(--workspace-user); }
+  /* A tab on top of the bubble: the message went in while the agent was still working. */
+  .during-turn-tab { align-self: flex-end; margin-bottom: -10px; padding: 3px 9px 4px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--workspace-user-line); border-bottom: 0; border-radius: 9px 9px 0 0; color: var(--workspace-muted); background: var(--workspace-user); font-size: var(--workspace-chat-tiny-size); font-weight: 700; position: relative; z-index: 1; }
+  .during-turn-tab :global(.lume-icon) { color: var(--workspace-accent); }
+  .user-message.with-tab { border-top-right-radius: 0; }
+  /* A little under the agent's text (13.5px), and following the chat text size setting. */
+  .user-message { font-size: calc(max(10px, 13px + var(--workspace-chat-font-adjust)) * var(--lume-chat-unzoom, 1)); }
   .outgoing-row.in-flight .user-message { visibility: hidden; }
   .outgoing-row.delivery-pending .user-message { border-style: dashed; opacity: .76; }
   .user-row.outgoing-replacement { display: none; }

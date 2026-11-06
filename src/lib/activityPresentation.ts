@@ -7,6 +7,8 @@ import { gitActivityInfo, gitEventTitle } from "./gitEvents.ts";
 import { isUsageLimitActivity } from "./agentNotices.ts";
 // @ts-expect-error Node runs the same source in the focused presentation tests.
 import { mcpActivityInfo, mcpEventTitle, mcpRunTitle, parseMcpToolName, sameMcpTool } from "./mcpEvents.ts";
+// @ts-expect-error Node runs the same source in the focused presentation tests.
+import { fileDiffChunk } from "./reviewDiffs.ts";
 
 export type ActivityCategory = "edit" | "git" | "read" | "search" | "test" | "command" | "tool" | "plan" | "skill" | "instruction" | "mcp";
 export type ActivityThinkingState = "working" | "searching" | "solving" | "listening" | "connecting" | "weaving" | "composing" | "breathing" | "shaping";
@@ -105,7 +107,7 @@ export function activityThinkingLabel(state: ActivityThinkingState, language: La
 
 export function isPresentableTraceActivity(activity: SessionActivity): boolean {
   if (isUsageLimitActivity(activity)) return false;
-  if (["prompt", "message", "analysis", "interrupt", "queued_prompt", "codex_queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
+  if (["prompt", "message", "analysis", "interrupt", "compact", "connection", "queued_prompt", "codex_queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return !/^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
 }
@@ -234,6 +236,21 @@ export function activityRunFiles(run: ActivityRun): string[] {
     activity.files.length ? activity.files : run.category === "read" ? readCommandFiles(activity) : [],
   );
   return [...new Set(files.filter((path) => path.length < 500 && !/[\r\n]/.test(path) && !path.includes("***")))];
+}
+
+/**
+ * What one file of a run opens: for an edit, the diffs the run recorded for that file; for a read, what was read.
+ * An event that touched several files only stands for one of them when its detail names that file, otherwise
+ * every file would show the same diff and the same line counts.
+ */
+export function activityRunFileDetail(run: ActivityRun, path: string): string {
+  const touching = run.activities.filter((item) => activityRunFiles({ ...run, activities: [item] }).includes(path));
+  if (run.category === "edit") {
+    const chunks = touching.map((item) => (item.detail ? fileDiffChunk(item.detail, path) : null)).filter((chunk): chunk is string => Boolean(chunk));
+    if (chunks.length) return [...new Set(chunks)].join("\n");
+    return touching.find((item) => activityRunFiles({ ...run, activities: [item] }).length === 1)?.detail ?? "";
+  }
+  return touching[0]?.detail ?? "";
 }
 
 export function groupConsecutiveTraceActivities(activities: SessionActivity[]): ActivityRun[] {

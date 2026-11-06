@@ -393,7 +393,7 @@ fn hook_activity(
             .find_map(|key| string(raw, key))
             // The hook also fires for Claude's own notices; they are not something the user said.
             .filter(|prompt| provider != "claude" || visible_claude_user_text(prompt))
-            .map(|prompt| unwrap_pasted_content(&prompt).into_owned());
+            .map(|prompt| without_claude_image_notes(&unwrap_pasted_content(&prompt)).to_string());
         return prompt.map(|prompt| SessionActivity {
             id: format!("{provider}:{session_id}:prompt:{}", now_millis()),
             kind: "prompt".into(),
@@ -1826,11 +1826,22 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if let Some(activity) = claude_compaction_activity(&entry, session_id)
+            .or_else(|| claude_connection_activity(&entry, session_id))
+        {
+            activities.push(activity);
+            continue;
+        }
         let role = entry
             .get("message")
             .and_then(|message| message.get("role"))
             .and_then(Value::as_str);
         if !matches!(role, Some("assistant" | "user")) {
+            continue;
+        }
+        // Claude Code also writes copies of earlier messages (`api-request-blob`), with no time of their own: read as
+        // messages, they took the current time and an old thinking showed up in the prompt being answered.
+        if !matches!(string(&entry, "type").as_deref(), Some("assistant" | "user")) {
             continue;
         }
         track_claude_turn_tokens(&entry, session_id, &mut turn, activities);
@@ -1844,6 +1855,7 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
         }
         if role == Some("user")
             && (entry.get("isMeta").and_then(Value::as_bool) == Some(true)
+                || entry.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
                 || entry.get("isSidechain").and_then(Value::as_bool) == Some(true))
         {
             continue;
@@ -1863,6 +1875,7 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
         else {
             continue;
         };
+        let prompts_before = activities.len();
         match content {
             Value::String(text) => {
                 if role == Some("user") {
@@ -1915,6 +1928,16 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
             }
             _ => {}
         }
+        // A message typed while Claude was working is queued and handed over mid-turn.
+        let queued = string(&entry, "promptSource").as_deref() == Some("queued")
+            || entry.pointer("/message/content").and_then(Value::as_str).is_some_and(|text| text.trim_start().starts_with(CLAUDE_QUEUED_HEADER));
+        if queued && role == Some("user") {
+            for activity in &mut activities[prompts_before..] {
+                if activity.kind == "prompt" {
+                    activity.title = SENT_DURING_TURN_TITLE.into();
+                }
+            }
+        }
     }
     if let Some((id, command, at)) = pending_bash {
         push_claude_bash_command(activities, session_id, &id, &command, None, at);
@@ -1947,6 +1970,64 @@ fn claude_bash_output(text: &str) -> Option<String> {
 }
 
 /// A command the person ran with `!`, shown like any other command event with what it printed.
+/// The mark Claude Code leaves where it compacted the conversation. The summary that follows it is not shown.
+fn claude_compaction_activity(entry: &Value, session_id: &str) -> Option<SessionActivity> {
+    if string(entry, "type").as_deref() != Some("system")
+        || string(entry, "subtype").as_deref() != Some("compact_boundary")
+        || entry.get("isSidechain").and_then(Value::as_bool) == Some(true)
+    {
+        return None;
+    }
+    let id = string(entry, "uuid")?;
+    Some(SessionActivity {
+        id: format!("claude:{session_id}:compact:{id}"),
+        kind: "compact".into(),
+        title: "Context compacted".into(),
+        detail: None,
+        status: "completed".into(),
+        created_at: string(entry, "timestamp")
+            .and_then(|timestamp| DateTime::parse_from_rfc3339(&timestamp).ok())
+            .map(|timestamp| timestamp.timestamp_millis())
+            .unwrap_or_else(now_millis),
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    })
+}
+
+/// Claude Code's own message when the connection to the API dropped. Usage limits and login errors stay messages.
+fn claude_connection_activity(entry: &Value, session_id: &str) -> Option<SessionActivity> {
+    if entry.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) || string(entry, "type").as_deref() != Some("assistant") {
+        return None;
+    }
+    let text = match entry.pointer("/message/content")? {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks.iter().filter_map(|block| string(block, "text")).collect::<Vec<_>>().join(" "),
+        _ => return None,
+    };
+    let lower = text.to_lowercase();
+    let connection = ["connection", "timed out", "timeout", "network", "econnreset", "socket", "fetch failed"]
+        .iter()
+        .any(|word| lower.contains(word));
+    if !connection || matches!(string(entry, "error").as_deref(), Some("rate_limit" | "authentication_failed" | "invalid_request")) {
+        return None;
+    }
+    Some(SessionActivity {
+        id: format!("claude:{session_id}:connection:{}", string(entry, "uuid")?),
+        kind: "connection".into(),
+        title: "Connection lost".into(),
+        detail: Some(text.trim().to_string()),
+        status: "completed".into(),
+        created_at: string(entry, "timestamp")
+            .and_then(|timestamp| DateTime::parse_from_rfc3339(&timestamp).ok())
+            .map(|timestamp| timestamp.timestamp_millis())
+            .unwrap_or_else(now_millis),
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    })
+}
+
 fn push_claude_bash_command(
     activities: &mut Vec<SessionActivity>,
     session_id: &str,
@@ -2102,7 +2183,9 @@ fn is_claude_resume_filler(entry: &Value) -> bool {
 }
 
 fn is_claude_user_prompt(entry: &Value) -> bool {
-    if entry.get("isMeta").and_then(Value::as_bool) == Some(true) {
+    if entry.get("isMeta").and_then(Value::as_bool) == Some(true)
+        || entry.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
+    {
         return false;
     }
     match entry.pointer("/message/content") {
@@ -2155,7 +2238,7 @@ fn push_claude_user_text(
     };
     let text = claude_queued_message(text).unwrap_or(text);
     let text = unwrap_pasted_content(text);
-    let text = text.as_ref();
+    let text = without_claude_image_notes(text.as_ref());
     if visible_claude_user_text(text) {
         push_claude_transcript_activity(
             activities,
@@ -2169,6 +2252,26 @@ fn push_claude_user_text(
         );
     }
 }
+
+/// Claude Code's note about an image the agent opened can reach the next message the person sends,
+/// ahead of what they wrote.
+fn without_claude_image_notes(text: &str) -> &str {
+    let mut rest = text;
+    loop {
+        let trimmed = rest.trim_start();
+        let note = trimmed.strip_prefix("[Image: original ").and_then(|note| {
+            let (note, after) = note.split_once(']')?;
+            (!note.contains('\n') && note.ends_with("to map to original image.")).then_some(after)
+        });
+        match note {
+            Some(after) => rest = after,
+            None => return if rest.len() == text.len() { text } else { trimmed },
+        }
+    }
+}
+
+/// What a prompt sent while Claude was working is titled; the chat marks it with a tab.
+const SENT_DURING_TURN_TITLE: &str = "Sent while working";
 
 const CLAUDE_QUEUED_HEADER: &str = "The user sent a new message while you were working:";
 
@@ -2233,10 +2336,13 @@ pub(crate) fn unwrap_pasted_content(value: &str) -> std::borrow::Cow<'_, str> {
 /// Whether a user-role message is something the person wrote. Claude Code also records its own
 /// notices in that role, such as the one that tells it a background command finished.
 pub(crate) fn visible_claude_user_text(value: &str) -> bool {
-    let value = value.trim();
+    let value = unwrap_pasted_content(value);
+    let value = without_claude_image_notes(&value).trim();
     !value.is_empty()
         // Claude Code adds this text beside the result of loading a deferred tool.
         && value != "Tool loaded."
+        // The summary it writes when a conversation is compacted; it can also come back queued.
+        && !value.starts_with("This session is being continued from a previous conversation")
         && !value.starts_with(CLAUDE_QUEUED_HEADER)
         && ![
             "<command-",
@@ -3025,6 +3131,43 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_is_one_mark_in_the_conversation_and_its_summary_is_not_a_prompt() {
+        let path = std::env::temp_dir().join(format!("lume-compact-{}-{}.jsonl", std::process::id(), now_millis()));
+        let lines = [
+            json!({ "type": "system", "subtype": "compact_boundary", "content": "Conversation compacted", "uuid": "b1", "timestamp": "2026-11-05T17:25:42.828Z", "compactMetadata": { "trigger": "auto" } }),
+            json!({ "type": "user", "isCompactSummary": true, "isVisibleInTranscriptOnly": true, "uuid": "s1", "timestamp": "2026-11-05T17:25:42.274Z", "message": { "role": "user", "content": "This session is being continued from a previous conversation that ran out of context." } }),
+            json!({ "type": "system", "subtype": "compact_boundary", "isSidechain": true, "uuid": "b2", "timestamp": "2026-11-05T17:26:00.000Z" }),
+            json!({ "type": "system", "subtype": "local_command", "uuid": "o1", "timestamp": "2026-11-05T17:26:00.000Z" }),
+            json!({ "type": "assistant", "uuid": "c1", "timestamp": "2026-11-05T17:27:00.000Z", "isApiErrorMessage": true, "error": "server_error", "message": { "role": "assistant", "content": [{ "type": "text", "text": "API Error: Connection lost mid-response. The response above may be incomplete." }] } }),
+            json!({ "type": "assistant", "uuid": "r1", "timestamp": "2026-11-05T17:28:00.000Z", "isApiErrorMessage": true, "error": "rate_limit", "message": { "role": "assistant", "content": [{ "type": "text", "text": "You've hit your session limit" }] } }),
+            // A copy of an earlier answer, with its thinking and no time of its own, is not a new message.
+            json!({ "type": "api-request-blob", "sessionId": "s", "hash": "h", "message": { "role": "assistant", "content": [{ "type": "thinking", "thinking": "an old thought" }, { "type": "text", "text": "an old answer" }] } }),
+        ];
+        std::fs::write(&path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        let mut activities = Vec::new();
+        read_claude_transcript(path.to_str().unwrap(), "s", &mut activities);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(activities.iter().map(|activity| activity.kind.as_str()).collect::<Vec<_>>(), ["compact", "connection", "message"]);
+        assert_eq!(activities[0].id, "claude:s:compact:b1");
+        assert_eq!(activities[0].created_at, 1_793_899_542_828);
+    }
+
+    #[test]
+    fn a_message_queued_while_claude_works_is_marked() {
+        let path = std::env::temp_dir().join(format!("lume-queued-{}-{}.jsonl", std::process::id(), now_millis()));
+        let lines = [
+            json!({ "type": "user", "uuid": "p1", "timestamp": "2026-11-06T10:00:00.000Z", "promptSource": "typed", "message": { "role": "user", "content": "Corrija o login" } }),
+            json!({ "type": "user", "uuid": "p2", "timestamp": "2026-11-06T10:00:30.000Z", "promptSource": "queued", "message": { "role": "user", "content": "e rode os testes" } }),
+        ];
+        std::fs::write(&path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        let mut activities = Vec::new();
+        read_claude_transcript(path.to_str().unwrap(), "s", &mut activities);
+        std::fs::remove_file(&path).unwrap();
+        let titles = activities.iter().filter(|activity| activity.kind == "prompt").map(|activity| activity.title.as_str()).collect::<Vec<_>>();
+        assert_eq!(titles, ["You", SENT_DURING_TURN_TITLE]);
+    }
+
+    #[test]
     fn claude_own_notices_are_not_something_the_user_said() {
         for notice in [
             "<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>",
@@ -3034,10 +3177,25 @@ mod tests {
             "Tool loaded.",
             "<bash-input> claude mcp add --transport http atlassian https://mcp.atlassian.com/v2/mcp</bash-input>",
             "<bash-stdout>Added HTTP MCP server atlassian</bash-stdout><bash-stderr></bash-stderr>",
+            "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion.",
+            "<pasted_content id=\"5f7b\">\nThis session is being continued from a previous conversation that ran out of context.\n</pasted_content id=\"5f7b\">",
+            "[Image: original 2960x1720, displayed at 2520x1464. Multiply coordinates by 1.17 to map to original image.]",
         ] {
             assert!(!visible_claude_user_text(notice), "{notice}");
         }
         assert!(visible_claude_user_text("Corrija o teste que falhou"));
+        let note = "[Image: original 2960x1720, displayed at 2520x1464. Multiply coordinates by 1.17 to map to original image.]";
+        assert_eq!(without_claude_image_notes(&format!("{note}\n{note}\n\nainda aparece")), "ainda aparece");
+        assert_eq!(without_claude_image_notes("[Image #2] olhe isso"), "[Image #2] olhe isso");
+        assert_eq!(without_claude_image_notes("[Image: minha foto] olhe"), "[Image: minha foto] olhe");
+        assert!(visible_claude_user_text(&format!("{note}\n\nainda aparece")));
+        assert!(visible_claude_user_text("<pasted_content id=\"a\">\nOlhe este log\n</pasted_content id=\"a\">"));
+        assert!(visible_claude_user_text("Por que apareceu This session is being continued from a previous conversation?"));
+        // The flag alone is enough, whatever the summary's text becomes.
+        assert!(!is_claude_user_prompt(&json!({
+            "isCompactSummary": true,
+            "message": { "content": "Resumo da conversa" }
+        })));
         let queued = "The user sent a new message while you were working:\n\n506553\n\n192.168.0.204:41265\n\nThis is how Claude Code surfaces messages the user sends mid-turn.";
         assert!(!visible_claude_user_text(queued));
         assert_eq!(claude_queued_message(queued), Some("506553\n\n192.168.0.204:41265"));

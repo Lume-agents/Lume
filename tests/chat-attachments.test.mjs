@@ -137,4 +137,27 @@ for (const text of ["<bash-input> claude mcp add atlassian</bash-input>", "<bash
 }
 assert.equal(isSyntheticPromptText("use <bash-input> to run things"), false);
 
+// What Codex tells itself is not a message; text the person wrote after it still is.
+const codexContext = '<codex_internal_context source="user_goal">\nUser cleared the goal.\n</codex_internal_context>';
+assert.equal(isSyntheticPromptText(codexContext), true);
+assert.equal(isSyntheticPromptText(`${codexContext}\n\napareceu isso`), false);
+assert.equal(cleanPromptTransport(`${codexContext}\n\napareceu isso`), "apareceu isso");
+assert.equal(cleanPromptTransport("O que é <codex_internal_context>?"), "O que é <codex_internal_context>?");
+
+// Claude Code's note about an image the agent opened is not a message; what the person wrote after it is.
+const imageNote = "[Image: original 2960x1720, displayed at 2520x1464. Multiply coordinates by 1.17 to map to original image.]";
+assert.equal(isSyntheticPromptText(imageNote), true);
+assert.equal(isSyntheticPromptText(`${imageNote}\n${imageNote}`), true);
+assert.equal(isSyntheticPromptText(`${imageNote}\n\nainda aparece`), false);
+assert.equal(cleanPromptTransport(`${imageNote}\n${imageNote}\n\nainda aparece`), "ainda aparece");
+assert.equal(cleanPromptTransport("[Image: minha foto] olhe isso"), "[Image: minha foto] olhe isso");
+assert.equal(cleanPromptTransport("[Image #2] olhe isso"), "[Image #2] olhe isso");
+
+// The summary Claude Code writes when it compacts a conversation is not a message, even when queued in a paste wrapper.
+const compactSummary = "This session is being continued from a previous conversation that ran out of context.";
+assert.equal(isSyntheticPromptText(compactSummary), true);
+assert.equal(isSyntheticPromptText(`<pasted_content id="5f7b">\n${compactSummary}\n</pasted_content id="5f7b">`), true);
+assert.equal(isSyntheticPromptText('<pasted_content id="a">\nOlhe este log\n</pasted_content id="a">'), false);
+assert.equal(isSyntheticPromptText(`Por que apareceu ${compactSummary}`), false);
+
 console.log("chat attachment test suite passed");

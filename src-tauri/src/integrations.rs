@@ -1110,6 +1110,7 @@ fn meaningful_session_title(message: &str) -> Option<String> {
         || normalized.starts_with('/')
         || normalized.starts_with("# AGENTS.md")
         || normalized.starts_with("<environment_context")
+        || normalized.starts_with("<codex_internal_context")
         || normalized.starts_with("# Lume workflow")
         || normalized.starts_with("## Context handoff from Codex")
     {

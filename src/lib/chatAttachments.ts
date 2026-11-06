@@ -22,19 +22,27 @@ export function unwrapPastedContent(value: string): string {
   return value.includes("pasted_content") ? value.replace(pastedContentTag, "") : value;
 }
 
+/** What Codex tells itself about a thread goal or a daemon recovery, in the user's role. */
+const codexInternalContext = /^\s*<codex_internal_context\b[^>]*>[\s\S]*?<\/codex_internal_context>\s*/;
+
+/** Claude Code's note about an image the agent opened, which can reach the next message the person sends. */
+const claudeImageNotes = /^(?:\s*\[Image: original [^\]\n]*to map to original image\.\])+\s*/;
+
 export function cleanPromptTransport(value?: string): string {
-  const normalized = unwrapPastedContent(String(value ?? "").replace(/\r\n?/g, "\n"));
+  const normalized = unwrapPastedContent(String(value ?? "").replace(/\r\n?/g, "\n")).replace(claudeImageNotes, "").replace(codexInternalContext, "");
   const marker = normalized.indexOf(lumeAttachedFilesMarker);
   return (marker >= 0 ? normalized.slice(0, marker) : normalized).trim();
 }
 
-const syntheticPromptPrefixes = ["<task-notification>", "<system-reminder>", "<command-", "<local-command-", "<bash-input>", "<bash-stdout>", "<bash-stderr>", "The user sent a new message while you were working:"];
+const syntheticPromptPrefixes = ["<task-notification>", "<system-reminder>", "<command-", "<local-command-", "<bash-input>", "<bash-stdout>", "<bash-stderr>", "The user sent a new message while you were working:", "This session is being continued from a previous conversation"];
 
 /** Providers also record notices and injected project/environment context with the user role. */
 export function isSyntheticPromptText(value?: string): boolean {
-  const text = String(value ?? "").trim();
+  const text = unwrapPastedContent(String(value ?? "")).trim();
   // Claude Code adds "Tool loaded." beside the result of loading a deferred tool.
   if (text === "Tool loaded.") return true;
+  if (text.startsWith("<codex_internal_context") && !text.replace(codexInternalContext, "")) return true;
+  if (text.startsWith("[Image: original ") && !text.replace(claudeImageNotes, "")) return true;
   if (syntheticPromptPrefixes.some((prefix) => text.startsWith(prefix))) return true;
   const environment = (content: string) => content.startsWith("<environment_context>") && content.endsWith("</environment_context>");
   if (environment(text)) return true;

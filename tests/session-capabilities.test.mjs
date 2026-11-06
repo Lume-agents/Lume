@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { sessionCapabilities } from "../src/lib/sessionCapabilities.ts";
+import { requiresCodexCliTakeover, sessionCapabilities } from "../src/lib/sessionCapabilities.ts";
 
 function session(overrides = {}) {
   return {
@@ -14,6 +14,12 @@ function session(overrides = {}) {
     ...overrides,
   };
 }
+
+assert.equal(requiresCodexCliTakeover(session({ controlOrigin: "external" })), true);
+assert.equal(requiresCodexCliTakeover(session()), false);
+assert.equal(requiresCodexCliTakeover(session({ agent: "claude_code", controlOrigin: "external" })), false);
+assert.equal(requiresCodexCliTakeover(session({ source: "vscode", controlOrigin: "external" })), false);
+assert.equal(requiresCodexCliTakeover(session({ controlOrigin: "external", remote: { computerId: "n" } })), false);
 
 assert.equal(sessionCapabilities(session()).canInterrupt, true);
 assert.equal(sessionCapabilities(session({ agent: "omp", controlOrigin: "external" })).canPrompt, false);

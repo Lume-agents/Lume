@@ -349,6 +349,9 @@ fn rename_session(
     name: String,
 ) -> Result<String, String> {
     let (session, name) = state.session_rename_plan(&session_id, &name)?;
+    if session.agent == AgentKind::Codex && session.source == SessionSource::Cli && session.control_origin == SessionControlOrigin::External {
+        return Err("Take control of this external CLI before renaming its conversation".into());
+    }
     if session.agent == AgentKind::Codex {
         let thread_id = session
             .native_session_id

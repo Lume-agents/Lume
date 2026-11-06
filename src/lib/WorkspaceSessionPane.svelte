@@ -35,6 +35,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import { linkAtIndex, splitLinks } from "$lib/links";
   import { claudeEffortForModel, claudeEffortValues, claudeModelOptions } from "$lib/claudeModels";
   import { permissionDescription, permissionLabel, permissionTone } from "$lib/sessionPermissions";
+  import { requiresCodexCliTakeover } from "$lib/sessionCapabilities";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
   import { agentConnectionMessage, type ConnectableAgent } from "$lib/agentConnection";
   import SessionRepositoryBadge from "$lib/SessionRepositoryBadge.svelte";
@@ -238,6 +239,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let planeLaunchTimer: number | null = null;
   let takingControl = $state(false);
   let takeoverConfirm = $state(false);
+  let takeoverIntent = $state<"prompt" | "settings">("prompt");
   let takeoverAcceptButton = $state<HTMLButtonElement | null>(null);
   let writerConflictBusy = $state<"keep_lume" | "open_branch" | null>(null);
   let writerConflictError = $state("");
@@ -687,6 +689,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let observedRunningSince = $state<number | null>(null);
   let observedRunningSessionId = "";
   const promptBlocksSettings = $derived(["running", "permission_required"].includes(session.status));
+  const codexCliOwnsSettings = $derived(requiresCodexCliTakeover(session));
   const modelControlsDisabled = $derived(
     session.controlOrigin !== "lume"
       || controlsLoading
@@ -1191,6 +1194,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     resetPromptHistory();
     closeMention();
     if (!session.capabilities.canPrompt && session.capabilities.canTakeControl) {
+      takeoverIntent = "prompt";
+      sendError = "";
       takeoverConfirm = true;
       await tick();
       takeoverAcceptButton?.focus();
@@ -1359,6 +1364,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
 
   function chooseEffortIndex(event: Event) {
+    if (codexCliOwnsSettings) { void requestSettingsTakeover(); return; }
     const values = effortValues();
     const index = Number((event.currentTarget as HTMLInputElement).value);
     const effort = values[Math.max(0, Math.min(values.length - 1, index))] ?? "";
@@ -1367,6 +1373,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
 
   function chooseModel(model: string) {
+    if (codexCliOwnsSettings) { void requestSettingsTakeover(); return; }
     if (modelControlsDisabled) return;
     selectedModel = model;
     const option = modelSettings?.models.find((candidate) => candidate.model === model);
@@ -1429,6 +1436,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   );
 
   async function resetAgentControls() {
+    if (codexCliOwnsSettings) { await requestSettingsTakeover(); return; }
     const original = originalControls;
     if (!original || modelControlsDisabled || controlsSaving) return;
     if (session.agent === "claude_code") {
@@ -1471,12 +1479,17 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   });
 
   async function toggleAgentControls() {
+    if (codexCliOwnsSettings) {
+      await requestSettingsTakeover();
+      return;
+    }
     controlsOpen = !controlsOpen;
     if (!controlsOpen || session.controlOrigin !== "lume") return;
     await loadAgentControls();
   }
 
   async function toggleFastMode() {
+    if (codexCliOwnsSettings) { await requestSettingsTakeover(); return; }
     if ((session.agent !== "codex" && session.agent !== "claude_code") || runtimeControlsDisabled || fastSaving) return;
     fastSaving = true;
     sendError = "";
@@ -1501,6 +1514,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
 
   async function toggleCollaborationMode() {
+    if (codexCliOwnsSettings) { await requestSettingsTakeover(); return; }
     if (session.agent !== "codex" || runtimeControlsDisabled || modeSaving) return;
     modeSaving = true;
     sendError = "";
@@ -1517,6 +1531,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
 
   async function saveAgentControls() {
+    if (codexCliOwnsSettings) { await requestSettingsTakeover(); return; }
     if (modelControlsDisabled) return;
     controlsSaving = true;
     controlsError = "";
@@ -1571,18 +1586,22 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
 
   async function confirmTakeover() {
-    const value = prompt.trim();
+    const isPrompt = takeoverIntent === "prompt";
+    const value = isPrompt ? prompt.trim() : "";
+    const attachments = isPrompt ? [...promptAttachments] : [];
     if (
-      (!value && promptAttachments.length === 0)
+      (isPrompt && !value && attachments.length === 0)
       || !session.capabilities.canTakeControl
       || takingControl
     ) return;
     takingControl = true;
     sendError = "";
     try {
-      await takeControlSession(session.id, value, promptAttachments);
-      prompt = "";
-      promptAttachments = [];
+      await takeControlSession(session.id, value, attachments);
+      if (isPrompt) {
+        prompt = "";
+        promptAttachments = [];
+      }
       takeoverConfirm = false;
     } catch (error) {
       const detail = String(error).replace(/^Error:\s*/, "");
@@ -1593,9 +1612,11 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         ));
         if (confirmed) {
           try {
-            await takeControlSession(session.id, value, promptAttachments, true);
-            prompt = "";
-            promptAttachments = [];
+            await takeControlSession(session.id, value, attachments, true);
+            if (isPrompt) {
+              prompt = "";
+              promptAttachments = [];
+            }
             takeoverConfirm = false;
           } catch (retryError) {
             sendError = String(retryError).replace(/^Error:\s*/, "");
@@ -1717,6 +1738,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   async function runSlashCommand(value: string) {
     const action = findSlashCommand(availableSlashCommands(), value)?.action;
     if (!action) return false;
+    if (codexCliOwnsSettings && ["model", "plan", "default"].includes(action)) {
+      await requestSettingsTakeover();
+      return true;
+    }
     switch (action) {
       case "model":
         if (!supportsAgentControls) return false;
@@ -1776,11 +1801,20 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
 
   async function toggleSessionPermissionMenu() {
+    if (codexCliOwnsSettings) {
+      await requestSettingsTakeover();
+      return;
+    }
     permissionMenuOpen = !permissionMenuOpen;
     if (permissionMenuOpen) await loadSessionPermission();
   }
 
   async function chooseSessionPermission(mode: string) {
+    if (codexCliOwnsSettings) {
+      permissionMenuOpen = false;
+      await requestSettingsTakeover();
+      return;
+    }
     if (permissionMenuSaving || mode === sessionPermission?.mode) {
       permissionMenuOpen = false;
       return;
@@ -1796,6 +1830,23 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       permissionMenuSaving = false;
     }
   }
+
+  async function requestSettingsTakeover() {
+    controlsOpen = false;
+    permissionMenuOpen = false;
+    sendError = "";
+    takeoverIntent = "settings";
+    takeoverConfirm = true;
+    await tick();
+    takeoverAcceptButton?.focus();
+  }
+
+  $effect(() => {
+    if (codexCliOwnsSettings) {
+      controlsOpen = false;
+      permissionMenuOpen = false;
+    }
+  });
 
   // Plan mode no longer has a button, so its state is read when the conversation opens.
   let loadedCollaborationSessionId = "";
@@ -2865,14 +2916,21 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         </span>
         <div>
           <strong id={`workspace-takeover-${session.id}`}>{tr("Take control of this CLI?", "Assumir o controle desta CLI?")}</strong>
-          <p>{session.agent === "omp"
+          <p>{takeoverIntent === "settings" && !session.capabilities.canTakeControl
+            ? tr("This CLI is not ready for automatic takeover. Identify the conversation and try again.", "Esta CLI ainda não pode ser assumida automaticamente. Identifique a conversa e tente novamente.")
+            : session.agent === "omp"
             ? tr("Close omp in the terminal before taking control. Lume will then resume the session and send this prompt.", "Feche o omp no terminal antes de assumir o controle. Depois, o Lume retomará a sessão e enviará este prompt.")
-            : tr("Lume will close the external writer, resume the same thread and send this prompt.", "O Lume fechará o processo externo, retomará a mesma thread e enviará este prompt.")}</p>
+            : takeoverIntent === "settings"
+              ? session.status === "running" || session.status === "permission_required"
+                ? tr("To change the settings, Lume must stop the current task, close the agent process and resume the thread. Your draft will be kept.", "Para mudar os ajustes, o Lume precisa interromper a tarefa atual, fechar o processo do agente e retomar a conversa. Seu rascunho será preservado.")
+                : tr("To change the settings, Lume must close the agent process and resume the thread. Your draft will be kept.", "Para mudar os ajustes, o Lume precisa fechar o processo do agente e retomar a conversa. Seu rascunho será preservado.")
+              : tr("Lume will close the external writer, resume the same thread and send this prompt.", "O Lume fechará o processo externo, retomará a mesma thread e enviará este prompt.")}</p>
+          {#if sendError}<p role="alert" class="takeover-error">{sendError}</p>{/if}
         </div>
         <footer>
           <button type="button" disabled={takingControl} onclick={() => (takeoverConfirm = false)}>{tr("Cancel", "Cancelar")}</button>
-          <button bind:this={takeoverAcceptButton} class="takeover-primary" type="button" disabled={takingControl} onclick={() => void confirmTakeover()}>
-            {takingControl ? tr("Taking control…", "Assumindo controle…") : tr("Take control & send", "Assumir e enviar")}
+          <button bind:this={takeoverAcceptButton} class="takeover-primary" type="button" disabled={takingControl || !session.capabilities.canTakeControl} onclick={() => void confirmTakeover()}>
+            {takingControl ? tr("Taking control…", "Assumindo controle…") : takeoverIntent === "settings" ? tr("Take control", "Assumir controle") : tr("Take control & send", "Assumir e enviar")}
           </button>
         </footer>
       </dialog>
@@ -3218,7 +3276,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         {#if supportsPermissionPicker && sessionPermission}
           <div class="permission-picker" bind:this={permissionMenuRoot}>
             <button class:active={permissionMenuOpen} class="model-trigger permission-trigger tone-{permissionTone(sessionPermission.mode)}" type="button"
-              disabled={session.controlOrigin !== "lume" || permissionMenuSaving}
+              disabled={(session.controlOrigin !== "lume" && !codexCliOwnsSettings) || permissionMenuSaving}
               aria-label={tr("Choose permissions", "Escolher permissões")}
               aria-haspopup="listbox" aria-expanded={permissionMenuOpen}
               title={session.controlOrigin !== "lume" ? tr("Take control of this session to change permissions", "Assuma o controle desta sessão para mudar as permissões") : permissionDescription(sessionPermission.mode, tr, session.agent)}

@@ -81,7 +81,8 @@
     createImagePreview,
     prepareClipboardImage,
   } from "$lib/imageAttachments";
-  import { sessionCapabilities } from "$lib/sessionCapabilities";
+  import { requiresCodexCliTakeover, sessionCapabilities } from "$lib/sessionCapabilities";
+  import CodexTakeoverDialog from "$lib/CodexTakeoverDialog.svelte";
   import { resolveLiveResumableSession, resolveTerminalSession } from "$lib/sessionIdentity";
   import { stripInternalAgentMetadata } from "$lib/markdown.js";
   import type {
@@ -262,6 +263,7 @@
   let sessionActionMessageIsError = $state(false);
   let renamingSessionId = $state<string | null>(null);
   let cliAssociationSessionId = $state<string | null>(null);
+  let renameTakeoverSession = $state<AgentSession | null>(null);
   let cliContextMenu = $state<{ sessionId: string; x: number; y: number } | null>(null);
   let cliContextMenuNode = $state<HTMLDivElement | null>(null);
   let cliContextTrigger: HTMLButtonElement | null = null;
@@ -1553,6 +1555,10 @@
 
   function beginSessionRename(session: AgentSession) {
     void bringOverlayToFront(true);
+    if (requiresCodexCliTakeover(session)) {
+      renameTakeoverSession = session;
+      return;
+    }
     renamingSessionId = session.id;
     renameDraft = sessionDisplayName(session);
     renameError = null;
@@ -1575,6 +1581,11 @@
 
   async function saveSessionRename(session: AgentSession) {
     if (renamingSession) return;
+    if (requiresCodexCliTakeover(session)) {
+      cancelSessionRename();
+      renameTakeoverSession = session;
+      return;
+    }
     const requested = renameDraft.trim();
     if (!requested) {
       renameError = tr("Enter a name for this session.", "Digite um nome para esta sessão.");
@@ -2994,6 +3005,9 @@
   onpointermove={wakeMascot}
   aria-label={tr("Lume, agent monitor", "Lume, monitor de agentes")}
 >
+  {#if renameTakeoverSession}
+    <CodexTakeoverDialog session={renameTakeoverSession} language={preferences.language} onClose={() => (renameTakeoverSession = null)} onTaken={() => { renameTakeoverSession = null; void refreshSessions(false); }} />
+  {/if}
   <AppUpdateNotice language={preferences.language} dark={effectiveDark} ready={updatePresentationReady && !startupChooserOpen && !onboardingOpen} surfaceOpen={expanded} noticeVisible={view !== "settings"} onReveal={async () => { if (!expanded) await toggleExpanded(); }} />
   {#if cliAssociationSessionId}
     {#key cliAssociationSessionId}

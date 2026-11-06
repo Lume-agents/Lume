@@ -74,7 +74,7 @@
     buildHandoffPrompt,
     parseHandoffPrompt,
   } from "$lib/handoff";
-  import { sessionCapabilities } from "$lib/sessionCapabilities";
+  import { requiresCodexCliTakeover, sessionCapabilities } from "$lib/sessionCapabilities";
   import { resolveTerminalSession } from "$lib/sessionIdentity";
   import { interruptNoticeText } from "$lib/interruptNotice";
   import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
@@ -257,6 +257,7 @@
   let terminateConfirm = $state(false);
   let terminating = $state(false);
   let takeoverConfirm = $state(false);
+  let takeoverIntent = $state<"prompt" | "settings">("prompt");
   let takingControl = $state(false);
   let interrupting = $state(false);
   let renamingSession = $state(false);
@@ -2528,6 +2529,10 @@
 
   function beginSessionRename() {
     if (!session) return;
+    if (requiresCodexCliTakeover(session)) {
+      void openModelDialog();
+      return;
+    }
     renameDraft = sessionDisplayName(session);
     renamingSession = true;
     message = null;
@@ -2535,6 +2540,11 @@
 
   async function saveSessionRename() {
     if (!session || savingSessionName) return;
+    if (requiresCodexCliTakeover(session)) {
+      renamingSession = false;
+      await openModelDialog();
+      return;
+    }
     const requested = renameDraft.trim();
     if (!requested) {
       message = tr("Enter a name for this session.", "Digite um nome para esta sessão.");
@@ -2584,6 +2594,7 @@
   }
 
   async function applyCollaborationMode(nextMode: CollaborationMode) {
+    if (session && requiresCodexCliTakeover(session)) { await openModelDialog(); return false; }
     if (
       !session
       || session.agent !== "codex"
@@ -2663,15 +2674,21 @@
 
   async function openModelDialog() {
     if (!session || !["codex", "claude_code", "opencode", "antigravity", "omp"].includes(session.agent)) return false;
-    if (modelLoading || modelSaving) return true;
     composerToolsOpen = false;
     if (session.controlOrigin !== "lume") {
+      if (requiresCodexCliTakeover(session)) {
+        takeoverIntent = "settings";
+        message = null;
+        takeoverConfirm = true;
+        return true;
+      }
       message = tr(
         "Take control of this external CLI before changing its model.",
         "Assuma o controle desta CLI externa antes de mudar o modelo.",
       );
       return true;
     }
+    if (modelLoading || modelSaving) return true;
     if (promptIsRunning && session.agent === "claude_code") {
       message = tr(
         "The model can be changed after the current task finishes.",
@@ -2719,6 +2736,7 @@
   }
 
   async function chooseSessionPermission(mode: string) {
+    if (session && requiresCodexCliTakeover(session)) { modelDialogOpen = false; await openModelDialog(); return; }
     if (!session || permissionSaving || mode === sessionPermission?.mode) return;
     permissionSaving = true;
     modelError = null;
@@ -2732,6 +2750,7 @@
   }
 
   async function toggleFastMode() {
+    if (session && requiresCodexCliTakeover(session)) { modelDialogOpen = false; await openModelDialog(); return; }
     if (!session || fastSaving || modelLoading || modelSaving || promptIsRunning) return;
     if (session.agent !== "codex" && session.agent !== "claude_code") return;
     fastSaving = true;
@@ -2758,6 +2777,7 @@
   }
 
   async function saveModelSettings() {
+    if (session && requiresCodexCliTakeover(session)) { modelDialogOpen = false; await openModelDialog(); return; }
     if (!session || modelSaving) return;
     if (session.agent === "codex" && (!modelSettings || !selectedModel || !selectedEffort)) return;
     modelSaving = true;
@@ -2880,6 +2900,9 @@
       || !readyForPrompt
     ) return;
     if (!canSubmit && capabilities?.canTakeControl) {
+      const action = promptAttachments.length === 0 ? findSlashCommand(availableSlashCommands(), prompt)?.action : undefined;
+      takeoverIntent = requiresCodexCliTakeover(session) && action && ["model", "plan", "default"].includes(action) ? "settings" : "prompt";
+      message = null;
       takeoverConfirm = true;
       return;
     }
@@ -2915,15 +2938,18 @@
   async function confirmTakeover() {
     if (!session || !capabilities?.canTakeControl || takingControl) return;
     const currentSession = session;
-    const pendingPrompt = prompt.trim();
-    const pendingAttachments = [...promptAttachments];
+    const isPrompt = takeoverIntent === "prompt";
+    const pendingPrompt = isPrompt ? prompt.trim() : "";
+    const pendingAttachments = isPrompt ? [...promptAttachments] : [];
     takingControl = true;
     message = null;
     const finishTakeover = async (force = false) => {
       await takeControlSession(currentSession.id, pendingPrompt, pendingAttachments, force);
       takeoverConfirm = false;
-      if (prompt.trim() === pendingPrompt) prompt = "";
-      promptAttachments = [];
+      if (isPrompt) {
+        if (prompt.trim() === pendingPrompt) prompt = "";
+        promptAttachments = [];
+      }
       await refresh();
     };
     try {
@@ -2947,6 +2973,10 @@
       takingControl = false;
     }
   }
+
+  $effect(() => {
+    if (session && requiresCodexCliTakeover(session)) modelDialogOpen = false;
+  });
   async function setupOmp() {
     const workingDirectory = session?.workingDirectory?.trim();
     if (!workingDirectory) return;
@@ -3902,15 +3932,18 @@
           <div class="terminate-dialog takeover-dialog" role="alertdialog" aria-modal="true" aria-labelledby="takeover-title" tabindex="-1" use:dialogFocus={{ onDismiss: () => { if (!takingControl) takeoverConfirm = false; }, fallbackFocus: () => document.querySelector<HTMLTextAreaElement>(".terminal-composer textarea") }} onpointerdown={(event) => event.stopPropagation()}>
             <div>
               <strong id="takeover-title">{tr("Continue this session in Lume?", "Continuar esta sessão no Lume?")}</strong>
-              <p>{session.agent === "omp"
+              <p>{takeoverIntent === "settings" && !capabilities?.canTakeControl
+                ? tr("This CLI is not ready for automatic takeover. Identify the conversation and try again.", "Esta CLI ainda não pode ser assumida automaticamente. Identifique a conversa e tente novamente.")
+                : session.agent === "omp"
                 ? tr("Close omp in the terminal before taking control. Lume will then resume this session without the external process.", "Feche o omp no terminal antes de assumir o controle. Depois, o Lume retomará esta sessão sem o processo externo.")
                 : session.status === "running"
                   ? tr("The external CLI is running a task. Taking control will stop that task, close only the agent process, and resume the same thread in Lume.", "A CLI externa está executando uma tarefa. Assumir o controle interromperá essa tarefa, fechará somente o processo do agente e retomará a mesma thread no Lume.")
                   : tr("Lume will close only the external agent process and resume the same thread here. The terminal and chat history will be preserved.", "O Lume fechará somente o processo externo do agente e retomará a mesma thread aqui. O terminal e o histórico do chat serão preservados.")}</p>
+              {#if message}<p role="alert" class="takeover-error">{message}</p>{/if}
             </div>
             <footer>
               <button disabled={takingControl} type="button" onclick={() => (takeoverConfirm = false)}>{tr("Cancel", "Cancelar")}</button>
-              <button class="takeover" disabled={takingControl} type="button" onclick={() => void confirmTakeover()}>{takingControl ? tr("Transferring…", "Transferindo…") : tr("Take control", "Assumir controle")}</button>
+              <button class="takeover" disabled={takingControl || !capabilities?.canTakeControl} type="button" onclick={() => void confirmTakeover()}>{takingControl ? tr("Transferring…", "Transferindo…") : tr("Take control", "Assumir controle")}</button>
             </footer>
           </div>
         </div>

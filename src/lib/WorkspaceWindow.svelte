@@ -20,6 +20,8 @@
   import LumeLogo from "$lib/LumeLogo.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import CodexCliAssociationDialog from "$lib/CodexCliAssociationDialog.svelte";
+  import CodexTakeoverDialog from "$lib/CodexTakeoverDialog.svelte";
+  import { requiresCodexCliTakeover } from "$lib/sessionCapabilities";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
   import AgentSetupCards from "$lib/AgentSetupCards.svelte";
   import CliInstallDialog from "$lib/CliInstallDialog.svelte";
@@ -279,6 +281,7 @@
   let sessionContextNode = $state<HTMLDivElement | null>(null);
   let sessionRenameDraft = $state("");
   let cliAssociationSessionId = $state<string | null>(null);
+  let renameTakeoverSession = $state<HubSession | null>(null);
   let streamMessages = $state(true);
   let workspaceBackgroundImage = $state("");
   let workspaceBackgroundImageOpacity = $state(100);
@@ -1663,6 +1666,10 @@
   }
 
   function beginSidebarSessionRename(session: HubSession) {
+    if (requiresCodexCliTakeover(session)) {
+      renameTakeoverSession = session;
+      return;
+    }
     sessionRenameDraft = sessionName(session);
     sessionContextError = "";
     if (sessionContextMenu) {
@@ -1677,6 +1684,10 @@
 
   async function saveSidebarSessionRename(session: HubSession) {
     if (sessionContextBusy) return;
+    if (requiresCodexCliTakeover(session)) {
+      renameTakeoverSession = session;
+      return;
+    }
     const requested = sessionRenameDraft.trim();
     if (!requested) {
       sessionContextError = tr("Enter a name for this session.", "Digite um nome para esta sessão.");
@@ -2716,6 +2727,9 @@
   style:--workspace-background-opacity={`${workspaceCanvasOpacity}%`}
   style:background={stageTakeover ? "var(--workspace-bg)" : `${backdropPaint || "linear-gradient(var(--workspace-chat-background), var(--workspace-chat-background))"}, var(--workspace-bg)`}
 >
+  {#if renameTakeoverSession}
+    <CodexTakeoverDialog session={renameTakeoverSession} language={preferences.language} onClose={() => (renameTakeoverSession = null)} onTaken={() => { renameTakeoverSession = null; sessionContextMenu = null; void refreshSessionsAfterContextAction(); }} />
+  {/if}
   <SystemBannerStack items={systemBanners} language={preferences.language} dismissLabel={tr("Dismiss", "Fechar")} />
   {#each workspaceResizeEdges as direction}
     <button

@@ -22,6 +22,11 @@ export interface SessionCapabilities {
   promptDeliveries: PromptDelivery[];
 }
 
+/** Settings for a Codex CLI remain owned by that process until the user transfers it. */
+export function requiresCodexCliTakeover(session: Pick<AgentSession, "agent" | "source" | "controlOrigin" | "remote">): boolean {
+  return !session.remote && session.agent === "codex" && session.source === "cli" && session.controlOrigin === "external";
+}
+
 /** A Claude conversation Lume owns: each message is its own run, so they can queue. */
 function claudeQueuesInLume(session: AgentSession) {
   return session.agent === "claude_code"

@@ -30,6 +30,16 @@ const palettes = [
   { background: "#f0dfe2", base: "#cf7787", light: "#e7aeb8", shade: "#985263", deep: "#693a48" },
 ] as const;
 
+// More colours, for when many agents are open. Two in three avatars keep the palette they always had; the rest take one of these.
+const extraPalettes = [
+  { background: "#d6efee", base: "#3fb5ad", light: "#8fd9d2", shade: "#2a807f", deep: "#1b5757" },
+  { background: "#f5dfdb", base: "#e06a5a", light: "#f3a99b", shade: "#a3453a", deep: "#6e2e27" },
+  { background: "#e6efcf", base: "#8fb83e", light: "#c1dc82", shade: "#628a24", deep: "#425e19" },
+  { background: "#dfe3f5", base: "#6577d4", light: "#a6b2ec", shade: "#4453a1", deep: "#2e386f" },
+  { background: "#f3dcee", base: "#c765b5", light: "#e5a5d9", shade: "#8e4283", deep: "#612c59" },
+  { background: "#eae0d5", base: "#a98467", light: "#d2b79e", shade: "#76563f", deep: "#503a2b" },
+] as const;
+
 const bodies: ThreadAvatarBody[] = ["cube", "capsule", "gem", "arch", "sphere", "stack"];
 
 export function hashThreadAvatarSeed(value: string) {
@@ -55,7 +65,9 @@ function eyeExpression(index: number): [ThreadAvatarEye, ThreadAvatarEye] {
 
 export function createThreadAvatarConfig(seed: string): ThreadAvatarConfig {
   const hash = hashThreadAvatarSeed(seed || "lume-thread");
-  const palette = palettes[hash % palettes.length] ?? palettes[0];
+  const palette = (hash >>> 24) % 3 === 0
+    ? extraPalettes[(hash >>> 26) % extraPalettes.length] ?? extraPalettes[0]
+    : palettes[hash % palettes.length] ?? palettes[0];
   // Keep the established shape for most seeds; reserve two hash slots for the
   // new silhouettes without reshuffling every existing avatar.
   const shapeSlot = (hash >>> 20) % 12;

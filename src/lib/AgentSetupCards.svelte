@@ -1,5 +1,9 @@
 <script lang="ts">
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { cubicOut } from "svelte/easing";
+  import { slide } from "svelte/transition";
   import BrandIcon from "$lib/BrandIcon.svelte";
+  import LumeIcon from "$lib/LumeIcon.svelte";
   import type { AgentKind, IntegrationDiagnostic, IntegrationStatus } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import type { CliInstallPlan } from "$lib/lume";
@@ -108,6 +112,38 @@
   }
 
   const canInstall = (entry: Entry) => Boolean(entry.plan && (entry.plan.methods.length || entry.plan.manualUrl));
+
+  /** Where each agent is officially installed from, for the ones Lume cannot install itself. */
+  const officialPages: Partial<Record<Kind, string>> = {
+    claude: "https://docs.claude.com/en/docs/claude-code/setup",
+    codex: "https://github.com/openai/codex",
+    gemini: "https://github.com/google-gemini/gemini-cli",
+    opencode: "https://opencode.ai",
+    antigravity: "https://antigravity.google/cli",
+    omp: "https://github.com/can1357/oh-my-pi",
+    deepseek: "https://www.deepseek.com",
+    github: "https://cli.github.com",
+  };
+  const pageFor = (entry: Entry) => entry.plan?.manualUrl ?? officialPages[entry.kind];
+
+  /** What the card tells about its agent, kept out of sight until the card is opened. */
+  function descriptionOf(entry: Entry): string[] {
+    const hint = entry.step === "installed" && !compact && entry.plan
+      ? entry.kind === "omp"
+        ? tr("Connect to install Lume's optional observe-only extension. It cannot approve external omp tool calls; passive monitoring works without it.", "Conecte para instalar a extensão opcional do Lume, somente observável. Ela não pode aprovar chamadas externas de ferramentas do omp; o monitoramento passivo funciona sem ela.")
+        : tr("Connect it so Lume can follow its sessions and answer permission requests.", "Conecte para o Lume acompanhar as sessões e responder pedidos de permissão.")
+      : "";
+    return [entry.detail, hint].filter(Boolean);
+  }
+
+  let opened = $state<Kind[]>([]);
+  function toggle(kind: Kind) {
+    opened = opened.includes(kind) ? opened.filter((value) => value !== kind) : [...opened, kind];
+  }
+
+  function motionDuration(duration: number) {
+    return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration;
+  }
 </script>
 
 <div class:compact class="agent-setup">
@@ -115,16 +151,25 @@
     {#if group.title}<small class="group-title">{group.title}</small>{/if}
     {#each group.items as entry (entry.kind)}
       {@const busy = entry.integration ? configuring === entry.integration.kind || diagnosing === entry.integration.kind : false}
-      <article class="agent-card step-{entry.step}">
-        <span class="agent-mark"><BrandIcon name={brand(entry.kind)} size={compact ? 18 : 22} /></span>
-        <span class="agent-copy">
-          <span class="agent-heading"><strong>{entry.label}</strong><b class="badge {entry.step}"><i aria-hidden="true"></i>{stepLabel(entry.step)}</b></span>
-          <small>{entry.detail}</small>
-        </span>
+      {@const description = descriptionOf(entry)}
+      {@const open = opened.includes(entry.kind)}
+      <article class="agent-card step-{entry.step}" class:open>
+        <button class="agent-toggle" type="button" disabled={!description.length} aria-expanded={description.length ? open : undefined} aria-controls={`agent-description-${entry.kind}`}
+          title={description.length ? (open ? tr("Hide description", "Ocultar descrição") : tr("Show description", "Mostrar descrição")) : undefined} onclick={() => toggle(entry.kind)}>
+          <span class="agent-mark"><BrandIcon name={brand(entry.kind)} size={compact ? 18 : 22} /></span>
+          <span class="agent-copy">
+            <span class="agent-heading"><strong>{entry.label}</strong><b class="badge {entry.step}"><i aria-hidden="true"></i>{stepLabel(entry.step)}</b></span>
+          </span>
+          {#if description.length}<svg class="agent-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>{/if}
+        </button>
         <span class="agent-actions">
           {#if entry.step === "missing"}
             {#if canInstall(entry)}
               <button class="primary" type="button" onclick={() => onInstall(entry.plan!)}>{tr("Install", "Instalar")}</button>
+            {:else if pageFor(entry)}
+              <button class="external" type="button" title={tr(`Open ${pageFor(entry)}`, `Abrir ${pageFor(entry)}`)} onclick={() => void openUrl(pageFor(entry)!)}>
+                {tr("Install", "Instalar")}<LumeIcon name="external" size={13} />
+              </button>
             {:else}
               <span class="unavailable">{tr("Install it yourself to use it", "Instale por conta própria para usar")}</span>
             {/if}
@@ -140,10 +185,10 @@
             <button class="quiet" type="button" onclick={() => void copyLogin(entry)} title={entry.plan.loginCommand}>{copied === entry.kind ? tr("Copied", "Copiado") : tr("Copy sign-in command", "Copiar comando de login")}</button>
           {/if}
         </span>
-        {#if entry.step === "installed" && !compact && entry.plan}
-          <small class="hint">{entry.kind === "omp"
-            ? tr("Connect to install Lume's optional observe-only extension. It cannot approve external omp tool calls; passive monitoring works without it.", "Conecte para instalar a extensão opcional do Lume, somente observável. Ela não pode aprovar chamadas externas de ferramentas do omp; o monitoramento passivo funciona sem ela.")
-            : tr("Connect it so Lume can follow its sessions and answer permission requests.", "Conecte para o Lume acompanhar as sessões e responder pedidos de permissão.")}</small>
+        {#if open && description.length}
+          <div class="agent-description" id={`agent-description-${entry.kind}`} transition:slide={{ duration: motionDuration(170), easing: cubicOut }}>
+            {#each description as line (line)}<small>{line}</small>{/each}
+          </div>
         {/if}
         {#if entry.integration && diagnostics[entry.integration.kind]}
           <div class="diagnostic-list">
@@ -160,15 +205,24 @@
 <style>
   .agent-setup { display: grid; gap: .9em; font-size: var(--agent-setup-font, 12px); }
   .group-title { margin: .5em 2px 0; opacity: .62; font-size: max(10px, .8em); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-  .agent-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .35em 1em; padding: 1em 1.1em; border: 1px solid color-mix(in srgb, currentColor 13%, transparent); border-radius: 1.1em; background: color-mix(in srgb, currentColor 4%, transparent); }
+  .agent-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .35em 1em; padding: 1em 1.1em; border: 1px solid color-mix(in srgb, currentColor 13%, transparent); border-radius: 1.1em; background: color-mix(in srgb, currentColor 4%, transparent); }
   .agent-card.step-connected { border-color: color-mix(in srgb, var(--workspace-accent, #3f9b69) 38%, transparent); }
   .compact .agent-card { padding: .7em .9em; border-radius: .9em; }
+  /* The mark, the name and the chevron are one button: the description opens under it. */
+  .agent-toggle { min-width: 0; padding: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 1em; border: 0; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+  .agent-toggle:disabled { cursor: default; }
+  .agent-toggle:focus-visible { outline: 2px solid var(--workspace-accent, #3f9b69); outline-offset: 4px; border-radius: .6em; }
+  .agent-chevron { width: 1.3em; height: 1.3em; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; opacity: .5; transition: transform 160ms ease; }
+  .agent-toggle:hover:not(:disabled) .agent-chevron { opacity: .85; }
+  .agent-card.open .agent-chevron { transform: rotate(180deg); }
+  .agent-description { grid-column: 1 / -1; padding-left: 4.1em; display: grid; gap: .5em; }
+  .compact .agent-description { padding-left: 3.5em; }
+  .agent-description small { opacity: .68; font-size: max(10px, .9em); line-height: 1.45; overflow-wrap: anywhere; }
   .agent-mark { width: 3em; height: 3em; display: grid; place-items: center; border-radius: .9em; background: color-mix(in srgb, currentColor 7%, transparent); }
   .compact .agent-mark { width: 2.5em; height: 2.5em; }
   .agent-copy { min-width: 0; display: grid; gap: 2px; }
   .agent-heading { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
   .agent-heading strong { font-size: 1.08em; }
-  .agent-copy small { opacity: .68; font-size: max(10px, .9em); line-height: 1.4; overflow-wrap: anywhere; }
   .badge { display: inline-flex; align-items: center; gap: 5px; padding: .1em .65em .1em .55em; border-radius: 999px; background: color-mix(in srgb, currentColor 8%, transparent); font-size: max(10px, .8em); font-weight: 700; }
   .badge i { width: .55em; height: .55em; border-radius: 50%; background: currentColor; opacity: .45; }
   .badge.connected { color: var(--workspace-accent, #3f9b69); background: color-mix(in srgb, var(--workspace-accent, #3f9b69) 14%, transparent); }
@@ -177,12 +231,13 @@
   .badge.installed i, .badge.ready i { background: #4d8cb8; opacity: 1; }
   .agent-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
   .agent-actions button { min-height: 2.5em; padding: 0 1.1em; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: .8em; color: inherit; background: transparent; font: inherit; font-size: max(10px, .95em); font-weight: 650; cursor: pointer; }
+  /* Installing happens on the agent's own site: an outline button, not the accent one, with the external mark. */
+  .agent-actions button.external { display: inline-flex; align-items: center; gap: 6px; }
   .agent-actions button:hover:not(:disabled) { background: color-mix(in srgb, currentColor 8%, transparent); }
   .agent-actions button.primary { border-color: transparent; color: #f5fbf7; background: var(--workspace-accent, #3f9b69); }
   .agent-actions button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--workspace-accent, #3f9b69); }
   .agent-actions button:disabled { opacity: .5; cursor: default; }
   .unavailable { max-width: 13em; opacity: .6; font-size: max(10px, .85em); line-height: 1.35; text-align: right; }
-  .hint { grid-column: 2 / -1; opacity: .62; font-size: max(10px, .85em); line-height: 1.4; }
   .diagnostic-list { grid-column: 1 / -1; display: grid; gap: .3em; margin-top: .4em; padding-top: .6em; border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); font-size: max(10px, .9em); }
   .diagnostic-list span { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
   .diagnostic-list i { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #aab6b0; }
@@ -190,5 +245,6 @@
   .diagnostic-list .diagnostic-warning i { background: #d0a142; }
   .diagnostic-list .diagnostic-error i, .diagnostic-list .diagnostic-failed i { background: #c0554f; }
   .diagnostic-list small { opacity: .68; }
-  @media (max-width: 420px) { .agent-card { grid-template-columns: auto minmax(0, 1fr); } .agent-actions { grid-column: 1 / -1; justify-content: flex-start; } }
+  @media (max-width: 420px) { .agent-card { grid-template-columns: minmax(0, 1fr); } .agent-actions { grid-column: 1 / -1; justify-content: flex-start; } }
+  @media (prefers-reduced-motion: reduce) { .agent-chevron { transition: none; } }
 </style>

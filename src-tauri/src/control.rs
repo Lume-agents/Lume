@@ -22,6 +22,7 @@ use crate::{
 
 const MAX_PROMPT_ATTACHMENTS: usize = 4;
 const MAX_IMAGE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
+const MAX_CHANGED_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FILE_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_PREVIEW_LENGTH: usize = 384 * 1024;
 
@@ -32,10 +33,20 @@ struct PreparedPromptAttachment {
 }
 
 pub fn local_image_data_url(path: &str) -> Result<String, String> {
+    image_data_url_within(path, MAX_IMAGE_ATTACHMENT_BYTES)
+}
+
+/// An image an agent created or changed, for the preview in the chat. Generated images are often larger than a photo
+/// attached to a prompt, so the limit is higher.
+pub fn changed_image_data_url(path: &str) -> Result<String, String> {
+    image_data_url_within(path, MAX_CHANGED_IMAGE_BYTES)
+}
+
+fn image_data_url_within(path: &str, limit: usize) -> Result<String, String> {
     let path = fs::canonicalize(path).map_err(|_| "A imagem selecionada não existe".to_string())?;
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_IMAGE_ATTACHMENT_BYTES {
-        return Err("A imagem excede o limite de 5 MB".into());
+    if bytes.len() > limit {
+        return Err(format!("A imagem excede o limite de {} MB", limit / (1024 * 1024)));
     }
     let mime = detected_image_mime(&bytes)
         .ok_or_else(|| "O arquivo selecionado não é uma imagem compatível".to_string())?;

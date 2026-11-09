@@ -210,3 +210,18 @@ export function mergeFileChanges(
   target.splice(0, target.length, ...merged.values());
   absorbBareNames(target);
 }
+
+export type FileChangeKind = "created" | "edited" | "deleted";
+
+/** Whether a recorded diff of one file made it, changed it or removed it. A diff that says nothing is an edit. */
+export function fileChangeKind(diff: string | undefined | null): FileChangeKind {
+  const text = diff ?? "";
+  if (/^(?:new file mode|--- \/dev\/null|Binary files \/dev\/null )/m.test(text)) return "created";
+  if (/^(?:deleted file mode|\+\+\+ \/dev\/null|Binary files .* and \/dev\/null differ)/m.test(text)) return "deleted";
+  return "edited";
+}
+
+/** The image formats Lume can show a preview of. */
+export function isPreviewableImage(path: string): boolean {
+  return /\.(?:png|jpe?g|gif|webp)$/i.test(path);
+}

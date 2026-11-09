@@ -3890,6 +3890,16 @@ fn codex_item_activity(
             Vec::new(),
         ),
         "contextCompaction" if completed => ("compact", "Context compacted".into(), None, Vec::new()),
+        // An image Codex generated: its file is a new file, shown as a preview in the chat.
+        "imageGeneration" => {
+            let path = text_at(item, "savedPath")?;
+            (
+                "file",
+                path.to_string(),
+                crate::command_file_changes::binary_image_chunk(path, false, true),
+                vec![path.to_string()],
+            )
+        }
         "reasoning" => (
             "analysis",
             if completed {
@@ -5523,6 +5533,16 @@ mod tests {
         assert!(matches!(event.event, HookEventKind::WaitingForInput));
         assert_eq!(event.status_label.as_deref(), Some("Prompt interrompido"));
         assert!(event.last_response.is_none());
+    }
+
+    #[test]
+    fn an_image_codex_generated_is_a_new_file_in_the_chat() {
+        let event = |method: &str, item: Value| activity_event(&json!({ "method": method, "params": { "threadId": "t", "turnId": "u", "item": item } }), method, None);
+        assert!(event("item/started", json!({ "type": "imageGeneration", "id": "g", "status": "inProgress" })).is_none(), "nothing to show before the file exists");
+        let activity = event("item/completed", json!({ "type": "imageGeneration", "id": "g", "savedPath": "/work/lume/logo.png" })).and_then(|event| event.activity).expect("the generated image");
+        assert_eq!((activity.kind.as_str(), activity.files.as_slice()), ("file", ["/work/lume/logo.png".to_string()].as_slice()));
+        let detail = activity.detail.unwrap_or_default();
+        assert!(detail.contains("new file mode") && detail.contains("Binary files /dev/null and b//work/lume/logo.png differ"), "{detail}");
     }
 
     #[test]

@@ -13,7 +13,8 @@
   import { mcpActivityInfo, mcpRunChips } from "$lib/mcpEvents";
   import { gitActivityInfo } from "$lib/gitEvents";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
-  import { displayFileChangePath, normalizeFileChangePath } from "$lib/fileChanges";
+  import { displayFileChangePath, fileChangeKind, isPreviewableImage, normalizeFileChangePath } from "$lib/fileChanges";
+  import ChangedImagePreview from "$lib/ChangedImagePreview.svelte";
   import { parseReviewDiff } from "$lib/reviewDiffs";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import { activityCategory, activityDisplayTitle, activityGroupSummary, activityPreview, activityRunFileDetail, activityRunFiles, activityRunTitle, groupConsecutiveTraceActivities, type ActivityCategory, type ActivityRun } from "$lib/activityPresentation";
@@ -202,10 +203,12 @@
                     {@const editRun = run.category === "edit"}
                     {@const card = editRun ? fileCard(detail) : { lines: [], added: 0, removed: 0 }}
                     {@const shownPath = normalizeFileChangePath(path, workingDirectory)}
-                    {@const opens = Boolean(detail) || (editRun && Boolean(onOpenReview))}
+                    {@const changeKind = editRun ? fileChangeKind(detail) : "edited"}
+                    {@const image = editRun && isPreviewableImage(path)}
+                    {@const opens = image || Boolean(detail) || (editRun && Boolean(onOpenReview))}
                     <div class:selected={selectedFileKey === fileKey} class="file-node" role="listitem" data-file-key={fileKey} style={`--file-delay: ${Math.min(fileIndex, 6) * 30}ms`}>
                       <button class="file-node-trigger" type="button" title={shownPath} disabled={!opens} aria-expanded={opens ? selectedFileKey === fileKey : undefined} onclick={(event) => openFileCard(event, fileKey)}>
-                        <span class="file-node-action">{run.category === "read" ? tr("Read", "Leu") : tr("Edited", "Editou")}</span>
+                        <span class="file-node-action">{run.category === "read" ? tr("Read", "Leu") : changeKind === "created" ? tr("Created", "Criou") : changeKind === "deleted" ? tr("Removed", "Removeu") : tr("Edited", "Editou")}</span>
                         <FileTypeIcon {path} />
                         <span class="file-node-name">{displayFileChangePath(shownPath)}</span>
                         {#if card.added || card.removed}<span class="file-node-stats"><b class="added">+{card.added}</b><b class="removed">−{card.removed}</b></span>{/if}
@@ -218,7 +221,9 @@
                             {#if card.added || card.removed}<span class="file-card-stats"><b class="added">+{card.added}</b><b class="removed">−{card.removed}</b></span>{/if}
                             <button class="file-card-close" type="button" aria-label={tr("Close", "Fechar")} onclick={() => (selectedFileKey = "")}><LumeIcon name="close" size={12} /></button>
                           </header>
-                          {#if card.lines.length}
+                          {#if image}
+                            <ChangedImagePreview {path} name={displayFileChangePath(shownPath)} kind={changeKind} {language} />
+                          {:else if card.lines.length}
                             <div class="file-card-diff">
                               {#each card.lines as line, lineIndex (lineIndex)}
                                 <div class="diff-line kind-{line.kind}"><span class="num">{line.kind === "hunk" ? "" : line.newLine ?? line.oldLine ?? ""}</span><code>{line.kind === "hunk" ? line.content : `${line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}${line.content}`}</code></div>
@@ -229,7 +234,7 @@
                           {:else}
                             <p class="file-card-empty">{tr("No diff was recorded for this change.", "Nenhum diff foi registrado para esta alteração.")}</p>
                           {/if}
-                          {#if editRun && onOpenReview}
+                          {#if editRun && onOpenReview && !image}
                             <footer><button type="button" onclick={() => { selectedFileKey = ""; onOpenReview?.(path); }}><LumeIcon name="diff" size={13} />{tr("Open in review center", "Abrir na central de revisão")}</button></footer>
                           {/if}
                         </div>

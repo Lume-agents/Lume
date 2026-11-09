@@ -1050,6 +1050,14 @@ fn read_local_image_data_url(path: String) -> Result<String, String> {
     control::local_image_data_url(&path)
 }
 
+/// The image an agent created or changed, for the preview in the chat.
+#[tauri::command]
+async fn read_changed_image_data_url(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || control::changed_image_data_url(&path))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 /// Opens a file the agent cited, in the default app, if it is a plain file inside the session's folder.
 #[tauri::command]
 fn open_session_file(
@@ -3946,6 +3954,7 @@ pub fn run() {
             open_session_source,
             submit_prompt,
             read_local_image_data_url,
+            read_changed_image_data_url,
             open_session_file,
             export_local_file,
             set_terminal_file_dialog_active,

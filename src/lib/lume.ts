@@ -486,6 +486,11 @@ export async function readLocalImageDataUrl(path: string): Promise<string> {
   return invoke<string>("read_local_image_data_url", { path });
 }
 
+/** An image an agent created or changed, for the chat's preview (up to 16 MB). */
+export async function readChangedImageDataUrl(path: string): Promise<string> {
+  return invoke<string>("read_changed_image_data_url", { path });
+}
+
 export async function exportLocalFile(sourcePath: string, destinationPath: string): Promise<void> {
   await invoke("export_local_file", { sourcePath, destinationPath });
 }

@@ -248,13 +248,16 @@ pub(crate) fn changes_after(key: &str) -> Option<CommandFileChanges> {
         };
         let existed = before_hash != "missing";
         let exists = absolute.exists();
-        if let Some(chunk) = file_diff(
+        // An image has no text to compare: a header-only chunk still says whether it was created, edited or removed.
+        let chunk = file_diff(
             &display,
             existed.then_some(before).flatten().as_deref(),
             existed,
             exists.then(|| read_text(&absolute)).flatten().as_deref(),
             exists,
-        ) {
+        )
+        .or_else(|| binary_image_chunk(&display, existed, exists));
+        if let Some(chunk) = chunk {
             if diff.len() + chunk.len() <= MAX_DIFF_CHARS {
                 diff.push_str(&chunk);
             }
@@ -262,6 +265,26 @@ pub(crate) fn changes_after(key: &str) -> Option<CommandFileChanges> {
         files.push(display);
     }
     (!files.is_empty()).then_some(CommandFileChanges { files, diff })
+}
+
+/// Images the chat can show: the formats Lume reads back for a preview.
+pub(crate) fn is_previewable_image(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp"].iter().any(|extension| lower.ends_with(extension))
+}
+
+/// The record of an image that was created, changed or removed, in the shape of a git diff of a binary file.
+pub(crate) fn binary_image_chunk(path: &str, existed: bool, exists: bool) -> Option<String> {
+    if !is_previewable_image(path) {
+        return None;
+    }
+    let (mode, from, to) = match (existed, exists) {
+        (false, true) => ("new file mode 100644\n", "/dev/null".to_string(), format!("b/{path}")),
+        (true, false) => ("deleted file mode 100644\n", format!("a/{path}"), "/dev/null".to_string()),
+        (true, true) => ("", format!("a/{path}"), format!("b/{path}")),
+        (false, false) => return None,
+    };
+    Some(format!("diff --git a/{path} b/{path}\n{mode}Binary files {from} and {to} differ\n"))
 }
 
 /// A unified diff of one file, in the same shape the edit tools' diffs are recorded in.
@@ -388,6 +411,33 @@ mod tests {
         assert!(changes.diff.contains("-b\n+B"));
         assert!(changes.diff.contains("--- /dev/null"));
         assert!(!changes.diff.contains("untouched"));
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn an_image_a_command_made_or_changed_is_recorded_without_a_text_diff() {
+        let repo = std::env::temp_dir().join(format!("lume-command-images-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&repo);
+        fs::create_dir_all(&repo).unwrap();
+        let root = repo.as_path();
+        run(root, &["init", "-q"]);
+        fs::write(root.join("logo.png"), [0x89, b'P', b'N', b'G', 0, 1, 2]).unwrap();
+        run(root, &["add", "logo.png"]);
+        run(root, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "logo"]);
+
+        let key = format!("test:{}", root.display());
+        remember_before(&key, &root.to_string_lossy(), "python3 draw.py");
+        fs::write(root.join("logo.png"), [0x89, b'P', b'N', b'G', 0, 9, 9, 9]).unwrap();
+        fs::write(root.join("chart.png"), [0x89, b'P', b'N', b'G', 0, 3]).unwrap();
+        fs::write(root.join("data.bin"), [0, 1, 2, 3]).unwrap();
+
+        let changes = changes_after(&key).expect("changes");
+        let chunk = |name: &str| changes.diff.split("diff --git ").find(|part| part.starts_with(&format!("a/{}", root.join(name).display()))).unwrap_or_default().to_string();
+        assert!(chunk("chart.png").contains("new file mode") && chunk("chart.png").contains("Binary files /dev/null"), "{}", changes.diff);
+        let edited = chunk("logo.png");
+        assert!(!edited.contains("new file mode") && edited.contains("Binary files a/"), "{edited}");
+        assert!(chunk("data.bin").is_empty(), "other binaries keep no chunk");
+        assert_eq!(binary_image_chunk("/x/a.PNG", true, false).unwrap().contains("deleted file mode"), true);
         let _ = fs::remove_dir_all(&repo);
     }
 

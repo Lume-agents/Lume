@@ -222,12 +222,27 @@ function readCommandFiles(activity: SessionActivity): string[] {
   }
   const tokens = [...command.matchAll(/"([^"]+)"|'([^']+)'|([^\s;|&<>]+)/g)]
     .map((match) => match[1] ?? match[2] ?? match[3]);
-  return tokens.slice(1).filter((token) =>
-    !token.startsWith("-")
-    && !token.startsWith("$")
-    && !/^\d+(?:,\d+)?p?$/.test(token)
-    && /(?:[\\/]|\.[a-z\d-]{1,12}$)/i.test(token)
-  );
+  const args = tokens.slice(1);
+  // sed's first argument is its script ("/start/,/end/p"), not a file, unless -e or -f gave the script already.
+  if (/^sed\s/i.test(command)) {
+    const scripts = args.flatMap((token, index) => (token === "-e" || token === "--expression" ? [index + 1] : []));
+    if (!scripts.length && !args.includes("-f")) {
+      const script = args.findIndex((token) => !token.startsWith("-"));
+      if (script >= 0) scripts.push(script);
+    }
+    for (const index of scripts.sort((left, right) => right - left)) args.splice(index, 1);
+  }
+  return args.filter(looksLikeFilePath);
+}
+
+/** A word of a command that names a file, and not a pattern, a script or a stray piece of shell syntax. */
+function looksLikeFilePath(token: string): boolean {
+  if (token.startsWith("-") || token.startsWith("$") || /^\d+(?:,\d+)?p?$/.test(token)) return false;
+  // Regular expression and glob characters belong to a pattern, never to the name of one file.
+  if (/[|^*?[\]{}]/.test(token)) return false;
+  // What is left must end in a real name ("a/b/c.ts", "/etc/hosts"), not in "]" or "p".
+  const name = token.split(/[\\/]/).filter(Boolean).at(-1) ?? "";
+  return /[\p{L}\p{N}]/u.test(name) && /(?:[\\/]|\.[a-z\d-]{1,12}$)/i.test(token);
 }
 
 export function activityRunFiles(run: ActivityRun): string[] {

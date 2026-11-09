@@ -166,6 +166,20 @@ await import("./git-events.test.mjs");
 }
 
 {
+  // Pieces of a command that are not files (a pattern, a sed script, a stray bracket) do not show up as read files.
+  const read = (command) => activityRunFiles({ id: "r", category: "read", activities: [activity("command", command)] });
+  assert.deepEqual(read("cat src/a.ts"), ["src/a.ts"]);
+  assert.deepEqual(read("sed -n '1,40p' src/lib/b.svelte"), ["src/lib/b.svelte"]);
+  assert.deepEqual(read("sed -n '/start|^end/,/stop/p' src/lib/b.svelte"), ["src/lib/b.svelte"]);
+  assert.deepEqual(read("sed -n -e '/x/p' src/c.ts"), ["src/c.ts"]);
+  assert.deepEqual(read("head -n 5 \"/work/my dir/d.md\""), ["/work/my dir/d.md"]);
+  assert.deepEqual(read("cat src/*.ts src/[ab]/e.ts"), [], "globs are patterns, not one file");
+  assert.deepEqual(read("cat /etc/hosts"), ["/etc/hosts"]);
+  assert.deepEqual(read("tail -n 20 'logs/a|^/]'"), []);
+  console.log("read files test passed");
+}
+
+{
   // A command that changed several files, with a detail that is not a diff of each one: no file borrows it.
   const { activityRunFileDetail: detailFor } = await import("../src/lib/activityPresentation.ts");
   const ev = (id, detail, files) => ({ id, kind: "file", title: "Edit", detail, status: "completed", createdAt: 1, files, attachments: [] });

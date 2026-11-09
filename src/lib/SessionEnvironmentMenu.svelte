@@ -4,20 +4,26 @@
   import { cubicOut } from "svelte/easing";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import { shellElapsed, type SessionShell } from "$lib/sessionShells";
   import { copyResolvedColorTokens } from "$lib/floatingTheme";
   import { SYSTEM_BANNER_CONTEXT, type SystemBannerReporter } from "$lib/systemBannerContext";
   import { sessionEnvironments, environmentsForSession, runningEnvironments, environmentElapsed,
     stopSessionEnvironment, refreshSessionEnvironments, type SessionEnvironment } from "$lib/sessionEnvironments";
   import type { Language } from "$lib/i18n";
 
-  let { sessionId, language = "en", variant = "fab", compact = false } = $props<{
+  let { sessionId, language = "en", variant = "fab", compact = false, shells = [] } = $props<{
     sessionId: string; language?: Language; variant?: "fab" | "sidebar"; compact?: boolean;
+    /** The shells the agent runs in the background, listed under the environments. */
+    shells?: SessionShell[];
   }>();
   const report = getContext<SystemBannerReporter | undefined>(SYSTEM_BANNER_CONTEXT);
   const environments = $derived(environmentsForSession($sessionEnvironments, sessionId));
   const running = $derived(runningEnvironments(environments));
-  const visible = $derived(variant === "fab" ? environments.length > 0 : running.length > 0);
-  const databaseOnly = $derived(running.length > 0 && running.every((item) => item.kind === "database"));
+  const runningShells = $derived(shells.filter((shell: SessionShell) => shell.status === "running"));
+  const busyCount = $derived(running.length + runningShells.length);
+  const visible = $derived(variant === "fab" ? environments.length + shells.length > 0 : busyCount > 0);
+  const databaseOnly = $derived(running.length > 0 && !runningShells.length && running.every((item) => item.kind === "database"));
+  const shellsOnly = $derived(!environments.length && shells.length > 0);
   let open = $state(false);
   let trigger = $state<HTMLButtonElement | null>(null);
   let menu = $state<HTMLElement | null>(null);
@@ -28,9 +34,15 @@
   let top = $state(0);
   let maxHeight = $state(360);
   const tr = (en: string, pt: string) => language === "pt-BR" ? pt : en;
-  const label = $derived(running.length
-    ? tr(`${running.length} running environment${running.length > 1 ? "s" : ""}`, `${running.length} ambiente${running.length > 1 ? "s" : ""} rodando`)
+  const label = $derived(busyCount
+    ? tr(`${busyCount} running environment${busyCount > 1 ? "s" : ""} and shell${busyCount > 1 ? "s" : ""}`, `${busyCount} ambiente${busyCount > 1 ? "s" : ""} e shell${busyCount > 1 ? "s" : ""} rodando`)
     : tr("Session environments", "Ambientes da sessão"));
+  const shellStatus = (shell: SessionShell) => ({
+    running: tr("Running", "Rodando"),
+    completed: tr("Finished", "Concluído"),
+    failed: tr("Failed", "Falhou"),
+    interrupted: tr("Stopped", "Parado"),
+  })[shell.status];
 
   function positionMenu() {
     if (!trigger || !menu) return;
@@ -116,11 +128,11 @@
 </script>
 
 {#if visible}
-  <button bind:this={trigger} class="environment-trigger" class:fab={variant === "fab"} class:compact class:active={running.length > 0} class:open
+  <button bind:this={trigger} class="environment-trigger" class:fab={variant === "fab"} class:compact class:active={busyCount > 0} class:open
     type="button" aria-label={label} data-tooltip={label} aria-haspopup="dialog" aria-expanded={open}
     onclick={toggle} onpointerdown={(event) => event.stopPropagation()} draggable="false">
-    <LumeIcon name={databaseOnly ? "database" : "server"} size={variant === "fab" ? 20 : 15} />
-    {#if variant === "fab" && running.length > 1}<span class="environment-count">{running.length}</span>{/if}
+    <LumeIcon name={shellsOnly ? "terminal" : databaseOnly ? "database" : "server"} size={variant === "fab" ? 20 : 15} />
+    {#if variant === "fab" && busyCount > 1}<span class="environment-count">{busyCount}</span>{/if}
   </button>
 {/if}
 
@@ -157,6 +169,21 @@
         </article>
       {/each}
     </div>
+    {#if shells.length}
+      <strong class="shell-heading">{tr("Background shells", "Shells em segundo plano")}</strong>
+      <div class="environment-list">
+        {#each shells as shell (shell.id)}
+          <article class="environment-row shell-row" class:stopped={shell.status !== "running"}>
+            <div class="environment-head">
+              <span class="environment-mark"><LumeIcon name="terminal" size={18} /></span>
+              <div class="environment-name"><strong title={shell.title}>{shell.title}</strong><div class="environment-state"><i class:live={shell.status === "running"} class:failed={shell.status === "failed"}></i><span>{shellStatus(shell)}</span></div></div>
+              {#if shell.status === "running"}<time>{shellElapsed(shell)}</time>{/if}
+            </div>
+            {#if shell.command !== shell.title}<code class="shell-command" title={shell.command}>{shell.command}</code>{/if}
+          </article>
+        {/each}
+      </div>
+    {/if}
     {#if error || $sessionEnvironments.error}<p class="environment-error" role="alert">{error || $sessionEnvironments.error}</p>{/if}
   </div>
 {/if}
@@ -189,6 +216,10 @@
   .environment-head time { align-self: flex-start; color: var(--workspace-muted); font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .environment-state { display: flex; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 10px; }
   .environment-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--workspace-muted); }
+  .shell-heading { display: block; margin: 12px 5px 7px; color: var(--workspace-muted); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .environment-list + .shell-heading { margin-top: 12px; }
+  .shell-command { min-width: 0; overflow: hidden; padding: 5px 7px; border-radius: 6px; color: var(--workspace-text); background: var(--workspace-raised); font: 10.5px/1.4 var(--lume-font-code, ui-monospace, monospace); text-overflow: ellipsis; white-space: nowrap; }
+  .environment-state i.failed { background: #c0554f; }
   .environment-state i.live { background: #3f9b69; box-shadow: 0 0 0 3px color-mix(in srgb, #3f9b69 22%, transparent); }
   .environment-foot { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .environment-ports { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }

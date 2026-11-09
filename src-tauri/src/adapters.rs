@@ -1819,6 +1819,8 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
     let mut fork_origin: Option<String> = None;
     // A command the person ran with `!` is recorded as two user messages: the command, then what it printed.
     let mut pending_bash: Option<(String, String, i64)> = None;
+    // The shells Claude runs in the background: what each is, when it started and how it ended.
+    let mut shells = ClaudeShells::default();
     // The model of the last answer, and whether `/model` already said so: a change is one notice, not two.
     let mut last_model: Option<String> = None;
     let mut model_announced = false;
@@ -1835,6 +1837,7 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
             activities.push(activity);
             continue;
         }
+        shells.observe(&entry);
         if let Some((activity, is_model)) = claude_setting_notice(&entry, session_id) {
             model_announced |= is_model;
             activities.push(activity);
@@ -1962,6 +1965,7 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
     if let Some((id, command, at)) = pending_bash {
         push_claude_bash_command(activities, session_id, &id, &command, None, at);
     }
+    activities.extend(shells.activities(session_id));
     if let Some(turn) = turn {
         activities.extend(turn.finish(session_id));
     }
@@ -2013,6 +2017,89 @@ fn claude_compaction_activity(entry: &Value, session_id: &str) -> Option<Session
         attachments: Vec::new(),
         append_detail: false,
     })
+}
+
+/// Background shells from a Claude transcript: the `Bash` call that asked for one (its command and description), the
+/// result that named its task id, and the `<task-notification>` that says how it ended.
+#[derive(Default)]
+struct ClaudeShells {
+    requested: HashMap<String, (String, Option<String>)>,
+    started: Vec<(String, String, i64)>,
+    ended: HashMap<String, String>,
+}
+
+impl ClaudeShells {
+    fn observe(&mut self, entry: &Value) {
+        let blocks = entry.pointer("/message/content").and_then(Value::as_array);
+        match string(entry, "type").as_deref() {
+            Some("assistant") => {
+                for block in blocks.into_iter().flatten() {
+                    let input = block.get("input");
+                    if string(block, "type").as_deref() == Some("tool_use")
+                        && string(block, "name").as_deref() == Some("Bash")
+                        && input.and_then(|input| input.get("run_in_background")).and_then(Value::as_bool) == Some(true)
+                    {
+                        if let (Some(id), Some(command)) = (string(block, "id"), input.and_then(|input| string(input, "command"))) {
+                            let description = input.and_then(|input| string(input, "description")).filter(|text| !text.trim().is_empty());
+                            self.requested.insert(id, (command, description));
+                        }
+                    }
+                }
+            }
+            Some("user") => {
+                if let Some(task) = entry.pointer("/toolUseResult/backgroundTaskId").and_then(Value::as_str) {
+                    let tool = blocks.into_iter().flatten().find_map(|block| string(block, "tool_use_id"));
+                    let at = string(entry, "timestamp")
+                        .and_then(|timestamp| DateTime::parse_from_rfc3339(&timestamp).ok())
+                        .map(|timestamp| timestamp.timestamp_millis())
+                        .unwrap_or_else(now_millis);
+                    if let Some(tool) = tool {
+                        self.started.push((task.to_string(), tool, at));
+                    }
+                }
+                let texts = match entry.pointer("/message/content") {
+                    Some(Value::String(text)) => vec![text.clone()],
+                    Some(Value::Array(blocks)) => blocks.iter().filter_map(|block| string(block, "text")).collect(),
+                    _ => Vec::new(),
+                };
+                for text in texts {
+                    for notice in text.split("<task-notification>").skip(1) {
+                        let field = |tag: &str| notice.split_once(&format!("<{tag}>")).and_then(|(_, rest)| rest.split_once(&format!("</{tag}>"))).map(|(value, _)| value.trim().to_string());
+                        if let (Some(task), Some(status)) = (field("task-id"), field("status")) {
+                            self.ended.insert(task, status);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn activities(self, session_id: &str) -> Vec<SessionActivity> {
+        self.started
+            .into_iter()
+            .filter_map(|(task, tool, at)| {
+                let (command, description) = self.requested.get(&tool)?.clone();
+                let status = match self.ended.get(&task).map(String::as_str) {
+                    None => "running",
+                    Some("completed") => "completed",
+                    Some("failed") => "failed",
+                    Some(_) => "interrupted",
+                };
+                Some(SessionActivity {
+                    id: format!("claude:{session_id}:shell:{task}"),
+                    kind: "shell".into(),
+                    title: description.unwrap_or_else(|| truncate(&command, 120)),
+                    detail: Some(truncate(&command, 2 * 1024)),
+                    status: status.into(),
+                    created_at: at,
+                    files: Vec::new(),
+                    attachments: Vec::new(),
+                    append_detail: false,
+                })
+            })
+            .collect()
+    }
 }
 
 fn model_change_activity(id: String, detail: Value, created_at: i64) -> SessionActivity {
@@ -3211,6 +3298,34 @@ mod tests {
         assert_eq!(activities.iter().map(|activity| activity.kind.as_str()).collect::<Vec<_>>(), ["compact", "connection", "message"]);
         assert_eq!(activities[0].id, "claude:s:compact:b1");
         assert_eq!(activities[0].created_at, 1_793_899_542_828);
+    }
+
+    #[test]
+    fn background_shells_are_listed_with_what_they_are_and_how_they_ended() {
+        let path = std::env::temp_dir().join(format!("lume-shells-{}-{}.jsonl", std::process::id(), now_millis()));
+        let call = |id: &str, command: &str, description: &str| json!({ "type": "assistant", "uuid": format!("u-{id}"), "timestamp": "2026-11-09T10:00:00.000Z", "message": { "role": "assistant", "content": [{ "type": "tool_use", "id": id, "name": "Bash", "input": { "command": command, "description": description, "run_in_background": true } }] } });
+        let started = |id: &str, task: &str, time: &str| json!({ "type": "user", "uuid": format!("r-{id}"), "timestamp": time, "toolUseResult": { "backgroundTaskId": task }, "message": { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": id, "content": format!("Command running in background with ID: {task}.") }] } });
+        let lines = [
+            call("t1", "npm run dev", "Start the dev server"),
+            started("t1", "b1", "2026-11-09T10:00:01.000Z"),
+            call("t2", "cargo test", "Run the Rust tests"),
+            started("t2", "b2", "2026-11-09T10:00:02.000Z"),
+            call("t3", "sleep 100", ""),
+            started("t3", "b3", "2026-11-09T10:00:03.000Z"),
+            json!({ "type": "assistant", "uuid": "plain", "timestamp": "2026-11-09T10:00:04.000Z", "message": { "role": "assistant", "content": [{ "type": "tool_use", "id": "t4", "name": "Bash", "input": { "command": "ls" } }] } }),
+            json!({ "type": "user", "uuid": "n2", "timestamp": "2026-11-09T10:01:00.000Z", "message": { "role": "user", "content": "<task-notification>\n<task-id>b2</task-id>\n<status>completed</status>\n</task-notification>" } }),
+            json!({ "type": "user", "uuid": "n3", "timestamp": "2026-11-09T10:02:00.000Z", "message": { "role": "user", "content": "<task-notification>\n<task-id>b3</task-id>\n<status>killed</status>\n</task-notification>" } }),
+        ];
+        std::fs::write(&path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        let mut activities = Vec::new();
+        read_claude_transcript(path.to_str().unwrap(), "s", &mut activities);
+        std::fs::remove_file(&path).unwrap();
+        let shells = activities.iter().filter(|activity| activity.kind == "shell").map(|activity| (activity.id.as_str(), activity.title.as_str(), activity.status.as_str())).collect::<Vec<_>>();
+        assert_eq!(shells, [
+            ("claude:s:shell:b1", "Start the dev server", "running"),
+            ("claude:s:shell:b2", "Run the Rust tests", "completed"),
+            ("claude:s:shell:b3", "sleep 100", "interrupted"),
+        ]);
     }
 
     #[test]

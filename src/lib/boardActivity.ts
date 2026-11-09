@@ -84,7 +84,7 @@ export type FeedItem = {
   path?: string;
 };
 
-const feedHidden = new Set(["prompt", "queued_prompt", "codex_queued_prompt", "interrupt", "compact", "connection", "model_change"]);
+const feedHidden = new Set(["prompt", "queued_prompt", "codex_queued_prompt", "interrupt", "compact", "connection", "model_change", "shell"]);
 
 /** The agent's recent work, newest first, for the board's live panel. */
 export function activityFeed(session: HubSession | undefined, language: Language, limit = 14): FeedItem[] {

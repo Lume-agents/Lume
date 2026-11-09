@@ -18,6 +18,7 @@
 import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/agentControls";
   import ThinkingOrb from "$lib/ThinkingOrb.svelte";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
+  import { sessionShells } from "$lib/sessionShells";
   import { sessionEnvironments } from "$lib/sessionEnvironments";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SubagentPortals from "$lib/SubagentPortals.svelte";
@@ -2968,7 +2969,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   {#if !composerInIntroPosition}
     <div class="environment-dock" style:bottom={`${composerHeight + 14}px`}>
-      <SessionEnvironmentMenu sessionId={session.id} {language} />
+      <SessionEnvironmentMenu sessionId={session.id} {language} shells={sessionShells(session)} />
     </div>
   {/if}
   <form bind:this={composerElement} data-tour="composer" bind:clientHeight={composerHeight} class:fresh={composerInIntroPosition} class:crossfade-out={composerTransition === "out"} class:crossfade-in={composerTransition === "in"} class:unavailable={!canCompose} class="composer" onpaste={(event) => void pasteAttachments(event)} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>

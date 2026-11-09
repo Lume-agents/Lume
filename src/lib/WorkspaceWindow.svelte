@@ -51,6 +51,7 @@
   import { tourDemoSession } from "$lib/tourDemoSession";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
+  import { sessionShells } from "$lib/sessionShells";
   import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
@@ -2930,7 +2931,7 @@
               </span>
             {/if}
             </button>
-            <span class="session-environment-marker"><SessionEnvironmentMenu sessionId={session.id} {language} variant="sidebar" compact={sidebarCollapsed} /></span>
+            <span class="session-environment-marker"><SessionEnvironmentMenu sessionId={session.id} {language} variant="sidebar" compact={sidebarCollapsed} shells={sessionShells(session)} /></span>
           </div>
           {#if childAgents.length}
             <div id={`workspace-subagents-${session.id}`} class:open={expandedSubagentSessions.has(session.id)} class="subagent-list-shell" aria-hidden={!expandedSubagentSessions.has(session.id)}>

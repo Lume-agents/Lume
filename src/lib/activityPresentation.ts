@@ -107,14 +107,14 @@ export function activityThinkingLabel(state: ActivityThinkingState, language: La
 
 export function isPresentableTraceActivity(activity: SessionActivity): boolean {
   if (isUsageLimitActivity(activity)) return false;
-  if (["prompt", "message", "analysis", "interrupt", "compact", "connection", "model_change", "queued_prompt", "codex_queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
+  if (["prompt", "message", "analysis", "interrupt", "compact", "connection", "model_change", "shell", "queued_prompt", "codex_queued_prompt", "plan", "plan_document", "warning"].includes(activity.kind)) return false;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return !/^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
 }
 
 export function isHiddenAgentActivity(activity: SessionActivity): boolean {
   if (isUsageLimitActivity(activity)) return true;
-  if (["plan", "plan_document", "queued_prompt", "codex_queued_prompt", "warning"].includes(activity.kind)) return true;
+  if (["plan", "plan_document", "queued_prompt", "codex_queued_prompt", "warning", "shell"].includes(activity.kind)) return true;
   const title = normalizedToolTitle(activity.title).toLowerCase();
   return /^(?:create_goal|get_goal|update_goal|update_plan)$/.test(title);
 }

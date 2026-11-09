@@ -145,7 +145,8 @@ export function buildConversationEntries(
     const sentDuringTurn = activity.kind === "prompt"
       && (activity.title === SENT_DURING_TURN_TITLE || Boolean(turn && codexTurnsWithWork.has(turn)));
     if (turn && activity.kind !== "prompt") codexTurnsWithWork.add(turn);
-    if (["queued_prompt", "codex_queued_prompt", "plan", "plan_document"].includes(activity.kind)) continue;
+    // A background shell is listed with the session's environments; its command already shows as a tool event.
+    if (["queued_prompt", "codex_queued_prompt", "plan", "plan_document", "shell"].includes(activity.kind)) continue;
     if (activity.kind === "message" && (isResumeFiller(activity.detail) || supersededNotices.has(activity.id))) continue;
     if (activity.kind === "prompt") {
       let duplicateIndex = -1;

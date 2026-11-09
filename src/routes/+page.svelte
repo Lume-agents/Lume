@@ -4,6 +4,7 @@
   import { onMount, setContext, tick } from "svelte";
   import { flip } from "svelte/animate";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
+  import { sessionShells } from "$lib/sessionShells";
   // The environments menu floats on the page body and takes its colours from the Workspace tokens.
   import "$lib/workspaceTokens.css";
   import { groupSessions, readSidebarGroups, sidebarGroupsKey, writeSidebarGroups, type SidebarGroupState } from "$lib/sidebarGroups";
@@ -3461,7 +3462,7 @@
                       <path d="m8 5 5 5-5 5" />
                     </svg>
                   </button>
-                  <span class="session-environment-marker workspace-tokens" class:dark={effectiveDark}><SessionEnvironmentMenu sessionId={session.id} language={preferences.language} variant="sidebar" /></span>
+                  <span class="session-environment-marker workspace-tokens" class:dark={effectiveDark}><SessionEnvironmentMenu sessionId={session.id} language={preferences.language} variant="sidebar" shells={sessionShells(session)} /></span>
 
                   {#if selectedId === session.id}
                     {@const capabilities = sessionCapabilities(session)}

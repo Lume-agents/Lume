@@ -6,7 +6,7 @@
   import { buildConversationEntries, buildConversationFeed, fileChangesForFinalResponses } from "$lib/sessionConversation";
   import { displayFileChangePath, normalizeFileChangePath, summarizeFileChanges } from "$lib/fileChanges";
   import { activityDisplayTitle, activityThinkingLabel, activityThinkingState, formatAgentDuration, isGenericAnalysisPlaceholder } from "$lib/activityPresentation";
-  import { compactNoticeText, connectionNoticeText, interruptNoticeText } from "$lib/interruptNotice";
+  import { compactNoticeText, connectionNoticeText, interruptNoticeText, modelChangeNoticeText } from "$lib/interruptNotice";
   import ChatSeparatorNotice from "$lib/ChatSeparatorNotice.svelte";
   import { renderWorkspaceMarkdownWithFileBadges } from "$lib/workspaceFileReferences.js";
   import { renderFileTypeIconHtml } from "$lib/fileTypeIcons";
@@ -249,6 +249,8 @@
                 </div>
               {:else if activity.kind === "interrupt"}
                 <ChatSeparatorNotice icon="stop" alert text={interruptNoticeText(activity.detail, (en: string, pt: string) => client.tr(en, pt))} />
+              {:else if activity.kind === "model_change"}
+                <ChatSeparatorNotice icon="settings" text={modelChangeNoticeText(activity.detail, (en: string, pt: string) => client.tr(en, pt))} />
               {:else if activity.kind === "connection"}
                 <ChatSeparatorNotice icon="unplug" alert text={connectionNoticeText(activity.detail, (en: string, pt: string) => client.tr(en, pt))} detail={activity.detail} />
               {:else if activity.kind === "compact"}

@@ -594,7 +594,7 @@ impl Store {
         Self::is_event_summary(activity)
             || matches!(activity.kind.as_str(), "prompt" | "queued_prompt")
             || (activity.kind == "message" && activity.status != "running")
-            || matches!(activity.kind.as_str(), "plan" | "plan_document" | "warning" | "compact" | "connection")
+            || matches!(activity.kind.as_str(), "plan" | "plan_document" | "warning" | "compact" | "connection" | "model_change")
             || (activity.kind == "tool"
                 && ["create_goal", "get_goal", "update_goal", "todo_write"]
                     .iter()

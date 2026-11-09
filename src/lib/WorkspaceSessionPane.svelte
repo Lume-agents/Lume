@@ -13,7 +13,7 @@
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
   import StreamedMessage from "$lib/StreamedMessage.svelte";
   import { MAX_HOLD_MS } from "$lib/streamPacing";
-  import { compactNoticeText, connectionNoticeText, interruptNoticeText } from "$lib/interruptNotice";
+  import { compactNoticeText, connectionNoticeText, interruptNoticeText, modelChangeNoticeText } from "$lib/interruptNotice";
   import ChatSeparatorNotice from "$lib/ChatSeparatorNotice.svelte";
 import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/agentControls";
   import ThinkingOrb from "$lib/ThinkingOrb.svelte";
@@ -2757,12 +2757,14 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
               {/if}
             </div>
           </div>
-        {:else if item.kind === "interrupt" || item.kind === "compact" || item.kind === "connection"}
+        {:else if item.kind === "interrupt" || item.kind === "compact" || item.kind === "connection" || item.kind === "model_change"}
           <div class="conversation-row agent-row">
             <span class="time-gutter"><time>{time(item.createdAt)}</time></span>
             <div class="conversation-entry">
               {#if item.kind === "interrupt"}
                 <ChatSeparatorNotice icon="stop" alert text={interruptNoticeText(item.detail, tr)} />
+              {:else if item.kind === "model_change"}
+                <ChatSeparatorNotice icon="settings" text={modelChangeNoticeText(item.detail, tr)} />
               {:else if item.kind === "connection"}
                 <ChatSeparatorNotice icon="unplug" alert text={connectionNoticeText(item.detail, tr)} detail={item.detail} />
               {:else}

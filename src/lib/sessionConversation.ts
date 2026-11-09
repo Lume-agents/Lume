@@ -175,9 +175,10 @@ export function buildConversationEntries(
     }
 
     if (
-      (activity.kind === "interrupt" || activity.kind === "compact" || activity.kind === "connection")
+      (activity.kind === "interrupt" || activity.kind === "compact" || activity.kind === "connection" || activity.kind === "model_change")
       && entries.some((entry) =>
         entry.activity.kind === activity.kind
+        && (activity.kind !== "model_change" || entry.activity.detail === activity.detail)
         && promptSegment(entry.activity.createdAt) === promptSegment(activity.createdAt)
         && Math.abs(entry.activity.createdAt - activity.createdAt) < 15_000
       )

@@ -54,6 +54,9 @@ struct ObservedFile {
     prompt_token_start: Option<TokenTotals>,
     prompt_started_at: Option<i64>,
     last_chat_message: Option<ObservedChatMessage>,
+    /// What the previous turn ran with, to notice when the model or the effort changes.
+    last_model: Option<String>,
+    last_effort: Option<String>,
 }
 
 #[derive(Debug)]
@@ -139,6 +142,11 @@ struct RecordPayload {
     input: Option<Value>,
     #[serde(default)]
     summary: Option<Value>,
+    /// The model and reasoning effort a turn runs with (`turn_context` records).
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
     #[serde(default)]
     content: Option<Value>,
     #[serde(default)]
@@ -243,6 +251,8 @@ fn initialize(root: &Path, state: &AppState, app: &AppHandle) -> HashMap<PathBuf
             prompt_token_start: None,
             prompt_started_at: None,
             last_chat_message: None,
+            last_model: None,
+            last_effort: None,
         };
         if was_modified_recently(&file_metadata) {
             let (running, recovered_events) = bootstrap_session(&path, &mut file);
@@ -281,6 +291,8 @@ fn bootstrap_session(path: &Path, file: &mut ObservedFile) -> (bool, Vec<HookEve
                 }
                 file.profile = Some(profile_from_context(&record.payload));
             }
+            file.last_model = record.payload.model.clone().or(file.last_model.take());
+            file.last_effort = record.payload.effort.clone().or(file.last_effort.take());
             continue;
         }
         observe_container_input(&record.payload, file);
@@ -430,6 +442,8 @@ fn poll_path(
             prompt_token_start: None,
             prompt_started_at: None,
             last_chat_message: None,
+            last_model: None,
+            last_effort: None,
         };
         if let Some(event) = session_started_event(&file) {
             let _ = event_server::publish_event(state, app, event);
@@ -553,6 +567,9 @@ fn events_from_records(records: Vec<CodexRecord>, file: &mut ObservedFile) -> Ve
                     session.cwd = record.payload.cwd.clone();
                 }
                 file.profile = Some(profile_from_context(&record.payload));
+            }
+            if let Some(event) = model_change_event(file, &record.payload, record.timestamp.as_deref()) {
+                events.push(event);
             }
             continue;
         }
@@ -1541,6 +1558,31 @@ fn read_records(path: &Path, start: u64) -> Result<(Vec<CodexRecord>, u64), Stri
     Ok((records, start + stream.byte_offset() as u64))
 }
 
+/// A notice for a turn that runs with another model or reasoning effort than the one before it.
+fn model_change_event(file: &mut ObservedFile, payload: &RecordPayload, timestamp: Option<&str>) -> Option<HookEvent> {
+    let model = payload.model.clone().filter(|model| !model.is_empty());
+    let effort = payload.effort.clone().filter(|effort| !effort.is_empty());
+    let changed_model = model.as_ref().filter(|model| file.last_model.as_ref().is_some_and(|last| last != *model)).cloned();
+    let changed_effort = effort.as_ref().filter(|effort| file.last_effort.as_ref().is_some_and(|last| last != *effort)).cloned();
+    if model.is_some() {
+        file.last_model = model;
+    }
+    if effort.is_some() {
+        file.last_effort = effort;
+    }
+    if changed_model.is_none() && changed_effort.is_none() {
+        return None;
+    }
+    let mut detail = serde_json::Map::new();
+    if let Some(model) = changed_model {
+        detail.insert("model".into(), Value::String(model));
+    }
+    if let Some(effort) = changed_effort {
+        detail.insert("effort".into(), Value::String(effort));
+    }
+    activity_event_for(file, "model_change", "Model changed", &Value::Object(detail).to_string(), timestamp)
+}
+
 fn profile_from_context(payload: &RecordPayload) -> PermissionProfile {
     let sandbox = payload
         .sandbox_policy
@@ -1684,6 +1726,8 @@ fn load_subagent_timeline_from_root(
         prompt_token_start: None,
         prompt_started_at: None,
         last_chat_message: None,
+            last_model: None,
+            last_effort: None,
     };
     let mut activities: Vec<SessionActivity> = Vec::new();
     let mut indices: HashMap<String, usize> = HashMap::new();
@@ -1864,6 +1908,8 @@ mod tests {
             prompt_token_start: None,
             prompt_started_at: None,
             last_chat_message: None,
+            last_model: None,
+            last_effort: None,
         }
     }
 
@@ -1958,6 +2004,18 @@ mod tests {
         assert_eq!(notice.detail.as_deref(), Some("Reconnecting... 2/5"));
         let failed = events_from_records(vec![record(r#"{"type":"event_msg","payload":{"type":"error","message":"stream disconnected"}}"#)], &mut file);
         assert!(failed.iter().any(|event| event.event == HookEventKind::Failed), "an error that ends the turn still fails it");
+    }
+
+    #[test]
+    fn a_turn_with_another_model_or_effort_is_noted_once() {
+        let mut file = observed_file(SessionSource::Cli);
+        let turn = |model: &str, effort: &str| record(&format!(r#"{{"timestamp":"2026-11-09T10:00:00Z","type":"turn_context","payload":{{"model":"{model}","effort":"{effort}"}}}}"#));
+        let notices = |events: Vec<HookEvent>| events.iter().filter_map(|event| event.activity.as_ref()).filter(|activity| activity.kind == "model_change").map(|activity| activity.detail.clone().unwrap_or_default()).collect::<Vec<_>>();
+        assert!(notices(events_from_records(vec![turn("gpt-a", "low")], &mut file)).is_empty(), "the first turn is the baseline");
+        assert!(notices(events_from_records(vec![turn("gpt-a", "low")], &mut file)).is_empty(), "nothing changed");
+        assert_eq!(notices(events_from_records(vec![turn("gpt-b", "low")], &mut file)), [r#"{"model":"gpt-b"}"#]);
+        assert_eq!(notices(events_from_records(vec![turn("gpt-b", "high")], &mut file)), [r#"{"effort":"high"}"#]);
+        assert_eq!(notices(events_from_records(vec![turn("gpt-c", "low")], &mut file)), [r#"{"effort":"low","model":"gpt-c"}"#]);
     }
 
     #[test]

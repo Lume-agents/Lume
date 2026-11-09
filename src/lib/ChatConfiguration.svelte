@@ -7,6 +7,7 @@
   import { permissionLabel } from "$lib/sessionPermissions";
   import type { AgentSession } from "$lib/domain";
   import type { Language } from "$lib/i18n";
+  import { effortName } from "$lib/interruptNotice";
 
   // Everything this chat runs with: its settings, and the plugins, skills, instructions, commands and subagents the
   // agent has for this folder. What the agent does not report is left out rather than guessed.
@@ -43,15 +44,8 @@
     return value;
   }
 
-  const effortNames: Record<string, [string, string]> = {
-    none: ["None", "Nenhum"], minimal: ["Minimal", "Mínimo"], low: ["Low", "Baixo"], medium: ["Medium", "Médio"],
-    high: ["High", "Alto"], xhigh: ["Extra high", "Muito alto"], max: ["Max", "Máximo"],
-  };
-
   function efforts(value?: string | null) {
-    if (!value) return tr("Default", "Padrão");
-    const name = effortNames[value.toLowerCase()];
-    return name ? tr(name[0], name[1]) : value.charAt(0).toUpperCase() + value.slice(1);
+    return value ? effortName(value, tr) : tr("Default", "Padrão");
   }
 
   async function load(id: string, agent: string, folder: string | undefined) {

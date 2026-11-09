@@ -2,7 +2,7 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
 
   /** Something that happened to the conversation itself: a badge centered between two lines. */
-  let { text, icon, alert = false, detail }: { text: string; icon: "stop" | "compact" | "unplug"; alert?: boolean; detail?: string } = $props();
+  let { text, icon, alert = false, detail }: { text: string; icon: "stop" | "compact" | "unplug" | "settings"; alert?: boolean; detail?: string } = $props();
 </script>
 
 <div class="chat-separator" class:alert role="status" title={detail}>

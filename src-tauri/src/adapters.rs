@@ -1819,6 +1819,9 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
     let mut fork_origin: Option<String> = None;
     // A command the person ran with `!` is recorded as two user messages: the command, then what it printed.
     let mut pending_bash: Option<(String, String, i64)> = None;
+    // The model of the last answer, and whether `/model` already said so: a change is one notice, not two.
+    let mut last_model: Option<String> = None;
+    let mut model_announced = false;
     for line in reader.lines().map_while(Result::ok) {
         if line.len() > CLAUDE_TRANSCRIPT_LINE_LIMIT {
             continue;
@@ -1831,6 +1834,23 @@ fn read_claude_transcript(path: &str, session_id: &str, activities: &mut Vec<Ses
         {
             activities.push(activity);
             continue;
+        }
+        if let Some((activity, is_model)) = claude_setting_notice(&entry, session_id) {
+            model_announced |= is_model;
+            activities.push(activity);
+            continue;
+        }
+        if string(&entry, "type").as_deref() == Some("assistant") && entry.get("isSidechain").and_then(Value::as_bool) != Some(true) {
+            if let Some(model) = entry.pointer("/message/model").and_then(Value::as_str).filter(|model| !model.is_empty() && !model.starts_with('<')) {
+                if last_model.as_deref().is_some_and(|last| last != model) && !std::mem::take(&mut model_announced) {
+                    activities.push(model_change_activity(
+                        format!("claude:{session_id}:model:{}", string(&entry, "uuid").unwrap_or_default()),
+                        serde_json::json!({ "model": model }),
+                        string(&entry, "timestamp").and_then(|timestamp| DateTime::parse_from_rfc3339(&timestamp).ok()).map(|timestamp| timestamp.timestamp_millis()).unwrap_or_else(now_millis),
+                    ));
+                }
+                last_model = Some(model.to_string());
+            }
         }
         let role = entry
             .get("message")
@@ -1993,6 +2013,47 @@ fn claude_compaction_activity(entry: &Value, session_id: &str) -> Option<Session
         attachments: Vec::new(),
         append_detail: false,
     })
+}
+
+fn model_change_activity(id: String, detail: Value, created_at: i64) -> SessionActivity {
+    SessionActivity {
+        id,
+        kind: "model_change".into(),
+        title: "Model changed".into(),
+        detail: Some(detail.to_string()),
+        status: "completed".into(),
+        created_at,
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    }
+}
+
+/// What `/model` and `/effort` answer in the CLI ("Set model to `Sonnet 5.5`…"), as a notice in the chat. The flag says
+/// whether it was a model change.
+fn claude_setting_notice(entry: &Value, session_id: &str) -> Option<(SessionActivity, bool)> {
+    if string(entry, "type").as_deref() != Some("user") {
+        return None;
+    }
+    let text = entry.pointer("/message/content")?.as_str()?;
+    let said = tagged_text(text, "local-command-stdout")?;
+    let (detail, is_model) = if let Some(rest) = said.strip_prefix("Set model to ") {
+        let name = rest.trim_start_matches('`').split('`').next()?.split(" and ").next()?.trim();
+        (serde_json::json!({ "model": name }), true)
+    } else if let Some(rest) = said.strip_prefix("Set effort level to ") {
+        let level = rest.split(|c: char| c.is_whitespace() || c == ':' || c == '(').next()?.trim();
+        (serde_json::json!({ "effort": level }), false)
+    } else {
+        return None;
+    };
+    if detail.as_object()?.values().any(|value| value.as_str().is_some_and(str::is_empty)) {
+        return None;
+    }
+    let created_at = string(entry, "timestamp")
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(&timestamp).ok())
+        .map(|timestamp| timestamp.timestamp_millis())
+        .unwrap_or_else(now_millis);
+    Some((model_change_activity(format!("claude:{session_id}:setting:{}", string(entry, "uuid")?), detail, created_at), is_model))
 }
 
 /// Claude Code's own message when the connection to the API dropped. Usage limits and login errors stay messages.
@@ -3150,6 +3211,29 @@ mod tests {
         assert_eq!(activities.iter().map(|activity| activity.kind.as_str()).collect::<Vec<_>>(), ["compact", "connection", "message"]);
         assert_eq!(activities[0].id, "claude:s:compact:b1");
         assert_eq!(activities[0].created_at, 1_793_899_542_828);
+    }
+
+    #[test]
+    fn a_changed_model_or_effort_is_one_notice() {
+        let path = std::env::temp_dir().join(format!("lume-model-{}-{}.jsonl", std::process::id(), now_millis()));
+        let answer = |uuid: &str, time: &str, model: &str| json!({ "type": "assistant", "uuid": uuid, "timestamp": time, "message": { "role": "assistant", "model": model, "content": [{ "type": "text", "text": "ok" }] } });
+        let said = |uuid: &str, time: &str, text: &str| json!({ "type": "user", "uuid": uuid, "timestamp": time, "message": { "role": "user", "content": format!("<local-command-stdout>{text}</local-command-stdout>") } });
+        let lines = [
+            answer("a1", "2026-11-09T10:00:00.000Z", "claude-opus-5-5"),
+            answer("a2", "2026-11-09T10:01:00.000Z", "claude-opus-5-5"),
+            said("s1", "2026-11-09T10:02:00.000Z", "Set model to `Sonnet 5.5` and saved as your default for new sessions"),
+            answer("a3", "2026-11-09T10:03:00.000Z", "claude-sonnet-5-5"),
+            said("s2", "2026-11-09T10:04:00.000Z", "Set effort level to high (saved as your default for new sessions): Comprehensive"),
+            answer("a4", "2026-11-09T10:05:00.000Z", "claude-haiku-5-5"),
+            json!({ "type": "assistant", "uuid": "a5", "isSidechain": true, "timestamp": "2026-11-09T10:06:00.000Z", "message": { "role": "assistant", "model": "claude-fable-5-1", "content": [{ "type": "text", "text": "sub" }] } }),
+            answer("a6", "2026-11-09T10:07:00.000Z", "<synthetic>"),
+        ];
+        std::fs::write(&path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+        let mut activities = Vec::new();
+        read_claude_transcript(path.to_str().unwrap(), "s", &mut activities);
+        std::fs::remove_file(&path).unwrap();
+        let notices = activities.iter().filter(|activity| activity.kind == "model_change").map(|activity| activity.detail.clone().unwrap()).collect::<Vec<_>>();
+        assert_eq!(notices, [r#"{"model":"Sonnet 5.5"}"#, r#"{"effort":"high"}"#, r#"{"model":"claude-haiku-5-5"}"#]);
     }
 
     #[test]

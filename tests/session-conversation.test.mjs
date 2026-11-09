@@ -240,6 +240,22 @@ test("a compaction is one notice in the chat, not a tool event and not twice", (
   );
 });
 
+test("a changed model is one notice, even when Lume and the log both report it", () => {
+  const notice = (id, createdAt, detail) => activity(id, "model_change", createdAt, detail, { title: "Model changed" });
+  const activities = [
+    activity("prompt", "prompt", 10),
+    notice("a", 20, '{"model":"gpt-b"}'),
+    notice("b", 25, '{"model":"gpt-b"}'),
+    notice("c", 30, '{"effort":"high"}'),
+    activity("again", "prompt", 60),
+  ];
+  assert.deepEqual(
+    buildConversationFeed(entriesFor(activities)).map((item) => (item.kind === "trace" ? "trace" : item.entry.activity.kind)),
+    ["prompt", "model_change", "model_change", "prompt"],
+    "the same change twice collapses; another change is its own notice",
+  );
+});
+
 test("Claude's own notices are not shown as something the user sent", () => {
   const entries = entriesFor([
     activity("typed", "prompt", 10, "Rode os testes"),

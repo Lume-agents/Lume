@@ -432,7 +432,7 @@ mod tests {
         fs::write(root.join("data.bin"), [0, 1, 2, 3]).unwrap();
 
         let changes = changes_after(&key).expect("changes");
-        // Found by file name: git prints the resolved path (/private/var on macOS, a drive on Windows).
+        // Found by file name: git prints the resolved path (/private/var on macOS, a drive and a backslash on Windows).
         let chunk = |name: &str| {
             changes
                 .diff
@@ -442,7 +442,10 @@ mod tests {
                         .next()
                         .and_then(|header| header.strip_prefix("a/"))
                         .and_then(|header| header.split(" b/").next())
-                        .is_some_and(|path| path.ends_with(&format!("/{name}")))
+                        .is_some_and(|path| {
+                            path.strip_suffix(name)
+                                .is_some_and(|dir| dir.ends_with(['/', '\\']))
+                        })
                 })
                 .unwrap_or_default()
                 .to_string()

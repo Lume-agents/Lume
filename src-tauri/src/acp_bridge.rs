@@ -32,6 +32,8 @@ const MAX_ACP_LINE: usize = 8 * 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// Set on every ACP agent Lume starts, so hooks running inside it know Lume already follows it.
+pub const MANAGED_ACP_ENV: &str = "LUME_MANAGED_ACP";
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
 type InboundPermissions = Arc<Mutex<HashMap<String, Vec<(Value, Arc<AtomicBool>)>>>>;
 type SessionConfigs = Arc<Mutex<HashMap<String, Value>>>;
@@ -242,6 +244,8 @@ impl AcpBridge {
             let label = self.agent.label;
             let mut command = crate::executables::command(self.agent.executable)?;
             command.args(self.agent.args);
+            // Tells Lume's own hooks, which Grok also runs, that this session is already driven here.
+            command.env(MANAGED_ACP_ENV, "1");
             if let Some(name) = self.agent.loopback_secret_env {
                 let mut password = [0u8; 24];
                 getrandom::getrandom(&mut password)

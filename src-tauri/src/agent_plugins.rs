@@ -147,7 +147,19 @@ pub fn catalog() -> Vec<Box<dyn AgentPlugin>> {
             label: "Grok Build",
             executable: "grok",
             direct_permissions: true,
-            hook_events: &[],
+            // Tool starts are left out: a PreToolUse hook delays every tool call.
+            hook_events: &[
+                "SessionStart",
+                "UserPromptSubmit",
+                "PostToolUse",
+                "PostToolUseFailure",
+                "PermissionDenied",
+                "Notification",
+                "Stop",
+                "StopFailure",
+                "StopCancelled",
+                "SessionEnd",
+            ],
         }),
         Box::new(BuiltInAgentPlugin {
             kind: IntegrationKind::Omp,

@@ -3073,6 +3073,7 @@ fn diagnose_integration(
                     | (IntegrationKind::Claude, domain::AgentKind::ClaudeCode)
                     | (IntegrationKind::Antigravity, domain::AgentKind::Antigravity)
                     | (IntegrationKind::OpenCode, domain::AgentKind::OpenCode)
+                    | (IntegrationKind::Grok, domain::AgentKind::Grok)
                     | (IntegrationKind::DeepSeek, domain::AgentKind::DeepSeek)
                     | (IntegrationKind::Gemini, domain::AgentKind::Gemini)
                     | (IntegrationKind::Omp, domain::AgentKind::Omp)

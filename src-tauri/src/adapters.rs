@@ -27,6 +27,14 @@ const MAX_HOOK_STDIN_BYTES: u64 = 2 * 1024 * 1024;
 const HOOK_STDIN_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn run_hook(provider: &str) -> i32 {
+    if runs_inside_grok(provider, std::env::var_os("GROK_HOOK_EVENT").is_some())
+        || is_managed_acp_hook(
+            provider,
+            std::env::var(crate::acp_bridge::MANAGED_ACP_ENV).as_deref() == Ok("1"),
+        )
+    {
+        return 0;
+    }
     let fallback = antigravity_hook_output(provider).or_else(|| gemini_hook_output(provider));
     let output = read_hook_event(provider)
         .or(fallback)
@@ -35,6 +43,32 @@ pub fn run_hook(provider: &str) -> i32 {
         println!("{output}");
     }
     0
+}
+
+/// Grok Build also runs the hooks in Claude's settings files and marks each run with
+/// `GROK_HOOK_EVENT`. Such a run describes a Grok session, so Lume's Claude hook stays out of it.
+fn runs_inside_grok(provider: &str, grok_marker: bool) -> bool {
+    grok_marker && provider.split(':').next() == Some("claude")
+}
+
+/// Grok's built-in tools under the names Lume already classifies (commands, reads, edits).
+fn grok_tool_name(name: &str) -> String {
+    match name {
+        "run_terminal_command" => "Bash",
+        "read_file" => "Read",
+        "search_replace" => "Edit",
+        "grep" => "Grep",
+        "list_dir" => "LS",
+        "web_search" => "WebSearch",
+        "spawn_subagent" => "Task",
+        other => other,
+    }
+    .into()
+}
+
+/// A Grok that Lume started over ACP is already a Lume chat; its hooks would add a second session.
+fn is_managed_acp_hook(provider: &str, managed: bool) -> bool {
+    managed && provider.split(':').next() == Some("grok")
 }
 
 fn read_hook_event(provider: &str) -> Option<Value> {
@@ -47,7 +81,12 @@ fn read_hook_event(provider: &str) -> Option<Value> {
     let wait_for_decision = event.wait_for_decision;
     let is_question = matches!(event.event, HookEventKind::QuestionRequest);
     let payload = serde_json::to_string(&event).ok()?;
-    if !wait_for_decision && matches!(event.agent, AgentKind::Antigravity | AgentKind::Gemini) {
+    if !wait_for_decision
+        && matches!(
+            event.agent,
+            AgentKind::Antigravity | AgentKind::Gemini | AgentKind::Grok
+        )
+    {
         event_server::send_observation_event(&payload).ok()?;
         return None;
     }
@@ -140,8 +179,13 @@ fn map_event_with_context(
         "claude" => AgentKind::ClaudeCode,
         "antigravity" => AgentKind::Antigravity,
         "gemini" => AgentKind::Gemini,
+        "grok" => AgentKind::Grok,
         _ => return None,
     };
+    // Subagents report through the same hooks; only the main conversation is a session.
+    if provider == "grok" && string(raw, "subagentType").is_some() {
+        return None;
+    }
     // Child hooks can reuse the parent's session ID. Drop their explicit
     // lineage before normalization loses it and before ancestry fallback can
     // turn them into root conversation activity. A root tool describing a
@@ -225,6 +269,17 @@ fn map_event_with_context(
         }
         ("claude", "PreToolUse") if is_claude_question(raw) => HookEventKind::QuestionRequest,
         ("codex" | "claude", "PreToolUse") | ("gemini", "BeforeTool") => HookEventKind::Running,
+        ("grok", "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure") => {
+            HookEventKind::Running
+        }
+        ("grok", "PermissionDenied") => HookEventKind::Activity,
+        ("grok", "StopCancelled") => HookEventKind::WaitingForInput,
+        ("grok", "Notification")
+            if string(raw, "notificationType").as_deref() == Some("permission_prompt") =>
+        {
+            HookEventKind::WaitingForInput
+        }
+        ("grok", "Stop") => HookEventKind::Completed,
         ("codex", "PostToolUse")
         | ("claude", "PostToolUse" | "PostToolUseFailure")
         | ("gemini", "AfterTool") => HookEventKind::Running,
@@ -421,7 +476,9 @@ fn hook_activity(
     }
     if hook_name == "StopFailure" {
         let error = string(raw, "error_details")
+            .or_else(|| string(raw, "errorDetails"))
             .or_else(|| string(raw, "last_assistant_message"))
+            .or_else(|| string(raw, "lastAssistantMessage"))
             .or_else(|| string(raw, "error"))
             .unwrap_or_else(|| "Claude could not finish the response".into());
         return Some(SessionActivity {
@@ -600,6 +657,13 @@ fn hook_activity(
     let tool_name = string(raw, "tool_name")
         .or_else(|| string(raw, "tool"))
         .or_else(|| tool_call.and_then(|call| string(call, "name")))
+        .map(|name| {
+            if provider == "grok" {
+                grok_tool_name(&name)
+            } else {
+                name
+            }
+        })
         .unwrap_or_else(|| "Ferramenta".into());
     let input = raw
         .get("tool_input")
@@ -1294,6 +1358,7 @@ fn status_label(hook: &str, event: &HookEventKind) -> Option<&'static str> {
         "Notification" => Some("Aguardando sua resposta"),
         "AfterAgent" | "SessionEnd" => Some("Finalizado"),
         "StopFailure" => Some("Encerrado com erro"),
+        "StopCancelled" => Some("Interrompido"),
         _ => None,
     }
 }
@@ -1749,7 +1814,7 @@ fn path_is_within(path: &str, root: &str) -> bool {
 }
 
 fn hook_response(value: &Value) -> Option<String> {
-    ["last_assistant_message", "prompt_response", "response"]
+    ["last_assistant_message", "lastAssistantMessage", "prompt_response", "response"]
         .into_iter()
         .find_map(|key| string(value, key))
         .map(|response| truncate(response.trim(), 32 * 1024))
@@ -3827,4 +3892,93 @@ mod tests {
         assert!(mcp_issue_digest(&json!([{ "type": "text", "text": "not a list" }]), 10, 10).is_none());
     }
 
+    #[test]
+    fn claude_hooks_that_grok_runs_are_left_to_grok() {
+        assert!(runs_inside_grok("claude", true));
+        assert!(runs_inside_grok("claude:PreToolUse", true));
+        assert!(!runs_inside_grok("claude", false));
+        assert!(!runs_inside_grok("codex", true));
+    }
+
+    fn grok_event(name: &str, extra: Value) -> Option<HookEvent> {
+        let mut raw = json!({
+            "hook_event_name": name, "hookEventName": name.to_lowercase(),
+            "session_id": "019a0000-0000-7000-8000-000000000009", "cwd": "/home/me/app",
+            "timestamp": "2026-11-10T12:00:00Z"
+        });
+        for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+            raw[key] = value;
+        }
+        map_event("grok", &raw)
+    }
+
+    #[test]
+    fn a_grok_terminal_session_is_followed_through_its_hooks() {
+        let started = grok_event("SessionStart", json!({"source": "startup"})).unwrap();
+        assert_eq!(started.event, HookEventKind::SessionStarted);
+        assert_eq!(started.agent, AgentKind::Grok);
+        assert_eq!(started.session_id, "grok:019a0000-0000-7000-8000-000000000009");
+        assert_eq!(started.working_directory.as_deref(), Some("/home/me/app"));
+
+        let prompt = grok_event("UserPromptSubmit", json!({"prompt": "fix the login"})).unwrap();
+        assert_eq!(prompt.event, HookEventKind::Running);
+        assert_eq!(prompt.activity.unwrap().detail.as_deref(), Some("fix the login"));
+
+        let command = grok_event(
+            "PostToolUse",
+            json!({"tool_name": "run_terminal_command", "tool_input": {"command": "ls"}}),
+        )
+        .unwrap();
+        assert_eq!(command.event, HookEventKind::Running);
+        assert_eq!(command.activity.unwrap().kind, "command");
+
+        let done = grok_event("Stop", json!({"lastAssistantMessage": "All set."})).unwrap();
+        assert_eq!(done.event, HookEventKind::Completed);
+        assert_eq!(done.last_response.as_deref(), Some("All set."));
+
+        let failed = grok_event(
+            "StopFailure",
+            json!({"error": "rate_limit", "errorDetails": "Too many requests"}),
+        )
+        .unwrap();
+        assert_eq!(failed.event, HookEventKind::Failed);
+        assert_eq!(failed.activity.unwrap().detail.as_deref(), Some("Too many requests"));
+
+        let stopped = grok_event("StopCancelled", json!({"reason": "user_interrupt"})).unwrap();
+        assert_eq!(stopped.event, HookEventKind::WaitingForInput);
+        assert_eq!(stopped.status_label.as_deref(), Some("Interrompido"));
+
+        let asking = grok_event("Notification", json!({"notificationType": "permission_prompt"})).unwrap();
+        assert_eq!(asking.event, HookEventKind::WaitingForInput);
+        assert!(grok_event("Notification", json!({"notificationType": "idle_prompt"})).is_none());
+
+        assert_eq!(
+            grok_event("SessionEnd", json!({"reason": "exit"})).unwrap().event,
+            HookEventKind::SessionEnded
+        );
+    }
+
+    #[test]
+    fn grok_subagents_and_lume_managed_chats_are_not_extra_sessions() {
+        assert!(grok_event("PostToolUse", json!({"subagentType": "explore", "tool_name": "grep"})).is_none());
+        assert!(grok_event("SubagentStart", json!({})).is_none());
+        assert!(is_managed_acp_hook("grok", true));
+        assert!(is_managed_acp_hook("grok:Stop", true));
+        assert!(!is_managed_acp_hook("grok", false));
+        assert!(!is_managed_acp_hook("claude", true));
+    }
+
+    #[test]
+    fn grok_tools_are_classified_like_the_other_agents_tools() {
+        assert_eq!(grok_tool_name("run_terminal_command"), "Bash");
+        assert_eq!(grok_tool_name("search_replace"), "Edit");
+        assert_eq!(grok_tool_name("read_file"), "Read");
+        assert_eq!(grok_tool_name("todo_write"), "todo_write");
+        let read = grok_event(
+            "PostToolUse",
+            json!({"tool_name": "read_file", "tool_input": {"path": "src/main.rs"}}),
+        )
+        .unwrap();
+        assert_eq!(read.activity.unwrap().kind, "tool");
+    }
 }

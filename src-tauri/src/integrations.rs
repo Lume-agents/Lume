@@ -244,8 +244,12 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
                 "CLI não encontrada".into()
             } else if kind == IntegrationKind::Gemini {
                 "Somente monitoramento por processo; o Lume não altera as configurações compartilhadas do Gemini".into()
-            } else if matches!(kind, IntegrationKind::OpenCode | IntegrationKind::Grok) {
+            } else if kind == IntegrationKind::OpenCode {
                 "Controle direto via ACP local; sem hook ou gateway global".into()
+            } else if kind == IntegrationKind::Grok && configured {
+                "Chat pelo Lume via ACP; sessões abertas no terminal monitoradas por hooks".into()
+            } else if kind == IntegrationKind::Grok {
+                "Chat pelo Lume via ACP; conecte para monitorar sessões abertas no terminal".into()
             } else if kind == IntegrationKind::DeepSeek {
                 "CLI detectada; requer o perfil TUI do DeepSeek Harness".into()
             } else if kind == IntegrationKind::Omp
@@ -2249,6 +2253,13 @@ pub fn configure(kind: &IntegrationKind, executable: &str, enabled: bool) -> Res
             enabled,
         );
     }
+    if *kind == IntegrationKind::Grok {
+        return configure_grok_at(
+            &config_path(kind).ok_or_else(|| "Diretório do usuário não encontrado".to_string())?,
+            executable,
+            enabled,
+        );
+    }
     if enabled && *kind == IntegrationKind::Codex {
         ensure_codex_hooks_enabled()?;
     }
@@ -2288,6 +2299,28 @@ pub fn configure(kind: &IntegrationKind, executable: &str, enabled: bool) -> Res
     }
     let payload = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
     fs::write(&path, format!("{payload}\n")).map_err(|error| error.to_string())
+}
+
+/// Writes or removes `hooks/lume.json` under Grok's home. Grok merges every hook file it finds, so
+/// Lume keeps its own file instead of editing a shared one, and leaves no backup copy beside it.
+fn configure_grok_at(path: &Path, executable: &str, enabled: bool) -> Result<(), String> {
+    if !enabled {
+        return match fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+            _ => Ok(()),
+        };
+    }
+    let kind = IntegrationKind::Grok;
+    let mut hooks = Value::Object(Map::new());
+    for event in events(&kind) {
+        add_handler(&mut hooks, event, &kind, executable)?;
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let payload = serde_json::to_string_pretty(&json!({ "hooks": hooks }))
+        .map_err(|error| error.to_string())?;
+    fs::write(path, format!("{payload}\n")).map_err(|error| error.to_string())
 }
 
 fn configure_legacy_gemini_at_path(
@@ -2709,9 +2742,15 @@ fn add_handler(
             "timeout": timeout * 1_000,
             "description": "Envia o estado da sessão ao Lume"
         }),
-        IntegrationKind::OpenCode | IntegrationKind::Grok | IntegrationKind::Omp => {
+        IntegrationKind::OpenCode | IntegrationKind::Omp => {
             return Err("Este agente não usa hooks JSON".into())
         }
+        // Grok's timeouts are in seconds, and a hook that fails never blocks its tool.
+        IntegrationKind::Grok => json!({
+            "type": "command",
+            "command": shell_command(executable, provider),
+            "timeout": timeout
+        }),
         IntegrationKind::Gemini => json!({
             "type": "command",
             "name": "Lume",
@@ -2734,7 +2773,10 @@ fn add_handler(
             "statusMessage": "Lume monitor"
         }),
     };
-    let matcher = if matches!(event, "SessionStart" | "PermissionRequest" | "Notification") {
+    // Grok matchers are regular expressions, and leaving one out already matches everything.
+    let matcher = if *kind != IntegrationKind::Grok
+        && matches!(event, "SessionStart" | "PermissionRequest" | "Notification")
+    {
         json!("*")
     } else {
         Value::Null
@@ -2800,10 +2842,17 @@ fn config_path(kind: &IntegrationKind) -> Option<PathBuf> {
         IntegrationKind::Antigravity => {
             return Some(antigravity_cli_settings_path_for(&PathBuf::from(user_home)))
         }
-        IntegrationKind::OpenCode
-        | IntegrationKind::Grok
-        | IntegrationKind::DeepSeek
-        | IntegrationKind::Omp => return None,
+        // The file is Lume's alone: Grok loads every `*.json` in its hooks folder.
+        IntegrationKind::Grok => {
+            return Some(
+                grok_home(Path::new(&user_home))
+                    .join("hooks")
+                    .join("lume.json"),
+            )
+        }
+        IntegrationKind::OpenCode | IntegrationKind::DeepSeek | IntegrationKind::Omp => {
+            return None
+        }
         IntegrationKind::Gemini => ".gemini/settings.json",
     };
     Some(PathBuf::from(user_home).join(directory))
@@ -5153,4 +5202,28 @@ mod tests {
                 .timestamp_millis()
         );
     }
+
+    #[test]
+    fn grok_hooks_live_in_a_file_of_their_own_and_leave_with_it() {
+        let root = std::env::temp_dir().join(format!("lume-grok-hooks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let path = root.join("hooks").join("lume.json");
+        configure_grok_at(&path, "/opt/lume/lume", true).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(configured_content(&content, &IntegrationKind::Grok, "/opt/lume/lume"));
+        let written: Value = serde_json::from_str(&content).unwrap();
+        let hooks = written["hooks"].as_object().unwrap();
+        assert_eq!(hooks.len(), events(&IntegrationKind::Grok).len());
+        // Grok reads matchers as regular expressions, so none is written.
+        assert!(hooks.values().all(|groups| groups[0].get("matcher").is_none()));
+        let stop = &hooks["Stop"][0]["hooks"][0];
+        assert_eq!(stop["type"], "command");
+        assert_eq!(stop["command"], "\"/opt/lume/lume\" hook grok");
+        assert!(fs::read_dir(root.join("hooks")).unwrap().count() == 1, "no backup copy beside it");
+        configure_grok_at(&path, "/opt/lume/lume", false).unwrap();
+        assert!(!path.exists());
+        configure_grok_at(&path, "/opt/lume/lume", false).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
 }
+

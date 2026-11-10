@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, untrack } from "svelte";
-  import { fade, fly } from "svelte/transition";
+  import { fade, fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import type { Preferences, WorkflowContextPolicy, WorkflowContextSelection, WorkflowGroupDefinition, WorkflowRole, WorkflowStepDefinition, WorkflowConnectionDefinition, WorkflowContextPackage, WorkflowRun } from "$lib/domain";
   import type { HubSession } from "$lib/hubProtocol";
@@ -17,6 +17,7 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import AgentModelPicker from "$lib/AgentModelPicker.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
@@ -204,6 +205,8 @@
     ? checkConnection(group, connectionSource, connectionTarget) : null);
   // The elapsed time of a running step ticks once a second, only while something is running.
   let panelTab = $state<"settings" | "activity">("settings");
+  /** The four fields of a role (instruction, input, output, completion) stay folded until asked for. */
+  let roleDetailsOpen = $state(false);
   // The board fades over the chats instead of cutting: it stays displayed while it fades out.
   let shown = $state(untrack(() => active));
   let entered = $state(false);
@@ -1279,10 +1282,24 @@
             </div>
           </div>
           {#if selectedStep.role === "custom"}<label class="field"><span>{tr("Role name", "Nome do papel")}</span><input value={selectedStep.customRoleLabel} disabled={locked} maxlength="80" oninput={(event) => editStep({ customRoleLabel: event.currentTarget.value })} /></label>{/if}
+          {#if session}
+            <div class="field">
+              <span>{tr("Model", "Modelo")}</span>
+              <AgentModelPicker sessionId={session.id} agent={session.agent} controlledByLume={session.controlOrigin === "lume"} working={session.status === "running" || session.status === "permission_required"} {locked} {language} />
+            </div>
+          {/if}
+          <button class:open={roleDetailsOpen} class="role-details-toggle" type="button" aria-expanded={roleDetailsOpen} aria-controls="role-details" onclick={() => (roleDetailsOpen = !roleDetailsOpen)}>
+            <span>{tr("Role instructions", "Instruções do papel")}</span>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>
+          </button>
+          {#if roleDetailsOpen}
+          <div class="role-details" id="role-details" transition:slide={{ duration: duration(170), easing: cubicOut }}>
           <label class="field"><span>{tr("Instruction", "Instrução")}</span><textarea rows="3" disabled={locked || changingRole} value={selectedStep.instruction} oninput={(event) => editStep({ instruction: event.currentTarget.value })}></textarea></label>
           <label class="field"><span>{tr("Expected input", "Entrada esperada")}</span><textarea rows="2" disabled={locked || changingRole} value={selectedStep.expectedInput} oninput={(event) => editStep({ expectedInput: event.currentTarget.value })}></textarea></label>
           <label class="field"><span>{tr("Produced output", "Saída produzida")}</span><textarea rows="2" disabled={locked || changingRole} value={selectedStep.producedOutput} oninput={(event) => editStep({ producedOutput: event.currentTarget.value })}></textarea></label>
           <label class="field"><span>{tr("Completion condition", "Condição de término")}</span><textarea rows="2" disabled={locked || changingRole} value={selectedStep.completionCondition} oninput={(event) => editStep({ completionCondition: event.currentTarget.value })}></textarea></label>
+          </div>
+          {/if}
           <div class="panel-actions"><button type="button" disabled={!session} onclick={() => { if (session) onOpenChat(session); }}><LumeIcon name="external" size={14} />{tr("Open chat", "Abrir chat")}</button><button class="danger" disabled={locked} type="button" onclick={removeSelected}><LumeIcon name="trash" size={14} />{tr("Remove", "Remover")}</button></div>
           {/if}
         {/if}
@@ -1575,6 +1592,12 @@
   .field { min-width: 0; display: grid; gap: 7px; font-size: 11px; }
   .field > span { color: var(--workspace-muted); }
   .field :global(.lume-select) { width: 100%; }
+  .role-details-toggle { width: 100%; min-height: 32px; padding: 0 2px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 0; border-top: 1px solid var(--workspace-line); color: var(--workspace-muted); background: transparent; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
+  .role-details-toggle:hover { color: var(--workspace-text); }
+  .role-details-toggle:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; border-radius: 6px; }
+  .role-details-toggle svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: transform 160ms ease; }
+  .role-details-toggle.open svg { transform: rotate(180deg); }
+  .role-details { display: grid; gap: 12px; }
   .role-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
   /* The same FABs the cards wear, so a role reads the same in the picker and on the canvas. */
   .role-option { min-width: 0; padding: 12px 2px 8px; display: grid; justify-items: center; align-content: start; gap: 7px; border: 1px solid color-mix(in srgb, var(--card-role) 20%, var(--workspace-line)); border-radius: 13px; color: var(--workspace-muted); background: linear-gradient(180deg, color-mix(in srgb, var(--card-role) 10%, var(--workspace-raised)), var(--workspace-raised) 72%); font: inherit; font-size: 10px; font-weight: 680; letter-spacing: -.01em; cursor: pointer; transition: color 140ms ease, border-color 140ms ease, box-shadow 160ms ease, transform 160ms cubic-bezier(.2, .8, .2, 1); }

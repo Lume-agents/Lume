@@ -432,7 +432,21 @@ mod tests {
         fs::write(root.join("data.bin"), [0, 1, 2, 3]).unwrap();
 
         let changes = changes_after(&key).expect("changes");
-        let chunk = |name: &str| changes.diff.split("diff --git ").find(|part| part.starts_with(&format!("a/{}", root.join(name).display()))).unwrap_or_default().to_string();
+        // Found by file name: git prints the resolved path (/private/var on macOS, a drive on Windows).
+        let chunk = |name: &str| {
+            changes
+                .diff
+                .split("diff --git ")
+                .find(|part| {
+                    part.lines()
+                        .next()
+                        .and_then(|header| header.strip_prefix("a/"))
+                        .and_then(|header| header.split(" b/").next())
+                        .is_some_and(|path| path.ends_with(&format!("/{name}")))
+                })
+                .unwrap_or_default()
+                .to_string()
+        };
         assert!(chunk("chart.png").contains("new file mode") && chunk("chart.png").contains("Binary files /dev/null"), "{}", changes.diff);
         let edited = chunk("logo.png");
         assert!(!edited.contains("new file mode") && edited.contains("Binary files a/"), "{edited}");

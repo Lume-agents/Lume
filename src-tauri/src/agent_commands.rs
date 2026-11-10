@@ -193,12 +193,12 @@ pub fn codex_skill_inputs(prompt: &str) -> Vec<Value> {
         .collect()
 }
 
-fn opencode_store() -> &'static Mutex<HashMap<String, Vec<AgentSlashCommand>>> {
+fn acp_store() -> &'static Mutex<HashMap<String, Vec<AgentSlashCommand>>> {
     static STORE: OnceLock<Mutex<HashMap<String, Vec<AgentSlashCommand>>>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn record_opencode_commands(session_id: &str, available: &Value) {
+pub fn record_acp_commands(session_id: &str, available: &Value) {
     let commands = available
         .as_array()
         .into_iter()
@@ -221,13 +221,13 @@ pub fn record_opencode_commands(session_id: &str, available: &Value) {
             Some(item)
         })
         .collect();
-    if let Ok(mut store) = opencode_store().lock() {
+    if let Ok(mut store) = acp_store().lock() {
         store.insert(session_id.into(), commands);
     }
 }
 
-pub fn opencode_commands(session_id: &str) -> Option<Vec<AgentSlashCommand>> {
-    opencode_store().lock().ok()?.get(session_id).cloned()
+pub fn acp_commands(session_id: &str) -> Option<Vec<AgentSlashCommand>> {
+    acp_store().lock().ok()?.get(session_id).cloned()
 }
 
 pub fn antigravity_commands(cwd: &str) -> Result<Vec<AgentSlashCommand>, String> {
@@ -427,15 +427,15 @@ mod tests {
     }
 
     #[test]
-    fn opencode_announcement_is_stored_per_session() {
-        record_opencode_commands(
+    fn acp_announcement_is_stored_per_session() {
+        record_acp_commands(
             "acp-1",
             &json!([{ "name": "review", "description": "review changes", "input": { "hint": "[commit]" } }]),
         );
-        let commands = opencode_commands("acp-1").expect("comandos");
+        let commands = acp_commands("acp-1").expect("comandos");
         assert_eq!(commands[0].name, "review");
         assert_eq!(commands[0].argument_hint.as_deref(), Some("[commit]"));
-        assert_eq!(opencode_commands("acp-2"), None);
+        assert_eq!(acp_commands("acp-2"), None);
     }
 
     #[test]

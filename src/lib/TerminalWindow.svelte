@@ -2592,7 +2592,7 @@
     selectedModel = model;
     const option = modelSettings.models.find((candidate) => candidate.model === model);
     if (!option) return;
-    if (session?.agent === "opencode" && model !== modelSettings.model) {
+    if ((session?.agent === "opencode" || session?.agent === "grok") && model !== modelSettings.model) {
       selectedEffort = "";
     } else if (!option.supportedReasoningEfforts.some((effort) => effort.value === selectedEffort)) {
       selectedEffort = option.defaultReasoningEffort;
@@ -2600,7 +2600,7 @@
   }
 
   async function openModelDialog() {
-    if (!session || !["codex", "claude_code", "opencode", "antigravity", "omp"].includes(session.agent)) return false;
+    if (!session || !["codex", "claude_code", "opencode", "grok", "antigravity", "omp"].includes(session.agent)) return false;
     composerToolsOpen = false;
     if (session.controlOrigin !== "lume") {
       if (requiresCodexCliTakeover(session)) {
@@ -2633,7 +2633,7 @@
         modelSettings = await getSessionModelSettings(session.id);
         selectedModel = modelSettings.model;
         selectedEffort = modelSettings.reasoningEffort ?? "";
-      } else if (["codex", "opencode", "omp"].includes(session.agent)) {
+      } else if (["codex", "opencode", "grok", "omp"].includes(session.agent)) {
         modelSettings = await getSessionModelSettings(session.id);
         if (["codex", "omp"].includes(session.agent)) sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
         selectedModel = modelSettings.model;
@@ -2711,7 +2711,7 @@
     modelError = null;
     const deferredUntilPromptEnds = (session.agent === "codex" || session.agent === "antigravity") && promptIsRunning;
     try {
-      if (["codex", "opencode", "antigravity", "omp"].includes(session.agent)) {
+      if (["codex", "opencode", "grok", "antigravity", "omp"].includes(session.agent)) {
         modelSettings = await setSessionModelSettings(
           session.id,
           selectedModel,
@@ -3967,7 +3967,7 @@
               {#if session.agent === "codex" || session.agent === "omp"}{@render permissionSection()}{/if}
               {#if session.agent === "codex"}{@render fastModeSection()}{/if}
 
-              {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
+              {#if (session.agent === "opencode" || session.agent === "grok") && modelSettings?.sessionModes?.options.length}
                 <section class="model-settings-section">
                   <span class="model-settings-label">{tr("Agent mode", "Modo do agente")}</span>
                   <LumeSelect value={modelSettings.sessionModes.currentMode} options={modelSettings.sessionModes.options}
@@ -4202,7 +4202,7 @@
                       <span><strong>{tr("Agent mode", "Modo do agente")}</strong><small>{collaborationMode === "plan" ? "Plan" : "Default"}</small></span>
                     </button>
                   {/if}
-                  {#if ["codex", "claude_code", "opencode", "antigravity"].includes(session.agent)}
+                  {#if ["codex", "claude_code", "opencode", "grok", "antigravity"].includes(session.agent)}
                     <button type="button" role="menuitem" onclick={() => void openModelDialog()}>
                       <span class="tool-icon"><svg viewBox="0 0 20 20"><path d="M5 5.5 10 3l5 2.5v9L10 17l-5-2.5zM5 5.5l5 2.5 5-2.5M10 8v9" /></svg></span>
                       <span><strong>{session.agent === "antigravity" ? tr("Model and permissions", "Modelo e permissões") : tr("Model and effort", "Modelo e effort")}</strong><small>{tr("Configure", "Configurar")}</small></span>
@@ -4304,7 +4304,7 @@
       <span>{tr("Connecting to session…", "Conectando à sessão…")}</span>
     </section>
   {/if}
-  {#if session && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini", "omp"].includes(session.agent) && (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)) || (session.agent === "omp" && session.status === "failed" && /no models available/i.test(session.statusLabel)))}
+  {#if session && ["claude_code", "opencode", "grok", "antigravity", "deepseek", "codex", "gemini", "omp"].includes(session.agent) && (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)) || (session.agent === "omp" && session.status === "failed" && /no models available/i.test(session.statusLabel)))}
     <AgentConnectionDialog agent={(session.agent === "claude_code" ? "claude" : session.agent) as ConnectableAgent}
       message={connectionRequired ?? (session.agent === "omp" && /no models available/i.test(session.statusLabel) ? tr("No models are available. Configure omp, then retry this session.", "Nenhum modelo está disponível. Configure o omp e tente esta sessão novamente.") : agentConnectionMessage(session.statusLabel) ?? "")} {language}
       onSetup={session.agent === "omp" && /no models available/i.test(session.statusLabel) ? () => void setupOmp() : undefined}

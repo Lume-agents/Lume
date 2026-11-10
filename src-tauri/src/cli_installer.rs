@@ -159,6 +159,22 @@ fn catalog() -> Vec<Catalog> {
         }
     }];
 
+    let grok = vec![if windows {
+        Method {
+            id: "script",
+            label: "Official installer",
+            requires: "",
+            runner: Runner::PowerShell("irm https://x.ai/cli/install.ps1 | iex"),
+        }
+    } else {
+        Method {
+            id: "script",
+            label: "Official installer",
+            requires: "curl",
+            runner: Runner::Bash("curl -fsSL https://x.ai/cli/install.sh | bash"),
+        }
+    }];
+
     let mut github = vec![];
     if windows {
         github.push(Method {
@@ -226,6 +242,14 @@ fn catalog() -> Vec<Catalog> {
             login: "agy",
             manual_url: Some("https://antigravity.google/cli"),
             methods: antigravity,
+        },
+        Catalog {
+            kind: "grok",
+            label: "Grok Build",
+            binary: "grok",
+            login: "grok login",
+            manual_url: Some("https://x.ai/cli"),
+            methods: grok,
         },
         Catalog {
             kind: "github",
@@ -656,6 +680,7 @@ mod tests {
                 "gemini",
                 "opencode",
                 "antigravity",
+                "grok",
                 "github"
             ]
         );

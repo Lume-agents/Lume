@@ -219,7 +219,12 @@ fn common_user_path(name: &str) -> Option<PathBuf> {
         "HOME"
     })
     .map(PathBuf::from)?;
-    let mut directories = vec![home.join(".local/bin"), home.join(".cargo/bin")];
+    let mut directories = vec![
+        home.join(".local/bin"),
+        home.join(".cargo/bin"),
+        // Grok Build's installer keeps its binary here.
+        home.join(".grok/bin"),
+    ];
     #[cfg(not(target_os = "windows"))]
     directories.extend(unix_install_directories(&home));
     #[cfg(target_os = "windows")]

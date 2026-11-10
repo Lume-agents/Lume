@@ -192,7 +192,11 @@ pub fn submit_prompt(
         && session.source != SessionSource::Web
         && matches!(
             session.agent,
-            AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::OpenCode | AgentKind::Omp
+            AgentKind::Codex
+                | AgentKind::ClaudeCode
+                | AgentKind::OpenCode
+                | AgentKind::Grok
+                | AgentKind::Omp
         )
     {
         return Err(
@@ -311,25 +315,25 @@ pub fn submit_prompt(
         }
         browser.request_prompt(session.id.clone(), prompt.to_string())?;
         browser.request_focus(session.id.clone())
-    } else if session.agent == AgentKind::OpenCode {
+    } else if is_acp_agent(&session.agent) {
         if session.control_origin != SessionControlOrigin::Lume {
-            return Err("Esta sessão OpenCode externa não está sob controle do Lume".into());
+            return Err("Esta sessão externa não está sob controle do Lume".into());
         }
         let native_id = session
             .native_session_id
             .as_deref()
-            .ok_or("Sessão OpenCode sem ID nativo")?;
+            .ok_or("Sessão sem ID nativo")?;
         let cwd = session
             .working_directory
             .as_deref()
-            .ok_or("Sessão OpenCode sem pasta de projeto")?;
-        app.state::<crate::opencode_acp::OpenCodeBridge>().prompt(
+            .ok_or("Sessão sem pasta de projeto")?;
+        acp_bridge(app, &session.agent)?.prompt(
             native_id,
             cwd,
             prompt.to_string(),
             attachments
                 .iter()
-                .map(|file| crate::opencode_acp::PromptFile {
+                .map(|file| crate::acp_bridge::PromptFile {
                     path: file.path.clone(),
                     mime_type: file.display.mime_type.clone(),
                     is_image: file.is_image,
@@ -400,6 +404,7 @@ pub fn submit_prompt(
             AgentKind::ClaudeCode => IntegrationKind::Claude,
             AgentKind::Antigravity => IntegrationKind::Antigravity,
             AgentKind::OpenCode => IntegrationKind::OpenCode,
+            AgentKind::Grok => IntegrationKind::Grok,
             AgentKind::DeepSeek => IntegrationKind::DeepSeek,
             AgentKind::Gemini => IntegrationKind::Gemini,
             AgentKind::Omp => return Err("Oh My Pi sessions are monitored only".into()),
@@ -547,13 +552,12 @@ pub fn interrupt_prompt(
             "abort",
             serde_json::json!({}),
         )?;
-    } else if session.agent == AgentKind::OpenCode {
+    } else if is_acp_agent(&session.agent) {
         let native_id = session
             .native_session_id
             .as_deref()
-            .ok_or("OpenCode session ID missing")?;
-        app.state::<crate::opencode_acp::OpenCodeBridge>()
-            .cancel(native_id)?;
+            .ok_or("ACP session ID missing")?;
+        acp_bridge(app, &session.agent)?.cancel(native_id)?;
     } else if session.agent == AgentKind::Antigravity && session.source == SessionSource::Desktop {
         let native_id = session
             .native_session_id
@@ -585,7 +589,7 @@ fn supports_safe_prompt_interrupt(agent: &AgentKind, source: &SessionSource) -> 
         // A Lume-owned conversation (Desktop) runs each prompt as the same
         // `claude --print` process a CLI session does.
         AgentKind::ClaudeCode => matches!(source, SessionSource::Cli | SessionSource::Desktop),
-        AgentKind::OpenCode => source == &SessionSource::Desktop,
+        AgentKind::OpenCode | AgentKind::Grok => source == &SessionSource::Desktop,
         AgentKind::Antigravity => source == &SessionSource::Desktop,
         AgentKind::Omp => source == &SessionSource::Desktop,
         _ => false,
@@ -654,10 +658,8 @@ pub fn session_slash_commands(
     match session.agent {
         AgentKind::ClaudeCode => crate::agent_commands::claude_commands(cwd),
         AgentKind::Codex => crate::agent_commands::codex_commands(cwd, || bridge.list_skills(cwd)),
-        AgentKind::OpenCode => match session.native_session_id.as_deref() {
-            Some(native_id) => app
-                .state::<crate::opencode_acp::OpenCodeBridge>()
-                .slash_commands(native_id, cwd),
+        AgentKind::OpenCode | AgentKind::Grok => match session.native_session_id.as_deref() {
+            Some(native_id) => acp_bridge(app, &session.agent)?.slash_commands(native_id, cwd),
             None => Ok(Vec::new()),
         },
         AgentKind::Antigravity => crate::agent_commands::antigravity_commands(cwd),
@@ -686,22 +688,20 @@ pub fn session_model_settings(
         )?;
         return omp_model_settings(&state_data, &catalog, &levels);
     }
-    if session.agent == AgentKind::OpenCode {
+    if is_acp_agent(&session.agent) {
         if session.control_origin != SessionControlOrigin::Lume {
-            return Err("Retome esta sessão OpenCode pelo Lume antes de alterar o modelo".into());
+            return Err("Retome esta sessão pelo Lume antes de alterar o modelo".into());
         }
-        return app
-            .state::<crate::opencode_acp::OpenCodeBridge>()
-            .model_settings(
-                session
-                    .native_session_id
-                    .as_deref()
-                    .ok_or("Sessão OpenCode sem ID nativo")?,
-                session
-                    .working_directory
-                    .as_deref()
-                    .ok_or("Sessão OpenCode sem pasta de projeto")?,
-            );
+        return acp_bridge(app, &session.agent)?.model_settings(
+            session
+                .native_session_id
+                .as_deref()
+                .ok_or("Sessão sem ID nativo")?,
+            session
+                .working_directory
+                .as_deref()
+                .ok_or("Sessão sem pasta de projeto")?,
+        );
     }
     if session.agent == AgentKind::Antigravity {
         if session.control_origin != SessionControlOrigin::Lume
@@ -866,24 +866,22 @@ pub fn set_session_model_settings(
         protocol::emit_sessions_changed(app);
         return session_model_settings(app, state, bridge, session_id);
     }
-    if session.agent == AgentKind::OpenCode {
+    if is_acp_agent(&session.agent) {
         if session.control_origin != SessionControlOrigin::Lume {
-            return Err("Retome esta sessão OpenCode pelo Lume antes de alterar o modelo".into());
+            return Err("Retome esta sessão pelo Lume antes de alterar o modelo".into());
         }
-        return app
-            .state::<crate::opencode_acp::OpenCodeBridge>()
-            .set_model_settings(
-                session
-                    .native_session_id
-                    .as_deref()
-                    .ok_or("Sessão OpenCode sem ID nativo")?,
-                session
-                    .working_directory
-                    .as_deref()
-                    .ok_or("Sessão OpenCode sem pasta de projeto")?,
-                model,
-                effort,
-            );
+        return acp_bridge(app, &session.agent)?.set_model_settings(
+            session
+                .native_session_id
+                .as_deref()
+                .ok_or("Sessão sem ID nativo")?,
+            session
+                .working_directory
+                .as_deref()
+                .ok_or("Sessão sem pasta de projeto")?,
+            model,
+            effort,
+        );
     }
     if session.agent == AgentKind::Antigravity {
         if session.control_origin != SessionControlOrigin::Lume
@@ -964,6 +962,20 @@ pub fn set_session_model_settings(
     Ok(settings)
 }
 
+fn is_acp_agent(agent: &AgentKind) -> bool {
+    matches!(agent, AgentKind::OpenCode | AgentKind::Grok)
+}
+
+fn acp_bridge<'a>(
+    app: &'a AppHandle,
+    agent: &AgentKind,
+) -> Result<&'a crate::acp_bridge::AcpBridge, String> {
+    app.state::<crate::acp_bridge::AcpBridges>()
+        .inner()
+        .for_agent(agent)
+        .ok_or_else(|| "Este agente não é controlado pelo ACP".into())
+}
+
 pub fn set_session_agent_mode(
     app: &AppHandle,
     state: &AppState,
@@ -975,19 +987,18 @@ pub fn set_session_agent_mode(
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or("Sessão não encontrada")?;
-    if session.agent != AgentKind::OpenCode || session.control_origin != SessionControlOrigin::Lume
-    {
-        return Err("Este seletor de modo requer uma sessão OpenCode controlada pelo Lume".into());
+    if !is_acp_agent(&session.agent) || session.control_origin != SessionControlOrigin::Lume {
+        return Err("Este seletor de modo requer uma sessão ACP controlada pelo Lume".into());
     }
-    app.state::<crate::opencode_acp::OpenCodeBridge>().set_mode(
+    acp_bridge(app, &session.agent)?.set_mode(
         session
             .native_session_id
             .as_deref()
-            .ok_or("Sessão OpenCode sem ID nativo")?,
+            .ok_or("Sessão sem ID nativo")?,
         session
             .working_directory
             .as_deref()
-            .ok_or("Sessão OpenCode sem pasta de projeto")?,
+            .ok_or("Sessão sem pasta de projeto")?,
         mode,
     )
 }
@@ -1811,7 +1822,7 @@ fn is_managed_native_session(session: &AgentSession) -> bool {
             || (session.source == SessionSource::Cli && session.process_id.is_none()))
         && matches!(
             session.agent,
-            AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
+            AgentKind::Codex | AgentKind::OpenCode | AgentKind::Grok | AgentKind::Antigravity
         )
 }
 
@@ -1876,13 +1887,12 @@ pub fn terminate_session(
         protocol::emit_sessions_changed(app);
         return Ok(());
     }
-    if session.agent == AgentKind::OpenCode && is_managed_native_session(&session) {
+    if is_acp_agent(&session.agent) && is_managed_native_session(&session) {
         let native_id = session
             .native_session_id
             .as_deref()
-            .ok_or("OpenCode session ID missing")?;
-        app.state::<crate::opencode_acp::OpenCodeBridge>()
-            .close(native_id)?;
+            .ok_or("ACP session ID missing")?;
+        acp_bridge(app, &session.agent)?.close(native_id)?;
         state.mark_session_terminated(session_id)?;
         protocol::emit_sessions_changed(app);
         return Ok(());
@@ -2543,6 +2553,7 @@ mod tests {
         for agent in [
             AgentKind::Codex,
             AgentKind::OpenCode,
+            AgentKind::Grok,
             AgentKind::Antigravity,
         ] {
             session.agent = agent;

@@ -173,6 +173,7 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
         IntegrationKind::Gemini => ("gemini".to_string(), Vec::new()),
         IntegrationKind::OpenCode => ("opencode".to_string(), Vec::new()),
         IntegrationKind::Omp => ("omp".to_string(), Vec::new()),
+        IntegrationKind::Grok => ("grok".to_string(), Vec::new()),
     };
     if request.agent == IntegrationKind::Omp {
         if let Some(profile) = request
@@ -222,7 +223,7 @@ fn payload_for(request: &LaunchRequest, codex_remote: Option<&str>) -> TerminalP
                     arguments.push(id.clone());
                 }
             }
-            IntegrationKind::Claude | IntegrationKind::Gemini => {
+            IntegrationKind::Claude | IntegrationKind::Gemini | IntegrationKind::Grok => {
                 arguments.push("--resume".into());
                 if let Some(id) = &request.resume_id {
                     arguments.push(id.clone());
@@ -797,6 +798,7 @@ fn apply_permission_profile(request: &LaunchRequest, arguments: &mut Vec<String>
         }
         IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
+        | IntegrationKind::Grok
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini
         | IntegrationKind::Omp => {}
@@ -1055,6 +1057,7 @@ fn launch_vscode(payload: &TerminalPayload, agent: &IntegrationKind) -> Result<(
             IntegrationKind::Gemini => "gemini",
             IntegrationKind::OpenCode => "opencode",
             IntegrationKind::Omp => "omp",
+            IntegrationKind::Grok => "grok",
         },
         "cwd": payload.working_directory,
         "args": payload.arguments,

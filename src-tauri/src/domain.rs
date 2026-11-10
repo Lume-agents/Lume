@@ -17,6 +17,7 @@ pub enum AgentKind {
     DeepSeek,
     Gemini,
     Omp,
+    Grok,
     Unknown,
 }
 

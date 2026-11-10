@@ -68,8 +68,83 @@ struct Runtime {
     cancelled: HashSet<String>,
 }
 
+/// An agent Lume drives through the Agent Client Protocol over stdio.
+pub struct AcpAgent {
+    pub label: &'static str,
+    executable: &'static str,
+    args: &'static [&'static str],
+    /// Environment variable that carries a random loopback password, when the agent opens one.
+    loopback_secret_env: Option<&'static str>,
+    /// Lume session IDs are `<prefix>-acp:<native ID>` and activity IDs start with `<prefix>-`.
+    prefix: &'static str,
+    pub agent: fn() -> AgentKind,
+    pub integration: fn() -> crate::integrations::IntegrationKind,
+}
+
+pub const OPENCODE: AcpAgent = AcpAgent {
+    label: "OpenCode",
+    executable: "opencode",
+    args: &["acp", "--hostname", "127.0.0.1", "--port", "0"],
+    loopback_secret_env: Some("OPENCODE_SERVER_PASSWORD"),
+    prefix: "opencode",
+    agent: || AgentKind::OpenCode,
+    integration: || crate::integrations::IntegrationKind::OpenCode,
+};
+
+pub const GROK: AcpAgent = AcpAgent {
+    label: "Grok",
+    executable: "grok",
+    // Without --always-approve, Grok asks for each tool through session/request_permission.
+    args: &["agent", "stdio"],
+    loopback_secret_env: None,
+    prefix: "grok",
+    agent: || AgentKind::Grok,
+    integration: || crate::integrations::IntegrationKind::Grok,
+};
+
+impl AcpAgent {
+    pub fn session_id(&self, native_id: &str) -> String {
+        format!("{}-acp:{native_id}", self.prefix)
+    }
+}
+
+/// One bridge per ACP agent, so each keeps its own process and sessions.
+pub struct AcpBridges {
+    pub opencode: AcpBridge,
+    pub grok: AcpBridge,
+}
+
+impl AcpBridges {
+    pub fn new(state: AppState, app: AppHandle) -> Self {
+        Self {
+            opencode: AcpBridge::new(&OPENCODE, state.clone(), app.clone()),
+            grok: AcpBridge::new(&GROK, state, app),
+        }
+    }
+
+    pub fn for_agent(&self, agent: &AgentKind) -> Option<&AcpBridge> {
+        match agent {
+            AgentKind::OpenCode => Some(&self.opencode),
+            AgentKind::Grok => Some(&self.grok),
+            _ => None,
+        }
+    }
+
+    pub fn for_integration(
+        &self,
+        kind: &crate::integrations::IntegrationKind,
+    ) -> Option<&AcpBridge> {
+        match kind {
+            crate::integrations::IntegrationKind::OpenCode => Some(&self.opencode),
+            crate::integrations::IntegrationKind::Grok => Some(&self.grok),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct OpenCodeBridge {
+pub struct AcpBridge {
+    agent: &'static AcpAgent,
     runtime: Arc<Mutex<Runtime>>,
     startup: Arc<Mutex<()>>,
     next_id: Arc<AtomicU64>,
@@ -82,7 +157,11 @@ pub struct OpenCodeBridge {
     app: AppHandle,
 }
 
-impl OpenCodeBridge {
+impl AcpBridge {
+    pub fn agent(&self) -> &'static AcpAgent {
+        self.agent
+    }
+
     pub(crate) fn environment_roots(&self) -> Vec<(String, u32)> {
         self.runtime
             .lock()
@@ -102,8 +181,9 @@ impl OpenCodeBridge {
             .unwrap_or_default()
     }
 
-    pub fn new(state: AppState, app: AppHandle) -> Self {
+    pub fn new(agent: &'static AcpAgent, state: AppState, app: AppHandle) -> Self {
         Self {
+            agent,
             runtime: Arc::new(Mutex::new(Runtime::default())),
             startup: Arc::new(Mutex::new(())),
             next_id: Arc::new(AtomicU64::new(1)),
@@ -118,15 +198,9 @@ impl OpenCodeBridge {
     }
 
     fn ensure_started(&self) -> Result<(), String> {
-        let _startup = self
-            .startup
-            .lock()
-            .map_err(|_| "OpenCode startup lock failed")?;
+        let _startup = self.startup.lock().map_err(|_| "ACP startup lock failed")?;
         {
-            let mut runtime = self
-                .runtime
-                .lock()
-                .map_err(|_| "OpenCode state lock failed")?;
+            let mut runtime = self.runtime.lock().map_err(|_| "ACP state lock failed")?;
             if let Some(process) = runtime.process.as_mut() {
                 if process
                     .child
@@ -150,11 +224,11 @@ impl OpenCodeBridge {
             runtime.cancelled.clear();
             self.session_configs
                 .lock()
-                .map_err(|_| "OpenCode config lock failed")?
+                .map_err(|_| "ACP config lock failed")?
                 .clear();
             self.turn_text
                 .lock()
-                .map_err(|_| "OpenCode stream lock failed")?
+                .map_err(|_| "ACP stream lock failed")?
                 .clear();
             if let Ok(mut permissions) = self.inbound_permissions.lock() {
                 for requests in permissions.values() {
@@ -165,17 +239,20 @@ impl OpenCodeBridge {
                 permissions.clear();
             }
 
-            let mut password = [0u8; 24];
-            getrandom::getrandom(&mut password)
-                .map_err(|error| format!("Could not secure OpenCode loopback: {error}"))?;
-            let secret = password
-                .iter()
-                .map(|value| format!("{value:02x}"))
-                .collect::<String>();
-            let mut command = crate::executables::command("opencode")?;
+            let label = self.agent.label;
+            let mut command = crate::executables::command(self.agent.executable)?;
+            command.args(self.agent.args);
+            if let Some(name) = self.agent.loopback_secret_env {
+                let mut password = [0u8; 24];
+                getrandom::getrandom(&mut password)
+                    .map_err(|error| format!("Could not secure {label} loopback: {error}"))?;
+                let secret = password
+                    .iter()
+                    .map(|value| format!("{value:02x}"))
+                    .collect::<String>();
+                command.env(name, secret);
+            }
             command
-                .args(["acp", "--hostname", "127.0.0.1", "--port", "0"])
-                .env("OPENCODE_SERVER_PASSWORD", secret)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
@@ -186,14 +263,11 @@ impl OpenCodeBridge {
             }
             let mut child = command
                 .spawn()
-                .map_err(|error| format!("Could not launch OpenCode ACP: {error}"))?;
+                .map_err(|error| format!("Could not launch {label} ACP: {error}"))?;
             let writer = Arc::new(Mutex::new(
-                child.stdin.take().ok_or("OpenCode ACP stdin unavailable")?,
+                child.stdin.take().ok_or("ACP stdin unavailable")?,
             ));
-            let output = child
-                .stdout
-                .take()
-                .ok_or("OpenCode ACP stdout unavailable")?;
+            let output = child.stdout.take().ok_or("ACP stdout unavailable")?;
             let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
             let reader_pending = pending.clone();
             let reader_writer = writer.clone();
@@ -204,10 +278,12 @@ impl OpenCodeBridge {
             let turn_sequence = self.turn_sequence.clone();
             let session_configs = self.session_configs.clone();
             let reader_generation = self.reader_generation.clone();
+            let agent = self.agent;
             thread::Builder::new()
-                .name("lume-opencode-acp".into())
+                .name(format!("lume-{}-acp", agent.prefix))
                 .spawn(move || {
                     read_messages(
+                        agent,
                         output,
                         reader_writer,
                         reader_pending,
@@ -246,12 +322,12 @@ impl OpenCodeBridge {
             if let Ok(mut runtime) = self.runtime.lock() {
                 runtime.process = None;
             }
-            return Err("OpenCode ACP protocol version is not supported".into());
+            return Err(format!(
+                "{} ACP protocol version is not supported",
+                self.agent.label
+            ));
         }
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| "OpenCode state lock failed")?;
+        let mut runtime = self.runtime.lock().map_err(|_| "ACP state lock failed")?;
         runtime.can_resume = initialized["agentCapabilities"]["sessionCapabilities"]
             .get("resume")
             .is_some();
@@ -267,36 +343,36 @@ impl OpenCodeBridge {
 
     fn raw_request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         let (writer, pending) = {
-            let runtime = self
-                .runtime
-                .lock()
-                .map_err(|_| "OpenCode state lock failed")?;
-            let process = runtime
-                .process
-                .as_ref()
-                .ok_or("OpenCode ACP is not running")?;
+            let runtime = self.runtime.lock().map_err(|_| "ACP state lock failed")?;
+            let process = runtime.process.as_ref().ok_or("ACP agent is not running")?;
             (process.writer.clone(), process.pending.clone())
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
         pending
             .lock()
-            .map_err(|_| "OpenCode response lock failed")?
+            .map_err(|_| "ACP response lock failed")?
             .insert(id, sender);
         let payload = json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params});
         let write_result = writer
             .lock()
-            .map_err(|_| "OpenCode write lock failed".to_string())?
+            .map_err(|_| "ACP write lock failed".to_string())?
             .write_all(format!("{payload}\n").as_bytes());
         if let Err(error) = write_result {
             let _ = pending.lock().map(|mut requests| requests.remove(&id));
-            return Err(format!("OpenCode ACP connection closed: {error}"));
+            return Err(format!(
+                "{} ACP connection closed: {error}",
+                self.agent.label
+            ));
         }
         match receiver.recv_timeout(timeout) {
             Ok(result) => result,
             Err(error) => {
                 let _ = pending.lock().map(|mut requests| requests.remove(&id));
-                Err(format!("OpenCode ACP {method} did not complete: {error}"))
+                Err(format!(
+                    "{} ACP {method} did not complete: {error}",
+                    self.agent.label
+                ))
             }
         }
     }
@@ -307,28 +383,29 @@ impl OpenCodeBridge {
         resume_id: Option<&str>,
     ) -> Result<String, String> {
         let cwd = std::fs::canonicalize(working_directory)
-            .map_err(|_| "A pasta do projeto do OpenCode não existe".to_string())?;
+            .map_err(|_| format!("A pasta do projeto do {} não existe", self.agent.label))?;
         if !cwd.is_dir() {
-            return Err("A pasta do projeto do OpenCode não é um diretório".into());
+            return Err(format!(
+                "A pasta do projeto do {} não é um diretório",
+                self.agent.label
+            ));
         }
         let cwd = cwd.to_string_lossy().to_string();
         self.ensure_started()?;
         let (method, params) = if let Some(id) = resume_id {
             let has_history = self
                 .state
-                .connected_session(&format!("opencode-acp:{id}"))
+                .connected_session(&self.agent.session_id(id))
                 .is_ok_and(|session| !session.activities.is_empty());
-            let runtime = self
-                .runtime
-                .lock()
-                .map_err(|_| "OpenCode state lock failed")?;
+            let runtime = self.runtime.lock().map_err(|_| "ACP state lock failed")?;
             // Replay only for imported chats. Reattaching a conversation already
             // stored in Lume must not duplicate all of its historical messages.
-            let method = resume_method(runtime.can_load, runtime.can_resume, has_history)?;
+            let method = resume_method(runtime.can_load, runtime.can_resume, has_history)
+                .map_err(|error| format!("{}: {error}", self.agent.label))?;
             if method == "session/load" {
                 self.turn_sequence
                     .lock()
-                    .map_err(|_| "OpenCode stream lock failed")?
+                    .map_err(|_| "ACP stream lock failed")?
                     .insert(id.into(), 0);
             }
             (method, json!({"sessionId":id,"cwd":cwd,"mcpServers":[]}))
@@ -344,21 +421,21 @@ impl OpenCodeBridge {
                     .and_then(Value::as_str)
                     .map(str::to_string)
             })
-            .ok_or("OpenCode did not return a session ID")?;
+            .ok_or_else(|| format!("{} did not return a session ID", self.agent.label))?;
         self.cache_config(&id, &response)?;
         self.runtime
             .lock()
-            .map_err(|_| "OpenCode state lock failed")?
+            .map_err(|_| "ACP state lock failed")?
             .loaded
             .insert(id.clone());
         let project = Path::new(&cwd)
             .file_name()
             .and_then(|name| name.to_str())
             .map(str::to_string);
-        let mut event = base_event(&id, HookEventKind::SessionStarted);
+        let mut event = base_event(self.agent, &id, HookEventKind::SessionStarted);
         event.project = project;
         event.working_directory = Some(cwd);
-        event.permission_profile = Some(permission_profile());
+        event.permission_profile = Some(permission_profile(self.agent));
         if let Err(error) = event_server::publish_event(&self.state, &self.app, event) {
             let _ = self.close(&id);
             return Err(error);
@@ -371,10 +448,13 @@ impl OpenCodeBridge {
         if !self
             .runtime
             .lock()
-            .map_err(|_| "OpenCode state lock failed")?
+            .map_err(|_| "ACP state lock failed")?
             .can_list
         {
-            return Err("This OpenCode version cannot list sessions through ACP".into());
+            return Err(format!(
+                "This {} version cannot list sessions through ACP",
+                self.agent.label
+            ));
         }
         let mut sessions = Vec::new();
         let mut cursor: Option<String> = None;
@@ -405,15 +485,15 @@ impl OpenCodeBridge {
                         .unwrap_or(0);
                     sessions.push(crate::integrations::ResumableSession {
                         id: id.to_string(),
-                        agent: crate::integrations::IntegrationKind::OpenCode,
+                        agent: (self.agent.integration)(),
                         name: item["title"]
                             .as_str()
                             .filter(|title| !title.trim().is_empty())
-                            .unwrap_or("OpenCode session")
+                            .unwrap_or(&format!("{} session", self.agent.label))
                             .to_string(),
                         project: project.to_string(),
                         working_directory: cwd.to_string(),
-                        source: "OpenCode ACP".into(),
+                        source: format!("{} ACP", self.agent.label),
                         updated_at,
                         profile: None,
                     });
@@ -451,7 +531,7 @@ impl OpenCodeBridge {
         let loaded = self
             .runtime
             .lock()
-            .map_err(|_| "OpenCode state lock failed")?
+            .map_err(|_| "ACP state lock failed")?
             .loaded
             .contains(session_id);
         if !loaded {
@@ -460,16 +540,16 @@ impl OpenCodeBridge {
         let can_images = self
             .runtime
             .lock()
-            .map_err(|_| "OpenCode state lock failed")?
+            .map_err(|_| "ACP state lock failed")?
             .can_images;
         let content = prompt_content(&prompt, &files, can_images)?;
         {
-            let mut runtime = self
-                .runtime
-                .lock()
-                .map_err(|_| "OpenCode state lock failed")?;
+            let mut runtime = self.runtime.lock().map_err(|_| "ACP state lock failed")?;
             if !runtime.active.insert(session_id.into()) {
-                return Err("Este prompt do OpenCode já está em execução".into());
+                return Err(format!(
+                    "Este prompt do {} já está em execução",
+                    self.agent.label
+                ));
             }
             runtime.cancelled.remove(session_id);
         }
@@ -477,17 +557,17 @@ impl OpenCodeBridge {
             *self
                 .turn_sequence
                 .lock()
-                .map_err(|_| "OpenCode stream lock failed")?
+                .map_err(|_| "ACP stream lock failed")?
                 .entry(session_id.into())
                 .or_default() += 1;
             self.turn_text
                 .lock()
-                .map_err(|_| "OpenCode stream lock failed")?
+                .map_err(|_| "ACP stream lock failed")?
                 .insert(session_id.into(), String::new());
             event_server::publish_event(
                 &self.state,
                 &self.app,
-                base_event(session_id, HookEventKind::Running),
+                base_event(self.agent, session_id, HookEventKind::Running),
             )
             .map(|_| ())
         })();
@@ -501,7 +581,7 @@ impl OpenCodeBridge {
         let id = session_id.to_string();
         let generation = self.reader_generation.load(Ordering::SeqCst);
         thread::Builder::new()
-            .name("lume-opencode-prompt".into())
+            .name(format!("lume-{}-prompt", self.agent.prefix))
             .spawn(move || {
                 let result = bridge.raw_request(
                     "session/prompt",
@@ -544,13 +624,14 @@ impl OpenCodeBridge {
                 } else {
                     HookEventKind::Failed
                 };
-                let mut event = base_event(&id, event_kind);
+                let mut event = base_event(bridge.agent, &id, event_kind);
                 event.last_response = response;
                 if cancelled || stop_reason == Some("cancelled") {
                     event.status_label = Some("Interrompido".into());
                 } else if let Err(error) = result {
                     event.status_label = Some(format!(
-                        "OpenCode: {}",
+                        "{}: {}",
+                        bridge.agent.label,
                         error.chars().take(160).collect::<String>()
                     ));
                 }
@@ -573,7 +654,7 @@ impl OpenCodeBridge {
         if response.get("configOptions").is_some() {
             self.session_configs
                 .lock()
-                .map_err(|_| "OpenCode config lock failed")?
+                .map_err(|_| "ACP config lock failed")?
                 .insert(session_id.into(), response["configOptions"].clone());
         }
         Ok(())
@@ -584,7 +665,7 @@ impl OpenCodeBridge {
         if !self
             .runtime
             .lock()
-            .map_err(|_| "OpenCode state lock failed")?
+            .map_err(|_| "ACP state lock failed")?
             .loaded
             .contains(session_id)
         {
@@ -592,10 +673,15 @@ impl OpenCodeBridge {
         }
         self.session_configs
             .lock()
-            .map_err(|_| "OpenCode config lock failed")?
+            .map_err(|_| "ACP config lock failed")?
             .get(session_id)
             .cloned()
-            .ok_or_else(|| "Esta versão do OpenCode não informou as opções da sessão".into())
+            .ok_or_else(|| {
+                format!(
+                    "Esta versão do {} não informou as opções da sessão",
+                    self.agent.label
+                )
+            })
     }
 
     pub fn slash_commands(
@@ -603,10 +689,12 @@ impl OpenCodeBridge {
         session_id: &str,
         cwd: &str,
     ) -> Result<Vec<crate::agent_commands::AgentSlashCommand>, String> {
-        // Loading the session makes OpenCode announce its commands over ACP.
+        // Loading the session makes the agent announce its commands over ACP.
         let _ = self.config_options(session_id, cwd);
         for _ in 0..40 {
-            if let Some(commands) = crate::agent_commands::opencode_commands(session_id) {
+            if let Some(commands) =
+                crate::agent_commands::acp_commands(&self.agent.session_id(session_id))
+            {
                 return Ok(commands);
             }
             thread::sleep(Duration::from_millis(25));
@@ -631,7 +719,7 @@ impl OpenCodeBridge {
         validate_config_value(option, value)?;
         let config_id = option["id"]
             .as_str()
-            .ok_or("OpenCode retornou uma opção sem identificador")?;
+            .ok_or("O agente retornou uma opção sem identificador")?;
         let response = self.raw_request(
             "session/set_config_option",
             json!({"sessionId":session_id,"configId":config_id,"value":value}),
@@ -642,14 +730,14 @@ impl OpenCodeBridge {
             self.cache_config(session_id, &response)?;
             return Ok(returned.clone());
         }
-        // Some OpenCode versions report the new selection in a separate
+        // Some agent versions report the new selection in a separate
         // config_option_update notification. Do not replace that newer cache
         // with a stale set_config_option response.
         for _ in 0..20 {
             let cached = self
                 .session_configs
                 .lock()
-                .map_err(|_| "OpenCode config lock failed")?
+                .map_err(|_| "ACP config lock failed")?
                 .get(session_id)
                 .cloned();
             if let Some(config) = cached {
@@ -659,7 +747,10 @@ impl OpenCodeBridge {
             }
             thread::sleep(Duration::from_millis(25));
         }
-        Err("OpenCode não confirmou a troca de modelo. A seleção anterior foi mantida.".into())
+        Err(format!(
+            "{} não confirmou a troca de modelo. A seleção anterior foi mantida.",
+            self.agent.label
+        ))
     }
 
     pub fn set_model_settings(
@@ -671,7 +762,7 @@ impl OpenCodeBridge {
     ) -> Result<CodexThreadModelSettings, String> {
         let mut config = self.config_options(session_id, cwd)?;
         let option =
-            config_option(&config, "model").ok_or("OpenCode não oferece seleção de modelo")?;
+            config_option(&config, "model").ok_or("Este agente não oferece seleção de modelo")?;
         validate_config_value(option, model)?;
         let changing_model = option["currentValue"].as_str() != Some(model);
         // A model change supplies its own effort catalog and default. Do not apply
@@ -702,23 +793,23 @@ impl OpenCodeBridge {
     ) -> Result<CodexThreadModelSettings, String> {
         let config = self.config_options(session_id, cwd)?;
         let option =
-            config_option(&config, "mode").ok_or("OpenCode não oferece seleção de modo")?;
+            config_option(&config, "mode").ok_or("Este agente não oferece seleção de modo")?;
         model_settings_from_config(&self.set_config_option(session_id, option, mode)?)
     }
 
     pub fn cancel(&self, session_id: &str) -> Result<(), String> {
         self.runtime
             .lock()
-            .map_err(|_| "OpenCode state lock failed")?
+            .map_err(|_| "ACP state lock failed")?
             .cancelled
             .insert(session_id.into());
         let writer = self
             .runtime
             .lock()
-            .map_err(|_| "OpenCode state lock failed")?
+            .map_err(|_| "ACP state lock failed")?
             .process
             .as_ref()
-            .ok_or("OpenCode ACP is not running")?
+            .ok_or("ACP agent is not running")?
             .writer
             .clone();
         if let Ok(mut pending) = self.inbound_permissions.lock() {
@@ -738,10 +829,7 @@ impl OpenCodeBridge {
     }
 
     pub fn close(&self, session_id: &str) -> Result<(), String> {
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| "OpenCode state lock failed")?;
+        let mut runtime = self.runtime.lock().map_err(|_| "ACP state lock failed")?;
         if !runtime.loaded.contains(session_id) {
             return Ok(());
         }
@@ -759,7 +847,7 @@ impl OpenCodeBridge {
             runtime.active.remove(session_id);
             self.session_configs
                 .lock()
-                .map_err(|_| "OpenCode config lock failed")?
+                .map_err(|_| "ACP config lock failed")?
                 .remove(session_id);
             return Ok(());
         }
@@ -770,10 +858,7 @@ impl OpenCodeBridge {
             json!({"sessionId":session_id}),
             REQUEST_TIMEOUT,
         )?;
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| "OpenCode state lock failed")?;
+        let mut runtime = self.runtime.lock().map_err(|_| "ACP state lock failed")?;
         runtime.loaded.remove(session_id);
         runtime.active.remove(session_id);
         runtime.cancelled.remove(session_id);
@@ -785,16 +870,16 @@ impl OpenCodeBridge {
         drop(runtime);
         self.session_configs
             .lock()
-            .map_err(|_| "OpenCode config lock failed")?
+            .map_err(|_| "ACP config lock failed")?
             .remove(session_id);
         Ok(())
     }
 }
 
-fn permission_profile() -> PermissionProfile {
+fn permission_profile(agent: &AcpAgent) -> PermissionProfile {
     PermissionProfile {
         mode: AccessMode::WorkspaceWrite,
-        label: "OpenCode ACP".into(),
+        label: format!("{} ACP", agent.label),
         approval_policy: "user".into(),
         approvals_reviewer: None,
         can_respond_from_lume: true,
@@ -806,12 +891,12 @@ fn permission_profile() -> PermissionProfile {
     }
 }
 
-fn base_event(id: &str, event: HookEventKind) -> HookEvent {
+fn base_event(agent: &AcpAgent, id: &str, event: HookEventKind) -> HookEvent {
     HookEvent {
         event,
-        session_id: format!("opencode-acp:{id}"),
-        agent: AgentKind::OpenCode,
-        agent_label: Some("OpenCode".into()),
+        session_id: agent.session_id(id),
+        agent: (agent.agent)(),
+        agent_label: Some(agent.label.into()),
         session_name: None,
         project: None,
         source: Some(SessionSource::Desktop),
@@ -835,12 +920,13 @@ fn base_event(id: &str, event: HookEventKind) -> HookEvent {
 fn send_json(writer: &Arc<Mutex<ChildStdin>>, value: Value) -> Result<(), String> {
     writer
         .lock()
-        .map_err(|_| "OpenCode write lock failed".to_string())?
+        .map_err(|_| "ACP write lock failed".to_string())?
         .write_all(format!("{value}\n").as_bytes())
         .map_err(|error| error.to_string())
 }
 
 fn read_messages(
+    agent: &'static AcpAgent,
     output: impl Read,
     writer: Arc<Mutex<ChildStdin>>,
     pending: Pending,
@@ -867,6 +953,7 @@ fn read_messages(
         if let Some(id_value) = message.get("id") {
             if message.get("method").is_some() {
                 answer_agent_request(
+                    agent,
                     id_value.clone(),
                     &message,
                     &writer,
@@ -883,7 +970,7 @@ fn read_messages(
                                 Err(error
                                     .get("message")
                                     .and_then(Value::as_str)
-                                    .unwrap_or("OpenCode ACP error")
+                                    .unwrap_or("ACP agent error")
                                     .to_string())
                             })
                             .unwrap_or_else(|| {
@@ -895,6 +982,7 @@ fn read_messages(
             }
         } else if message.get("method").and_then(Value::as_str) == Some("session/update") {
             handle_update(
+                agent,
                 &message,
                 &state,
                 &app,
@@ -906,7 +994,7 @@ fn read_messages(
     }
     if let Ok(mut requests) = pending.lock() {
         for (_, sender) in requests.drain() {
-            let _ = sender.send(Err("OpenCode ACP process disconnected".into()));
+            let _ = sender.send(Err(format!("{} ACP process disconnected", agent.label)));
         }
     }
     if generation != reader_generation.load(Ordering::SeqCst) {
@@ -953,6 +1041,7 @@ pub(crate) fn read_bounded_line(reader: &mut impl BufRead) -> std::io::Result<Op
 }
 
 fn handle_update(
+    agent: &AcpAgent,
     message: &Value,
     state: &AppState,
     app: &AppHandle,
@@ -967,7 +1056,10 @@ fn handle_update(
     let update = &params["update"];
     let kind = update["sessionUpdate"].as_str().unwrap_or("");
     if kind == "available_commands_update" {
-        crate::agent_commands::record_opencode_commands(id, &update["availableCommands"]);
+        crate::agent_commands::record_acp_commands(
+            &agent.session_id(id),
+            &update["availableCommands"],
+        );
         return;
     }
     if kind == "config_option_update" {
@@ -983,7 +1075,7 @@ fn handle_update(
             .as_str()
             .filter(|title| !title.trim().is_empty())
         {
-            let mut event = base_event(id, HookEventKind::Activity);
+            let mut event = base_event(agent, id, HookEventKind::Activity);
             event.session_name = Some(title.chars().take(140).collect());
             let _ = event_server::publish_event(state, app, event);
         }
@@ -1021,7 +1113,8 @@ fn handle_update(
             }
             SessionActivity {
                 id: format!(
-                    "opencode-{kind}:{id}:{}:{}",
+                    "{}-{kind}:{id}:{}:{}",
+                    agent.prefix,
                     turn_sequence
                         .lock()
                         .ok()
@@ -1040,7 +1133,7 @@ fn handle_update(
                 title: if kind == "user_message_chunk" {
                     "Você"
                 } else if kind == "agent_message_chunk" {
-                    "OpenCode"
+                    agent.label
                 } else {
                     "Pensando"
                 }
@@ -1053,9 +1146,9 @@ fn handle_update(
                 append_detail: true,
             }
         }
-        "tool_call" | "tool_call_update" => tool_activity(id, update),
+        "tool_call" | "tool_call_update" => tool_activity(agent, id, update),
         "plan" => SessionActivity {
-            id: format!("opencode-plan:{id}"),
+            id: format!("{}-plan:{id}", agent.prefix),
             kind: "plan".into(),
             title: "Plano atualizado".into(),
             detail: Some(plan_detail(update)),
@@ -1067,7 +1160,7 @@ fn handle_update(
         },
         _ => return,
     };
-    let mut event = base_event(id, HookEventKind::Activity);
+    let mut event = base_event(agent, id, HookEventKind::Activity);
     event.activity = Some(activity);
     let _ = event_server::publish_event(state, app, event);
 }
@@ -1094,7 +1187,7 @@ fn plan_detail(update: &Value) -> String {
         .join("\n")
 }
 
-fn tool_activity(session_id: &str, update: &Value) -> SessionActivity {
+fn tool_activity(agent: &AcpAgent, session_id: &str, update: &Value) -> SessionActivity {
     let tool_id = update["toolCallId"].as_str().unwrap_or("tool");
     let title = update["title"].as_str().unwrap_or("Ferramenta em execução");
     let tool_kind = update["kind"].as_str().unwrap_or("other");
@@ -1138,7 +1231,7 @@ fn tool_activity(session_id: &str, update: &Value) -> SessionActivity {
         })
         .map(|text| text.chars().take(8 * 1024).collect());
     SessionActivity {
-        id: format!("opencode-tool:{session_id}:{tool_id}"),
+        id: format!("{}-tool:{session_id}:{tool_id}", agent.prefix),
         kind: match tool_kind {
             "edit" | "delete" | "move" => "file",
             "read" | "search" | "fetch" => "tool",
@@ -1175,7 +1268,7 @@ fn resume_method(
     } else if can_resume {
         Ok("session/resume")
     } else {
-        Err("This OpenCode version cannot resume sessions through ACP".into())
+        Err("this version cannot resume sessions through ACP".into())
     }
 }
 
@@ -1219,17 +1312,17 @@ fn validate_config_value(option: &Value, value: &str) -> Result<(), String> {
         .iter()
         .any(|item| item["value"].as_str() == Some(value))
     {
-        return Err("A opção selecionada não está disponível nesta sessão OpenCode".into());
+        return Err("A opção selecionada não está disponível nesta sessão".into());
     }
     Ok(())
 }
 
 fn model_settings_from_config(config: &Value) -> Result<CodexThreadModelSettings, String> {
     let option =
-        config_option(config, "model").ok_or("OpenCode não informou os modelos da sessão")?;
+        config_option(config, "model").ok_or("O agente não informou os modelos da sessão")?;
     let model = option["currentValue"]
         .as_str()
-        .ok_or("OpenCode não informou o modelo atual")?
+        .ok_or("O agente não informou o modelo atual")?
         .to_string();
     let effort = config_option(config, "thought_level");
     let reasoning_effort = effort
@@ -1271,7 +1364,7 @@ fn model_settings_from_config(config: &Value) -> Result<CodexThreadModelSettings
         })
         .collect::<Vec<_>>();
     if models.is_empty() {
-        return Err("OpenCode não retornou modelos disponíveis".into());
+        return Err("O agente não retornou modelos disponíveis".into());
     }
     let session_modes = config_option(config, "mode").and_then(|option| {
         Some(SessionModeSettings {
@@ -1311,7 +1404,7 @@ fn prompt_content(
         let uri = Url::from_file_path(&file.path).map_err(|_| "Caminho de anexo inválido")?;
         if file.is_image {
             if !can_images {
-                return Err("Esta versão do OpenCode não aceita imagens pelo ACP".into());
+                return Err("Esta versão do agente não aceita imagens pelo ACP".into());
             }
             let mut bytes = Vec::new();
             std::fs::File::open(&file.path)
@@ -1331,6 +1424,7 @@ fn prompt_content(
 }
 
 fn answer_agent_request(
+    agent: &AcpAgent,
     id: Value,
     message: &Value,
     writer: &Arc<Mutex<ChildStdin>>,
@@ -1358,9 +1452,9 @@ fn answer_agent_request(
         .unwrap_or_default();
     let tool = &message["params"]["toolCall"];
     let tool_id = tool["toolCallId"].as_str().unwrap_or("tool");
-    let permission_id = format!("opencode:{session_id}:{id}:{tool_id}");
-    let mut event = base_event(session_id, HookEventKind::PermissionRequest);
-    let mut profile = permission_profile();
+    let permission_id = format!("{}:{session_id}:{id}:{tool_id}", agent.prefix);
+    let mut event = base_event(agent, session_id, HookEventKind::PermissionRequest);
+    let mut profile = permission_profile(agent);
     profile.available_actions = vec![PermissionAction::Deny];
     if options
         .iter()
@@ -1382,7 +1476,7 @@ fn answer_agent_request(
         kind: "tool".into(),
         summary: tool["title"]
             .as_str()
-            .unwrap_or("OpenCode requests permission")
+            .unwrap_or("The agent requests permission")
             .chars()
             .take(180)
             .collect(),
@@ -1637,17 +1731,48 @@ mod tests {
     #[test]
     fn partial_tool_updates_keep_original_tool_metadata_when_merged() {
         let original = tool_activity(
+            &OPENCODE,
             "one",
             &json!({"sessionUpdate":"tool_call","toolCallId":"edit-1","kind":"edit","title":"Edit config","locations":[{"path":"config.ts"},{"path":"config.ts"}]}),
         );
         assert_eq!(original.kind, "file");
         assert_eq!(original.files, vec!["config.ts"]);
         let update = tool_activity(
+            &OPENCODE,
             "one",
             &json!({"sessionUpdate":"tool_call_update","toolCallId":"edit-1","status":"completed"}),
         );
         assert_eq!(original.id, update.id);
         assert!(update.append_detail);
         assert_eq!(update.status, "completed");
+    }
+
+    #[test]
+    fn each_agent_keeps_its_own_session_and_activity_ids() {
+        assert_eq!(OPENCODE.session_id("abc"), "opencode-acp:abc");
+        assert_eq!(GROK.session_id("abc"), "grok-acp:abc");
+        let update = json!({"sessionUpdate":"tool_call","toolCallId":"t1","kind":"execute","title":"npm test","rawInput":{"command":"npm test"}});
+        assert_eq!(
+            tool_activity(&OPENCODE, "abc", &update).id,
+            "opencode-tool:abc:t1"
+        );
+        let grok = tool_activity(&GROK, "abc", &update);
+        assert_eq!(grok.id, "grok-tool:abc:t1");
+        assert_eq!(grok.kind, "command");
+        assert_eq!(grok.detail.as_deref(), Some("npm test"));
+        let event = base_event(&GROK, "abc", HookEventKind::Running);
+        assert_eq!(event.agent, AgentKind::Grok);
+        assert_eq!(event.agent_label.as_deref(), Some("Grok"));
+    }
+
+    #[test]
+    fn grok_effort_is_found_by_its_category() {
+        let config = json!([
+            {"id":"model","category":"model","type":"select","currentValue":"grok-4.6","options":[{"value":"grok-4.6","name":"Grok 4.6"}]},
+            {"id":"reasoning_effort","category":"thought_level","type":"select","currentValue":"high","options":[{"value":"low","name":"Low"},{"value":"high","name":"High"}]}
+        ]);
+        let settings = model_settings_from_config(&config).unwrap();
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(settings.models[0].supported_reasoning_efforts.len(), 2);
     }
 }

@@ -101,7 +101,7 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
     canTerminate:
       (!legacyGeminiCli && session.source === "cli" && Boolean(session.processId))
       || (
-        ["codex", "opencode", "antigravity", "claude_code", "omp"].includes(session.agent)
+        ["codex", "opencode", "grok", "antigravity", "claude_code", "omp"].includes(session.agent)
         && (session.source === "desktop" || (session.source === "cli" && !session.processId))
         && session.controlOrigin === "lume"
         && Boolean(session.nativeSessionId?.trim())

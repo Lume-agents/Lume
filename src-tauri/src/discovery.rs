@@ -514,6 +514,7 @@ fn scan(
                         AgentKind::DeepSeek => "DeepSeek",
                         AgentKind::Gemini => "Gemini",
                         AgentKind::Omp => "Oh My Pi",
+                        AgentKind::Grok => "Grok",
                         AgentKind::Unknown => "Agent",
                     };
                     (agent, label.to_string())
@@ -1637,6 +1638,14 @@ pub(crate) fn detect_agent_arguments(name: &str, arguments: &[String]) -> Option
         Some(AgentKind::DeepSeek)
     } else if executable_matches("gemini") {
         Some(AgentKind::Gemini)
+    } else if executable_matches("grok") {
+        // `grok agent ...` is the ACP server Lume itself runs and `-p` a one-shot prompt; only the
+        // interactive TUI is a conversation of its own.
+        (!arguments
+            .iter()
+            .skip(1)
+            .any(|argument| matches!(argument.as_str(), "agent" | "-p" | "--print" | "--prompt")))
+        .then_some(AgentKind::Grok)
     } else {
         None
     }
@@ -2867,6 +2876,32 @@ mod tests {
                 &["/usr/bin/rg".into(), "local-agent".into(), "/work".into(),],
                 &[plugin]
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_grok_tui_is_an_agent_but_its_acp_server_and_one_shot_prompts_are_not() {
+        let argv = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            detect_agent_arguments("grok", &argv(&["/home/me/.grok/bin/grok"])),
+            Some(AgentKind::Grok)
+        );
+        assert_eq!(
+            detect_agent_arguments("grok", &argv(&["grok", "--resume", "abc"])),
+            Some(AgentKind::Grok)
+        );
+        assert_eq!(
+            detect_agent_arguments("grok", &argv(&["grok", "agent", "stdio"])),
+            None
+        );
+        assert_eq!(
+            detect_agent_arguments("grok", &argv(&["grok", "-p", "hello"])),
             None
         );
     }

@@ -12,7 +12,7 @@
   } = $props();
   let copied = $state(false);
   const command = $derived(agentLoginCommand(agent));
-  const label = $derived(agent === "claude" ? "Claude Code" : agent === "opencode" ? "OpenCode" : agent === "omp" ? "Oh My Pi" : agent);
+  const label = $derived(agent === "claude" ? "Claude Code" : agent === "opencode" ? "OpenCode" : agent === "grok" ? "Grok Build" : agent === "omp" ? "Oh My Pi" : agent);
   const pt = $derived(language === "pt-BR");
 
   async function copyCommand() {

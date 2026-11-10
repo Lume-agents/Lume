@@ -5,6 +5,7 @@ export type AgentKind =
   | "claude_code"
   | "antigravity"
   | "opencode"
+  | "grok"
   | "omp"
   | "deepseek"
   | "gemini"
@@ -536,7 +537,7 @@ export interface WorkflowContextPackage {
 }
 
 export interface IntegrationStatus {
-  kind: "codex" | "claude" | "antigravity" | "opencode" | "omp" | "deepseek" | "gemini";
+  kind: "codex" | "claude" | "antigravity" | "opencode" | "grok" | "omp" | "deepseek" | "gemini";
   label: string;
   installed: boolean;
   configured: boolean;

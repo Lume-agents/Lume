@@ -143,6 +143,13 @@ pub fn catalog() -> Vec<Box<dyn AgentPlugin>> {
             hook_events: &[],
         }),
         Box::new(BuiltInAgentPlugin {
+            kind: IntegrationKind::Grok,
+            label: "Grok Build",
+            executable: "grok",
+            direct_permissions: true,
+            hook_events: &[],
+        }),
+        Box::new(BuiltInAgentPlugin {
             kind: IntegrationKind::Omp,
             label: "Oh My Pi",
             executable: "omp",
@@ -248,7 +255,7 @@ mod tests {
     #[test]
     fn built_in_plugins_expose_their_monitoring_contract() {
         let plugins = catalog();
-        assert_eq!(plugins.len(), 7);
+        assert_eq!(plugins.len(), 8);
         let claude = plugins
             .iter()
             .find(|plugin| plugin.kind() == IntegrationKind::Claude)

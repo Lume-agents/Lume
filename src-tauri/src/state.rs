@@ -5223,6 +5223,7 @@ fn integration_kind_for_agent(agent: &AgentKind) -> Option<IntegrationKind> {
         AgentKind::DeepSeek => Some(IntegrationKind::DeepSeek),
         AgentKind::Gemini => Some(IntegrationKind::Gemini),
         AgentKind::Omp => Some(IntegrationKind::Omp),
+        AgentKind::Grok => Some(IntegrationKind::Grok),
         AgentKind::ChatGpt | AgentKind::Claude | AgentKind::Unknown => None,
     }
 }
@@ -5424,6 +5425,7 @@ fn agent_label(agent: &AgentKind) -> &'static str {
         AgentKind::DeepSeek => "DeepSeek",
         AgentKind::Gemini => "Gemini",
         AgentKind::Omp => "Oh My Pi",
+        AgentKind::Grok => "Grok",
         AgentKind::Unknown => "Agente",
     }
 }
@@ -5466,6 +5468,7 @@ fn persistent_session_alias_key(session: &AgentSession) -> Option<String> {
         AgentKind::DeepSeek => "deepseek".to_string(),
         AgentKind::Gemini => "gemini".to_string(),
         AgentKind::Omp => "omp".to_string(),
+        AgentKind::Grok => "grok".to_string(),
         AgentKind::Unknown => format!("unknown:{}", session.agent_label.to_lowercase()),
     };
     Some(format!("{agent}:{native_id}"))

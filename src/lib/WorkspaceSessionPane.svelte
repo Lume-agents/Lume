@@ -683,7 +683,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   ));
   // Claude Code and Codex can change how they ask before acting, from Lume.
   const supportsPermissionPicker = $derived(!session.remote && ["claude_code", "codex", "antigravity", "omp"].includes(session.agent));
-  const supportsAgentControls = $derived(!session.remote && ["codex", "claude_code", "opencode", "antigravity", "omp"].includes(session.agent));
+  const supportsAgentControls = $derived(!session.remote && ["codex", "claude_code", "opencode", "grok", "antigravity", "omp"].includes(session.agent));
   let sourceEntryId = $state<string | null>(null);
   let actionNotice = $state("");
   let forkingEntryId = $state<string | null>(null);
@@ -1379,7 +1379,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     if (modelControlsDisabled) return;
     selectedModel = model;
     const option = modelSettings?.models.find((candidate) => candidate.model === model);
-    if (session.agent === "opencode" && model !== modelSettings?.model) {
+    if ((session.agent === "opencode" || session.agent === "grok") && model !== modelSettings?.model) {
       selectedEffort = "";
     } else if (option && !option.supportedReasoningEfforts.some((effort) => effort.value === selectedEffort)) {
       selectedEffort = option.defaultReasoningEffort;
@@ -1395,7 +1395,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
 
   async function fetchAgentControls() {
-      if (["codex", "opencode", "antigravity", "omp"].includes(session.agent)) {
+      if (["codex", "opencode", "grok", "antigravity", "omp"].includes(session.agent)) {
         const [mode, settings] = await Promise.all([
           session.agent === "codex" ? getSessionCollaborationMode(session.id) : Promise.resolve("default" as CollaborationMode),
           getSessionModelSettings(session.id),
@@ -1538,7 +1538,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     controlsSaving = true;
     controlsError = "";
     try {
-      if (["codex", "opencode", "antigravity", "omp"].includes(session.agent)) {
+      if (["codex", "opencode", "grok", "antigravity", "omp"].includes(session.agent)) {
         if ((session.agent !== "antigravity" && !selectedModel) || (session.agent === "codex" && !selectedEffort)) return;
         const savedSettings = await setSessionModelSettings(session.id, selectedModel, selectedEffort);
         modelSettings = savedSettings;
@@ -1560,7 +1560,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       }
     } catch (error) {
       controlsError = String(error).replace(/^Error:\s*/, "");
-      if (session.agent === "opencode") {
+      if (session.agent === "opencode" || session.agent === "grok") {
         try {
           modelSettings = await getSessionModelSettings(session.id);
           selectedModel = modelSettings.model;
@@ -3221,7 +3221,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             aria-label={tr("Choose model and effort", "Escolher modelo e esforço")}
             aria-haspopup="dialog" aria-expanded={controlsOpen}
             onclick={() => void toggleAgentControls()}>
-            <span>{["codex", "opencode", "antigravity", "omp"].includes(session.agent)
+            <span>{["codex", "opencode", "grok", "antigravity", "omp"].includes(session.agent)
               ? (modelSettings?.models.find((option) => option.model === selectedModel)?.displayName || selectedModel || "Model")
               : (claudeModels.find((option) => option.model === claudeModel)?.displayName || claudeModel || tr("Model", "Modelo"))}</span>
             {#if (session.agent === "codex" || session.agent === "claude_code") && fastMode}<span class="fast-indicator" title={tr("Fast mode is on", "Modo Fast ligado")}><WorkspaceChatIcon name="fast" size={13} active /></span>{/if}
@@ -3253,7 +3253,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                     </button>
                   {/if}
                 {/snippet}
-                {#if ["codex", "opencode", "antigravity", "omp"].includes(session.agent)}
+                {#if ["codex", "opencode", "grok", "antigravity", "omp"].includes(session.agent)}
                   {#if modelSettings}
                     <div class="controls-model-row">
                       {@render modelResetButton()}
@@ -3275,7 +3275,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                     {@render modelFastButton()}
                   </div>
                 {/if}
-                {#if session.agent === "opencode" && modelSettings?.sessionModes?.options.length}
+                {#if (session.agent === "opencode" || session.agent === "grok") && modelSettings?.sessionModes?.options.length}
                   <label class="controls-field"><span>{tr("Agent mode", "Modo do agente")}</span>
                     <LumeSelect value={modelSettings.sessionModes.currentMode} options={modelSettings.sessionModes.options}
                       disabled={modelControlsDisabled} ariaLabel={tr("Agent mode", "Modo do agente")} minWidth={190} onValueChange={changeAgentMode} />
@@ -3295,7 +3295,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                     </div>
                   </div>
                 {/if}
-                {#if promptIsRunning && session.agent !== "opencode"}<p class="controls-note">{session.agent === "codex" || session.agent === "antigravity"
+                {#if promptIsRunning && session.agent !== "opencode" && session.agent !== "grok"}<p class="controls-note">{session.agent === "codex" || session.agent === "antigravity"
                   ? tr("Changes made now will apply when this prompt finishes.", "Mudanças feitas agora serão aplicadas ao final deste prompt.")
                   : tr("Finish or interrupt the current prompt to apply changes.", "Finalize ou interrompa o prompt atual para aplicar mudanças.")}</p>{/if}
                 {#if controlsSaving}<p class="controls-saving" role="status">{tr("Saving…", "Salvando…")}</p>{/if}
@@ -3337,7 +3337,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   </form>
 </article>
 
-{#if (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)) || (session.agent === "omp" && session.status === "failed" && /no models available/i.test(session.statusLabel))) && ["claude_code", "opencode", "antigravity", "deepseek", "codex", "gemini", "omp"].includes(session.agent)}
+{#if (connectionRequired || (session.status === "failed" && session.statusLabel !== dismissedConnectionError && agentConnectionMessage(session.statusLabel)) || (session.agent === "omp" && session.status === "failed" && /no models available/i.test(session.statusLabel))) && ["claude_code", "opencode", "grok", "antigravity", "deepseek", "codex", "gemini", "omp"].includes(session.agent)}
   <AgentConnectionDialog
     agent={(session.agent === "claude_code" ? "claude" : session.agent) as ConnectableAgent}
     message={connectionRequired ?? (session.agent === "omp" && /no models available/i.test(session.statusLabel) ? tr("No models are available. Configure omp, then retry this session.", "Nenhum modelo está disponível. Configure o omp e tente esta sessão novamente.") : agentConnectionMessage(session.statusLabel) ?? "")}

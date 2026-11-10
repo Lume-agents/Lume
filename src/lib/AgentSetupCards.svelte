@@ -119,6 +119,7 @@
     codex: "https://github.com/openai/codex",
     gemini: "https://github.com/google-gemini/gemini-cli",
     opencode: "https://opencode.ai",
+    grok: "https://x.ai/cli",
     antigravity: "https://antigravity.google/cli",
     omp: "https://github.com/can1357/oh-my-pi",
     deepseek: "https://www.deepseek.com",

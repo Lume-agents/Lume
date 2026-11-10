@@ -33,6 +33,7 @@ pub enum IntegrationKind {
     DeepSeek,
     Gemini,
     Omp,
+    Grok,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -243,7 +244,7 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
                 "CLI não encontrada".into()
             } else if kind == IntegrationKind::Gemini {
                 "Somente monitoramento por processo; o Lume não altera as configurações compartilhadas do Gemini".into()
-            } else if kind == IntegrationKind::OpenCode {
+            } else if matches!(kind, IntegrationKind::OpenCode | IntegrationKind::Grok) {
                 "Controle direto via ACP local; sem hook ou gateway global".into()
             } else if kind == IntegrationKind::DeepSeek {
                 "CLI detectada; requer o perfil TUI do DeepSeek Harness".into()
@@ -307,6 +308,7 @@ pub fn resumable_sessions(kind: &IntegrationKind) -> Result<Vec<ResumableSession
             Vec::new()
         }
         IntegrationKind::Omp => omp_resumable_sessions(&home.join(".omp")),
+        IntegrationKind::Grok => grok_resumable_sessions(&grok_home(&home).join("sessions")),
     };
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     sessions.truncate(250);
@@ -338,6 +340,7 @@ pub(crate) fn indexed_session_names(
         IntegrationKind::Claude
         | IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
+        | IntegrationKind::Grok
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini
         | IntegrationKind::Omp => HashMap::new(),
@@ -360,6 +363,7 @@ pub(crate) fn native_session_title(kind: &IntegrationKind, session_id: &str) -> 
         IntegrationKind::Claude
         | IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
+        | IntegrationKind::Grok
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini
         | IntegrationKind::Omp => None,
@@ -435,6 +439,7 @@ pub fn resume_preview(kind: &IntegrationKind, session_id: &str) -> Option<Resume
         IntegrationKind::Claude => claude_last_response(std::io::Cursor::new(recent)),
         IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
+        | IntegrationKind::Grok
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini => None,
         IntegrationKind::Omp => omp_last_response(&recent),
@@ -457,6 +462,7 @@ pub fn resume_work_activities(kind: &IntegrationKind, session_id: &str) -> Vec<S
         IntegrationKind::Claude => claude_work_activities(std::io::Cursor::new(recent), session_id),
         IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
+        | IntegrationKind::Grok
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini
         | IntegrationKind::Omp => Vec::new(),
@@ -901,9 +907,10 @@ fn resume_path(kind: &IntegrationKind, session_id: &str) -> Option<PathBuf> {
         IntegrationKind::Antigravity => {
             return antigravity_transcript_path(&home.join(".gemini/antigravity-cli"), session_id)
         }
-        IntegrationKind::OpenCode | IntegrationKind::DeepSeek | IntegrationKind::Gemini => {
-            return None
-        }
+        IntegrationKind::OpenCode
+        | IntegrationKind::Grok
+        | IntegrationKind::DeepSeek
+        | IntegrationKind::Gemini => return None,
         IntegrationKind::Omp => return omp_session_path(&home.join(".omp"), session_id),
     };
     resume_files(&root).into_iter().find(|path| {
@@ -943,6 +950,70 @@ fn omp_last_response(bytes: &[u8]) -> Option<String> {
                 })
                 .filter(|text| !text.is_empty())
         })
+}
+
+/// Grok keeps its state under `$GROK_HOME`, or `~/.grok` when that is unset.
+fn grok_home(home: &Path) -> PathBuf {
+    env::var_os("GROK_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".grok"))
+}
+
+/// Sessions live in `sessions/<encoded cwd>/<session id>/summary.json`; the summary carries the
+/// title, the working directory and the timestamps, so the conversation itself is never read.
+fn grok_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
+    let mut sessions = Vec::new();
+    for group in sorted_child_directories(root, 1000) {
+        for directory in sorted_child_directories(&group, 250) {
+            if let Some(session) = grok_session_summary(&directory) {
+                sessions.push(session);
+            }
+        }
+    }
+    sessions
+}
+
+fn grok_session_summary(directory: &Path) -> Option<ResumableSession> {
+    let summary: Value =
+        serde_json::from_slice(&fs::read(directory.join("summary.json")).ok()?).ok()?;
+    // Subagent sessions share the tree but are not conversations someone resumes.
+    if summary["session_kind"]
+        .as_str()
+        .is_some_and(|kind| kind.starts_with("subagent"))
+        || summary["hidden"].as_bool() == Some(true)
+    {
+        return None;
+    }
+    let id = summary["info"]["id"]
+        .as_str()
+        .filter(|id| is_safe_conversation_id(id))?
+        .to_string();
+    let working_directory = summary["info"]["cwd"].as_str()?.to_string();
+    let name = ["generated_title", "session_summary"]
+        .into_iter()
+        .find_map(|key| summary[key].as_str())
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Grok session")
+        .chars()
+        .take(140)
+        .collect();
+    let updated_at = summary["updated_at"]
+        .as_str()
+        .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
+        .map(|stamp| stamp.timestamp_millis())
+        .unwrap_or_else(|| file_updated_at(&directory.join("summary.json")));
+    Some(ResumableSession {
+        id,
+        agent: IntegrationKind::Grok,
+        name,
+        project: resume_project_name(&working_directory),
+        working_directory,
+        source: "Grok".into(),
+        updated_at,
+        profile: None,
+    })
 }
 
 fn omp_agent_dirs(config_root: &Path) -> Vec<(PathBuf, Option<String>)> {
@@ -1929,7 +2000,6 @@ fn recent_codex_resume_files(root: &Path, limit: usize) -> Vec<PathBuf> {
     files
 }
 
-#[cfg(target_os = "windows")]
 fn sorted_child_directories(root: &Path, limit: usize) -> Vec<PathBuf> {
     let mut directories = fs::read_dir(root)
         .into_iter()
@@ -2639,7 +2709,7 @@ fn add_handler(
             "timeout": timeout * 1_000,
             "description": "Envia o estado da sessão ao Lume"
         }),
-        IntegrationKind::OpenCode | IntegrationKind::Omp => {
+        IntegrationKind::OpenCode | IntegrationKind::Grok | IntegrationKind::Omp => {
             return Err("Este agente não usa hooks JSON".into())
         }
         IntegrationKind::Gemini => json!({
@@ -2730,9 +2800,10 @@ fn config_path(kind: &IntegrationKind) -> Option<PathBuf> {
         IntegrationKind::Antigravity => {
             return Some(antigravity_cli_settings_path_for(&PathBuf::from(user_home)))
         }
-        IntegrationKind::OpenCode | IntegrationKind::DeepSeek | IntegrationKind::Omp => {
-            return None
-        }
+        IntegrationKind::OpenCode
+        | IntegrationKind::Grok
+        | IntegrationKind::DeepSeek
+        | IntegrationKind::Omp => return None,
         IntegrationKind::Gemini => ".gemini/settings.json",
     };
     Some(PathBuf::from(user_home).join(directory))
@@ -2812,6 +2883,7 @@ fn provider(kind: &IntegrationKind) -> &'static str {
         IntegrationKind::DeepSeek => "deepseek",
         IntegrationKind::Gemini => "gemini",
         IntegrationKind::Omp => "omp",
+        IntegrationKind::Grok => "grok",
     }
 }
 
@@ -5034,5 +5106,51 @@ mod tests {
         let background = serde_json::json!({ "kind": "bg", "sessionId": "job" });
         assert!(!unused_interactive_record(&background, |_| false), "daemon sessions have their own rule");
         assert!(!unused_interactive_record(&serde_json::json!({ "kind": "interactive" }), |_| false));
+    }
+
+    #[test]
+    fn grok_sessions_come_from_their_summaries_and_skip_subagents() {
+        let root = std::env::temp_dir().join(format!("lume-grok-sessions-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let write = |group: &str, id: &str, summary: Value| {
+            let directory = root.join(group).join(id);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("summary.json"), summary.to_string()).unwrap();
+        };
+        write(
+            "%2Fhome%2Fme%2Fapp",
+            "019a0000-0000-7000-8000-000000000001",
+            serde_json::json!({
+                "info": {"id": "019a0000-0000-7000-8000-000000000001", "cwd": "/home/me/app"},
+                "session_summary": "fix login", "generated_title": "Fix the login form",
+                "created_at": "2026-11-09T10:00:00Z", "updated_at": "2026-11-09T11:00:00Z",
+                "num_messages": 4, "current_model_id": "grok-4.6"
+            }),
+        );
+        write(
+            "%2Fhome%2Fme%2Fapp",
+            "019a0000-0000-7000-8000-000000000002",
+            serde_json::json!({
+                "info": {"id": "019a0000-0000-7000-8000-000000000002", "cwd": "/home/me/app"},
+                "session_summary": "explore", "session_kind": "subagent",
+                "created_at": "2026-11-09T10:00:00Z", "updated_at": "2026-11-09T12:00:00Z",
+                "num_messages": 2, "current_model_id": "grok-4.6"
+            }),
+        );
+        let sessions = grok_resumable_sessions(&root);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.id, "019a0000-0000-7000-8000-000000000001");
+        assert_eq!(session.name, "Fix the login form");
+        assert_eq!(session.project, "app");
+        assert_eq!(session.working_directory, "/home/me/app");
+        assert_eq!(session.agent, IntegrationKind::Grok);
+        assert_eq!(
+            session.updated_at,
+            chrono::DateTime::parse_from_rfc3339("2026-11-09T11:00:00Z")
+                .unwrap()
+                .timestamp_millis()
+        );
     }
 }

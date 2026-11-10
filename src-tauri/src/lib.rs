@@ -1,3 +1,4 @@
+mod acp_bridge;
 mod adapters;
 mod remote_sessions;
 mod agent_extensions;
@@ -48,7 +49,6 @@ pub mod node_sessions;
 pub mod node_service;
 pub mod omp_rpc;
 mod omp_sessions;
-mod opencode_acp;
 mod overlay;
 mod path_mentions;
 mod protocol;
@@ -430,9 +430,9 @@ async fn get_session_environments(
         let agy = app
             .state::<antigravity_stream::AntigravityStream>()
             .environment_roots();
-        let opencode = app
-            .state::<opencode_acp::OpenCodeBridge>()
-            .environment_roots();
+        let bridges = app.state::<acp_bridge::AcpBridges>();
+        let opencode = bridges.opencode.environment_roots();
+        let grok = bridges.grok.environment_roots();
         for owner in &mut owners {
             if let Some(native_id) = &owner.native_id {
                 if owner.agent == AgentKind::ClaudeCode {
@@ -443,6 +443,7 @@ async fn get_session_environments(
                 let roots = match owner.agent {
                     AgentKind::Antigravity => &agy,
                     AgentKind::OpenCode => &opencode,
+                    AgentKind::Grok => &grok,
                     _ => continue,
                 };
                 owner.roots.extend(
@@ -3044,7 +3045,8 @@ fn list_resumable_sessions(
         .filter_map(|session| session.native_session_id)
         .collect::<HashSet<_>>();
     let sessions = if kind == IntegrationKind::OpenCode {
-        app.state::<opencode_acp::OpenCodeBridge>()
+        app.state::<acp_bridge::AcpBridges>()
+            .opencode
             .resumable_sessions()?
     } else {
         integrations::resumable_sessions(&kind)?
@@ -3306,15 +3308,18 @@ fn launch_session_impl(
         }
         return Ok(());
     }
-    if request.agent == IntegrationKind::OpenCode {
+    if let Some(bridge) = app
+        .state::<acp_bridge::AcpBridges>()
+        .inner()
+        .for_integration(&request.agent)
+    {
         if request.resume {
             ensure_native_session_not_external(
                 state,
-                &domain::AgentKind::OpenCode,
+                &(bridge.agent().agent)(),
                 request.resume_id.as_deref(),
             )?;
         }
-        let bridge = app.state::<opencode_acp::OpenCodeBridge>();
         let id = bridge.launch(
             &request.working_directory,
             request
@@ -3333,7 +3338,7 @@ fn launch_session_impl(
                 prompt.to_string(),
                 Vec::new(),
             )?;
-            state.record_prompt_activity(&format!("opencode-acp:{id}"), prompt, Vec::new())?;
+            state.record_prompt_activity(&bridge.agent().session_id(&id), prompt, Vec::new())?;
         }
         return Ok(());
     }
@@ -3623,6 +3628,7 @@ fn prepared_resume_preview_event(
         IntegrationKind::DeepSeek => return None,
         IntegrationKind::Gemini => return None,
         IntegrationKind::Omp => return None,
+        IntegrationKind::Grok => return None,
     };
     let native_session_id = request.resume_id.clone()?;
     let project = std::path::Path::new(&request.working_directory)
@@ -3747,7 +3753,7 @@ pub fn run() {
             app.manage(state.clone());
             app.manage(omp_rpc::OmpRpc::new(state.clone(), app.handle().clone()));
             app.manage(session_environments::EnvironmentMonitor::default());
-            app.manage(opencode_acp::OpenCodeBridge::new(
+            app.manage(acp_bridge::AcpBridges::new(
                 state.clone(),
                 app.handle().clone(),
             ));

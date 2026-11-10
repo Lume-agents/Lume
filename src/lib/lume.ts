@@ -1288,7 +1288,7 @@ export interface CliInstallMethod {
 }
 
 export interface CliInstallPlan {
-  /** `claude`, `codex`, `gemini`, `opencode`, `antigravity` or `github`. */
+  /** `claude`, `codex`, `gemini`, `opencode`, `antigravity`, `grok` or `github`. */
   kind: string;
   label: string;
   installed: boolean;

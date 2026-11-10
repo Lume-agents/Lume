@@ -15,13 +15,13 @@ use serde_json::{json, Value};
 use tauri::AppHandle;
 
 use crate::{
+    acp_bridge::read_bounded_line,
     codex_bridge::{CodexModelOption, CodexReasoningEffortOption, CodexThreadModelSettings},
     domain::{
         AccessMode, AgentKind, AgentRateLimit, HookEvent, HookEventKind, PermissionProfile,
         SessionActivity, SessionControlOrigin, SessionSource,
     },
     event_server,
-    opencode_acp::read_bounded_line,
     state::{now_millis, AppState},
 };
 

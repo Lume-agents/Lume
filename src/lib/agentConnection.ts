@@ -1,4 +1,4 @@
-export type ConnectableAgent = "claude" | "opencode" | "antigravity" | "deepseek" | "codex" | "gemini" | "omp";
+export type ConnectableAgent = "claude" | "opencode" | "grok" | "antigravity" | "deepseek" | "codex" | "gemini" | "omp";
 
 export function markedErrorMessage(error: unknown, marker: string): string | null {
   const message = String(error).replace(/^Error:\s*/, "");
@@ -20,6 +20,7 @@ export function agentConnectionMessage(error: unknown): string | null {
 export function agentLoginCommand(agent: ConnectableAgent): string | null {
   if (agent === "claude") return "claude auth login";
   if (agent === "opencode") return "opencode auth login";
+  if (agent === "grok") return "grok login";
   if (agent === "omp") return "omp";
   return null;
 }

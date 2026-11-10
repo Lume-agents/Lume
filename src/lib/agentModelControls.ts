@@ -9,7 +9,7 @@ import {
 export type ModelControls = { models: CodexModelOption[]; model: string; effort: string };
 
 /** The agents whose model and reasoning effort Lume can read and change. */
-const AGENTS = ["codex", "claude_code", "opencode", "antigravity", "omp"];
+const AGENTS = ["codex", "claude_code", "opencode", "grok", "antigravity", "omp"];
 export const supportsModelControls = (agent: string) => AGENTS.includes(agent);
 
 /** The model and effort a conversation runs with, whichever agent it is. */

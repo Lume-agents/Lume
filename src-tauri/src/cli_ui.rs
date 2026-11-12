@@ -395,6 +395,18 @@ pub fn pretty(command: &str, value: &Value) -> Option<String> {
             )
         }),
         "sessions" | "relay-sessions" => sessions(value),
+        "audit" => list(value, t("Nothing was done from another device yet.", "Nada foi feito por outro dispositivo ainda."), |record| {
+            let outcome = record["outcome"].as_str().unwrap_or("?");
+            let mark = if outcome.starts_with("refused") { style("✘").red() } else { style("●").green() };
+            let length = record["promptLength"].as_u64().map(|length| format!(" ({length} {})", t("characters", "caracteres"))).unwrap_or_default();
+            format!(
+                "  {mark} {}{length}  {}\n{}{} {}\n{}{}",
+                style(record["cmd"].as_str().unwrap_or("?")).bold(), style(ago(record["at"].as_i64())).dim(),
+                label(t("Device", "Dispositivo")), record["deviceName"].as_str().unwrap_or("?"),
+                style(format!("({})", short(record["fingerprint"].as_str().unwrap_or("")))).dim(),
+                label(t("Outcome", "Resultado")), outcome,
+            )
+        }),
         "requests" => requests(value),
         "approve" => format!("\n  {} {}\n", style("✔").green(), t("Device approved. It can now see this computer's agents.", "Dispositivo aprovado. Ele já pode ver os agentes deste computador.")),
         "deny" => format!("\n  {} {}\n", style("✔").green(), t("Request refused.", "Pedido recusado.")),

@@ -83,6 +83,9 @@ fn directory() -> Result<std::path::PathBuf, String> {
     node_service::default_state_directory()
 }
 
+// Each action gets one request id; `node_relay` retries a transport failure once with that same id, so a lost
+// answer never makes the other computer run the prompt, approval or stop twice.
+
 /// Sends a prompt to a session of another computer.
 pub fn prompt(session_id: &str, prompt: &str) -> Result<(), String> {
     let (node, session) = parse(session_id).ok_or("Not a session of another computer")?;

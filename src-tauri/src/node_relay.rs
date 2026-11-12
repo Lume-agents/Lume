@@ -29,7 +29,7 @@ use zeroize::Zeroize;
 
 use crate::{
     distributed_protocol::NodeScope,
-    node_auth,
+    node_audit, node_auth,
     node_identity::{NodeIdentity, PublicDeviceIdentity},
     node_pairing::{self, NodePairingOffer, NodePairingRequest, PairedNodeClient},
     node_service,
@@ -402,7 +402,12 @@ fn sync_authorized(directory: &Path, link: &mut RelayLink, authorized: &mut Hash
 /// device that sent it has given up on it, and answering it would end the device's current session.
 fn handle_message(directory: &Path, identity: &NodeIdentity, peers: &mut Peers, from: &str, payload: &[u8], replayed: bool) -> Result<Vec<Outgoing>, String> {
     match payload.first().copied() {
-        Some(PAIR_REQUEST) => pair_device(directory, identity, from, payload),
+        Some(PAIR_REQUEST) => {
+            let paired = pair_device(directory, identity, from, payload);
+            let outcome = paired.as_ref().map(|_| "accepted".to_string()).unwrap_or_else(|error| node_audit::refused(error));
+            audit(directory, from, paired.as_ref().ok().map(|(client, _)| client), "pair", &Value::Null, outcome);
+            paired.map(|(_, outgoing)| outgoing)
+        }
         Some(1) => {
             if replayed {
                 return Err("a handshake kept by the Relay while the Node was offline was ignored".into());
@@ -438,12 +443,36 @@ fn handle_message(directory: &Path, identity: &NodeIdentity, peers: &mut Peers, 
             if answer["ok"] == true {
                 let _ = node_pairing::touch_with_platform(directory, from, now_millis(), command["clientPlatform"].as_str());
             }
+            if let Some(cmd @ ("prompt" | "approve" | "interrupt" | "authenticate")) = command["cmd"].as_str() {
+                audit(directory, from, Some(&client), cmd, &command, node_audit::outcome_of(&answer));
+            }
             let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&answer).map_err(io)?);
             scrub_sensitive_fields(&mut command);
             if let Some(result) = answer.get_mut("result") { scrub_sensitive_fields(result); }
             Ok(vec![Outgoing::Message { id: "reply", payload: session.seal(&plaintext)? }])
         }
         _ => Err("unexpected frame".into()),
+    }
+}
+
+/// Writes what a device did to the audit file: who, which command, for which session and request, and how it ended.
+/// A prompt contributes only its length.
+fn audit(directory: &Path, fingerprint: &str, client: Option<&PairedNodeClient>, cmd: &str, command: &Value, outcome: String) {
+    let bounded = |field: &str| command[field].as_str().map(|value| value.chars().take(512).collect::<String>());
+    let record = node_audit::AuditRecord {
+        at: now_millis(),
+        device_id: client.map(|client| client.device_id.clone()).unwrap_or_default(),
+        fingerprint: fingerprint.chars().take(64).collect(),
+        device_name: client.map(|client| client.display_name.clone()).unwrap_or_default(),
+        cmd: cmd.into(),
+        session_id: bounded("id"),
+        request_id: bounded("requestId"),
+        route: "relay".into(),
+        outcome,
+        prompt_length: (cmd == "prompt").then(|| command["prompt"].as_str().map(|prompt| prompt.chars().count())).flatten(),
+    };
+    if let Err(error) = node_audit::record(directory, &record) {
+        log(directory, &format!("Relay: could not write the audit record: {error}"));
     }
 }
 
@@ -466,7 +495,7 @@ fn answer_authenticated_command(directory: &Path, fingerprint: &str, command: &V
             json!({ "disconnected": true })
         }),
         _ => return match node_auth::authorize(directory, fingerprint, command["authToken"].as_str()) {
-            Ok(()) => answer_command(directory, command, scopes),
+            Ok(()) => answer_command(directory, fingerprint, command, scopes),
             Err(error) => json!({ "ok": false, "error": error }),
         },
     };
@@ -476,7 +505,7 @@ fn answer_authenticated_command(directory: &Path, fingerprint: &str, command: &V
     }
 }
 
-fn pair_device(directory: &Path, identity: &NodeIdentity, from: &str, payload: &[u8]) -> Result<Vec<Outgoing>, String> {
+fn pair_device(directory: &Path, identity: &NodeIdentity, from: &str, payload: &[u8]) -> Result<(PairedNodeClient, Vec<Outgoing>), String> {
     let stored: StoredRelayOffer = serde_json::from_slice(&fs::read(directory.join(OFFER_FILE)).map_err(|_| "no pairing offer is open".to_string())?).map_err(io)?;
     let request: NodePairingRequest = serde_json::from_slice(&open_box(&stored.secret, PAIR_REQUEST, payload)?).map_err(io)?;
     if request.proof.identity.fingerprint != from {
@@ -488,7 +517,7 @@ fn pair_device(directory: &Path, identity: &NodeIdentity, from: &str, payload: &
     let answer = json!({ "client": client, "nodeIdentity": identity.public() });
     let response = seal_box(&stored.secret, PAIR_RESPONSE, &serde_json::to_vec(&answer).map_err(io)?)?;
     log(directory, "Relay: paired a new device");
-    Ok(vec![Outgoing::Authorize(key), Outgoing::Message { id: "pair-response", payload: response }])
+    Ok((client, vec![Outgoing::Authorize(key), Outgoing::Message { id: "pair-response", payload: response }]))
 }
 
 /// What was said in one session: needs the owner's switch (off by default) and a device paired with the scope.
@@ -512,27 +541,107 @@ fn conversation_for(directory: &Path, command: &Value, scopes: &[NodeScope]) -> 
 /// A prompt or an approval that is older than this when it arrives is refused: the Relay replays frames kept for an
 /// offline Node, and a request that waited minutes must not act when nobody is watching.
 const REQUEST_MAX_AGE_MS: i64 = 60_000;
-/// How long a request id is remembered, so a repeated request is answered without acting twice.
-const REQUEST_MEMORY_MS: i64 = 10 * 60_000;
+/// How long a request id is remembered, so a repeated request is answered without acting twice, also after a restart.
+const REQUEST_MEMORY_MS: i64 = 24 * 60 * 60_000;
+const MAX_REMEMBERED_REQUESTS: usize = 4096;
+const REQUESTS_FILE: &str = "relay-requests.json";
 
-static SEEN_REQUESTS: std::sync::Mutex<Vec<(String, i64)>> = std::sync::Mutex::new(Vec::new());
-
-/// Remembers a request id; false when it was already seen.
-fn first_time(request_id: &str, now: i64) -> bool {
-    let Ok(mut seen) = SEEN_REQUESTS.lock() else { return false };
-    seen.retain(|(_, at)| now - at < REQUEST_MEMORY_MS);
-    if seen.iter().any(|(id, _)| id == request_id) {
-        return false;
-    }
-    seen.push((request_id.to_string(), now));
-    true
+/// One acting request a device sent, kept in `relay-requests.json` (private to the owner).
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RememberedRequest {
+    device: String,
+    request_id: String,
+    at: i64,
+    /// Digest of the command, its session and what it carries: the same id sent with another request is refused.
+    digest: String,
+    /// What the Node answered; `None` while it runs, or when the Node stopped before it could tell.
+    #[serde(default)]
+    outcome: Option<Value>,
 }
 
-/// Forgets a request id whose attempt failed, so the device can retry it.
-fn forget_request(request_id: &str) {
-    if let Ok(mut seen) = SEEN_REQUESTS.lock() {
-        seen.retain(|(id, _)| id != request_id);
+static REMEMBERED: OnceLock<Mutex<HashMap<PathBuf, Vec<RememberedRequest>>>> = OnceLock::new();
+
+#[derive(Debug, PartialEq)]
+enum Seen {
+    First,
+    Repeated(Option<Value>),
+    Conflict,
+}
+
+fn request_digest(command: &Value) -> String {
+    let mut hasher = Sha256::new();
+    for field in ["cmd", "id", "prompt", "permissionId", "action"] {
+        let value = command[field].as_str().unwrap_or_default();
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
     }
+    hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Runs `change` on the requests remembered for `directory` (read from disk the first time), then saves them.
+fn with_remembered<T>(directory: &Path, now: i64, change: impl FnOnce(&mut Vec<RememberedRequest>) -> T) -> Result<T, String> {
+    let mut all = REMEMBERED.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_| "the request memory is unavailable")?;
+    let requests = all.entry(directory.to_path_buf()).or_insert_with(|| {
+        fs::read(directory.join(REQUESTS_FILE)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    });
+    requests.retain(|request| now - request.at < REQUEST_MEMORY_MS);
+    // What could not be saved is not remembered either, so memory and disk never disagree about a request.
+    let before = requests.clone();
+    let result = change(requests);
+    if requests.len() > MAX_REMEMBERED_REQUESTS {
+        requests.sort_by_key(|request| request.at);
+        let excess = requests.len() - MAX_REMEMBERED_REQUESTS;
+        requests.drain(..excess);
+    }
+    // Written beside and then moved into place, so a Node stopped mid-write keeps the previous memory.
+    let temporary = directory.join(format!("{REQUESTS_FILE}.tmp"));
+    let saved = serde_json::to_vec(&*requests).map_err(io)
+        .and_then(|bytes| write_private(&temporary, &bytes))
+        .and_then(|()| fs::rename(&temporary, directory.join(REQUESTS_FILE)).map_err(io));
+    if let Err(error) = saved {
+        *requests = before;
+        return Err(error);
+    }
+    Ok(result)
+}
+
+/// Records a request before it runs. A request id is per device: another device may use the same one.
+fn remember_request(directory: &Path, device: &str, request_id: &str, digest: &str, now: i64) -> Result<Seen, String> {
+    with_remembered(directory, now, |requests| {
+        match requests.iter().find(|request| request.device == device && request.request_id == request_id) {
+            Some(known) if known.digest != digest => Seen::Conflict,
+            Some(known) => Seen::Repeated(known.outcome.clone()),
+            None => {
+                requests.push(RememberedRequest { device: device.into(), request_id: request_id.into(), at: now, digest: digest.into(), outcome: None });
+                Seen::First
+            }
+        }
+    })
+}
+
+/// Keeps what a request answered, or forgets a request whose attempt failed, so the device can retry it.
+fn settle_request(directory: &Path, device: &str, request_id: &str, outcome: Option<&Value>, now: i64) -> Result<(), String> {
+    with_remembered(directory, now, |requests| match outcome {
+        Some(outcome) => {
+            if let Some(known) = requests.iter_mut().find(|request| request.device == device && request.request_id == request_id) {
+                known.outcome = Some(outcome.clone());
+            }
+        }
+        None => requests.retain(|request| !(request.device == device && request.request_id == request_id)),
+    })
+}
+
+/// The id the app sees: tied to the device, so two devices that pick the same id never share the app's answer to it.
+/// The app accepts at most 128 characters; a longer combination carries a digest of the device's id instead.
+fn bridge_request_id(device: &str, request_id: &str) -> String {
+    let device = &device[..device.len().min(16)];
+    let prefixed = format!("relay:{device}:{request_id}");
+    if prefixed.len() <= 128 {
+        return prefixed;
+    }
+    let digest: String = Sha256::digest(request_id.as_bytes()).iter().take(20).map(|byte| format!("{byte:02x}")).collect();
+    format!("relay:{device}:h{digest}")
 }
 
 /// What a device needs before it may act on this computer: a pairing that granted `scope`, and the owner's switch
@@ -561,17 +670,30 @@ fn acting_request(command: &Value, now: i64) -> Result<&str, String> {
     Ok(request_id)
 }
 
-/// Runs an acting request once per request id; a repeat is answered without acting again, a failure can be retried.
-fn once(request_id: &str, now: i64, act: impl FnOnce() -> Result<Value, String>) -> Result<Value, String> {
-    if !first_time(request_id, now) {
-        return Ok(json!({ "accepted": true, "repeated": true }));
+/// Runs an acting request once per device and request id, also across restarts of the Node. A repeat is answered with
+/// what the first attempt answered, without acting again; the same id with a different request is refused; a failed
+/// attempt can be retried. `act` receives the id to give the app.
+fn once(directory: &Path, device: &str, command: &Value, request_id: &str, now: i64, act: impl FnOnce(&str) -> Result<Value, String>) -> Result<Value, String> {
+    match remember_request(directory, device, request_id, &request_digest(command), now)? {
+        Seen::Conflict => Err("that request id was already used for a different request".into()),
+        // Without an outcome the first attempt was cut short (the Node stopped): it may have acted, so it is not run again.
+        Seen::Repeated(outcome) => Ok(match outcome {
+            Some(Value::Object(mut outcome)) => { outcome.insert("repeated".into(), Value::Bool(true)); Value::Object(outcome) }
+            _ => json!({ "accepted": true, "repeated": true }),
+        }),
+        Seen::First => {
+            let result = act(&bridge_request_id(device, request_id));
+            if let Err(error) = settle_request(directory, device, request_id, result.as_ref().ok(), now) {
+                log(directory, &format!("Relay: could not save the request memory: {error}"));
+            }
+            result
+        }
     }
-    act().inspect_err(|_| forget_request(request_id))
 }
 
 /// A prompt for one of this computer's sessions: needs the device's scope, the owner's switch (off by default), a fresh
 /// request, and the Lume app open. A request id the Node already handled is answered without sending it again.
-fn prompt_for(directory: &Path, command: &Value, scopes: &[NodeScope], now: i64) -> Result<Value, String> {
+fn prompt_for(directory: &Path, device: &str, command: &Value, scopes: &[NodeScope], now: i64) -> Result<Value, String> {
     control_gate(directory, scopes, NodeScope::Prompt, |config| config.allow_prompts, "prompts")?;
     let session_id = session_id_of(command)?;
     let prompt = command["prompt"].as_str().unwrap_or_default();
@@ -579,15 +701,15 @@ fn prompt_for(directory: &Path, command: &Value, scopes: &[NodeScope], now: i64)
         return Err("the prompt is empty or too long".into());
     }
     let request_id = acting_request(command, now)?;
-    once(request_id, now, || crate::node_bridge::send_prompt(directory, session_id, request_id, prompt))
+    once(directory, device, command, request_id, now, |id| crate::node_bridge::send_prompt(directory, session_id, id, prompt))
 }
 
 /// Stops the turn a session is running. It goes with sending prompts: the same owner switch, and its own scope.
-fn interrupt_for(directory: &Path, command: &Value, scopes: &[NodeScope], now: i64) -> Result<Value, String> {
+fn interrupt_for(directory: &Path, device: &str, command: &Value, scopes: &[NodeScope], now: i64) -> Result<Value, String> {
     control_gate(directory, scopes, NodeScope::Interrupt, |config| config.allow_prompts, "prompts")?;
     let session_id = session_id_of(command)?;
     let request_id = acting_request(command, now)?;
-    once(request_id, now, || crate::node_bridge::interrupt_session(directory, session_id, request_id))
+    once(directory, device, command, request_id, now, |id| crate::node_bridge::interrupt_session(directory, session_id, id))
 }
 
 /// What a session waits for the person to allow: the summary and the risk, so the decision is an informed one. It shows
@@ -598,26 +720,26 @@ fn permission_for(directory: &Path, command: &Value, scopes: &[NodeScope]) -> Re
 }
 
 /// Allows once or denies what a session waits for. "Allow for the whole session" stays on the computer itself.
-fn approval_for(directory: &Path, command: &Value, scopes: &[NodeScope], now: i64) -> Result<Value, String> {
+fn approval_for(directory: &Path, device: &str, command: &Value, scopes: &[NodeScope], now: i64) -> Result<Value, String> {
     control_gate(directory, scopes, NodeScope::Approve, |config| config.allow_approvals, "approvals")?;
     let session_id = session_id_of(command)?;
     let permission_id = command["permissionId"].as_str().filter(|id| !id.is_empty() && id.len() <= 512).ok_or("a permission id is required")?;
     let action = command["action"].as_str().filter(|action| matches!(*action, "allow_once" | "deny")).ok_or("the answer must be allow_once or deny")?;
     let request_id = acting_request(command, now)?;
-    once(request_id, now, || crate::node_bridge::answer_permission(directory, session_id, request_id, permission_id, action))
+    once(directory, device, command, request_id, now, |id| crate::node_bridge::answer_permission(directory, session_id, id, permission_id, action))
 }
 
 /// Read-only commands, the same observations the LAN transport offers, and the prompt the owner allows.
-fn answer_command(directory: &Path, command: &Value, scopes: &[NodeScope]) -> Value {
+fn answer_command(directory: &Path, device: &str, command: &Value, scopes: &[NodeScope]) -> Value {
     let result = match command["cmd"].as_str() {
         Some("keepalive") => Ok(json!({ "connected": true })),
         Some("health") => node_service::health(directory).and_then(|health| serde_json::to_value(health).map_err(io)),
         Some("inventory") => crate::node_inventory::InventoryCache::default().snapshot(directory).and_then(|inventory| serde_json::to_value(inventory).map_err(io)),
         Some("session") => conversation_for(directory, command, scopes),
-        Some("prompt") => prompt_for(directory, command, scopes, now_millis()),
+        Some("prompt") => prompt_for(directory, device, command, scopes, now_millis()),
         Some("permission") => permission_for(directory, command, scopes),
-        Some("approve") => approval_for(directory, command, scopes, now_millis()),
-        Some("interrupt") => interrupt_for(directory, command, scopes, now_millis()),
+        Some("approve") => approval_for(directory, device, command, scopes, now_millis()),
+        Some("interrupt") => interrupt_for(directory, device, command, scopes, now_millis()),
         Some("sessions") => crate::node_bridge::live_sessions_snapshot(directory).or_else(|error| {
             if !crate::node_bridge::is_app_closed(&error) {
                 return Err(error);
@@ -758,11 +880,26 @@ pub fn query_many(directory: &Path, node_id: &str, commands: &[&str]) -> Result<
     query_commands(directory, node_id, &commands)
 }
 
+/// Sends one acting command. A transport failure (not an answer of the Node) is retried once with the same request
+/// id, which the Node runs only once: if the first attempt acted and only its answer was lost, the retry gets it.
+fn act(directory: &Path, node_id: &str, command: Value) -> Result<Value, String> {
+    let answers = match query_commands(directory, node_id, std::slice::from_ref(&command)) {
+        Ok(answers) => answers,
+        Err(error) if error == NODE_OFFLINE => return Err(error),
+        Err(_) => {
+            let mut command = command;
+            command["sentAt"] = json!(now_millis());
+            query_commands(directory, node_id, &[command])?
+        }
+    };
+    answers.into_iter().next().ok_or("the Node did not answer")?
+}
+
 /// Sends a prompt to a session of a computer paired through the Relay, when its owner allows it. Repeat the call with
 /// the same `request_id` after a failure to be safe: the Node runs a request id only once.
 pub fn send_prompt(directory: &Path, node_id: &str, session_id: &str, request_id: &str, prompt: &str) -> Result<Value, String> {
     let command = json!({ "cmd": "prompt", "id": session_id, "requestId": request_id, "prompt": prompt, "sentAt": now_millis() });
-    query_commands(directory, node_id, &[command])?.into_iter().next().ok_or("the Node did not answer")?
+    act(directory, node_id, command)
 }
 
 /// What a session of a computer paired through the Relay waits for the person to allow, when its owner allows approvals.
@@ -774,13 +911,13 @@ pub fn query_permission(directory: &Path, node_id: &str, session_id: &str) -> Re
 /// `request_id` is safe.
 pub fn answer_permission(directory: &Path, node_id: &str, session_id: &str, permission_id: &str, action: &str, request_id: &str) -> Result<Value, String> {
     let command = json!({ "cmd": "approve", "id": session_id, "permissionId": permission_id, "action": action, "requestId": request_id, "sentAt": now_millis() });
-    query_commands(directory, node_id, &[command])?.into_iter().next().ok_or("the Node did not answer")?
+    act(directory, node_id, command)
 }
 
 /// Stops the turn a session of a computer paired through the Relay is running, when its owner allows prompts.
 pub fn interrupt_session(directory: &Path, node_id: &str, session_id: &str, request_id: &str) -> Result<Value, String> {
     let command = json!({ "cmd": "interrupt", "id": session_id, "requestId": request_id, "sentAt": now_millis() });
-    query_commands(directory, node_id, &[command])?.into_iter().next().ok_or("the Node did not answer")?
+    act(directory, node_id, command)
 }
 
 /// One session's conversation, if the owner of the Node allows it.
@@ -947,25 +1084,25 @@ mod tests {
         let now = now_millis();
         let with = [NodeScope::Observe, NodeScope::Prompt, NodeScope::Approve, NodeScope::Interrupt];
         // The device lacks the scope: it must pair again.
-        let refused = prompt_for(&directory, &prompt_command("request-001", now), &[NodeScope::Observe], now).unwrap_err();
+        let refused = prompt_for(&directory, "device-a", &prompt_command("request-001", now), &[NodeScope::Observe], now).unwrap_err();
         assert!(refused.contains("pair it again"), "{refused}");
         // The owner has not allowed prompts: the default.
-        let refused = prompt_for(&directory, &prompt_command("request-002", now), &with, now).unwrap_err();
+        let refused = prompt_for(&directory, "device-a", &prompt_command("request-002", now), &with, now).unwrap_err();
         assert!(refused.contains("not allowed"), "{refused}");
         let mut config = node_service::load_or_create_config(&directory).unwrap();
         config.allow_prompts = true;
         node_service::save_config(&directory, &config).unwrap();
         // Allowed, but the checks on the request itself still apply.
-        assert!(prompt_for(&directory, &prompt_command("request-003", now - 2 * REQUEST_MAX_AGE_MS), &with, now).unwrap_err().contains("too old"));
-        assert!(prompt_for(&directory, &prompt_command("request-004", now + 2 * REQUEST_MAX_AGE_MS), &with, now).unwrap_err().contains("too old"));
-        assert!(prompt_for(&directory, &prompt_command("short", now), &with, now).unwrap_err().contains("request id"));
-        assert!(prompt_for(&directory, &json!({ "cmd": "prompt", "id": "s1", "requestId": "request-005", "prompt": " ", "sentAt": now }), &with, now).unwrap_err().contains("empty"));
-        assert!(prompt_for(&directory, &json!({ "cmd": "prompt", "requestId": "request-006", "prompt": "x", "sentAt": now }), &with, now).unwrap_err().contains("session id"));
+        assert!(prompt_for(&directory, "device-a", &prompt_command("request-003", now - 2 * REQUEST_MAX_AGE_MS), &with, now).unwrap_err().contains("too old"));
+        assert!(prompt_for(&directory, "device-a", &prompt_command("request-004", now + 2 * REQUEST_MAX_AGE_MS), &with, now).unwrap_err().contains("too old"));
+        assert!(prompt_for(&directory, "device-a", &prompt_command("short", now), &with, now).unwrap_err().contains("request id"));
+        assert!(prompt_for(&directory, "device-a", &json!({ "cmd": "prompt", "id": "s1", "requestId": "request-005", "prompt": " ", "sentAt": now }), &with, now).unwrap_err().contains("empty"));
+        assert!(prompt_for(&directory, "device-a", &json!({ "cmd": "prompt", "requestId": "request-006", "prompt": "x", "sentAt": now }), &with, now).unwrap_err().contains("session id"));
         // Everything is right, but no Lume app is open on this computer.
-        let unreachable = prompt_for(&directory, &prompt_command("request-007", now), &with, now).unwrap_err();
+        let unreachable = prompt_for(&directory, "device-a", &prompt_command("request-007", now), &with, now).unwrap_err();
         assert!(unreachable.contains("not open"), "{unreachable}");
         // The failed attempt did not use up its request id.
-        assert!(prompt_for(&directory, &prompt_command("request-007", now), &with, now).unwrap_err().contains("not open"));
+        assert!(prompt_for(&directory, "device-a", &prompt_command("request-007", now), &with, now).unwrap_err().contains("not open"));
         let _ = fs::remove_dir_all(&directory);
     }
 
@@ -979,17 +1116,17 @@ mod tests {
         let approve = |request_id: &str, action: &str| json!({ "cmd": "approve", "id": "s1", "permissionId": "perm", "action": action, "requestId": request_id, "sentAt": now });
         let with = [NodeScope::Observe, NodeScope::Prompt, NodeScope::Approve, NodeScope::Interrupt];
         // Allowing prompts does not allow approvals, and an older pairing lacks the scope.
-        assert!(approval_for(&directory, &approve("approve-001", "allow_once"), &[NodeScope::Observe, NodeScope::Prompt], now).unwrap_err().contains("pair it again"));
-        assert!(approval_for(&directory, &approve("approve-002", "allow_once"), &with, now).unwrap_err().contains("not allowed"));
+        assert!(approval_for(&directory, "device-a", &approve("approve-001", "allow_once"), &[NodeScope::Observe, NodeScope::Prompt], now).unwrap_err().contains("pair it again"));
+        assert!(approval_for(&directory, "device-a", &approve("approve-002", "allow_once"), &with, now).unwrap_err().contains("not allowed"));
         assert!(permission_for(&directory, &json!({ "cmd": "permission", "id": "s1" }), &with).unwrap_err().contains("not allowed"));
         config.allow_approvals = true;
         node_service::save_config(&directory, &config).unwrap();
-        assert!(approval_for(&directory, &approve("approve-003", "allow_session"), &with, now).unwrap_err().contains("allow_once or deny"));
-        assert!(approval_for(&directory, &json!({ "cmd": "approve", "id": "s1", "action": "deny", "requestId": "approve-004", "sentAt": now }), &with, now).unwrap_err().contains("permission id"));
-        assert!(approval_for(&directory, &json!({ "cmd": "approve", "id": "s1", "permissionId": "perm", "action": "deny", "requestId": "approve-005", "sentAt": now - 2 * REQUEST_MAX_AGE_MS }), &with, now).unwrap_err().contains("too old"));
+        assert!(approval_for(&directory, "device-a", &approve("approve-003", "allow_session"), &with, now).unwrap_err().contains("allow_once or deny"));
+        assert!(approval_for(&directory, "device-a", &json!({ "cmd": "approve", "id": "s1", "action": "deny", "requestId": "approve-004", "sentAt": now }), &with, now).unwrap_err().contains("permission id"));
+        assert!(approval_for(&directory, "device-a", &json!({ "cmd": "approve", "id": "s1", "permissionId": "perm", "action": "deny", "requestId": "approve-005", "sentAt": now - 2 * REQUEST_MAX_AGE_MS }), &with, now).unwrap_err().contains("too old"));
         // Everything is right, but no Lume app is open here; the id stays usable for a retry.
-        assert!(approval_for(&directory, &approve("approve-006", "deny"), &with, now).unwrap_err().contains("not open"));
-        assert!(approval_for(&directory, &approve("approve-006", "deny"), &with, now).unwrap_err().contains("not open"));
+        assert!(approval_for(&directory, "device-a", &approve("approve-006", "deny"), &with, now).unwrap_err().contains("not open"));
+        assert!(approval_for(&directory, "device-a", &approve("approve-006", "deny"), &with, now).unwrap_err().contains("not open"));
         assert!(permission_for(&directory, &json!({ "cmd": "permission", "id": "s1" }), &with).unwrap_err().contains("not open"));
         let _ = fs::remove_dir_all(&directory);
     }
@@ -1001,24 +1138,127 @@ mod tests {
         let now = now_millis();
         let stop = |request_id: &str| json!({ "cmd": "interrupt", "id": "s1", "requestId": request_id, "sentAt": now });
         let with = [NodeScope::Observe, NodeScope::Prompt, NodeScope::Interrupt];
-        assert!(interrupt_for(&directory, &stop("interrupt-001"), &[NodeScope::Observe, NodeScope::Prompt], now).unwrap_err().contains("pair it again"));
-        assert!(interrupt_for(&directory, &stop("interrupt-002"), &with, now).unwrap_err().contains("not allowed"));
+        assert!(interrupt_for(&directory, "device-a", &stop("interrupt-001"), &[NodeScope::Observe, NodeScope::Prompt], now).unwrap_err().contains("pair it again"));
+        assert!(interrupt_for(&directory, "device-a", &stop("interrupt-002"), &with, now).unwrap_err().contains("not allowed"));
         let mut config = node_service::load_or_create_config(&directory).unwrap();
         config.allow_prompts = true;
         node_service::save_config(&directory, &config).unwrap();
-        assert!(interrupt_for(&directory, &stop("interrupt-003"), &with, now).unwrap_err().contains("not open"));
-        assert!(interrupt_for(&directory, &json!({ "cmd": "interrupt", "id": "s1", "requestId": "interrupt-004", "sentAt": now - 2 * REQUEST_MAX_AGE_MS }), &with, now).unwrap_err().contains("too old"));
+        assert!(interrupt_for(&directory, "device-a", &stop("interrupt-003"), &with, now).unwrap_err().contains("not open"));
+        assert!(interrupt_for(&directory, "device-a", &json!({ "cmd": "interrupt", "id": "s1", "requestId": "interrupt-004", "sentAt": now - 2 * REQUEST_MAX_AGE_MS }), &with, now).unwrap_err().contains("too old"));
         let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]
-    fn a_request_id_runs_once() {
+    fn a_request_id_runs_once_per_device_and_repeats_its_answer() {
+        let directory = std::env::temp_dir().join(format!("lume-requests-once-{}", random_token_for_test()));
+        fs::create_dir_all(&directory).unwrap();
         let now = now_millis();
-        assert!(first_time("repeat-0001", now));
-        assert!(!first_time("repeat-0001", now + 1_000));
-        assert!(first_time("repeat-0002", now + 1_000));
-        // After the memory window the id may be used again.
-        assert!(first_time("repeat-0001", now + REQUEST_MEMORY_MS + 1));
+        let runs = std::cell::Cell::new(0);
+        let act = |id: &str| { runs.set(runs.get() + 1); Ok(json!({ "accepted": true, "requestId": id })) };
+        let command = prompt_command("repeat-0001", now);
+        let first = once(&directory, "device-a", &command, "repeat-0001", now, act).unwrap();
+        assert_eq!(first, json!({ "accepted": true, "requestId": "relay:device-a:repeat-0001" }), "the app sees an id tied to the device");
+        let again = once(&directory, "device-a", &command, "repeat-0001", now + 1_000, act).unwrap();
+        assert_eq!(again, json!({ "accepted": true, "requestId": "relay:device-a:repeat-0001", "repeated": true }), "the first answer, not a second run");
+        assert_eq!(runs.get(), 1);
+        // Another device may pick the same id: it is its own request.
+        assert_eq!(once(&directory, "device-b", &command, "repeat-0001", now, act).unwrap()["requestId"], "relay:device-b:repeat-0001");
+        assert_eq!(runs.get(), 2);
+        // The same id with another prompt is refused, not answered as a repeat.
+        let other = json!({ "cmd": "prompt", "id": "s1", "requestId": "repeat-0001", "prompt": "something else", "sentAt": now });
+        assert!(once(&directory, "device-a", &other, "repeat-0001", now, act).unwrap_err().contains("different request"));
+        assert!(once(&directory, "device-a", &json!({ "cmd": "interrupt", "id": "s1" }), "repeat-0001", now, act).is_err());
+        // A failed attempt leaves its id free for a retry.
+        assert!(once(&directory, "device-a", &command, "repeat-0002", now, |_| Err("the app is closed".to_string())).is_err());
+        assert!(once(&directory, "device-a", &command, "repeat-0002", now, act).unwrap().get("repeated").is_none());
+        assert_eq!(runs.get(), 3);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    fn forget_cached_requests(directory: &Path) {
+        REMEMBERED.get().unwrap().lock().unwrap().remove(directory);
+    }
+
+    #[test]
+    fn remembered_requests_survive_a_restart_of_the_node() {
+        let directory = std::env::temp_dir().join(format!("lume-requests-reload-{}", random_token_for_test()));
+        fs::create_dir_all(&directory).unwrap();
+        let now = now_millis();
+        let command = prompt_command("reload-0001", now);
+        once(&directory, "device-a", &command, "reload-0001", now, |_| Ok(json!({ "accepted": true }))).unwrap();
+        // A request the Node stopped in the middle of: it may have reached the app, so it is not run again.
+        assert_eq!(remember_request(&directory, "device-a", "reload-0002", &request_digest(&command), now).unwrap(), Seen::First);
+        forget_cached_requests(&directory);
+        let refuse = |_: &str| -> Result<Value, String> { panic!("a remembered request must not run again") };
+        assert_eq!(once(&directory, "device-a", &command, "reload-0001", now, refuse).unwrap(), json!({ "accepted": true, "repeated": true }));
+        assert_eq!(once(&directory, "device-a", &command, "reload-0002", now, refuse).unwrap(), json!({ "accepted": true, "repeated": true }));
+        let stored: Vec<RememberedRequest> = serde_json::from_slice(&fs::read(directory.join(REQUESTS_FILE)).unwrap()).unwrap();
+        assert_eq!(stored.len(), 2);
+        assert!(!String::from_utf8(fs::read(directory.join(REQUESTS_FILE)).unwrap()).unwrap().contains("hello"), "the prompt itself is not kept");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_request_memory_is_bounded_in_time_and_size() {
+        let directory = std::env::temp_dir().join(format!("lume-requests-bound-{}", random_token_for_test()));
+        fs::create_dir_all(&directory).unwrap();
+        let now = now_millis();
+        let digest = request_digest(&prompt_command("x", now));
+        assert_eq!(remember_request(&directory, "device-a", "old-request", &digest, now - REQUEST_MEMORY_MS - 1).unwrap(), Seen::First);
+        assert_eq!(remember_request(&directory, "device-a", "old-request", &digest, now).unwrap(), Seen::First, "a day later the id is free again");
+        with_remembered(&directory, now, |requests| {
+            requests.extend((0..MAX_REMEMBERED_REQUESTS + 10).map(|index| RememberedRequest {
+                device: "device-b".into(), request_id: format!("bulk-{index:05}"), at: now - 10_000 + index as i64, digest: digest.clone(), outcome: None,
+            }));
+        }).unwrap();
+        forget_cached_requests(&directory);
+        let stored: Vec<RememberedRequest> = serde_json::from_slice(&fs::read(directory.join(REQUESTS_FILE)).unwrap()).unwrap();
+        assert_eq!(stored.len(), MAX_REMEMBERED_REQUESTS);
+        assert!(stored.iter().all(|request| request.request_id.as_str() > "bulk-00010"), "the oldest go first");
+        assert!(stored.iter().any(|request| request.request_id == "old-request"), "the newest stays");
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn the_id_the_app_sees_names_the_device_and_fits_its_limit() {
+        let device = "ab".repeat(32);
+        assert_eq!(bridge_request_id(&device, "request-0001"), "relay:abababababababab:request-0001");
+        let long = bridge_request_id(&device, &"r".repeat(128));
+        assert!(long.len() <= 128 && long.starts_with("relay:abababababababab:h"), "{long}");
+        assert_ne!(long, bridge_request_id(&device, &"s".repeat(128)));
+    }
+
+    #[test]
+    fn prompts_approvals_and_stops_are_audited_without_the_prompt_text() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("audit", &listener);
+        let from = fixture.device.public().fingerprint.clone();
+        let node_key: [u8; 32] = URL_SAFE_NO_PAD.decode(&fixture.node.public().public_key).unwrap().try_into().unwrap();
+        let mut peers = Peers::default();
+        let (state, hello) = relay_e2e::initiate(&fixture.device).unwrap();
+        let answered = handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &hello, false).unwrap();
+        let [Outgoing::Message { payload: reply, .. }] = answered.as_slice() else { panic!() };
+        let mut session = state.finish(reply, &node_key).unwrap();
+        let now = now_millis();
+        for command in [
+            json!({ "cmd": "keepalive" }),
+            json!({ "cmd": "prompt", "id": "s1", "requestId": "audit-0001", "prompt": "a secret plan", "sentAt": now }),
+            json!({ "cmd": "approve", "id": "s1", "permissionId": "p1", "action": "deny", "requestId": "audit-0002", "sentAt": now }),
+            json!({ "cmd": "interrupt", "id": "s1", "requestId": "audit-0003", "sentAt": now }),
+        ] {
+            let frame = session.seal(&serde_json::to_vec(&command).unwrap()).unwrap();
+            let answered = handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &frame, false).unwrap();
+            let [Outgoing::Message { payload, .. }] = answered.as_slice() else { panic!() };
+            session.open(payload).unwrap();
+        }
+        let records = node_audit::recent(&fixture.node_dir, 10);
+        assert_eq!(records.iter().map(|record| record.cmd.as_str()).collect::<Vec<_>>(), ["prompt", "approve", "interrupt"], "reads are not audited");
+        let prompt = &records[0];
+        assert_eq!((prompt.prompt_length, prompt.request_id.as_deref(), prompt.session_id.as_deref()), (Some(13), Some("audit-0001"), Some("s1")));
+        assert_eq!((prompt.device_name.as_str(), prompt.fingerprint.as_str(), prompt.route.as_str()), ("Test laptop", from.as_str(), "relay"));
+        assert!(records.iter().all(|record| record.outcome.starts_with("refused:the owner")), "{records:?}");
+        assert!(!fs::read_to_string(fixture.node_dir.join("remote-audit.jsonl")).unwrap().contains("secret plan"));
+        assert_eq!(records[1].prompt_length, None);
     }
 
     use std::net::TcpListener;
@@ -1172,6 +1412,33 @@ mod tests {
         assert_eq!(query(&fixture.client_dir, &fixture.remote.node_id, "keepalive").unwrap_err(), NODE_RESET, "only once");
         assert!(started.elapsed() < Duration::from_secs(5), "a reset never waits for the answer timeout");
         assert_eq!(relay.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_lost_connection_retries_an_action_once_with_the_same_request_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("transport-retry", &listener);
+        let node = NodeIdentity::load_or_create(&fixture.node_dir).unwrap();
+        let (client_key, node_fingerprint) = (device_key(&fixture.device), fixture.node.public().fingerprint.clone());
+        let relay = std::thread::spawn(move || {
+            let mut ids = Vec::new();
+            for connection in 0..2 {
+                let mut socket = accept_client(&listener, json!({ "t": "ready", "role": "client" }));
+                let hello = next_payload(&mut socket).unwrap();
+                let (reply, mut session) = relay_e2e::respond(&node, &client_key, &hello).unwrap();
+                deliver(&mut socket, &node_fingerprint, &reply);
+                let frame = next_payload(&mut socket).unwrap();
+                let command: Value = serde_json::from_slice(&session.open(&frame).unwrap()).unwrap();
+                ids.push(command["requestId"].as_str().unwrap().to_string());
+                if connection == 0 { drop(socket); continue; } // The connection drops before an answer.
+                deliver(&mut socket, &node_fingerprint, &session.seal(br#"{"ok":true,"result":{"accepted":true}}"#).unwrap());
+                while next_payload(&mut socket).is_some() {}
+            }
+            ids
+        });
+        assert_eq!(interrupt_session(&fixture.client_dir, &fixture.remote.node_id, "s1", "retry-0001").unwrap()["accepted"], true);
+        close_client_connection(&fixture.client_dir, &fixture.remote.identity.fingerprint);
+        assert_eq!(relay.join().unwrap(), ["retry-0001", "retry-0001"]);
     }
 
     #[test]

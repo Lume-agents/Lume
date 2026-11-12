@@ -299,6 +299,10 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
             Ok(Some(json(&crate::node_relay::pair(&state_directory, uri)?)?))
         }
         "relay-remotes" => Ok(Some(json(&crate::node_relay::remotes(&state_directory)?)?)),
+        "audit" => {
+            let limit = positional_argument(arguments, 1).map(|value| value.parse::<usize>().map_err(|_| "audit takes a number of records")).transpose()?.unwrap_or(50);
+            Ok(Some(json(&crate::node_audit::recent(&state_directory, limit))?))
+        }
         "sessions" => match crate::node_bridge::live_sessions_snapshot(&state_directory) {
             Ok(snapshot) => Ok(Some(json(&snapshot)?)),
             Err(_) => Ok(Some(json(&crate::node_sessions::snapshot()?)?)),
@@ -397,7 +401,7 @@ fn run_cli_inner(arguments: &[String]) -> Result<Option<String>, String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lume node [menu|on|off|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|sessions|requests|approve|deny|conversations|relay|relay-pair|relay-remotes|relay-health|relay-inventory|relay-sessions|relay-session> [VALUE] [--state-dir PATH] [--once]"
+    "Usage: lume node [menu|on|off|enable|disable|listen|status|inventory|run|pair|clients|revoke|discover|connect|remotes|remote-health|remote-inventory|forget|sessions|requests|approve|deny|conversations|relay|relay-pair|relay-remotes|relay-health|relay-inventory|relay-sessions|relay-session|audit> [VALUE] [--state-dir PATH] [--once]"
 }
 
 fn positional_argument(arguments: &[String], index: usize) -> Option<&str> {

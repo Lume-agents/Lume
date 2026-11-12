@@ -34,6 +34,7 @@ mod legacy_cli_gateway_cleanup;
 mod macos_process_supervisor;
 mod mobile_gateway;
 mod mobile_server;
+mod node_audit;
 pub mod node_bridge;
 pub mod node_client;
 mod node_http;

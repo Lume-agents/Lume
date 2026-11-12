@@ -136,6 +136,67 @@ function startsBlock(line) {
   return /^\s*(?:```|#{1,4}\s+|>\s?|[-*+]\s+|\d+\.\s+|(?:---+|\*\*\*+)\s*$)/.test(line);
 }
 
+const LIST_MARKER = /^(\s*)([-*+]|\d+\.)\s+(.+)$/;
+
+/** @param {string} line */
+function listMarker(line) {
+  const match = LIST_MARKER.exec(line);
+  if (!match) return null;
+  const marker = match[2];
+  return {
+    indent: match[1].replace(/\t/g, "    ").length,
+    ordered: /\d/.test(marker),
+    number: Number.parseInt(marker, 10),
+    text: match[3],
+  };
+}
+
+/**
+ * One list and the lists nested under its items. A blank line between items does not end it, so a
+ * numbered list keeps counting; an indented marker opens a child list and indented text continues the item.
+ * @param {string[]} lines
+ * @param {number} start
+ * @returns {{ html: string, index: number }}
+ */
+function renderList(lines, start) {
+  const first = /** @type {NonNullable<ReturnType<typeof listMarker>>} */ (listMarker(lines[start]));
+  const items = [];
+  let index = start;
+  while (index < lines.length) {
+    const marker = listMarker(lines[index]);
+    if (!marker || marker.indent !== first.indent || marker.ordered !== first.ordered) break;
+    const text = [renderInline(marker.text)];
+    let children = "";
+    index += 1;
+    while (index < lines.length) {
+      let next = index;
+      while (next < lines.length && !lines[next].trim()) next += 1;
+      if (next >= lines.length) break;
+      const nextMarker = listMarker(lines[next]);
+      if (nextMarker) {
+        if (nextMarker.indent <= first.indent) break;
+        const child = renderList(lines, next);
+        children += child.html;
+        index = child.index;
+        continue;
+      }
+      // Text under the item belongs to it only while it stays indented and unbroken by a blank line.
+      if (next !== index || startsBlock(lines[next]) || !/^\s+\S/.test(lines[next]) || children) break;
+      text.push(renderInline(lines[next].trim()));
+      index += 1;
+    }
+    items.push(`<li>${text.join("<br>")}${children}</li>`);
+    // Skip the blank lines only when another item of this list follows.
+    let next = index;
+    while (next < lines.length && !lines[next].trim()) next += 1;
+    const following = next < lines.length ? listMarker(lines[next]) : null;
+    if (following && following.indent === first.indent && following.ordered === first.ordered) index = next;
+  }
+  const tag = first.ordered ? "ol" : "ul";
+  const attribute = first.ordered && first.number !== 1 ? ` start="${first.number}"` : "";
+  return { html: `<${tag}${attribute}>${items.join("")}</${tag}>`, index };
+}
+
 /**
  * Remove provider-internal metadata that must never be presented as chat text.
  * @param {unknown} value
@@ -227,29 +288,10 @@ export function renderSafeMarkdown(markdown) {
       continue;
     }
 
-    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
-    if (unordered) {
-      const items = [];
-      while (index < lines.length) {
-        const item = lines[index].match(/^\s*[-*+]\s+(.+)$/);
-        if (!item) break;
-        items.push(`<li>${renderInline(item[1])}</li>`);
-        index += 1;
-      }
-      output.push(`<ul>${items.join("")}</ul>`);
-      continue;
-    }
-
-    const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
-    if (ordered) {
-      const items = [];
-      while (index < lines.length) {
-        const item = lines[index].match(/^\s*\d+\.\s+(.+)$/);
-        if (!item) break;
-        items.push(`<li>${renderInline(item[1])}</li>`);
-        index += 1;
-      }
-      output.push(`<ol>${items.join("")}</ol>`);
+    if (listMarker(line)) {
+      const list = renderList(lines, index);
+      output.push(list.html);
+      index = list.index;
       continue;
     }
 

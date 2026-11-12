@@ -80,3 +80,12 @@ console.log("markdown test suite passed");
   assert.match(html, /<a class="github-ref" href="https:\/\/github.com\/o\/r\/issues\/3"/);
   assert.doesNotMatch(html, /example\.com[^<]*<\/a>/);
 }
+
+// Lists: numbering survives nested bullets and blank lines, and each kind stays what it was written as.
+assert.equal(renderSafeMarkdown("1. a\n   - x\n   - y\n2. b"), "<ol><li>a<ul><li>x</li><li>y</li></ul></li><li>b</li></ol>");
+assert.equal(renderSafeMarkdown("1. a\n\n2. b\n\n3. c"), "<ol><li>a</li><li>b</li><li>c</li></ol>");
+assert.equal(renderSafeMarkdown("3. c\n4. d"), '<ol start="3"><li>c</li><li>d</li></ol>');
+assert.equal(renderSafeMarkdown("- a\n- b\n\ntext"), "<ul><li>a</li><li>b</li></ul><p>text</p>");
+assert.equal(renderSafeMarkdown("- a\n1. b"), "<ul><li>a</li></ul><ol><li>b</li></ol>");
+assert.equal(renderSafeMarkdown("1. a\n   more\n2. b"), "<ol><li>a<br>more</li><li>b</li></ol>");
+console.log("markdown list tests passed");

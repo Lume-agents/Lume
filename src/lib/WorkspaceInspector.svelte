@@ -1,3 +1,11 @@
+<script module lang="ts">
+  import type { McpServer } from "$lib/lume";
+
+  // The inspector is rebuilt each time it opens; what it already read about a session is kept for the app's lifetime.
+  const mcpCache = new Map<string, McpServer[]>();
+  const usageRead = new Set<string>();
+</script>
+
 <script lang="ts">
   import BrandIcon from "$lib/BrandIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
@@ -17,7 +25,7 @@
   import type { AgentSession, SessionActivity } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
-  import { listSessionMcpServers, refreshAgentRateLimits, type McpServer } from "$lib/lume";
+  import { listSessionMcpServers, refreshAgentRateLimits } from "$lib/lume";
   import { buildLatestReviewTurn } from "$lib/reviewDiffs";
   import { subagentsForSession } from "$lib/workspaceAgents";
   import { expectedUsageLimitCount, stacksUsageGauges, usageGaugeGroups } from "$lib/usageGauges";
@@ -65,6 +73,8 @@
     if (!id || !agent || !mcpAgents.includes(agent)) { mcpKey = ""; mcpServers = []; return; }
     if (mcpKey === id) return;
     mcpKey = id;
+    const cached = mcpCache.get(id);
+    if (cached) { mcpServers = cached; mcpLoading = false; return; }
     mcpServers = [];
     mcpLoading = true;
     void loadMcp(id, agent);
@@ -75,9 +85,10 @@
       if (mcpKey !== id) return;
       mcpServers = configured;
       mcpLoading = false;
-      if (agent !== "claude_code") return;
+      if (agent !== "claude_code") { mcpCache.set(id, configured); return; }
       mcpProbing = true;
       const live = await listSessionMcpServers(id, true);
+      mcpCache.set(id, live);
       if (mcpKey === id) mcpServers = live;
     } catch { /* The list is informational; the section stays with what was read. */ }
     finally { if (mcpKey === id) { mcpProbing = false; mcpLoading = false; } }
@@ -127,6 +138,7 @@
       : "";
     if (!key || key === requestedUsageKey) return;
     requestedUsageKey = key;
+    if (usageRead.has(key)) { usagePendingKey = usageSettledKey = key; return; }
     usagePendingKey = key;
     void refreshUsage(key);
   });
@@ -155,6 +167,7 @@
     usageRefreshing = true;
     try {
       await refreshAgentRateLimits(session.agent);
+      usageRead.add(key);
     } catch { /* Keep the last known usage without adding noisy inspector copy. */ }
     finally {
       usageRefreshing = false;
@@ -218,7 +231,6 @@
           <div class="usage-gauges" class:loading={usageRefreshing && !usageGroups.length} aria-busy={usageLoading}>
             {#each usageGroups as group (group.label)}
               <div class="usage-group" role={group.label ? "group" : undefined} aria-label={group.label || undefined}>
-                {#if group.label}<span class="usage-group-label">{group.label}</span>{/if}
                 <div class="usage-group-gauges">
                   {#each group.gauges as gauge (gauge.id)}
                     <div class="usage-gauge" style:--usage-remaining={gauge.remaining} role="img" aria-label={gauge.title} title={gauge.title}>
@@ -231,6 +243,7 @@
                     </div>
                   {/each}
                 </div>
+                {#if group.label}<span class="usage-group-label">{group.label}</span>{/if}
               </div>
             {:else}
               {#each { length: usagePlaceholders }, index (index)}<i></i>{/each}

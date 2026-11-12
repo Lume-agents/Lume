@@ -60,6 +60,7 @@
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
   import { sidebarGroupsKey } from "$lib/sidebarGroups";
+  import type { PromptJumpRequest, PromptJumpTarget } from "$lib/tokenUsage";
   import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, PendingPairRequest, Preferences, ResumableSession, WorkflowGroupDefinition, WorkflowRole, WorkflowRoleContract, WorkflowRun } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
@@ -318,6 +319,12 @@
   let inspectorOpen = $state(true);
   let boardOpen = $state(false);
   let extensionsOpen = $state(false);
+  // A prompt a chat should scroll to; the pane showing that session handles it.
+  let promptJumpRequest = $state<PromptJumpRequest | null>(null);
+  let promptJumpNonce = 0;
+  function requestPromptJump(sessionId: string, target: PromptJumpTarget) {
+    promptJumpRequest = { ...target, sessionId, nonce: ++promptJumpNonce };
+  }
   let activeTour = $state<"workspace" | "board" | null>(null);
   let boardTourTimer = 0;
   // The board and the extensions take over the stage: the chats, inspector and review step aside.
@@ -3767,6 +3774,7 @@
     {#if maximizedSession}
       {#key maximizedSession.id}
         <WorkspaceSessionPane
+          promptJump={promptJumpRequest}
           session={maximizedSession}
           externalWriterConflict={externalWriterConflicts[maximizedSession.id] ?? null}
           {language}
@@ -3790,6 +3798,7 @@
     {:else if primary}
       {#key primary.id}
         <WorkspaceSessionPane
+          promptJump={promptJumpRequest}
           session={primary}
           externalWriterConflict={externalWriterConflicts[primary.id] ?? null}
           {language}
@@ -3829,6 +3838,7 @@
         ></div>
         {#key secondary.id}
         <WorkspaceSessionPane
+          promptJump={promptJumpRequest}
           session={secondary}
             externalWriterConflict={externalWriterConflicts[secondary.id] ?? null}
             {language}
@@ -3870,6 +3880,7 @@
           ></div>
           {#key tertiary.id}
             <WorkspaceSessionPane
+              promptJump={promptJumpRequest}
               session={tertiary}
               externalWriterConflict={externalWriterConflicts[tertiary.id] ?? null}
               {language}
@@ -3949,7 +3960,7 @@
     <div class:open={inspectorOpen && !stageTakeover} class="inspector-shell" aria-hidden={!inspectorOpen || stageTakeover} inert={!inspectorOpen || stageTakeover}>
       {#if inspectorOpen}
         <div class="inspector-content" in:fade={{ duration: motionDuration(140) }} out:fade={{ duration: motionDuration(100) }}>
-          <WorkspaceInspector session={focusedSession} {language} {loading} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} onOpenCommitFile={openCommitReview} onOpenWorkingFile={openWorkingReview} />
+          <WorkspaceInspector session={focusedSession} {language} {loading} bind:section={inspectorSection} onClose={toggleInspector} onOpenReview={openReview} onOpenCommitFile={openCommitReview} onOpenWorkingFile={openWorkingReview} onJumpToPrompt={(target) => focusedSession && requestPromptJump(focusedSession.id, target)} />
         </div>
       {/if}
     </div>

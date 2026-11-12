@@ -1,24 +1,35 @@
 <script lang="ts">
   import type { PromptTokenUsage } from "$lib/domain";
   import type { Language } from "$lib/i18n";
-  import { TOKEN_GRAPH_HEIGHT, TOKEN_GRAPH_WIDTH, contextPercent, tokenGraphGeometry } from "$lib/tokenUsage";
+  import { TOKEN_GRAPH_WIDTH, contextPercent, tokenBarsGeometry, tokenGraphGeometry } from "$lib/tokenUsage";
 
   /** The tokens of each prompt over time, as the Inspector and the chat header show it. */
-  let { samples, language, loading = false, limit = 14 }: {
+  let { samples, language, loading = false, limit = 14, height = 48, mode = "line", title, onSelect }: {
     samples: PromptTokenUsage[];
     language: Language;
     loading?: boolean;
     /** How many of the latest prompts are drawn. */
     limit?: number;
+    /** The chart's drawn height in pixels; the tooltip is placed over it. */
+    height?: number;
+    /** A line over time, or one bar per prompt with its output stacked on its input. */
+    mode?: "line" | "bars";
+    title?: string;
+    /** Called with the index in `samples` of the prompt clicked (or chosen with Enter). */
+    onSelect?: (index: number) => void;
   } = $props();
 
   const shown = $derived(samples.slice(-limit));
-  const graph = $derived(tokenGraphGeometry(shown));
+  const offset = $derived(samples.length - shown.length);
+  const viewHeight = $derived(height + 6);
+  const graph = $derived(tokenGraphGeometry(shown, TOKEN_GRAPH_WIDTH, viewHeight));
+  const bars = $derived(mode === "bars" ? tokenBarsGeometry(shown, TOKEN_GRAPH_WIDTH, viewHeight) : []);
+  // Where each prompt sits, for the pointer, the cursor and the tooltip, whichever way it is drawn.
+  const marks = $derived(mode === "bars" ? bars.map((bar) => ({ x: bar.x, y: bar.outputY, sample: bar.sample })) : graph.dots);
+  const grid = $derived([0.25, 0.5, 0.75].map((share) => `M4 ${(viewHeight * share + 1).toFixed(1)}H222`).join(""));
   let plot = $state<HTMLDivElement | null>(null);
   let active = $state<number | null>(null);
-  const point = $derived(active !== null ? graph.dots[active] ?? null : null);
-  // The chart's drawn height; the tooltip is placed over it in pixels.
-  const plotHeight = 48;
+  const point = $derived(active !== null ? marks[active] ?? null : null);
 
   function tr(english: string, portuguese: string) {
     return language === "pt-BR" ? portuguese : english;
@@ -27,17 +38,21 @@
   const time = (value: number) => new Date(value).toLocaleString(language, { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" });
 
   /** The prompt closest to the pointer along the time axis. */
-  function pick(event: PointerEvent) {
-    if (!plot || !graph.dots.length) return;
+  function pick(event: MouseEvent) {
+    if (!plot || !marks.length) return;
     const bounds = plot.getBoundingClientRect();
     const x = ((event.clientX - bounds.left) / Math.max(1, bounds.width)) * TOKEN_GRAPH_WIDTH;
     let nearest = 0;
-    graph.dots.forEach((dot, index) => { if (Math.abs(dot.x - x) < Math.abs(graph.dots[nearest].x - x)) nearest = index; });
+    marks.forEach((mark, index) => { if (Math.abs(mark.x - x) < Math.abs(marks[nearest].x - x)) nearest = index; });
     active = nearest;
   }
+  function select() {
+    if (onSelect && active !== null && marks[active]) onSelect(offset + active);
+  }
   function keydown(event: KeyboardEvent) {
-    if (!graph.dots.length) return;
-    const last = graph.dots.length - 1;
+    if (!marks.length) return;
+    if (event.key === "Enter" && onSelect && active !== null) { event.preventDefault(); select(); return; }
+    const last = marks.length - 1;
     const next = event.key === "ArrowLeft" ? Math.max(0, (active ?? last) - 1)
       : event.key === "ArrowRight" ? Math.min(last, (active ?? last) + 1)
       : event.key === "Home" ? 0 : event.key === "End" ? last : null;
@@ -47,52 +62,70 @@
   }
 </script>
 
-<div class="token-chart" aria-busy={loading && !shown.length}>
-  <span>{tr("Tokens / prompt", "Tokens / prompt")}</span>
+<div class="token-chart" class:selectable={Boolean(onSelect)} aria-busy={loading && !shown.length} style:--plot-height="{height}px">
+  <span>{title ?? tr("Tokens / prompt", "Tokens / prompt")}</span>
   <!-- Pointer and arrow keys move between prompts; the details show in the tooltip, which is also announced. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="token-plot"
     bind:this={plot}
     role="group"
-    tabindex={graph.dots.length ? 0 : -1}
-    aria-label={tr("Tokens used per prompt over time. Use the arrow keys to read each prompt.", "Tokens usados por prompt ao longo do tempo. Use as setas para ler cada prompt.")}
+    tabindex={marks.length ? 0 : -1}
+    aria-label={onSelect
+      ? tr("Tokens used per prompt over time. Use the arrow keys to read each prompt and Enter to open it in the chat.", "Tokens usados por prompt ao longo do tempo. Use as setas para ler cada prompt e Enter para abri-lo no chat.")
+      : tr("Tokens used per prompt over time. Use the arrow keys to read each prompt.", "Tokens usados por prompt ao longo do tempo. Use as setas para ler cada prompt.")}
     onpointermove={pick}
     onpointerleave={() => (active = null)}
-    onfocus={() => { if (graph.dots.length) active = graph.dots.length - 1; }}
+    onclick={(event) => { pick(event); select(); }}
+    onfocus={() => { if (marks.length) active = marks.length - 1; }}
     onblur={() => (active = null)}
     onkeydown={keydown}
   >
-    <svg class:empty={!graph.points} class:loading={loading && !shown.length} class="token-graph" viewBox="0 0 {TOKEN_GRAPH_WIDTH} {TOKEN_GRAPH_HEIGHT}" preserveAspectRatio="none" aria-hidden="true">
-      <path class="graph-grid" d="M4 14H222M4 28H222M4 42H222" />
-      <polygon points={graph.area} />
-      <polyline points={graph.points || "4,42 222,42"} />
-      {#if point}<path class="graph-cursor" d="M{point.x} 4V{TOKEN_GRAPH_HEIGHT - 6}" />{/if}
-      {#each graph.dots as dot, index (dot.sample.turnId + index)}
-        <circle class:active={index === active} cx={dot.x} cy={dot.y} r={index === active ? 3 : 2} />
-      {/each}
+    <svg class:empty={!graph.points} class:loading={loading && !shown.length} class="token-graph" viewBox="0 0 {TOKEN_GRAPH_WIDTH} {viewHeight}" preserveAspectRatio="none" aria-hidden="true">
+      <path class="graph-grid" d={grid} />
+      {#if point}<path class="graph-cursor" d="M{point.x} 4V{viewHeight - 6}" />{/if}
+      {#if mode === "bars" && bars.length}
+        {#each bars as bar, index (bar.sample.turnId + index)}
+          <g class="token-bar" class:active={index === active}>
+            <rect class="bar-input" x={bar.x - bar.width / 2} y={bar.inputY} width={bar.width} height={Math.max(0.5, bar.inputHeight)} rx="1" />
+            {#if bar.outputHeight > 0}<rect class="bar-output" x={bar.x - bar.width / 2} y={bar.outputY} width={bar.width} height={bar.outputHeight} rx="1" />{/if}
+          </g>
+        {/each}
+      {:else}
+        <polygon points={graph.area} />
+        <polyline points={graph.points || `4,${viewHeight - 12} 222,${viewHeight - 12}`} />
+        {#each graph.dots as dot, index (dot.sample.turnId + index)}
+          <circle class:active={index === active} cx={dot.x} cy={dot.y} r={index === active ? 3 : 2} />
+        {/each}
+      {/if}
     </svg>
     {#if point}
       {@const context = contextPercent(point.sample)}
-      <div class="token-tip" class:edge-left={point.x < 60} class:edge-right={point.x > TOKEN_GRAPH_WIDTH - 60} role="status" style:left={(point.x / TOKEN_GRAPH_WIDTH) * 100 + "%"} style:top={(point.y / TOKEN_GRAPH_HEIGHT) * plotHeight + "px"}>
+      <div class="token-tip" class:edge-left={point.x < 60} class:edge-right={point.x > TOKEN_GRAPH_WIDTH - 60} role="status" style:left={(point.x / TOKEN_GRAPH_WIDTH) * 100 + "%"} style:top={(point.y / viewHeight) * height + "px"}>
         <strong>{number(point.sample.totalTokens)} tokens</strong>
         <span>{tr("Input", "Entrada")} {number(point.sample.inputTokens)} · {tr("Output", "Saída")} {number(point.sample.outputTokens)}</span>
         {#if context !== null}<span>{tr("Context", "Contexto")} {context}%</span>{/if}
-        <small>{time(point.sample.createdAt)}</small>
+        {#if point.sample.model}<span>{point.sample.model}</span>{/if}
+        <small>{time(point.sample.createdAt)}{onSelect ? " · " + tr("click to open", "clique para abrir") : ""}</small>
       </div>
     {/if}
   </div>
-  <small>{loading && !shown.length ? tr("Loading…", "Carregando…") : tr("Time →", "Tempo →")}</small>
+  <small>{loading && !shown.length ? tr("Loading…", "Carregando…") : mode === "bars" ? tr("Prompts →", "Prompts →") : tr("Time →", "Tempo →")}</small>
 </div>
 
 <style>
-  .token-chart { min-width: 0; display: grid; grid-template-rows: auto 48px auto; gap: 3px; }
+  .token-chart { --plot-height: 48px; min-width: 0; display: grid; grid-template-rows: auto var(--plot-height) auto; gap: 3px; }
   .token-chart > span, .token-chart > small { color: var(--workspace-muted); font-size: 10px; font-weight: 720; line-height: 1.2; }
   .token-chart > small { color: var(--workspace-faint); text-align: right; }
-  .token-plot { position: relative; min-width: 0; height: 48px; border-radius: 6px; outline: none; }
+  .token-plot { position: relative; min-width: 0; height: var(--plot-height); border-radius: 6px; outline: none; }
+  .token-chart.selectable .token-plot { cursor: pointer; }
   .token-plot:focus-visible { box-shadow: 0 0 0 2px color-mix(in srgb, var(--workspace-accent) 45%, transparent); }
-  .token-graph { display: block; width: 100%; min-width: 0; height: 48px; overflow: visible; }
-  .token-graph :is(path, polyline, circle) { vector-effect: non-scaling-stroke; }
+  .token-graph { display: block; width: 100%; min-width: 0; height: var(--plot-height); overflow: visible; }
+  .token-graph :is(path, polyline, circle, rect) { vector-effect: non-scaling-stroke; }
+  /* Input below, output stacked on it; output uses the warm accent the context ring warns with. */
+  .token-graph .bar-input { fill: color-mix(in srgb, var(--workspace-accent) 58%, transparent); }
+  .token-graph .bar-output { fill: #c9963d; }
+  .token-graph .token-bar.active rect { stroke: var(--workspace-strong); stroke-width: 1; }
   .token-graph .graph-grid { fill: none; stroke: color-mix(in srgb, var(--workspace-line) 54%, transparent); stroke-width: .7; }
   .token-graph polygon { fill: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }
   .token-graph polyline { fill: none; stroke: var(--workspace-accent); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }

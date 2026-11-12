@@ -2,6 +2,8 @@
   import BrandIcon from "$lib/BrandIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import TokenUsageChart from "$lib/TokenUsageChart.svelte";
+  import TokenMetrics from "$lib/TokenMetrics.svelte";
+  import type { PromptJumpTarget } from "$lib/tokenUsage";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import LumeSelect, { type LumeSelectOption } from "$lib/LumeSelect.svelte";
   import RepositoryPanel from "$lib/RepositoryPanel.svelte";
@@ -32,6 +34,7 @@
     sessionOptions = [],
     onSelectSession,
     loading = false,
+    onJumpToPrompt,
   } = $props<{
     session: (AgentSession & { activityTotal?: number }) | null;
     language?: Language;
@@ -45,6 +48,8 @@
     sessionOptions?: LumeSelectOption[];
     onSelectSession?: (sessionId: string) => void;
     loading?: boolean;
+    /** Scrolls the session's chat to one of its prompts. */
+    onJumpToPrompt?: (target: PromptJumpTarget) => void;
   }>();
 
   let mcpServers = $state<McpServer[]>([]);
@@ -234,6 +239,13 @@
             <p class="usage-error" role="status"><strong>{tr("Usage unavailable", "Uso indisponível")}</strong> {usageError}</p>
           {/if}
         </section>
+      {/if}
+
+      {#if session.promptTokenUsage?.length}
+        <details class="inspector-section metrics-section">
+          <summary><span>{tr("Metrics", "Métricas")}</span><em>{session.promptTokenUsage.length}</em></summary>
+          <TokenMetrics samples={session.promptTokenUsage} agent={session.agent} {language} onJump={onJumpToPrompt} />
+        </details>
       {/if}
 
       {#if mcpAgents.includes(session.agent) && mcpLoading && !mcpServers.length}

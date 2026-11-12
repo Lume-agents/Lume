@@ -28,6 +28,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import LumeMascot from "$lib/LumeMascot.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import ChatUsageButton from "$lib/ChatUsageButton.svelte";
+  import { promptJumpNeedsOlder, resolvePromptJump, type PromptJumpRequest } from "$lib/tokenUsage";
   import UsageBanner from "$lib/UsageBanner.svelte";
   import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
@@ -135,6 +136,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     workflow = null,
     onWorkflowAction,
     onOpenWorkflow,
+    promptJump = null,
   } = $props<{
     session: HubSession;
     externalWriterConflict?: ExternalWriterConflict | null;
@@ -160,6 +162,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     workflow?: WorkflowPresence | null;
     onWorkflowAction?: (presence: WorkflowPresence, action: WorkflowStripAction) => Promise<unknown>;
     onOpenWorkflow?: (workflowId: string) => void;
+    /** Scrolls to a prompt when its session id is this chat's; a new nonce asks again. */
+    promptJump?: PromptJumpRequest | null;
   }>();
 
   const subagents = $derived(subagentsForSession(session));
@@ -2471,6 +2475,40 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     } finally {
       if (session.id === requestedSessionId) jumpingToPromptId = null;
     }
+  }
+
+  // The Inspector's metrics and the notes ask for prompts by token sample or activity id.
+  let handledPromptJump = 0;
+  $effect(() => {
+    const request = promptJump;
+    if (!request || request.sessionId !== session.id || request.nonce === handledPromptJump) return;
+    handledPromptJump = request.nonce;
+    void resolveAndJump(request);
+  });
+
+  async function resolveAndJump(request: PromptJumpRequest) {
+    const requestedSessionId = session.id;
+    const prompts: WorkspacePromptIndexEntry[] = conversationActivities
+      .filter((activity) => activity.kind === "prompt")
+      .map((activity) => ({ id: activity.id, createdAt: activity.createdAt, detail: activity.detail ?? "" }));
+    let target = resolvePromptJump(request, [...prompts, ...indexedPrompts]);
+    // Older prompts are read from the index a page at a time until one fits or none can.
+    let cursor: WorkspacePromptIndexEntry | undefined;
+    let oldest = Math.min(...prompts.map((prompt) => prompt.createdAt));
+    for (let page = 0; !target && session.nativeSessionId && page < 10 && promptJumpNeedsOlder(request, Number.isFinite(oldest) ? oldest : undefined); page += 1) {
+      try {
+        const result = await loadWorkspacePromptIndexPage(requestedSessionId, cursor?.createdAt, cursor?.id);
+        if (session.id !== requestedSessionId) return;
+        prompts.push(...result.prompts);
+        target = resolvePromptJump(request, prompts);
+        cursor = result.prompts.at(-1);
+        if (!cursor || !result.hasMore) break;
+        oldest = Math.min(oldest, cursor.createdAt);
+      } catch { break; }
+    }
+    if (session.id !== requestedSessionId) return;
+    if (target) await jumpToPrompt(target);
+    else promptIndexError = tr("This prompt could not be found in the available history.", "Este prompt não foi encontrado no histórico disponível.");
   }
 
   function scrollToLatest() {

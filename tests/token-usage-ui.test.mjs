@@ -23,7 +23,7 @@ assert.ok(!/<title>/.test(read("src/lib/TokenUsageChart.svelte")), "the points u
 
 await build({
   stdin: {
-    contents: 'import "./src/app.css"; import "./src/lib/workspaceTokens.css"; import { mount } from "svelte"; import Button from "./src/lib/ChatUsageButton.svelte"; for (const [id, usage] of Object.entries(window.__usage)) mount(Button, { target: document.getElementById(id), props: { usage, language: "pt-BR" } });',
+    contents: 'import "./src/app.css"; import "./src/lib/workspaceTokens.css"; import { mount } from "svelte"; import Button from "./src/lib/ChatUsageButton.svelte"; import Metrics from "./src/lib/TokenMetrics.svelte"; for (const [id, usage] of Object.entries(window.__usage)) mount(Button, { target: document.getElementById(id), props: { usage, language: "pt-BR" } }); for (const id of ["metrics-light", "metrics-dark"]) mount(Metrics, { target: document.getElementById(id), props: { samples: window.__metrics, agent: "claude_code", language: "en", onJump: (target) => window.__jumps.push(target) } });',
     resolveDir: root,
   },
   external: ["/fonts/*"],
@@ -43,11 +43,16 @@ function fixture() {
   const turn = (index, totalTokens, context) => ({ turnId: "turn-" + index, totalTokens, inputTokens: Math.round(totalTokens * 0.86), outputTokens: Math.round(totalTokens * 0.14), createdAt: start + index * 240_000, ...(context ? { contextTokens: context, contextWindow: 200_000 } : {}) });
   const claude = [turn(0, 12_400, 22_000), turn(1, 31_800, 54_000), turn(2, 8_200, 61_000), turn(3, 46_100, 108_000), turn(4, 19_300, 127_000), turn(5, 27_600, 151_000)];
   window.__usage = { light: claude, dark: claude, codex: [turn(0, 5_100), turn(1, 9_400)], none: [] };
+  // The Inspector's metrics: cache, prompt time and model on most turns.
+  window.__metrics = claude.map((sample, index) => ({ ...sample, cacheReadTokens: Math.round(sample.inputTokens * 0.6), promptAt: sample.createdAt - 30_000 - index * 4_000, model: "claude-opus-4-1" }));
+  window.__jumps = [];
 }
 
 const page = `<html><head><link rel="stylesheet" href="/app.css"></head><body style="margin:0">
 <div class="workspace-tokens" style="height:300px;padding:16px 24px;display:flex;justify-content:flex-end;gap:16px;background:var(--workspace-pane)"><span id="codex"></span><span id="none"></span><span id="light"></span></div>
 <div class="workspace-tokens dark" style="height:300px;padding:16px 24px;display:flex;justify-content:flex-end;background:var(--workspace-pane)"><span id="dark"></span></div>
+<div style="display:flex"><div class="workspace-tokens" style="width:300px;padding:40px 14px 14px;background:var(--workspace-sidebar)"><div id="metrics-light"></div></div>
+<div class="workspace-tokens dark" style="width:300px;padding:40px 14px 14px;background:var(--workspace-sidebar)"><div id="metrics-dark"></div></div></div>
 <script type="module" src="/app.js"></script></body></html>`;
 const server = createServer((request, response) => {
   const path = new URL(request.url, "http://localhost").pathname;
@@ -86,7 +91,7 @@ try {
   const call = (method, params) => send(method, params, sessionId);
   await call("Runtime.enable");
   await call("Page.enable");
-  await call("Emulation.setDeviceMetricsOverride", { width: 720, height: 600, deviceScaleFactor: 1, mobile: false });
+  await call("Emulation.setDeviceMetricsOverride", { width: 720, height: 1000, deviceScaleFactor: 1, mobile: false });
   await call("Page.addScriptToEvaluateOnNewDocument", { source: "(" + fixture.toString() + ")()" });
   const evaluate = async (expression) => {
     const result = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
@@ -139,6 +144,22 @@ try {
   await wait("document.querySelector('#dark .token-tip')?.innerText.includes('12.400')");
   await evaluate("window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))");
   await wait("!document.querySelector('#dark .usage-popover')");
+  // The Inspector's metrics: every prompt as stacked bars, the context over time and the tiles, in both themes.
+  await wait("document.querySelectorAll('#metrics-light .token-bar').length === 6");
+  assert.equal(await evaluate("document.querySelectorAll('#metrics-dark .context-fill polyline').length"), 1, "the context fill");
+  const tiles = await evaluate("Array.from(document.querySelectorAll('#metrics-light .metric-tiles dt')).map(item => item.textContent)");
+  assert.deepEqual(tiles, ["Session total", "Per turn", "Largest turn", "Context now", "Cache hits", "Time per turn", "Model"]);
+  assert.equal(await evaluate("document.querySelector('#metrics-light .metric-tiles .wide dd').textContent"), "claude-opus-4-1");
+  await hover("#metrics-dark .token-plot", 0.58);
+  await wait("document.querySelector('#metrics-dark .token-tip')");
+  await screenshot("metrics");
+  await evaluate("document.querySelector('#metrics-dark .token-plot').click()");
+  await evaluate("document.querySelector('#metrics-light .metric-tiles button').click()");
+  const jumps = await evaluate("window.__jumps");
+  assert.equal(jumps.length, 2, "a bar and the largest turn open their prompts");
+  assert.equal(jumps[1].promptAt, await evaluate("window.__metrics[3].promptAt"), "the largest turn is the fourth");
+  await evaluate("document.querySelector('#metrics-light .mode-toggle button:last-child').click()");
+  await wait("document.querySelectorAll('#metrics-light .token-graph circle').length === 6");
   assert.deepEqual(failures, []);
   console.log("Token usage UI passed. Screenshots: " + output);
 } finally {

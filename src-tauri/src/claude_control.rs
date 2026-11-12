@@ -546,6 +546,41 @@ pub fn rate_limits(usage: &Value) -> Result<Vec<AgentRateLimit>, String> {
     .into())
 }
 
+/// The model a window belongs to, for the limits a model has of its own (`weekly_fable_5_2` is
+/// "Fable 5.2"). The account-wide windows have none.
+fn rate_limit_model(window: &Value, kind: &str) -> Option<String> {
+    if let Some(name) = ["model", "model_name", "label"]
+        .iter()
+        .find_map(|key| window.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        return Some(name.to_string());
+    }
+    let rest = kind
+        .strip_prefix("weekly_")
+        .or_else(|| kind.strip_prefix("session_"))?;
+    if rest == "all" {
+        return None;
+    }
+    let mut words: Vec<String> = Vec::new();
+    for token in rest.split('_').filter(|token| !token.is_empty()) {
+        let numeric = token.chars().all(|ch| ch.is_ascii_digit());
+        match words.last_mut() {
+            Some(last) if numeric && last.ends_with(|ch: char| ch.is_ascii_digit()) => {
+                last.push('.');
+                last.push_str(token);
+            }
+            _ => {
+                let mut chars = token.chars();
+                let first = chars.next()?.to_uppercase().collect::<String>();
+                words.push(format!("{first}{}", chars.as_str()));
+            }
+        }
+    }
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
 fn current_rate_limits(windows: &[Value]) -> Vec<AgentRateLimit> {
     windows
         .iter()
@@ -559,7 +594,10 @@ fn current_rate_limits(windows: &[Value]) -> Vec<AgentRateLimit> {
             };
             Some(AgentRateLimit {
                 id: format!("claude:{kind}"),
-                label: label.to_string(),
+                label: match rate_limit_model(window, kind) {
+                    Some(model) => format!("{model} · {label}"),
+                    None => label.to_string(),
+                },
                 used_percent: percent(window.get("percent")),
                 resets_at: reset_millis(window.get("resets_at")),
                 window_minutes: minutes,
@@ -751,6 +789,22 @@ mod tests {
             ("7d", 4, Some(10080))
         );
         assert_eq!(limits[0].resets_at, Some(1_791_319_200_000));
+    }
+
+    #[test]
+    fn usage_names_the_model_of_a_limit_that_is_its_own() {
+        let usage = json!({ "rate_limits": { "limits": [
+            { "kind": "session", "group": "session", "percent": 25 },
+            { "kind": "weekly_all", "group": "weekly", "percent": 4 },
+            { "kind": "weekly_fable_5_2", "group": "weekly", "percent": 61 },
+            { "kind": "weekly_opus", "group": "weekly", "percent": 9, "model": "Opus 5" }
+        ]}});
+        let labels = rate_limits(&usage)
+            .expect("limits")
+            .into_iter()
+            .map(|limit| limit.label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["5h", "7d", "Fable 5.2 · 7d", "Opus 5 · 7d"]);
     }
 
     #[test]

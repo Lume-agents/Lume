@@ -77,3 +77,13 @@ assert.equal(sessionContextUsage({ agent: "claude_code", promptTokenUsage: [{ co
 assert.equal(codexContext([{ contextTokens: 150_000, contextWindow: 100_000 }]).percent, 100);
 assert.equal(sessionContextUsage(null), null);
 console.log("provider context usage ok");
+
+// A model's own limit follows the account-wide ones, and its name is the group label.
+const withModel = usageGaugeGroups([
+  { id: "claude:weekly_fable_5_2", label: "Fable 5.2 · 7d", usedPercent: 61, windowMinutes: 10080 },
+  { id: "claude:session", label: "5h", usedPercent: 10, windowMinutes: 300 },
+  { id: "claude:weekly_all", label: "7d", usedPercent: 4, windowMinutes: 10080 },
+], "en");
+assert.deepEqual(withModel.map((group) => group.label), ["", "Fable 5.2"]);
+assert.deepEqual(withModel[1].gauges.map((gauge) => gauge.window), ["7d"]);
+console.log("Model usage gauge tests passed");

@@ -65,5 +65,8 @@ export function usageGaugeGroups(limits: AgentRateLimit[], language: Language): 
     group.gauges.splice(at, 0, { id: limit.id, remaining, window, title });
     groups.set(label, group);
   }
-  return [...groups.values()].map(({ label, gauges }) => ({ label, gauges }));
+  // The account-wide limits come first; a model's own limits follow, named under their gauges.
+  return [...groups.values()]
+    .map(({ label, gauges }) => ({ label, gauges }))
+    .sort((left, right) => Number(Boolean(left.label)) - Number(Boolean(right.label)));
 }

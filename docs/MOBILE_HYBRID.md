@@ -6,7 +6,9 @@ business rules.
 
 ## Ownership
 
-- `mobile-pwa/` owns navigation, chat, results, visual states and accessibility.
+- `mobile/` (Svelte sources, sharing modules with the Workspace) owns navigation, chat, results, visual states and
+  accessibility. `mobile-pwa/` is its build output (`npm run build:mobile`, see `vite.mobile.config.js`), published
+  as the PWA and synced into the Capacitor shells; it is not edited by hand.
 - `src-tauri/` owns sessions, permissions, commands and device scopes.
 - `LumeNativePlugin` owns Android connectivity while the app is visible.
 - `LumeRealtimeService` owns it while optional background monitoring is active.

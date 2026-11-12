@@ -8,6 +8,10 @@ Lume Mobile uses the same application in three forms:
 
 No cloud relay carries agent data. The phone and computer must be on the same local network.
 
+For now the phone is local-network only: it cannot use the Lume Relay. The Relay ([LUME_REMOTE.md](./docs/LUME_REMOTE.md))
+connects one computer running Lume to another (the app's **Settings → Remote computers** and the `lume node relay-*`
+commands); phone access through it is a later phase.
+
 ## Pairing
 
 1. In desktop Lume, open **Settings → Mobile access**.

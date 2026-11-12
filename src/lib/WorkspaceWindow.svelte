@@ -47,7 +47,7 @@
   import WorkflowBoard from "$lib/WorkflowBoard.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import { desktopWorkflowBackend } from "$lib/workflowBoardBackend";
-  import { boardLayoutNames, newerRun, presenceTone, sessionWorkflowPresence, type PresenceTone, type WorkflowPresence } from "$lib/workflowPresence";
+  import { boardLayoutNames, newerRun, presenceTone, sessionWorkflowPresence, type PresenceTone, type WorkflowPresence, type WorkflowStripAction } from "$lib/workflowPresence";
   import WorkspaceExtensions from "$lib/WorkspaceExtensions.svelte";
   import GuidedTour from "$lib/GuidedTour.svelte";
   import { boardTour, boardTourKey, workspaceTour, workspaceTourKey } from "$lib/tours";
@@ -2161,6 +2161,21 @@
     const state = workflowToneLabel(presenceTone(step));
     return [tr(`Step ${step.index}/${step.total}`, `Etapa ${step.index}/${step.total}`), step.roleLabel, step.name, state].filter(Boolean).join(" · ");
   }
+  /** The step a chat shows in its strip: only while that workflow's run is active. */
+  function activeWorkflowStep(session: HubSession) {
+    return workflowStepsFor(session).find((step) => step.runActive) ?? null;
+  }
+  async function runWorkflowStripAction(step: WorkflowPresence, action: WorkflowStripAction) {
+    const backend = desktopWorkflowBackend;
+    const commands = { approve: backend.approve, advance: backend.advance, retry: backend.retry, skip: backend.skip };
+    acceptWorkflowRun(await commands[action](step.workflowId));
+  }
+  // The board picks the group up once it is mounted and the group is in its list.
+  let boardFocusRequest = $state<{ groupId: string; name?: string; nonce: number } | null>(null);
+  function openWorkflowOnBoard(groupId: string, name?: string) {
+    boardFocusRequest = { groupId, name, nonce: (boardFocusRequest?.nonce ?? 0) + 1 };
+    showWorkflowBoard(true);
+  }
   function workflowChipTitle(steps: WorkflowPresence[]) {
     return steps.map((step) => workflowStepLabel(step) + (step.objective && step.runActive ? "\n" + step.objective : "")).join("\n\n");
   }
@@ -3546,6 +3561,9 @@
           onToggleMaximize={() => togglePaneMaximize(maximizedSession.id)}
           onDismissExternalWriterConflict={dismissExternalWriterConflict}
           onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(maximizedSession, externalWriterConflicts[maximizedSession.id]!, action)}
+          workflow={activeWorkflowStep(maximizedSession)}
+          onWorkflowAction={runWorkflowStripAction}
+          onOpenWorkflow={(groupId) => openWorkflowOnBoard(groupId)}
         />
       {/key}
     {:else if primary}
@@ -3565,6 +3583,9 @@
           onToggleMaximize={() => togglePaneMaximize(primary.id)}
           onDismissExternalWriterConflict={dismissExternalWriterConflict}
           onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(primary, externalWriterConflicts[primary.id]!, action)}
+          workflow={activeWorkflowStep(primary)}
+          onWorkflowAction={runWorkflowStripAction}
+          onOpenWorkflow={(groupId) => openWorkflowOnBoard(groupId)}
         />
       {/key}
       {#if secondary}
@@ -3603,6 +3624,9 @@
             onToggleMaximize={() => togglePaneMaximize(secondary.id)}
             onDismissExternalWriterConflict={dismissExternalWriterConflict}
             onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(secondary, externalWriterConflicts[secondary.id]!, action)}
+          workflow={activeWorkflowStep(secondary)}
+          onWorkflowAction={runWorkflowStripAction}
+          onOpenWorkflow={(groupId) => openWorkflowOnBoard(groupId)}
           />
         {/key}
         {#if tertiary}
@@ -3641,6 +3665,9 @@
               onToggleMaximize={() => togglePaneMaximize(tertiary.id)}
               onDismissExternalWriterConflict={dismissExternalWriterConflict}
               onResolveExternalWriterConflict={(action) => resolveExternalWriterConflict(tertiary, externalWriterConflicts[tertiary.id]!, action)}
+          workflow={activeWorkflowStep(tertiary)}
+          onWorkflowAction={runWorkflowStripAction}
+          onOpenWorkflow={(groupId) => openWorkflowOnBoard(groupId)}
             />
           {/key}
         {/if}
@@ -3691,6 +3718,7 @@
         onFinishSidebarDrag={finishSidebarSessionDrag}
         {draggingSessionId}
         onSidebarDragOverBoard={(over) => dragOverBoard = over}
+        focusRequest={boardFocusRequest}
       />
     {/if}
     {#if extensionsOpen}

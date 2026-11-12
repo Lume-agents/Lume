@@ -42,6 +42,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import { agentConnectionMessage, type ConnectableAgent } from "$lib/agentConnection";
   import SessionRepositoryBadge from "$lib/SessionRepositoryBadge.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
+  import WorkflowChatStrip from "$lib/WorkflowChatStrip.svelte";
+  import type { WorkflowPresence, WorkflowStripAction } from "$lib/workflowPresence";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import { renderFileTypeIconHtml } from "$lib/fileTypeIcons";
   import ResponseAttachments from "$lib/ResponseAttachments.svelte";
@@ -129,6 +131,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     onDismissExternalWriterConflict,
     onResolveExternalWriterConflict,
     header = true,
+    workflow = null,
+    onWorkflowAction,
+    onOpenWorkflow,
   } = $props<{
     session: HubSession;
     externalWriterConflict?: ExternalWriterConflict | null;
@@ -150,6 +155,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     onResolveExternalWriterConflict?: (action: "keep_lume" | "open_branch") => void | Promise<void>;
     /** False where the window already shows the session's name and controls (a terminal). */
     header?: boolean;
+    /** The step this chat plays in a workflow whose run is active. */
+    workflow?: WorkflowPresence | null;
+    onWorkflowAction?: (presence: WorkflowPresence, action: WorkflowStripAction) => Promise<unknown>;
+    onOpenWorkflow?: (workflowId: string) => void;
   }>();
 
   const subagents = $derived(subagentsForSession(session));
@@ -2590,6 +2599,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         {/if}
       </div>
   </header>
+  {/if}
+
+  {#if workflow}
+    <WorkflowChatStrip presence={workflow} {session} {language} onAction={onWorkflowAction ? (action) => onWorkflowAction(workflow, action) : undefined} onOpen={onOpenWorkflow ? () => onOpenWorkflow(workflow.workflowId) : undefined} />
   {/if}
 
   {#if subagents.length}

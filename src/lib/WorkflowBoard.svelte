@@ -24,7 +24,7 @@
   import WorkspaceHeaderIcon from "$lib/WorkspaceHeaderIcon.svelte";
   import SystemBannerStack, { type SystemBannerItem } from "$lib/SystemBannerStack.svelte";
 
-  let { sessions, preferences, language, active, keyboardEnabled = true, backend = desktopWorkflowBackend, onSaveGroup, onDeleteGroup, onOpenChat, onClose, onFinishSidebarDrag, draggingSessionId = null, onSidebarDragOverBoard, touch = false }: {
+  let { sessions, preferences, language, active, keyboardEnabled = true, backend = desktopWorkflowBackend, onSaveGroup, onDeleteGroup, onOpenChat, onClose, onFinishSidebarDrag, draggingSessionId = null, onSidebarDragOverBoard, touch = false, focusRequest = null }: {
     sessions: HubSession[];
     preferences: Preferences;
     language: Language;
@@ -42,6 +42,8 @@
     onSidebarDragOverBoard?: (over: boolean) => void;
     /** A phone: taps open a card, a held card only drags, and the toolbar is trimmed. */
     touch?: boolean;
+    /** Shows a group once it exists (a chat strip or the sidebar menu asked for it), naming it when given a name. */
+    focusRequest?: { groupId: string; name?: string; nonce: number } | null;
   } = $props();
 
   const storageKey = "lume:workflow-board:v1";
@@ -883,6 +885,17 @@
     if (group) untrack(() => ensureLayout(group));
   });
   $effect(() => { if (ready && active && activeId) void refreshRun(activeId); });
+  // The board owns its layout, so a name given from elsewhere is written here rather than into storage directly.
+  let handledFocusNonce = 0;
+  $effect(() => {
+    const request = focusRequest;
+    if (!ready || !request || request.nonce === handledFocusNonce || !groups.some((item) => item.id === request.groupId)) return;
+    untrack(() => {
+      handledFocusNonce = request.nonce;
+      if (activeId !== request.groupId) activate(request.groupId);
+      if (request.name) patchLayout({ name: request.name }, request.groupId);
+    });
+  });
   $effect(() => { if (!active) untrack(cancelGesture); });
   // The canvas takes the focus when the board opens, so Esc works straight away.
   $effect(() => { if (active && viewport) untrack(() => viewport?.focus({ preventScroll: true })); });

@@ -30,7 +30,7 @@ await build({
       builder.onResolve({ filter: /^\$lib\// }, ({ path }) => ({ path: join(root, "src/lib", path.slice(5) + (extname(path) ? "" : ".ts")) }));
       builder.onLoad({ filter: /\.svelte$/ }, ({ path }) => {
         let source = readFileSync(path, "utf8");
-        if (path.endsWith("WorkspaceSessionPane.svelte")) source = '<script>let { session } = $props();</script><section data-workspace-pane={session.id}><input aria-label="Preserved chat draft" /></section>';
+        if (path.endsWith("WorkspaceSessionPane.svelte")) source = '<script>import WorkflowChatStrip from "$lib/WorkflowChatStrip.svelte"; let { session, language, workflow = null, onWorkflowAction, onOpenWorkflow } = $props();</script><section data-workspace-pane={session.id}>{#if workflow}<WorkflowChatStrip presence={workflow} {session} {language} onAction={(action) => onWorkflowAction(workflow, action)} onOpen={() => onOpenWorkflow(workflow.workflowId)} />{/if}<input aria-label="Preserved chat draft" /></section>';
         if (path.endsWith("WorkspaceInspector.svelte") || path.endsWith("WorkspaceReviewCenter.svelte")) source = '<div>Test inspector</div>';
         return { contents: compile(source, { filename: path, css: "injected" }).js.code, loader: "js", resolveDir: dirname(path) };
       });
@@ -299,6 +299,17 @@ try {
   assert.equal(await evaluate("document.querySelector('.edge-approve')"), null, "nothing left to approve on the arrow");
   await click(".board-run .primary");
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
+  // The chat whose result goes out carries the same approval in its strip, and only that action.
+  await evaluate("window.__fixture.status('waiting_for_approval', { pendingConnectionId: 'connection-fixture' })");
+  await wait("document.querySelector('[data-workspace-pane=\"session-0\"] .workflow-strip [data-workflow-action=\"approve\"]')");
+  assert.match(await evaluate("document.querySelector('[data-workspace-pane=\"session-0\"] .workflow-strip').textContent"), /Etapa 1\/3 · Planejador .*Handoff para Implementador aguardando aprovação/, "the strip names the step and the waiting handoff");
+  const approvals = await evaluate("window.__fixture.calls.filter(command => command === 'approve_workflow_handoff').length");
+  await click('[data-workspace-pane="session-0"] [data-workflow-action="approve"]');
+  await wait("window.__fixture.calls.filter(command => command === 'approve_workflow_handoff').length === " + (approvals + 1));
+  await wait("document.querySelector('.board-run').dataset.status === 'ready'");
+  await wait("document.querySelector('[data-workspace-pane=\"session-0\"] [data-workflow-action=\"advance\"]')");
+  await click(".board-run .primary");
+  await wait("document.querySelector('.board-run').dataset.status === 'running'");
   await evaluate("window.__fixture.status('failed', { error: 'Falha simulada' })");
   await click(".board-run .primary");
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
@@ -314,6 +325,7 @@ try {
   await wait("window.__fixture.starts === 2");
   await evaluate("window.__fixture.status('completed', { error: undefined })");
   await wait("document.querySelector('.board-run').dataset.status === 'completed'");
+  await wait("!document.querySelector('.workflow-strip')");
   await evaluate("(() => { const r = window.__fixture.runs['orb-fixture']; window.__fixture.emit('lume://workflow-run-changed', { ...r, status: 'running', updatedAt: r.updatedAt - 1 }); })()");
   assert.equal(await evaluate("document.querySelector('.board-run').dataset.status"), "completed", "stale events do not rewind the run");
   await click('[data-board-card="step-native-0"] .card-body');

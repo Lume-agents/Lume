@@ -56,6 +56,9 @@ export type WorkflowPresence = {
 
 export type PresenceTone = "running" | "approval" | "ready" | "paused" | "failed" | "done" | "idle";
 
+/** What the chat strip can ask of a run; each maps to the runtime command of the same name. */
+export type WorkflowStripAction = "approve" | "advance" | "retry" | "skip";
+
 /** Whether `next` should replace `current` as the latest run of a workflow. */
 export function newerRun(current: WorkflowRun | null | undefined, next: WorkflowRun): boolean {
   if (!current) return true;

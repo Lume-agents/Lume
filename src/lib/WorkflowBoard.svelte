@@ -9,6 +9,7 @@
   import { desktopWorkflowBackend, type WorkflowBoardBackend } from "$lib/workflowBoardBackend";
   import { BOARD_CARD_WIDTH, BOARD_CARD_HEIGHT, analyzeChain, checkConnection, connectionRefusalMessage, problemMessage, newGroup, newStep, preserveRoleOverrides, defaultRole, defaultContextSelection, addStep, updateStep, removeStep, addConnection, updateConnection, removeConnection, insertStep, edgeGeometry, cardRect, cardAt, placeCard, toBoardPoint, zoomAround, fitView, normalizeLayout, stepVisualState, connectionWaitsForApproval, type BoardPoint, type BoardLayout, type BoardView } from "$lib/workflowBoard";
   import { WorkflowBoardSaveQueue } from "$lib/workflowBoardPersistence";
+  import { newerRun } from "$lib/workflowPresence";
   import { activityFeed, lastResponse, stepActivity } from "$lib/boardActivity";
   import { formatAgentDuration } from "$lib/activityPresentation";
   import { demoFrames, demoSession, demoTodoCount, type DemoState } from "$lib/boardSimulator";
@@ -838,10 +839,7 @@
 
   function acceptRun(next: WorkflowRun | null) {
     if (!next || disposed) return;
-    const current = runs[next.workflowId];
-    const newer = !current || (next.id === current.id ? next.updatedAt > current.updatedAt
-      : next.createdAt > current.createdAt || (next.createdAt === current.createdAt && next.updatedAt > current.updatedAt));
-    if (!newer) return;
+    if (!newerRun(runs[next.workflowId], next)) return;
     runs = { ...runs, [next.workflowId]: next };
     if (!objectives[next.workflowId] || !["completed", "cancelled"].includes(next.status)) {
       objectives = { ...objectives, [next.workflowId]: next.objective };

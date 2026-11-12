@@ -1,6 +1,7 @@
 <script lang="ts">
   import BrandIcon from "$lib/BrandIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
+  import TokenUsageChart from "$lib/TokenUsageChart.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import LumeSelect, { type LumeSelectOption } from "$lib/LumeSelect.svelte";
   import RepositoryPanel from "$lib/RepositoryPanel.svelte";
@@ -102,7 +103,6 @@
   const totalAdded = $derived(changes.reduce((total, file) => total + file.added, 0));
   const totalRemoved = $derived(changes.reduce((total, file) => total + file.removed, 0));
   const tokenSamples = $derived((session?.promptTokenUsage ?? []).slice(-14));
-  const tokenGraph = $derived(tokenGraphGeometry(tokenSamples));
   // The first read of a session's limits is the only wait worth showing; later refreshes keep the last values.
   const usageLoading = $derived(Boolean(session && hasUsage(session.agent) && usagePendingKey !== usageSettledKey && !session.rateLimits?.length));
   const usageGroups = $derived(usageGaugeGroups(session?.rateLimits ?? [], language));
@@ -126,29 +126,6 @@
 
   function tr(english: string, portuguese: string) {
     return language === "pt-BR" ? portuguese : english;
-  }
-
-  function tokenGraphGeometry(samples: NonNullable<AgentSession["promptTokenUsage"]>) {
-    if (!samples.length) return { points: "", area: "", dots: [] as Array<{ x: number; y: number; tokens: number }> };
-    const width = 226;
-    const height = 54;
-    const insetX = 4;
-    const insetTop = 12;
-    const insetBottom = 10;
-    const firstTime = samples[0]?.createdAt ?? 0;
-    const lastTime = samples.at(-1)?.createdAt ?? firstTime;
-    const timeSpan = Math.max(1, lastTime - firstTime);
-    const maximum = Math.max(1, ...samples.map((sample) => sample.totalTokens));
-    const dots = samples.map((sample, index) => ({
-      x: samples.length === 1 ? width / 2 : insetX + ((sample.createdAt - firstTime) / timeSpan || index / (samples.length - 1)) * (width - insetX * 2),
-      y: height - insetBottom - (sample.totalTokens / maximum) * (height - insetTop - insetBottom),
-      tokens: sample.totalTokens,
-    }));
-    const points = dots.length === 1
-      ? `${insetX},${dots[0].y.toFixed(1)} ${width - insetX},${dots[0].y.toFixed(1)}`
-      : dots.map((dot) => `${dot.x.toFixed(1)},${dot.y.toFixed(1)}`).join(" ");
-    const area = `${insetX},${height - insetBottom} ${points} ${width - insetX},${height - insetBottom}`;
-    return { points, area, dots };
   }
 
   function subagentStatus(status: (typeof subagents)[number]["status"]) {
@@ -252,18 +229,7 @@
               {#each { length: usagePlaceholders }, index (index)}<i></i>{/each}
             {/each}
           </div>
-          <div class="token-chart" aria-busy={usageLoading && !tokenSamples.length}>
-            <span>{tr("Tokens / prompt", "Tokens / prompt")}</span>
-            <svg class:empty={!tokenGraph.points} class:loading={usageLoading && !tokenSamples.length} class="token-graph" viewBox="0 0 226 54" preserveAspectRatio="none" role="img" aria-label={tr("Tokens used per prompt over time", "Tokens usados por prompt ao longo do tempo")}>
-              <path class="graph-grid" d="M4 14H222M4 28H222M4 42H222" />
-              <polygon points={tokenGraph.area} />
-              <polyline points={tokenGraph.points || "4,42 222,42"} />
-              {#each tokenGraph.dots as dot}
-                <circle cx={dot.x} cy={dot.y} r="2"><title>{dot.tokens.toLocaleString(language)} tokens</title></circle>
-              {/each}
-            </svg>
-            <small>{usageLoading && !tokenSamples.length ? tr("Loading…", "Carregando…") : tr("Time →", "Tempo →")}</small>
-          </div>
+          <TokenUsageChart samples={tokenSamples} {language} loading={usageLoading} />
           {#if usageError}
             <p class="usage-error" role="status"><strong>{tr("Usage unavailable", "Uso indisponível")}</strong> {usageError}</p>
           {/if}
@@ -341,7 +307,7 @@
       <div class="inspector-scroll inspector-loading" role="status" aria-label={tr("Loading inspector", "Carregando o inspector")}>
         <section class="usage-section">
           <div class="usage-gauges loading"><i></i><i></i></div>
-          <div class="token-chart"><span>{tr("Tokens / prompt", "Tokens / prompt")}</span><svg class="token-graph empty loading" viewBox="0 0 226 54" preserveAspectRatio="none" aria-hidden="true"><path class="graph-grid" d="M4 14H222M4 28H222M4 42H222" /><polyline points="4,42 222,42" /></svg><small>{tr("Loading…", "Carregando…")}</small></div>
+          <TokenUsageChart samples={[]} {language} loading />
         </section>
         <div class="loading-rows" aria-hidden="true"><i></i><i></i><i></i></div>
       </div>
@@ -375,7 +341,6 @@
   .inspector-scroll::-webkit-scrollbar-thumb { border-radius: 5px; background: transparent; }
   .inspector-scroll:global(.is-scrolling)::-webkit-scrollbar-thumb { background: var(--workspace-scroll-thumb); }
   .usage-section { min-height: 72px; margin: 13px 0 3px; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 12px; }.usage-section.stacked { grid-template-columns: minmax(0, 1fr); gap: 10px; }
-  .token-graph :is(path, polyline, circle) { vector-effect: non-scaling-stroke; }
   .usage-gauges { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; }
   .usage-section.stacked .usage-gauges { justify-content: space-evenly; gap: 10px; }
   .usage-group { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 2px; }
@@ -392,7 +357,6 @@
   .usage-error { grid-column: 1 / -1; margin: 0; color: var(--workspace-muted); font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }.usage-error strong { color: var(--workspace-strong); font-weight: 720; }
   .usage-gauges > i { width: 56px; min-width: 0; flex: 0 1 56px; height: 30px; border: 5px solid var(--workspace-line); border-bottom: 0; border-radius: 32px 32px 0 0; opacity: .5; }
   .usage-gauges.loading > i { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
-  .token-chart { min-width: 0; display: grid; grid-template-rows: auto 48px auto; gap: 3px; }.token-chart > span, .token-chart > small { color: var(--workspace-muted); font-size: 10px; font-weight: 720; line-height: 1.2; }.token-chart > small { color: var(--workspace-faint); text-align: right; }.token-graph { width: 100%; min-width: 0; height: 48px; overflow: visible; }.token-graph .graph-grid { fill: none; stroke: color-mix(in srgb, var(--workspace-line) 54%, transparent); stroke-width: .7; }.token-graph polygon { fill: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }.token-graph polyline { fill: none; stroke: var(--workspace-accent); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }.token-graph.empty polyline { stroke: var(--workspace-line); stroke-dasharray: 3 4; }.token-graph circle { fill: var(--workspace-raised); stroke: var(--workspace-accent); stroke-width: 1.3; }
   :global(.inspector-section) { border-bottom: 1px solid var(--workspace-line); }:global(.inspector-section > summary) { min-height: 40px; display: flex; align-items: center; gap: 7px; color: var(--workspace-strong); font-size: 11px; font-weight: 600; list-style: none; cursor: pointer; }:global(.inspector-section > summary::-webkit-details-marker) { display: none; }:global(.inspector-section > summary::after) { width: 6px; height: 6px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; content: ""; opacity: .5; transform: rotate(45deg); transition: transform 160ms ease; }:global(.inspector-section[open] > summary::after) { transform: rotate(225deg); }:global(.inspector-section > summary em) { min-width: 19px; height: 19px; display: grid; place-items: center; border-radius: 6px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 10px; font-style: normal; }:global(.inspector-section[open]) { padding-bottom: 13px; }
   .subagent-list { display: grid; gap: 3px; }.subagent-list > div { min-width: 0; min-height: 36px; padding: 4px 5px; display: flex; align-items: center; gap: 8px; border-radius: 8px; }.subagent-list > div:hover { background: var(--workspace-subtle); }.subagent-list > div > span { min-width: 0; display: grid; gap: 2px; }.subagent-list strong { overflow: hidden; color: var(--workspace-text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.subagent-list small { color: var(--workspace-faint); font-size: 10px; }.subagent-list small.status-running { color: #4e98ca; }.subagent-list small.status-failed { color: #c66762; }.subagent-list small.status-completed { color: #50aa79; }
   .files-toolbar { min-height: 40px; margin-bottom: 4px; padding-bottom: 8px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid color-mix(in srgb, var(--workspace-line) 65%, transparent); }.files-toolbar > span { min-width: 0; display: grid; gap: 2px; flex: 1; }.files-toolbar > span > strong { color: var(--workspace-text); font-size: 10px; }.files-toolbar > span small { display: flex; gap: 5px; font-size: 10px; }.files-toolbar b, .inspector-files b { color: #43a873; }.files-toolbar i, .inspector-files i { color: #c16660; font-style: normal; }.files-toolbar button { min-height: 28px; padding: 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 28%, var(--workspace-line)); border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 10px; font-weight: 740; cursor: pointer; }.files-toolbar button:hover { border-color: color-mix(in srgb, var(--workspace-accent) 52%, var(--workspace-line)); }
@@ -416,7 +380,6 @@
   .empty-section { margin: 0; padding: 0 0 5px; color: var(--workspace-faint); font-size: 10px; line-height: 1.45; }
   .inspector-empty { margin: auto; padding: 24px; display: grid; justify-items: center; gap: 10px; color: var(--workspace-faint); font-size: 10px; text-align: center; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .token-graph.loading { animation: usage-pulse 1.2s ease-in-out infinite alternate; }
   .inspector-loading { padding-top: 1px; }
   .mcp-loading { padding: 0 0 16px; border-bottom: 1px solid var(--workspace-line); }
   .mcp-loading .loading-rows { margin-top: 14px; }
@@ -425,5 +388,5 @@
   .loading-rows > i:nth-child(2) { width: 78%; }
   .loading-rows > i:nth-child(3) { width: 54%; }
   @keyframes usage-pulse { to { opacity: .9; } }
-  @media (prefers-reduced-motion: reduce) { .inspector-section > summary::after, .gauge-progress { transition: none; }.usage-gauges.loading > i, .token-graph.loading, .loading-rows > i { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .inspector-section > summary::after, .gauge-progress { transition: none; }.usage-gauges.loading > i, .loading-rows > i { animation: none; } }
 </style>

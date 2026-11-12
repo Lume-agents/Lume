@@ -27,6 +27,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import BrandIcon from "$lib/BrandIcon.svelte";
   import LumeMascot from "$lib/LumeMascot.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import ChatUsageButton from "$lib/ChatUsageButton.svelte";
   import UsageBanner from "$lib/UsageBanner.svelte";
   import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
@@ -2537,6 +2538,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     {/if}
     <span class="status-badge status-{waitingForSubagents ? 'subagents' : session.status}" title={presentedStatus} aria-label={presentedStatus}><i></i><span class="badge-label">{presentedStatus}</span></span>
       <div class="pane-actions">
+        {#if session.promptTokenUsage?.length}<ChatUsageButton usage={session.promptTokenUsage} {language} />{/if}
         {#if archivedAgentAlerts.length}
           <div class="agent-alerts" bind:this={alertsRoot}>
             <button

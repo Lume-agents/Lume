@@ -8,6 +8,8 @@ Pedidos de permissão são removidos antes de cada gravação. Comando completo,
 
 Ao escolher **Salvar nota** em uma resposta final, o texto visível daquela resposta e os arquivos/verificações reportados são gravados localmente. A ação é explícita e a nota pode ser excluída na mesma tela.
 
+As notas (aba **Notas**, seção Notas do Inspector e **Salvar em nota** em prompts e respostas) ficam só no banco local, com título, texto, tags, projeto, agente e o prompt de origem. Planos salvos automaticamente aparecem no filtro **Planos**. Nenhuma nota é enviada a um agente sem ação explícita: ao anexar uma nota a um prompt, o texto dela segue para o provedor daquele agente junto com o prompt, depois de ocultar valores secretos e referências a arquivos sensíveis como no contexto de workflow. Excluir uma nota a remove do banco; um plano automático excluído não volta a ser salvo. O que já foi enviado a um provedor segue as regras dele.
+
 O histórico de workflow retém no máximo 200 execuções e guarda somente a resposta final sanitizada e limitada de cada etapa, caminhos de arquivo não sensíveis, verificações deduplicadas e eventos de controle. Prompts internos do orquestrador, arquivos sensíveis e conversas completas não fazem parte desse registro. O mobile recebe somente uma janela limitada e de leitura desse histórico depois do pareamento; iniciar ou controlar workflows continua restrito ao desktop.
 
 ## Comunicação

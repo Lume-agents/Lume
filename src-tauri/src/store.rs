@@ -33,6 +33,30 @@ pub struct TakeoverRecovery {
     pub phase: String,
 }
 
+/// The note columns in the order `query_notes` reads them.
+const NOTE_COLUMNS: &str = "id, native_session_id, title, body, kind, pinned, created_at, updated_at, \
+     agent, project, prompt_activity_id, prompt_excerpt, tags, source_activity_id";
+
+/// Adds the columns a table lacks, so older databases gain them without losing rows; safe to run every start.
+fn add_missing_columns(connection: &Connection, table: &str, columns: &[(&str, &str)]) -> Result<(), String> {
+    let existing = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| error.to_string())?;
+    for (name, definition) in columns {
+        if !existing.iter().any(|column| column == name) {
+            connection
+                .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {definition};"))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 const EVENT_SYNC_SLACK_MS: i64 = 10 * 60 * 1000;
 const EVENT_DETAIL_CHARS: usize = 160;
 const EVENT_FILES: usize = 20;
@@ -187,6 +211,24 @@ impl Store {
                  );
                  CREATE INDEX IF NOT EXISTS idx_workflow_run_history_updated
                     ON workflow_run_history(updated_at DESC);",
+            )
+            .map_err(|error| error.to_string())?;
+        add_missing_columns(
+            &connection,
+            "session_notes",
+            &[
+                ("agent", "TEXT"),
+                ("project", "TEXT"),
+                ("prompt_activity_id", "TEXT"),
+                ("prompt_excerpt", "TEXT"),
+                ("tags", "TEXT NOT NULL DEFAULT '[]'"),
+                ("source_activity_id", "TEXT"),
+            ],
+        )?;
+        connection
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_session_notes_project
+                    ON session_notes(project, pinned DESC, updated_at DESC);",
             )
             .map_err(|error| error.to_string())?;
 
@@ -814,17 +856,25 @@ impl Store {
     }
 
     pub fn save_session_note(&self, note: &SessionNote) -> Result<(), String> {
+        let tags = serde_json::to_string(&note.tags).map_err(|error| error.to_string())?;
         self.connection
             .execute(
-                "INSERT INTO session_notes
-                 (id, native_session_id, title, body, kind, pinned, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                &format!(
+                    "INSERT INTO session_notes ({NOTE_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title,
                     body = excluded.body,
                     kind = excluded.kind,
                     pinned = excluded.pinned,
-                    updated_at = excluded.updated_at",
+                    updated_at = excluded.updated_at,
+                    agent = excluded.agent,
+                    project = excluded.project,
+                    prompt_activity_id = excluded.prompt_activity_id,
+                    prompt_excerpt = excluded.prompt_excerpt,
+                    tags = excluded.tags,
+                    source_activity_id = excluded.source_activity_id"
+                ),
                 params![
                     note.id,
                     note.native_session_id,
@@ -834,6 +884,12 @@ impl Store {
                     note.pinned,
                     note.created_at,
                     note.updated_at,
+                    note.agent,
+                    note.project,
+                    note.prompt_activity_id,
+                    note.prompt_excerpt,
+                    tags,
+                    note.source_activity_id,
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -841,14 +897,16 @@ impl Store {
     }
 
     pub fn save_session_note_if_absent(&self, note: &SessionNote) -> Result<(), String> {
+        let tags = serde_json::to_string(&note.tags).map_err(|error| error.to_string())?;
         self.connection
             .execute(
-                "INSERT OR IGNORE INTO session_notes
-                 (id, native_session_id, title, body, kind, pinned, created_at, updated_at)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+                &format!(
+                    "INSERT OR IGNORE INTO session_notes ({NOTE_COLUMNS})
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
                  WHERE NOT EXISTS (
                     SELECT 1 FROM dismissed_session_notes WHERE id = ?1
-                 )",
+                 )"
+                ),
                 params![
                     note.id,
                     note.native_session_id,
@@ -858,6 +916,12 @@ impl Store {
                     note.pinned,
                     note.created_at,
                     note.updated_at,
+                    note.agent,
+                    note.project,
+                    note.prompt_activity_id,
+                    note.prompt_excerpt,
+                    tags,
+                    note.source_activity_id,
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -865,16 +929,57 @@ impl Store {
     }
 
     pub fn session_notes(&self, native_session_id: &str) -> Result<Vec<SessionNote>, String> {
+        self.query_notes(
+            &format!(
+                "SELECT {NOTE_COLUMNS} FROM session_notes WHERE native_session_id = ?1
+                 ORDER BY pinned DESC, updated_at DESC"
+            ),
+            [native_session_id],
+        )
+    }
+
+    pub fn session_note(&self, id: &str) -> Result<Option<SessionNote>, String> {
+        Ok(self
+            .query_notes(&format!("SELECT {NOTE_COLUMNS} FROM session_notes WHERE id = ?1"), [id])?
+            .pop())
+    }
+
+    /// Every note, newest first, narrowed to a project, a kind and a search over title, body and tags.
+    pub fn list_notes(
+        &self,
+        project: Option<&str>,
+        query: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<Vec<SessionNote>, String> {
+        let pattern = query
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(|query| format!("%{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+        self.query_notes(
+            &format!(
+                "SELECT {NOTE_COLUMNS} FROM session_notes
+                 WHERE (?1 IS NULL OR project = ?1)
+                   AND (?2 IS NULL OR kind = ?2)
+                   AND (?3 IS NULL OR title LIKE ?3 ESCAPE '\\' OR body LIKE ?3 ESCAPE '\\' OR tags LIKE ?3 ESCAPE '\\')
+                 ORDER BY pinned DESC, updated_at DESC
+                 LIMIT 1000"
+            ),
+            params![
+                project.filter(|project| !project.is_empty()),
+                kind.filter(|kind| !kind.is_empty()),
+                pattern
+            ],
+        )
+    }
+
+    fn query_notes<P: rusqlite::Params>(&self, sql: &str, parameters: P) -> Result<Vec<SessionNote>, String> {
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT id, native_session_id, title, body, kind, pinned, created_at, updated_at
-                 FROM session_notes WHERE native_session_id = ?1
-                 ORDER BY pinned DESC, updated_at DESC",
-            )
+            .prepare(sql)
             .map_err(|error| error.to_string())?;
         let rows = statement
-            .query_map([native_session_id], |row| {
+            .query_map(parameters, |row| {
+                let tags: Option<String> = row.get(12)?;
                 Ok(SessionNote {
                     id: row.get(0)?,
                     native_session_id: row.get(1)?,
@@ -884,6 +989,14 @@ impl Store {
                     pinned: row.get(5)?,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
+                    agent: row.get(8)?,
+                    project: row.get(9)?,
+                    prompt_activity_id: row.get(10)?,
+                    prompt_excerpt: row.get(11)?,
+                    tags: tags
+                        .and_then(|tags| serde_json::from_str(&tags).ok())
+                        .unwrap_or_default(),
+                    source_activity_id: row.get(13)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -1713,6 +1826,7 @@ mod tests {
             pinned: true,
             created_at: 42,
             updated_at: 42,
+            ..Default::default()
         };
         store.save_session_note_if_absent(&note).expect("save note");
         let notes = store.session_notes("thread-1").expect("load notes");
@@ -1729,6 +1843,57 @@ mod tests {
             .session_notes("thread-1")
             .expect("load dismissed notes")
             .is_empty());
+    }
+
+    #[test]
+    fn notes_gain_links_on_an_old_database_and_list_by_project_kind_and_text() {
+        let path = std::env::temp_dir().join(format!("lume-notes-{}-{}.db", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        {
+            // A database from before notes had links.
+            let connection = Connection::open(&path).expect("old database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE session_notes (id TEXT PRIMARY KEY, native_session_id TEXT NOT NULL, title TEXT NOT NULL,
+                        body TEXT NOT NULL, kind TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+                     INSERT INTO session_notes VALUES ('old', 'thread-1', 'Old', 'kept body', 'note', 0, 1, 1);",
+                )
+                .expect("old schema");
+        }
+        let store = Store::open(&path).expect("migrated");
+        drop(store);
+        let store = Store::open(&path).expect("opening twice is safe");
+        let old = store.session_note("old").expect("read").expect("old note kept");
+        assert_eq!((old.body.as_str(), old.tags.len(), old.project), ("kept body", 0, None));
+        let note = |id: &str, session: &str, project: &str, kind: &str, title: &str, tags: &[&str]| SessionNote {
+            id: id.into(),
+            native_session_id: session.into(),
+            title: title.into(),
+            body: format!("{title} body"),
+            kind: kind.into(),
+            created_at: 10,
+            updated_at: 10,
+            project: Some(project.into()),
+            agent: Some("codex".into()),
+            prompt_activity_id: Some("prompt-7".into()),
+            prompt_excerpt: Some("Fix the tests".into()),
+            tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            ..Default::default()
+        };
+        store.save_session_note(&note("a", "thread-1", "/work/lume", "note", "Release checklist", &["release"])).unwrap();
+        store.save_session_note(&note("b", "", "/work/lume", "note", "Project idea", &["ideas"])).unwrap();
+        store.save_session_note(&note("c", "thread-2", "/work/other", "plan", "Other plan", &[])).unwrap();
+        let ids = |notes: Vec<SessionNote>| notes.into_iter().map(|note| note.id).collect::<Vec<_>>();
+        assert_eq!(ids(store.list_notes(Some("/work/lume"), None, None).unwrap()), ["a", "b"]);
+        assert_eq!(ids(store.list_notes(None, None, Some("plan")).unwrap()), ["c"]);
+        assert_eq!(ids(store.list_notes(None, Some("ideas"), None).unwrap()), ["b"], "tags are searched");
+        assert_eq!(ids(store.list_notes(None, Some("100%"), None).unwrap()), Vec::<String>::new(), "wildcards are literal");
+        let saved = store.session_note("a").unwrap().unwrap();
+        assert_eq!(saved.tags, ["release"]);
+        assert_eq!(saved.prompt_activity_id.as_deref(), Some("prompt-7"));
+        assert_eq!(store.session_notes("").unwrap().len(), 1, "a project note has no chat");
+        drop(store);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

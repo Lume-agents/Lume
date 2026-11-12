@@ -82,7 +82,7 @@ use std::{
 use domain::{
     AgentKind, AgentSession, HistoryEntry, HookEvent, HookEventKind, PermissionAction, Preferences,
     PromptAttachmentInput, PromptDelivery, QuestionAnswer, ResultNote, ReviewDecision,
-    ReviewDecisionKind, ReviewNote, SessionActivity, SessionControlOrigin, SessionNote,
+    ReviewDecisionKind, ReviewNote, SessionActivity, SessionControlOrigin, SessionNote, SessionNoteLinks,
     SessionSource, WorkflowRole, WorkflowRoleContract,
 };
 use integrations::{CompanionStatus, IntegrationDiagnostic, IntegrationKind, IntegrationStatus};
@@ -1707,22 +1707,35 @@ fn list_session_notes(
 }
 
 #[tauri::command]
+fn list_notes(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    query: Option<String>,
+    kind: Option<String>,
+) -> Result<Vec<SessionNote>, String> {
+    state.list_notes(project.as_deref(), query.as_deref(), kind.as_deref())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn save_session_note(
     state: State<'_, AppState>,
-    session_id: String,
+    session_id: Option<String>,
     note_id: Option<String>,
     title: String,
     body: String,
     kind: String,
     pinned: bool,
+    links: Option<SessionNoteLinks>,
 ) -> Result<SessionNote, String> {
     state.save_session_note(
-        &session_id,
+        session_id.as_deref(),
         note_id.as_deref(),
         &title,
         &body,
         &kind,
         pinned,
+        links.unwrap_or_default(),
     )
 }
 
@@ -4001,6 +4014,7 @@ pub fn run() {
             list_review_decisions,
             set_review_decision,
             list_session_notes,
+            list_notes,
             save_session_note,
             delete_session_note,
             get_preferences,

@@ -211,6 +211,7 @@ export interface ReviewDecision {
 
 export interface SessionNote {
   id: string;
+  /** Empty for a note that belongs to a project rather than one chat. */
   nativeSessionId: string;
   title: string;
   body: string;
@@ -218,6 +219,25 @@ export interface SessionNote {
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
+  agent?: AgentKind;
+  /** The project folder (or name) the note belongs to. */
+  project?: string;
+  /** The prompt the note was saved from. */
+  promptActivityId?: string;
+  promptExcerpt?: string;
+  tags?: string[];
+  /** The message or plan the note was saved from. */
+  sourceActivityId?: string;
+}
+
+/** Links sent with a note; a field left out keeps its saved value and an empty one clears it. */
+export interface SessionNoteLinks {
+  project?: string;
+  agent?: string;
+  promptActivityId?: string;
+  promptExcerpt?: string;
+  tags?: string[];
+  sourceActivityId?: string;
 }
 
 export interface HistoryEntry {

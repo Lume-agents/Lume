@@ -21,7 +21,7 @@ use crate::{
         HookEventKind, PairedDevice, PermissionAction, PermissionProfile, PermissionRequest,
         Preferences, PromptAttachment, PromptTokenUsage, QuestionAnswer, ResultNote,
         ReviewDecision, ReviewDecisionKind, ReviewNote, SessionActivity, SessionControlOrigin,
-        SessionModelOverride, SessionNote, SessionResult, SessionSource, SessionStatus,
+        SessionModelOverride, SessionNote, SessionNoteLinks, SessionResult, SessionSource, SessionStatus,
         WorkflowHistoryRecord,
     },
     integrations::{self, IntegrationKind},
@@ -1259,6 +1259,10 @@ impl AppState {
                         pinned: false,
                         created_at: activity.created_at,
                         updated_at: activity.created_at,
+                        agent: note_agent(&session.agent),
+                        project: note_project(session),
+                        source_activity_id: Some(activity.id.clone()),
+                        ..Default::default()
                     })?;
                 }
             }
@@ -1290,6 +1294,10 @@ impl AppState {
                     pinned: false,
                     created_at: activity.created_at,
                     updated_at: activity.created_at,
+                    agent: note_agent(&session.agent),
+                    project: note_project(session),
+                    source_activity_id: Some(activity.id.clone()),
+                    ..Default::default()
                 })?;
             }
             let Some((content, _, updated_at)) = store.session_plan(native_session_id)? else {
@@ -2316,16 +2324,36 @@ impl AppState {
             .session_notes(&native_session_id)
     }
 
+    /// Every note, for the Notes tab: narrowed to a project, a kind (`note` or `plan`) and a text search.
+    pub fn list_notes(
+        &self,
+        project: Option<&str>,
+        query: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<Vec<SessionNote>, String> {
+        self.store
+            .lock()
+            .map_err(|_| "Could not access notes".to_string())?
+            .list_notes(project, query, kind)
+    }
+
+    /// Saves a note of a chat (`session_id`) or, without one, of a project. Links left out keep their value;
+    /// a new chat note takes its agent and project from the chat.
+    #[allow(clippy::too_many_arguments)]
     pub fn save_session_note(
         &self,
-        session_id: &str,
+        session_id: Option<&str>,
         note_id: Option<&str>,
         title: &str,
         body: &str,
         kind: &str,
         pinned: bool,
+        links: SessionNoteLinks,
     ) -> Result<SessionNote, String> {
-        let native_session_id = self.session_native_id(session_id)?;
+        let session = session_id
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| self.connected_session(id))
+            .transpose()?;
         let title = title.trim();
         let body = body.trim();
         if body.is_empty() {
@@ -2333,21 +2361,64 @@ impl AppState {
         }
         let kind = if kind == "plan" { "plan" } else { "note" };
         let now = now_millis();
-        let id = note_id
-            .filter(|id| !id.trim().is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("session-note:{native_session_id}:{now}"));
-        let existing = self
-            .store
-            .lock()
-            .map_err(|_| "Could not access session notes".to_string())?
-            .session_notes(&native_session_id)?
-            .into_iter()
-            .find(|note| note.id == id);
-        if note_id.is_some() && existing.is_none() {
+        let existing = match note_id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => Some(
+                self.store
+                    .lock()
+                    .map_err(|_| "Could not access session notes".to_string())?
+                    .session_note(id)?
+                    .ok_or_else(|| "This note no longer exists".to_string())?,
+            ),
+            None => None,
+        };
+        let native_session_id = match (&session, &existing) {
+            (Some(session), _) => session
+                .native_session_id
+                .clone()
+                .ok_or_else(|| "This session does not have a persistent conversation id".to_string())?,
+            (None, Some(existing)) => existing.native_session_id.clone(),
+            (None, None) => String::new(),
+        };
+        if existing
+            .as_ref()
+            .is_some_and(|note| note.native_session_id != native_session_id)
+        {
             return Err("This note does not belong to the selected session".into());
         }
+        let id = existing
+            .as_ref()
+            .map(|note| note.id.clone())
+            .unwrap_or_else(|| {
+                if native_session_id.is_empty() {
+                    format!("project-note:{now}")
+                } else {
+                    format!("session-note:{native_session_id}:{now}")
+                }
+            });
+        // A link sent empty clears it; one left out keeps the saved value, or the chat's for a new note.
+        let link = |sent: Option<String>, saved: Option<String>, from_session: Option<String>, limit: usize| match sent {
+            Some(value) => Some(value.trim().chars().take(limit).collect::<String>()).filter(|value| !value.is_empty()),
+            None => saved.or(from_session),
+        };
+        let saved = existing.clone().unwrap_or_default();
+        let fresh = existing.is_none();
         let note = SessionNote {
+            agent: link(
+                links.agent,
+                saved.agent,
+                session.as_ref().filter(|_| fresh).and_then(|session| note_agent(&session.agent)),
+                40,
+            ),
+            project: link(
+                links.project,
+                saved.project,
+                session.as_ref().filter(|_| fresh).and_then(note_project),
+                1024,
+            ),
+            prompt_activity_id: link(links.prompt_activity_id, saved.prompt_activity_id, None, 512),
+            prompt_excerpt: link(links.prompt_excerpt, saved.prompt_excerpt, None, 280),
+            tags: links.tags.map(|tags| normalize_note_tags(&tags)).unwrap_or(saved.tags),
+            source_activity_id: link(links.source_activity_id, saved.source_activity_id, None, 512),
             id,
             native_session_id,
             title: if title.is_empty() {
@@ -4203,6 +4274,41 @@ fn distinct_codex_message_items(left: &str, right: &str) -> bool {
 
 /// How many prompts' token usage a session keeps in memory.
 const PROMPT_TOKEN_USAGE_LIMIT: usize = 64;
+
+/// The agent's id as the frontend names it (`claude_code`, `codex`, ...).
+fn note_agent(agent: &AgentKind) -> Option<String> {
+    serde_json::to_value(agent)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+}
+
+/// What groups a chat's notes into a project: its folder, else its project name.
+fn note_project(session: &AgentSession) -> Option<String> {
+    session
+        .working_directory
+        .clone()
+        .filter(|folder| !folder.trim().is_empty())
+        .or_else(|| Some(session.project.clone()).filter(|project| !project.trim().is_empty()))
+}
+
+/// Tags without `#`, trimmed, lowercase, unique, at most 12 of 32 characters.
+fn normalize_note_tags(tags: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for tag in tags {
+        let tag = tag
+            .trim()
+            .trim_start_matches('#')
+            .trim()
+            .to_lowercase()
+            .chars()
+            .take(32)
+            .collect::<String>();
+        if !tag.is_empty() && !normalized.contains(&tag) && normalized.len() < 12 {
+            normalized.push(tag);
+        }
+    }
+    normalized
+}
 
 fn remember_prompt_token_usage(session: &mut AgentSession, mut usage: PromptTokenUsage) {
     if let Some(existing) = session.prompt_token_usage.iter_mut().find(|existing| {

@@ -45,6 +45,7 @@ import type {
   ReviewNote,
   SessionActivity,
   SessionNote,
+  SessionNoteLinks,
   RestoredTerminalPlacement,
   ExternalAgentPlugin,
   TerminalWindowState,
@@ -1028,9 +1029,17 @@ export async function loadSessionNotes(sessionId: string): Promise<SessionNote[]
   return invoke<SessionNote[]>("list_session_notes", { sessionId });
 }
 
+/** Every note, newest and pinned first, narrowed to a project, a kind and a text search. */
+export async function listNotes(filters: { project?: string; query?: string; kind?: SessionNote["kind"] } = {}): Promise<SessionNote[]> {
+  if (!inDesktop()) return [];
+  return invoke<SessionNote[]>("list_notes", { project: filters.project || null, query: filters.query || null, kind: filters.kind || null });
+}
+
+/** Saves a chat's note, or a project's when `sessionId` is null. Links left out keep their saved value. */
 export async function saveSessionNote(
-  sessionId: string,
+  sessionId: string | null,
   note: Pick<SessionNote, "title" | "body" | "kind" | "pinned"> & { id?: string },
+  links?: SessionNoteLinks,
 ): Promise<SessionNote> {
   return invoke<SessionNote>("save_session_note", {
     sessionId,
@@ -1039,6 +1048,7 @@ export async function saveSessionNote(
     body: note.body,
     kind: note.kind,
     pinned: note.pinned,
+    links: links ?? null,
   });
 }
 

@@ -316,10 +316,11 @@ pub struct ReviewDecision {
     pub updated_at: i64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionNote {
     pub id: String,
+    /// Empty for a note that belongs to a project rather than one chat.
     pub native_session_id: String,
     pub title: String,
     pub body: String,
@@ -327,6 +328,40 @@ pub struct SessionNote {
     pub pinned: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The agent of the chat the note came from (`claude_code`, `codex`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The project folder (or name) the note belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// The prompt the note was saved from, to open the chat there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_activity_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_excerpt: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// The message or plan the note was saved from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_activity_id: Option<String>,
+}
+
+/// Where a note points, as the composer and the Notes tab send it; every field is optional.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionNoteLinks {
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub prompt_activity_id: Option<String>,
+    #[serde(default)]
+    pub prompt_excerpt: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub source_activity_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

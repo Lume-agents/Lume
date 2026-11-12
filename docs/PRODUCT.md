@@ -20,7 +20,7 @@ O acesso distribuído é opcional e está em desenvolvimento: o Lume Node no PC1
 - Sessões podem ser abertas ou retomadas no terminal ou VS Code habitual.
 - O Whiteboard abre cada sessão em seu próprio mini terminal; janelas próximas podem ser acopladas e movidas como um conjunto.
 - O Whiteboard permite nomear, salvar e restaurar layouts para as sessões abertas correspondentes.
-- O modo Workflow oferece execução manual ou automática, recuperação local e histórico consolidado por etapa. No mobile, a visualização é somente de monitoramento dos papéis e estados; os controles permanecem no desktop.
+- O modo Workflow oferece execução manual ou automática, recuperação local e histórico consolidado por etapa. No Workspace, cada chat que é etapa de um workflow mostra o papel e o estado na sidebar e, durante a execução, uma faixa no chat com a ação do momento; veja o [Workflow Board](./WORKFLOW_BOARD.md). No mobile, o mesmo board pelo gateway pareado permite montar, executar, aprovar, avançar, pausar, retomar, tentar de novo, ignorar e parar.
 - Perfis por projeto podem definir destino, monitor, posição da cápsula, permissões de novas sessões, layout e agentes preferidos.
 - `Ctrl+Shift+Space` abre uma paleta global para navegar entre telas, sessões e ações.
 - Detectores externos declarativos podem ser instalados por manifesto JSON e entram em vigor sem reiniciar.

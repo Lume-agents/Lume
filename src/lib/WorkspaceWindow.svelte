@@ -47,7 +47,8 @@
   import WorkflowBoard from "$lib/WorkflowBoard.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import { desktopWorkflowBackend } from "$lib/workflowBoardBackend";
-  import { boardLayoutNames, newerRun, presenceTone, sessionWorkflowPresence, type PresenceTone, type WorkflowPresence, type WorkflowStripAction } from "$lib/workflowPresence";
+  import { boardLayoutNames, chainGroupFromSessions, newerRun, presenceTone, runIsActive, sessionWorkflowPresence, workflowGroupName, type PresenceTone, type WorkflowPresence, type WorkflowStripAction } from "$lib/workflowPresence";
+  import { defaultRole, newGroup } from "$lib/workflowBoard";
   import WorkspaceExtensions from "$lib/WorkspaceExtensions.svelte";
   import GuidedTour from "$lib/GuidedTour.svelte";
   import { boardTour, boardTourKey, workspaceTour, workspaceTourKey } from "$lib/tours";
@@ -59,7 +60,7 @@
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
   import { sidebarGroupsKey } from "$lib/sidebarGroups";
-  import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, PendingPairRequest, Preferences, ResumableSession, WorkflowGroupDefinition, WorkflowRun } from "$lib/domain";
+  import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, PendingPairRequest, Preferences, ResumableSession, WorkflowGroupDefinition, WorkflowRole, WorkflowRoleContract, WorkflowRun } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
@@ -1671,6 +1672,7 @@
 
   function openSessionContextMenu(session: HubSession, x: number, y: number) {
     sessionContextError = "";
+    workflowSubmenuOpen = false;
     sessionContextMenu = {
       sessionId: session.id,
       x: Math.max(8, Math.min(x, window.innerWidth - 230)),
@@ -2175,6 +2177,42 @@
   function openWorkflowOnBoard(groupId: string, name?: string) {
     boardFocusRequest = { groupId, name, nonce: (boardFocusRequest?.nonce ?? 0) + 1 };
     showWorkflowBoard(true);
+  }
+  // The sidebar menu builds the same groups the board does: one step per chat, chained from the end of the route.
+  let workflowSubmenuOpen = $state(false);
+  const openPaneSessions = $derived(currentPaneIds().map((id) => sessions.find((session) => session.id === id)).filter((session): session is HubSession => Boolean(session)));
+  async function addChatsToWorkflow(chats: HubSession[], groupId: string | null) {
+    if (sessionContextBusy) return;
+    sessionContextError = "";
+    const base = groupId ? preferences.workflowGroups.find((item) => item.id === groupId) : undefined;
+    const refuse = (message: string) => { sessionContextMenu = null; sessionContextError = message; };
+    if (groupId && !base) return refuse(tr("That workflow no longer exists.", "Esse workflow não existe mais."));
+    if (base && runIsActive(workflowRuns[base.id])) {
+      return refuse(tr("This workflow is running. Let it finish or cancel it on the board before adding steps.", "Este workflow está em execução. Deixe terminar ou cancele no board antes de adicionar etapas."));
+    }
+    const connected = chats.filter((chat) => chat.nativeSessionId?.trim());
+    if (!connected.length) return refuse(tr("Connect this conversation before adding it to a workflow.", "Conecte esta conversa antes de adicioná-la a um workflow."));
+    const fresh = base ? connected.filter((chat) => !base.steps.some((step) => step.sessionNativeId === chat.nativeSessionId)) : connected;
+    if (!fresh.length) return refuse(tr("This conversation is already a step of that workflow.", "Esta conversa já é uma etapa desse workflow."));
+    if (!base && fresh.length < 2 && chats.length > 1) return refuse(tr("Open at least two connected chats to chain them.", "Abra ao menos dois chats conectados para encadeá-los."));
+    sessionContextBusy = true;
+    try {
+      const offset = base?.steps.length ?? 0;
+      const roles = [...new Set(fresh.map((_, index) => defaultRole(offset + index)))];
+      const contracts: Partial<Record<WorkflowRole, WorkflowRoleContract>> = Object.fromEntries(
+        await Promise.all(roles.map(async (role) => [role, await desktopWorkflowBackend.roleContract(role)] as const)),
+      );
+      const { group, added } = chainGroupFromSessions(fresh, contracts, base ?? newGroup());
+      if (!added.length) return refuse(tr("Could not add these chats to the workflow.", "Não foi possível adicionar esses chats ao workflow."));
+      await saveWorkflowBoardGroup(group);
+      sessionContextMenu = null;
+      // A new group gets the name the board itself would give it; an existing one keeps its own.
+      openWorkflowOnBoard(group.id, base ? undefined : "Workflow " + preferences.workflowGroups.length);
+    } catch (reason) {
+      sessionContextError = String(reason).replace(/^Error:\s*/, "");
+    } finally {
+      sessionContextBusy = false;
+    }
   }
   function workflowChipTitle(steps: WorkflowPresence[]) {
     return steps.map((step) => workflowStepLabel(step) + (step.objective && step.runActive ? "\n" + step.objective : "")).join("\n\n");
@@ -3105,6 +3143,23 @@
           {/if}
           <button class="session-context-command" type="button" role="menuitem" onclick={() => { const group = newSidebarGroup(); assignToGroup(contextSession, group.id); sessionContextMenu = null; renamingGroupId = group.id; groupNameDraft = group.name; }}><LumeIcon name="plus" size={14} /><span>{tr("New group…", "Novo grupo…")}</span></button>
         </div>
+        <div class="session-context-groups session-context-workflows" role="group" aria-label={tr("Workflow", "Workflow")}>
+          <button class="session-context-command" type="button" role="menuitem" aria-haspopup="true" aria-expanded={workflowSubmenuOpen} disabled={sessionContextBusy} onclick={() => { workflowSubmenuOpen = !workflowSubmenuOpen; }}>
+            <WorkspaceHeaderIcon name="workflow" size={15} /><span>{tr("Add to workflow", "Adicionar ao workflow")}</span><span class:open={workflowSubmenuOpen} class="submenu-chevron"><LumeIcon name="chevron-down" size={12} /></span>
+          </button>
+          {#if workflowSubmenuOpen}
+            {#each preferences.workflowGroups as group, index (group.id)}
+              {@const present = Boolean(contextSession.nativeSessionId && group.steps.some((step) => step.sessionNativeId === contextSession.nativeSessionId))}
+              <button class:current={present} class="session-context-command workflow-target" type="button" role="menuitem" disabled={sessionContextBusy} data-workflow-target={group.id} onclick={() => void addChatsToWorkflow([contextSession], group.id)}>
+                <span class="workflow-target-name">{workflowGroupName(group, index, workflowLayoutNames, language === "pt-BR")}</span><small>{group.steps.length}</small>{#if present}<LumeIcon name="check" size={13} />{/if}
+              </button>
+            {/each}
+            <button class="session-context-command workflow-target" type="button" role="menuitem" disabled={sessionContextBusy} data-workflow-target="new" onclick={() => void addChatsToWorkflow([contextSession], null)}><LumeIcon name="plus" size={14} /><span>{tr("New workflow", "Novo workflow")}</span></button>
+          {/if}
+          {#if openPaneSessions.length > 1}
+            <button class="session-context-command" type="button" role="menuitem" disabled={sessionContextBusy} data-workflow-chain onclick={() => void addChatsToWorkflow(openPaneSessions, null)}><LumeIcon name="split" size={15} /><span>{tr("Chain open chats into a workflow", "Encadear os chats abertos em um workflow")}</span></button>
+          {/if}
+        </div>
         {#if canLinkCodexCli(contextSession)}
           <button class="session-context-command" type="button" role="menuitem" onclick={() => { cliAssociationSessionId = contextSession.id; sessionContextMenu = null; }}>
             <LumeIcon name="split" size={15} />
@@ -4016,6 +4071,12 @@
   .session-context-groups { margin: 2px 0; padding: 4px 0; display: grid; border-block: 1px solid var(--workspace-line); }
   .session-context-groups > small { padding: 2px 9px 3px; color: var(--workspace-faint); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
   .session-context-groups .current { color: var(--workspace-accent); }
+  .session-context-workflows > small { display: none; }
+  .session-context-workflows .submenu-chevron { margin-left: auto; display: inline-flex; color: var(--workspace-faint); transition: transform 160ms ease; }
+  .session-context-workflows .submenu-chevron.open { transform: rotate(180deg); }
+  .session-context-workflows .workflow-target { padding-left: 24px; }
+  .session-context-workflows .workflow-target-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-context-workflows .workflow-target small { color: var(--workspace-faint); font-size: 10px; }
   .session-list.releasing { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--workspace-accent) 35%, transparent); }
   .session-list { min-height: 0; padding: 0 8px 14px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   .session-row { position: relative; display: flex; align-items: stretch; border-radius: 10px; cursor: grab; transition: background 140ms ease, opacity 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }

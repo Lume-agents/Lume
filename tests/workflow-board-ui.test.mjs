@@ -395,8 +395,33 @@ try {
     await evaluate("document.activeElement.blur()");
     await click('[aria-label="Fechar"]');
   }
+  // The sidebar menu builds a workflow without the board: a new one from a chat, then a second chat appended to it.
+  await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await click('[aria-label="Board de workflow"]');
+  await wait("document.querySelector('.workflow-board').hidden");
+  const openMenu = (name) => evaluate("(() => { const row = document.querySelector('.session-row[aria-label=" + JSON.stringify(name).replace(/"/g, '\\"') + "]'); const r = row.getBoundingClientRect(); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: r.left + 40, clientY: r.top + 20 })); })()");
+  const pickWorkflow = async (target) => {
+    await wait("document.querySelector('.session-context-workflows [aria-haspopup]')");
+    await click(".session-context-workflows [aria-haspopup]");
+    await wait("document.querySelector('[data-workflow-target=\"" + target + "\"]')");
+    await click('[data-workflow-target="' + target + '"]');
+  };
+  await openMenu("Pesquisa");
+  await pickWorkflow("orb-fixture");
+  await wait("document.querySelector('.system-banner-stack')?.textContent.includes('já é uma etapa')");
+  assert.equal(await evaluate("document.querySelector('.workflow-board').hidden"), true, "a refused addition leaves the board closed");
+  await openMenu("Monitoramento");
+  await pickWorkflow("new");
+  await wait("window.__fixture.preferences.workflowGroups.length === 2 && !document.querySelector('.workflow-board').hidden");
+  const created = await evaluate("window.__fixture.preferences.workflowGroups[1].id");
+  await openMenu("Pesquisa");
+  await pickWorkflow(created);
+  await wait("window.__fixture.preferences.workflowGroups[1].steps.length === 2");
+  assert.deepEqual(await evaluate("(() => { const g = window.__fixture.preferences.workflowGroups[1]; return { steps: g.steps.map(step => step.sessionNativeId + ':' + step.role), arrows: g.connections.map(c => c.fromStepId + '>' + c.toStepId) }; })()"),
+    { steps: ["native-3:planner", "native-0:implementer"], arrows: ["step-native-3>step-native-0"] }, "the menu chains the chat after the end of the route");
+  await wait("document.querySelectorAll('.board-card:not(.ghost)').length === 2 && document.querySelector('.workflow-name')?.value === 'Workflow 2'");
   assert.deepEqual(failures, [], "no browser exceptions");
-  console.log("Workflow board UI passed: Orb import, sidebar drop, arrows, cycle refusal, free drag, preview, zoom, all run controls, recovery, event order, draft/layout persistence, removal, insertion, overlay keyboard ownership, fit, light/dark contrast.");
+  console.log("Workflow board UI passed: Orb import, sidebar drop, arrows, cycle refusal, free drag, preview, zoom, all run controls, recovery, event order, draft/layout persistence, removal, insertion, overlay keyboard ownership, fit, light/dark contrast, sidebar chips, chat strip approval, sidebar menu workflows.");
   console.log("Screenshots: " + output);
 } finally {
   socket?.close();

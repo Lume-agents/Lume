@@ -23,13 +23,15 @@ Uma segunda forma de **ver e conectar** o workflow que o orb já executa. A func
 4. Informe o objetivo e execute; os controles de aprovação, próxima etapa, pausa, retomada, tentativa, ignorar e parada aparecem conforme o estado.
 5. Use **Voltar aos chats** ou **Abrir chat** no card para sair do board. Os chats permanecem montados.
 
+Sem abrir o board antes, o menu de contexto de um chat na sidebar oferece **Adicionar ao workflow** (lista os workflows existentes e **Novo workflow**) e, com dois ou mais chats abertos, **Encadear os chats abertos em um workflow**, na ordem dos painéis. Depois de salvar, o board abre já no workflow criado ou alterado.
+
 ## Decisões
 
 1. Posição é só layout. **A ordem vem das setas**, nunca de onde o card está.
 2. Nada muda na execução. O board não introduz conceito que o runtime não execute.
 3. Uma sessão aparece uma única vez por workflow (o backend já exige isso, e duas etapas na mesma conversa causariam conflito de escritor).
 4. Conectar não compartilha a conversa inteira: cada seta define o que passa (contexto, aprovação, avanço).
-5. Valores padrão de uma seta nova são os mesmos do orb: contexto padrão, aprovação ligada, avanço manual.
+5. Uma seta nova criada no board (`newConnection`) usa contexto padrão, aprovação ligada e `advanceMode: "automatic"`: o handoff para pedindo aprovação e, aprovado, segue sozinho. A ponte do orb (`WorkflowBridgeWindow`) ainda cria setas com avanço manual.
 6. O papel padrão de uma etapa nova segue a ordem de inclusão (planejador, implementador, revisor, testador, pesquisador, depois personalizado), com o contrato do papel vindo de `loadWorkflowRoleContract`.
 
 ## Regras da cadeia (espelham `validate_manual_workflow` no runtime)
@@ -56,6 +58,15 @@ Uma seta que viole essas regras é **recusada na hora**, com o motivo (`checkCon
 - Selo no meio da seta: cadeado (pede aprovação) e raio (avança sozinha). Setas esperando aprovação destacadas. Cards numerados pela ordem da cadeia e o primeiro marcado.
 - Cards de CLI externa mostram aviso: é preciso assumir o controle antes de executar.
 - Teclado: `Delete`/`Backspace` remove o selecionado; `Esc` fecha painel, cancela conexão ou limpa a seleção. Sem seleção ou gesto, `Esc` volta aos chats. Esses atalhos não atuam em campos de edição nem quando um overlay do workspace, como Ajustes, possui o teclado.
+
+## O workflow fora do board
+
+O Workspace segue as execuções sem abrir o board. `WorkspaceWindow` carrega o último run de cada grupo de `preferences.workflowGroups` (`desktopWorkflowBackend.loadRun`), escuta `lume://workflow-run-changed` (`onRunChanged`) e guarda sempre o run mais novo com `newerRun`, a mesma regra do board. `sessionWorkflowPresence` (`src/lib/workflowPresence.ts`) cruza grupos e runs e devolve, por `nativeSessionId` atual do chat, a etapa que ele cumpre: papel, posição na cadeia, estado da etapa e se o handoff que chega ou sai dele espera aprovação.
+
+- **Sidebar:** a linha do chat mostra um chip com o ícone do papel, a posição (`2/3`) e um ponto de estado (executando, aguardando aprovação, pronto, falhou, concluído). O tooltip traz o nome do workflow e o objetivo; o `aria-label` da linha também descreve a etapa. Com a sidebar recolhida, só um ponto no avatar. Um chat em vários workflows mostra primeiro o que tem run ativo e `+N` para os demais.
+- **Chat:** enquanto o run está ativo, `WorkflowChatStrip` fica fixo abaixo do cabeçalho do chat (não é dispensável), por exemplo "Etapa 2/3 · Implementador · Workflow 1 · Handoff para Revisor aguardando aprovação". Oferece só a ação que cabe no momento: aprovar o handoff (apenas no chat de onde o resultado sai, como na central de revisão), executar a próxima etapa, tentar de novo ou ignorar uma etapa que falhou, e abrir o workflow no board. A etapa que recebe mostra "Handoff de Planejador aguardando aprovação". Chats de CLI externa mostram o mesmo aviso de assumir o controle dos cards.
+- **Abrir no board:** `WorkflowBoard` recebe `focusRequest` (`groupId`, `name` opcional, `nonce`) e, quando o grupo aparece na lista, ativa-o e grava o nome pelo próprio layout. O Workspace não escreve em `lume:workflow-board:v1`, porque o board regrava o layout ao ser desmontado.
+- **Menu da sidebar:** adicionar a um workflow existente cria a etapa com o próximo papel padrão e a liga ao fim da cadeia (`chainGroupFromSessions`). É recusado, com o motivo, quando o chat já é uma etapa daquele workflow, quando não está conectado ou quando o run do workflow está ativo.
 
 ## Execução
 
@@ -100,7 +111,9 @@ O estado dos cards e das setas vem de `WorkflowRun` e do evento `lume://workflow
 
 `src/lib/workflowBoardPersistence.ts` fornece `WorkflowBoardSaveQueue`, testada em `tests/workflow-board-persistence.test.mjs` (serialização, coalescimento, retenção após falha e retry). `tests/workflow-order.test.mjs` inclui os dois conjuntos de testes puros.
 
-`src/lib/WorkflowBoard.svelte` reúne canvas, cards, setas, editores, preview de contexto e controles de execução. `src/lib/WorkspaceWindow.svelte` integra abertura, salvamento, sidebar e retorno aos chats. `tests/workflow-board-ui.test.mjs` exercita essa interface em navegador.
+`src/lib/workflowPresence.ts` (puro, testado em `tests/workflow-presence.test.mjs`): `newerRun`, `sessionWorkflowPresence`, `presenceTone`, `chainGroupFromSessions`, `workflowGroupName` e `boardLayoutNames`.
+
+`src/lib/WorkflowBoard.svelte` reúne canvas, cards, setas, editores, preview de contexto e controles de execução. `src/lib/WorkflowChatStrip.svelte` é a faixa do chat. `src/lib/WorkspaceWindow.svelte` integra abertura, salvamento, sidebar, chips, menu e retorno aos chats. `tests/workflow-board-ui.test.mjs` exercita essa interface em navegador.
 
 ## Fora do escopo
 
@@ -119,6 +132,6 @@ Ramificação, laços, etapas que não são agente, cards sem sessão e qualquer
 
 - **Confirmado:** testes puros de regras/geometria e persistência passaram; `npm run check` terminou sem erros ou avisos e `npm run build` concluiu com exit 0.
 - **Confirmado:** `npm run test:workflow-board-ui` monta o Workspace e o Board reais em Chromium, mas usa **IPC Tauri simulado e conteúdo dos chats substituído por um stub**. Não envia prompts a agentes reais.
-- Esse smoke cobre importação de grupo existente do Orb, drop da sidebar, arraste livre, desenho de setas e recusa de ciclo, preview, inserção/remoção intermediária, zoom e ajustar à tela responsivo, controles de execução e recuperação, descarte de eventos antigos, retenção de rascunho de chat e restauração do layout.
+- Esse smoke cobre importação de grupo existente do Orb, drop da sidebar, arraste livre, desenho de setas e recusa de ciclo, preview, inserção/remoção intermediária, zoom e ajustar à tela responsivo, controles de execução e recuperação, descarte de eventos antigos, retenção de rascunho de chat e restauração do layout; também o chip da sidebar após um `lume://workflow-run-changed` simulado, a aprovação pela faixa do chat (`approve_workflow_handoff`) e o menu da sidebar criando um workflow de duas etapas e abrindo o board nele. No teste, o painel do chat é um stub que só renderiza a faixa real.
 - A última execução também confirmou isolamento do teclado dos Ajustes e contraste de avisos/erros sobre a superfície do painel de pelo menos **4,5:1**, nos temas claro e escuro, medido com estilos computados. As capturas desktop/compacto foram atualizadas em `.impeccable/review/workflow-board/`.
 - **Ainda pendente:** aceitar execução e recuperação na janela Tauri nativa com agentes reais e verificar sincronização bidirecional entre board e Orb em múltiplas janelas. A cobertura simulada não prova integração nativa, comportamento de plataforma ou sincronização multi-janela; os critérios acima continuam sendo critérios de aceite, não declarações incondicionais de conclusão.

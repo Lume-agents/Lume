@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { parseWorkflowPrompt, userMessagePresentation } from "../src/lib/userMessagePresentation.ts";
+import { parseAgentReport, parseWorkflowPrompt, userMessagePresentation } from "../src/lib/userMessagePresentation.ts";
 
 assert.deepEqual(userMessagePresentation("Short prompt"), {
   kind: "full",
@@ -39,3 +39,14 @@ assert.ok(!/@keyframes message-reveal \{[^}]*filter/.test(collapsible), "the rev
 assert.match(collapsible, /\.message-fade \{[^}]*backdrop-filter: blur\(2\.5px\)/, "the fade of a collapsed message keeps its blur");
 
 console.log("Workflow prompt presentation tests passed");
+
+const frame = (body) => `<agent-message from="aab12345cd">\n${body}\n</agent-message>`;
+assert.deepEqual(
+  parseAgentReport(frame("  [Subagent hand-back] I committed steps 1–4.\n  \n  **Commits**\n  1. a05f6f2")),
+  { from: "aab12345cd", headline: "I committed steps 1–4.", body: "I committed steps 1–4.\n\n**Commits**\n1. a05f6f2" },
+);
+assert.equal(parseAgentReport("Please fix the build"), null);
+assert.equal(parseAgentReport("Look at this: " + frame("  hi")), null, "a tag inside a person's own message is not a report");
+assert.equal(parseAgentReport(frame("   ")), null);
+assert.match(collapsible, /parseAgentReport/);
+console.log("Agent report presentation tests passed");

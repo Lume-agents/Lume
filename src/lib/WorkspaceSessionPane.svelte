@@ -618,7 +618,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     hiddenCount > 0 || (historyHasMore ?? (session.nativeSessionId && session.activities.length >= 60))
   ));
   const activeTraceId = $derived.by(() => {
-    if (waitingForSubagents) return null;
+    // Waiting on subagents keeps the trace open: it ends with the turn, not each time a subagent reports.
     if (!["running", "permission_required"].includes(session.status)) return null;
     const traceIndex = feed.findLastIndex((item) => item.kind === "trace");
     const promptIndex = feed.findLastIndex((item) =>
@@ -3815,7 +3815,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .agent-typing .typing-label { color: transparent; background: linear-gradient(90deg, #67837a 10%, #5aa1ce 44%, #a3d2ef 53%, #5aa1ce 62%, #67837a 90%); background-size: 240% 100%; background-clip: text; font-size: 12px; font-weight: 720; letter-spacing: -.01em; animation: thinking-label-shimmer 1.75s linear infinite; }
   .typing-elapsed { padding-left: 9px; border-left: 1px solid var(--workspace-line); color: var(--workspace-muted); font-size: 10px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .latest-button { position: absolute; right: 18px; bottom: calc(30px + var(--composer-overlap, 0px)); z-index: 3; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 5px 16px rgba(17, 35, 27, .09); cursor: pointer; }
-  .environment-dock { position: absolute; left: 18px; z-index: 4; }
+  .environment-dock { position: absolute; left: 18px; z-index: 1; }
   .session-pane.has-environments .conversation { padding-bottom: calc(66px + var(--composer-overlap, 0px)); }
   .sources-scrim { position: absolute; z-index: 5; inset: 64px 0 0; padding: 0; border: 0; background: color-mix(in srgb, var(--workspace-pane) 28%, transparent); backdrop-filter: blur(1px); cursor: default; animation: sources-fade 150ms ease-out both; }
   .sources-sidebar { position: absolute; z-index: 6; top: 64px; right: 0; bottom: 0; width: min(340px, 88%); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--workspace-line); color: var(--workspace-text); background: var(--workspace-raised); box-shadow: -16px 0 46px rgba(8, 18, 13, .13); animation: sources-arrive 220ms cubic-bezier(.16, 1, .3, 1) both; }

@@ -5,7 +5,7 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { splitLinks } from "$lib/links";
-  import { parseWorkflowPrompt, userMessagePresentation } from "$lib/userMessagePresentation";
+  import { parseAgentReport, parseWorkflowPrompt, userMessagePresentation } from "$lib/userMessagePresentation";
 
   /** The webview does not follow links on its own, so the system browser opens them. */
   function openLink(event: MouseEvent, href: string) {
@@ -84,6 +84,7 @@
   .workflow-heading { display: flex; align-items: center; gap: 7px; color: var(--user-message-text, inherit); font-size: .9em; }
   .workflow-mark { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 7px; color: var(--user-message-accent, var(--workspace-accent)); background: color-mix(in srgb, var(--user-message-accent, var(--workspace-accent)) 14%, transparent); }
   .workflow-objective { max-width: 100%; margin: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; color: var(--user-message-muted, var(--workspace-muted)); line-height: 1.5; overflow-wrap: anywhere; }
+  .agent-report-note { color: var(--user-message-muted, var(--workspace-muted)); font-size: .74em; }
   .workflow-prompt { max-height: 260px; padding: 8px 10px; overflow: auto; border-radius: 8px; background: color-mix(in srgb, currentColor 6%, transparent); font-size: .85em; }
   .collapsible-user-message { min-width: 0; max-width: 100%; margin-top: var(--user-message-content-margin-top, 0); display: grid; gap: 5px; justify-items: end; }
   .message-text-frame { position: relative; min-width: 0; max-width: 100%; }

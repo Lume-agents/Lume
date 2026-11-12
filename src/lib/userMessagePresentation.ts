@@ -64,3 +64,29 @@ export function parseWorkflowPrompt(text: string): WorkflowPromptSummary | null 
   const role = /- Role: \*\*(.+?)\*\*/.exec(value);
   return { kind: "start", role: role?.[1], objective };
 }
+
+export type AgentReportSummary = {
+  /** Id of the subagent that sent the report. */
+  from: string;
+  /** First line of the report, shown while it is collapsed. */
+  headline: string;
+  /** The report without the harness framing and its indentation. */
+  body: string;
+};
+
+const AGENT_REPORT = /^<agent-message from="([^"\n]{1,80})">\n([\s\S]*)\n<\/agent-message>$/;
+const AGENT_REPORT_LABEL = /^\[Subagent hand-back\]\s*/;
+
+/**
+ * A subagent's hand-back is recorded with the user role, but it is model output and carries no user
+ * authority. Only a message that is wholly that frame reads as a report, so a person who types the
+ * tag inside a longer message still sees their own text.
+ */
+export function parseAgentReport(text: string): AgentReportSummary | null {
+  const match = AGENT_REPORT.exec(text.trim());
+  if (!match) return null;
+  const body = match[2].split("\n").map((line) => line.replace(/^ {2}/, "")).join("\n").replace(AGENT_REPORT_LABEL, "").trim();
+  if (!body) return null;
+  const headline = body.split("\n").find((line) => line.trim())!.trim();
+  return { from: match[1], headline, body };
+}

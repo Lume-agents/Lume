@@ -58,18 +58,26 @@
   let fileCardMaxHeight = $state(360);
   let initialized = false;
   let wasActive = false;
+  let collapseTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Once the person opens or closes the list, new events stop moving it. */
+  let userToggled = false;
 
   $effect(() => {
     const isActive = isWorking;
+    clearTimeout(collapseTimer);
     if (!initialized) {
       expanded = isActive;
       initialized = true;
+    } else if (userToggled) {
+      // Left as the person set it.
     } else if (isActive) {
       expanded = true;
     } else if (wasActive) {
-      expanded = false;
+      // Subagents leave the group idle between reports; closing at once would flicker.
+      collapseTimer = setTimeout(() => (expanded = false), 1200);
     }
     wasActive = isActive;
+    return () => clearTimeout(collapseTimer);
   });
 
   function tr(english: string, portuguese: string) {
@@ -149,7 +157,7 @@
     class="cluster-summary"
     type="button"
     aria-expanded={expanded}
-    onclick={() => (expanded = !expanded)}
+    onclick={() => { userToggled = true; expanded = !expanded; }}
   >
     <span class="cluster-mark" aria-hidden="true">
       <span class="cluster-type-stack">

@@ -334,6 +334,8 @@ fn serve(directory: &Path, relay_url: &str, identity: &NodeIdentity, stop: &Atom
                     Err(error) => log(directory, &format!("Relay message from {}…: {error}", &from[..from.len().min(8)])),
                 }
             }
+            // One unreadable frame is dropped; the connection and every other device's session go on.
+            RelayEvent::Malformed(error) => log(directory, &format!("Relay: {error}")),
             RelayEvent::Presence { fingerprint, online: false, .. } => {
                 peers.forget(&fingerprint);
                 node_auth::disconnect(directory, &fingerprint);
@@ -352,6 +354,8 @@ struct Peers {
     sessions: HashMap<String, Session>,
     /// The digest of the handshake that opened each session: the same handshake arriving again is a replay.
     hellos: HashMap<String, [u8; 32]>,
+    /// Per device, so one busy or misbehaving device cannot slow the others. They outlive a reconnection.
+    limits: HashMap<String, Limits>,
 }
 
 impl Peers {
@@ -359,7 +363,44 @@ impl Peers {
         self.sessions.remove(fingerprint);
         self.hellos.remove(fingerprint);
     }
+
+    fn limits(&mut self, fingerprint: &str) -> &mut Limits {
+        if self.limits.len() > 1024 && !self.limits.contains_key(fingerprint) { self.limits.clear(); }
+        self.limits.entry(fingerprint.to_string()).or_insert_with(Limits::new)
+    }
 }
+
+/// A token bucket: `capacity` at once, refilled at `capacity` per `period`.
+struct Bucket { tokens: f64, capacity: f64, period: Duration, updated: Instant }
+
+impl Bucket {
+    fn new(capacity: u32, period: Duration) -> Self {
+        Self { tokens: capacity as f64, capacity: capacity as f64, period, updated: Instant::now() }
+    }
+
+    fn take(&mut self) -> bool {
+        let now = Instant::now();
+        let refill = now.duration_since(self.updated).as_secs_f64() / self.period.as_secs_f64() * self.capacity;
+        self.tokens = (self.tokens + refill).min(self.capacity);
+        self.updated = now;
+        if self.tokens < 1.0 { return false; }
+        self.tokens -= 1.0;
+        true
+    }
+}
+
+/// What one device may send: 30 commands per 10 s, 10 prompts, approvals or stops per minute, one handshake per 2 s.
+struct Limits { commands: Bucket, acting: Bucket, handshakes: Bucket }
+
+impl Limits {
+    fn new() -> Self {
+        Self { commands: Bucket::new(30, Duration::from_secs(10)), acting: Bucket::new(10, Duration::from_secs(60)), handshakes: Bucket::new(1, Duration::from_secs(2)) }
+    }
+}
+
+const BUSY: &str = "busy: too many requests from this device, try again in a moment";
+/// Larger than any sealed command a device needs to send (a prompt is at most a few tens of KiB).
+const MAX_INCOMING: usize = relay_e2e::MAX_PLAINTEXT + 64;
 
 /// A frame the Node sends back to the device a message came from, or a key the Relay must allow.
 #[derive(Debug, PartialEq)]
@@ -401,6 +442,9 @@ fn sync_authorized(directory: &Path, link: &mut RelayLink, authorized: &mut Hash
 /// `replayed` marks a frame the Relay kept while this Node was offline: a handshake is then dropped, since the
 /// device that sent it has given up on it, and answering it would end the device's current session.
 fn handle_message(directory: &Path, identity: &NodeIdentity, peers: &mut Peers, from: &str, payload: &[u8], replayed: bool) -> Result<Vec<Outgoing>, String> {
+    if payload.len() > MAX_INCOMING {
+        return Err("a frame larger than any command was dropped".into());
+    }
     match payload.first().copied() {
         Some(PAIR_REQUEST) => {
             let paired = pair_device(directory, identity, from, payload);
@@ -415,6 +459,9 @@ fn handle_message(directory: &Path, identity: &NodeIdentity, peers: &mut Peers, 
             let hello: [u8; 32] = Sha256::digest(payload).into();
             if peers.hellos.get(from) == Some(&hello) {
                 return Err("a repeated handshake was ignored".into());
+            }
+            if !peers.limits(from).handshakes.take() {
+                return Err("a handshake sooner than 2 s after the previous one was ignored".into());
             }
             let client = node_pairing::clients(directory)?.into_iter().find(|client| client.identity.fingerprint == from && client.scopes.contains(&NodeScope::Observe)).ok_or("the device is not paired")?;
             let key = client_key(&client).ok_or("the paired key is invalid")?;
@@ -438,8 +485,19 @@ fn handle_message(directory: &Path, identity: &NodeIdentity, peers: &mut Peers, 
                 return Ok(vec![Outgoing::Message { id: "reset", payload: reset_frame(payload) }]);
             };
             let plaintext = zeroize::Zeroizing::new(session.open(payload)?);
-            let mut command: Value = serde_json::from_slice(&plaintext).map_err(io)?;
-            let mut answer = answer_authenticated_command(directory, from, &command, &client.scopes);
+            // From here the frame is authentic, so every outcome gets a sealed answer instead of a 15 s silence.
+            let Ok(mut command) = serde_json::from_slice::<Value>(&plaintext) else {
+                let answer = serde_json::to_vec(&json!({ "ok": false, "error": "unreadable command" })).map_err(io)?;
+                return Ok(vec![Outgoing::Message { id: "reply", payload: session.seal(&answer)? }]);
+            };
+            let acting = matches!(command["cmd"].as_str(), Some("prompt" | "approve" | "interrupt" | "authenticate"));
+            let limits = peers.limits.entry(from.to_string()).or_insert_with(Limits::new);
+            let allowed = limits.commands.take() && (!acting || limits.acting.take());
+            let mut answer = if allowed {
+                answer_authenticated_command(directory, from, &command, &client.scopes)
+            } else {
+                json!({ "ok": false, "error": BUSY })
+            };
             if answer["ok"] == true {
                 let _ = node_pairing::touch_with_platform(directory, from, now_millis(), command["clientPlatform"].as_str());
             }
@@ -1439,6 +1497,136 @@ mod tests {
         assert_eq!(interrupt_session(&fixture.client_dir, &fixture.remote.node_id, "s1", "retry-0001").unwrap()["accepted"], true);
         close_client_connection(&fixture.client_dir, &fixture.remote.identity.fingerprint);
         assert_eq!(relay.join().unwrap(), ["retry-0001", "retry-0001"]);
+    }
+
+    /// Opens an E2E session with the Node of `fixture` through `handle_message`, as the device would.
+    fn open_session(fixture: &Fixture, peers: &mut Peers) -> Session {
+        let node_key: [u8; 32] = URL_SAFE_NO_PAD.decode(&fixture.node.public().public_key).unwrap().try_into().unwrap();
+        let (state, hello) = relay_e2e::initiate(&fixture.device).unwrap();
+        let answered = handle_message(&fixture.node_dir, &fixture.node, peers, &fixture.device.public().fingerprint, &hello, false).unwrap();
+        let [Outgoing::Message { payload, .. }] = answered.as_slice() else { panic!("{answered:?}") };
+        state.finish(payload, &node_key).unwrap()
+    }
+
+    fn send_frame(fixture: &Fixture, peers: &mut Peers, session: &mut Session, frame: &[u8]) -> Result<Value, String> {
+        let answered = handle_message(&fixture.node_dir, &fixture.node, peers, &fixture.device.public().fingerprint, frame, false)?;
+        let [Outgoing::Message { payload, .. }] = answered.as_slice() else { panic!("{answered:?}") };
+        Ok(serde_json::from_slice(&session.open(payload).unwrap()).unwrap())
+    }
+
+    fn send_command(fixture: &Fixture, peers: &mut Peers, session: &mut Session, command: Value) -> Value {
+        let frame = session.seal(&serde_json::to_vec(&command).unwrap()).unwrap();
+        send_frame(fixture, peers, session, &frame).unwrap()
+    }
+
+    #[test]
+    fn replayed_old_and_unreadable_frames_are_refused_and_the_session_goes_on() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("frames", &listener);
+        let from = fixture.device.public().fingerprint.clone();
+        let mut peers = Peers::default();
+        let mut session = open_session(&fixture, &mut peers);
+        let keepalive = serde_json::to_vec(&json!({ "cmd": "keepalive" })).unwrap();
+        let frame = session.seal(&keepalive).unwrap();
+        assert_eq!(send_frame(&fixture, &mut peers, &mut session, &frame).unwrap()["ok"], true);
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &frame, false).is_err(), "the same counter again");
+        let truncated = session.seal(&keepalive).unwrap();
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &truncated[..12], false).is_err(), "truncated");
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &[], false).is_err(), "empty");
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &[0x7f, 1, 2], false).is_err(), "unknown type");
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &vec![3u8; MAX_INCOMING + 1], false).is_err(), "oversize");
+        let garbage = session.seal(b"not json").unwrap();
+        assert_eq!(send_frame(&fixture, &mut peers, &mut session, &garbage).unwrap()["error"], "unreadable command", "an authentic but unreadable command is answered");
+        assert_eq!(send_command(&fixture, &mut peers, &mut session, json!({ "cmd": "keepalive" }))["ok"], true, "the session survives all of it");
+        // A reconnection (after the handshake limit) makes the frames of the earlier session useless.
+        let stale = session.seal(&keepalive).unwrap();
+        std::thread::sleep(Duration::from_millis(2_100));
+        let mut fresh = open_session(&fixture, &mut peers);
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &stale, false).is_err());
+        assert_eq!(send_command(&fixture, &mut peers, &mut fresh, json!({ "cmd": "keepalive" }))["ok"], true);
+    }
+
+    #[test]
+    fn acting_requests_outside_the_minute_are_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("expiry", &listener);
+        let mut config = node_service::load_or_create_config(&fixture.node_dir).unwrap();
+        (config.allow_prompts, config.allow_approvals) = (true, true);
+        node_service::save_config(&fixture.node_dir, &config).unwrap();
+        let mut peers = Peers::default();
+        let mut session = open_session(&fixture, &mut peers);
+        for (index, skew) in [-61_000, 61_000].into_iter().enumerate() {
+            let at = now_millis() + skew;
+            for command in [
+                json!({ "cmd": "prompt", "id": "s1", "requestId": format!("expiry-p{index}"), "prompt": "hi", "sentAt": at }),
+                json!({ "cmd": "approve", "id": "s1", "permissionId": "p", "action": "deny", "requestId": format!("expiry-a{index}"), "sentAt": at }),
+                json!({ "cmd": "interrupt", "id": "s1", "requestId": format!("expiry-i{index}"), "sentAt": at }),
+            ] {
+                let answer = send_command(&fixture, &mut peers, &mut session, command);
+                assert!(answer["error"].as_str().unwrap().contains("too old"), "{answer}");
+            }
+        }
+    }
+
+    #[test]
+    fn each_command_needs_the_scope_it_was_paired_with() {
+        let directory = std::env::temp_dir().join(format!("lume-scopes-{}", random_token_for_test()));
+        let mut config = node_service::load_or_create_config(&directory).unwrap();
+        (config.allow_prompts, config.allow_approvals, config.share_conversations) = (true, true, true);
+        node_service::save_config(&directory, &config).unwrap();
+        let now = now_millis();
+        for command in [
+            json!({ "cmd": "session", "id": "s1" }),
+            json!({ "cmd": "permission", "id": "s1" }),
+            json!({ "cmd": "prompt", "id": "s1", "requestId": "scope-0001", "prompt": "hi", "sentAt": now }),
+            json!({ "cmd": "approve", "id": "s1", "permissionId": "p", "action": "deny", "requestId": "scope-0002", "sentAt": now }),
+            json!({ "cmd": "interrupt", "id": "s1", "requestId": "scope-0003", "sentAt": now }),
+        ] {
+            let answer = answer_command(&directory, "device-a", &command, &[NodeScope::Observe]);
+            assert!(answer["error"].as_str().unwrap().contains("pair it again"), "{command}: {answer}");
+        }
+        assert_eq!(answer_command(&directory, "device-a", &json!({ "cmd": "keepalive" }), &[NodeScope::Observe])["ok"], true);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn an_unpaired_sender_gets_nothing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("unpaired", &listener);
+        let stranger_dir = std::env::temp_dir().join(format!("lume-stranger-{}", random_token_for_test()));
+        let stranger = NodeIdentity::load_or_create(&stranger_dir).unwrap();
+        let mut peers = Peers::default();
+        let (_, hello) = relay_e2e::initiate(&stranger).unwrap();
+        let from = stranger.public().fingerprint.clone();
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &hello, false).unwrap_err().contains("not paired"));
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &[3u8; 40], false).unwrap_err().contains("no longer paired"), "not even a reset");
+        // A handshake signed by another key under a paired fingerprint fails too.
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &fixture.device.public().fingerprint, &hello, false).is_err());
+        assert!(peers.sessions.is_empty());
+        let _ = fs::remove_dir_all(&stranger_dir);
+    }
+
+    #[test]
+    fn each_device_is_limited_on_commands_actions_and_handshakes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("limits", &listener);
+        let from = fixture.device.public().fingerprint.clone();
+        let mut peers = Peers::default();
+        let mut session = open_session(&fixture, &mut peers);
+        let (_, again) = relay_e2e::initiate(&fixture.device).unwrap();
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &again, false).unwrap_err().contains("2 s"));
+        let now = now_millis();
+        for index in 0..10 {
+            let answer = send_command(&fixture, &mut peers, &mut session, json!({ "cmd": "interrupt", "id": "s1", "requestId": format!("limit-{index:04}"), "sentAt": now }));
+            assert!(answer["error"].as_str().unwrap().contains("not allowed"), "within the limit the owner's switch answers: {answer}");
+        }
+        let answer = send_command(&fixture, &mut peers, &mut session, json!({ "cmd": "prompt", "id": "s1", "requestId": "limit-0010", "prompt": "hi", "sentAt": now }));
+        assert_eq!(answer["error"], BUSY);
+        assert_eq!(node_audit::recent(&fixture.node_dir, 1)[0].outcome, node_audit::refused(BUSY), "a refusal for the limit is audited");
+        // 30 per 10 s refills 3 per second, so a slow machine may get one or two more before the limit.
+        let accepted = (0..40).take_while(|_| send_command(&fixture, &mut peers, &mut session, json!({ "cmd": "keepalive" }))["ok"] == true).count();
+        assert!((19..30).contains(&accepted), "the limit holds near 30 commands in 10 s: {accepted} more after 11");
+        assert_eq!(peers.limits.len(), 1, "limits are per device");
     }
 
     #[test]

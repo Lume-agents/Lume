@@ -36,6 +36,8 @@ pub enum RelayEvent {
     Presence { fingerprint: String, role: String, online: bool },
     Authorized { fingerprint: String },
     PairingOpen { hash: String },
+    /// A frame that could not be read (not JSON, or ciphertext that is not base64): reported, never fatal.
+    Malformed(String),
     /// Keep-alive answer or another frame that needs no action.
     Idle,
 }
@@ -175,14 +177,12 @@ impl RelayLink {
         if text.as_str() == "pong" {
             return Ok(RelayEvent::Idle);
         }
-        let frame: Value = serde_json::from_str(text.as_str()).map_err(|error| error.to_string())?;
+        let Ok(frame) = serde_json::from_str::<Value>(text.as_str()) else { return Ok(RelayEvent::Malformed("the Relay sent a frame that is not JSON".into())) };
         let field = |name: &str| frame[name].as_str().unwrap_or_default().to_string();
         Ok(match frame["t"].as_str() {
-            Some("msg") => RelayEvent::Message {
-                from: field("from"),
-                id: field("id"),
-                payload: URL_SAFE_NO_PAD.decode(field("c")).map_err(|_| "the Relay sent invalid ciphertext".to_string())?,
-                replayed: frame["replayed"].as_bool().unwrap_or(false),
+            Some("msg") => match URL_SAFE_NO_PAD.decode(field("c")) {
+                Ok(payload) => RelayEvent::Message { from: field("from"), id: field("id"), payload, replayed: frame["replayed"].as_bool().unwrap_or(false) },
+                Err(_) => RelayEvent::Malformed("the Relay sent invalid ciphertext".into()),
             },
             Some("presence") => RelayEvent::Presence { fingerprint: field("fingerprint"), role: field("role"), online: frame["online"].as_bool().unwrap_or(false) },
             Some("authorized") => RelayEvent::Authorized { fingerprint: field("fingerprint") },
@@ -250,6 +250,32 @@ mod tests {
             RelayEvent::Message { from, id, payload, replayed } => assert_eq!((from.as_str(), id.as_str(), payload.as_slice(), replayed), ("peer", "m1", &b"ciphertext"[..], true)),
             other => panic!("unexpected {other:?}"),
         }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_frame_is_reported_and_the_link_goes_on() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let node = identity();
+        let room = fingerprint(KeyPair::public_key(&node).as_ref());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket.send(Message::text(json!({ "t": "challenge", "nonce": "bm9uY2U" }).to_string())).unwrap();
+            socket.read().unwrap();
+            socket.send(Message::text(json!({ "t": "ready", "role": "node", "nodeOnline": true }).to_string())).unwrap();
+            socket.send(Message::text("{not json")).unwrap();
+            socket.send(Message::text(json!({ "t": "msg", "id": "m", "from": "peer", "c": "%%%" }).to_string())).unwrap();
+            socket.send(Message::text(json!({ "t": "msg", "id": "m", "from": "peer", "c": "b2s" }).to_string())).unwrap();
+            socket.read().ok();
+        });
+        let mut link = RelayLink::connect(&format!("http://{address}"), &room, &node, Role::Node, None).unwrap();
+        assert_eq!(link.node_online, Some(true));
+        assert!(matches!(link.receive().unwrap(), RelayEvent::Malformed(_)));
+        assert!(matches!(link.receive().unwrap(), RelayEvent::Malformed(_)));
+        assert!(matches!(link.receive().unwrap(), RelayEvent::Message { payload, .. } if payload == b"ok"));
+        link.close();
         server.join().unwrap();
     }
 

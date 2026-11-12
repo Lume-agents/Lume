@@ -3,6 +3,7 @@
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
   import TokenUsageChart from "$lib/TokenUsageChart.svelte";
   import TokenMetrics from "$lib/TokenMetrics.svelte";
+  import InspectorNotes from "$lib/InspectorNotes.svelte";
   import type { PromptJumpTarget } from "$lib/tokenUsage";
   import LumeIcon from "$lib/LumeIcon.svelte";
   import LumeSelect, { type LumeSelectOption } from "$lib/LumeSelect.svelte";
@@ -94,6 +95,7 @@
     return ({ user: tr("User", "Usuário"), project: tr("Project", "Projeto"), local: tr("Local", "Local"), account: tr("Account", "Conta") } as Record<string, string>)[scope] ?? scope;
   }
 
+  let noteCount = $state(0);
   let usageRefreshing = $state(false);
   let usageSettledKey = $state("");
   let usagePendingKey = $state("");
@@ -263,6 +265,13 @@
               </li>
             {/each}
           </ul>
+        </details>
+      {/if}
+
+      {#if session.nativeSessionId}
+        <details class="inspector-section notes-section" open>
+          <summary><LumeIcon name="note" size={14} /><span>{tr("Notes", "Notas")}</span>{#if noteCount}<em>{noteCount}</em>{/if}</summary>
+          <InspectorNotes sessionId={session.id} {language} onJump={onJumpToPrompt} onCount={(count) => (noteCount = count)} />
         </details>
       {/if}
 

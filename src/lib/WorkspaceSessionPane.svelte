@@ -29,6 +29,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import LumeIcon from "$lib/LumeIcon.svelte";
   import ChatUsageButton from "$lib/ChatUsageButton.svelte";
   import { promptJumpNeedsOlder, resolvePromptJump, type PromptJumpRequest } from "$lib/tokenUsage";
+  import { NOTES_CHANGED_EVENT, noteTitleFrom } from "$lib/notes";
   import UsageBanner from "$lib/UsageBanner.svelte";
   import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
@@ -104,6 +105,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     setSessionAgentMode,
     steerQueuedPrompt,
     submitPrompt,
+    saveSessionNote,
     takeControlSession,
     type PermissionSettings,
     type CodexModelOption,
@@ -1085,6 +1087,24 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     try {
       await navigator.clipboard.writeText(value);
       actionNotice = tr("Response copied", "Resposta copiada");
+    } catch (error) {
+      sendError = String(error).replace(/^Error:\s*/, "");
+    }
+  }
+
+  /** Saves a prompt or a response as a note of this chat, linked to the prompt so the note can open it again. */
+  async function saveToNote(source: SessionActivity, prompt: SessionActivity | null) {
+    const body = (source.kind === "prompt" ? cleanPromptTransport(source.detail) : source.detail ?? "").trim();
+    if (!body) return;
+    const promptText = prompt ? cleanPromptTransport(prompt.detail).replace(/\s+/g, " ").trim() : "";
+    try {
+      await saveSessionNote(session.id, { title: noteTitleFrom(body, tr("Note", "Nota")), body, kind: "note", pinned: false }, {
+        sourceActivityId: source.id,
+        promptActivityId: prompt?.id,
+        promptExcerpt: promptText ? promptText.slice(0, 280) : undefined,
+      });
+      actionNotice = tr("Saved to notes", "Salvo nas notas");
+      window.dispatchEvent(new CustomEvent(NOTES_CHANGED_EVENT, { detail: { sessionId: session.id } }));
     } catch (error) {
       sendError = String(error).replace(/^Error:\s*/, "");
     }
@@ -2753,6 +2773,11 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                   </div>
                 {/if}
               </section>
+              {#if item.detail && session.nativeSessionId}
+                <div class="prompt-actions">
+                  <button type="button" title={tr("Save to note", "Salvar em nota")} aria-label={tr("Save prompt to note", "Salvar prompt em nota")} onclick={() => void saveToNote(item, item)}><LumeIcon name="note" size={13} /></button>
+                </div>
+              {/if}
             </div>
           </div>
         {:else if item.kind === "message" && item.detail}
@@ -2775,6 +2800,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                     {#if entry.durationMs !== undefined}<span class="response-duration">{`${tr("Worked for", "Trabalhou por")} ${formatAgentDuration(entry.durationMs)}`}</span>{/if}
                     <div class="final-actions" aria-label={tr("Response actions", "Ações da resposta")}>
                       <button type="button" title={tr("Copy response", "Copiar resposta")} aria-label={tr("Copy response", "Copiar resposta")} onclick={() => void copyResponse(item.detail ?? "")}><LumeIcon name="copy" size={14} /></button>
+                      {#if session.nativeSessionId}
+                        <button type="button" title={tr("Save to note", "Salvar em nota")} aria-label={tr("Save response to note", "Salvar resposta em nota")} onclick={() => void saveToNote(item, promptForEntry(entry))}><LumeIcon name="note" size={14} /></button>
+                      {/if}
                       <button class:active={sourceEntryId === entry.id} type="button" title={tr("View sources", "Visualizar fontes")} aria-label={tr("View sources", "Visualizar fontes")} aria-expanded={sourceEntryId === entry.id} onclick={() => { promptIndexOpen = false; sourceEntryId = sourceEntryId === entry.id ? null : entry.id; }}><LumeIcon name="sources" size={14} /></button>
                       {#if session.agent === "codex" && session.nativeSessionId && promptForEntry(entry)}
                         <button class:loading={forkingEntryId === entry.id} type="button" disabled={Boolean(forkingEntryId)} title={tr("Fork from this prompt", "Criar fork a partir deste prompt")} aria-label={tr("Fork from this prompt", "Criar fork a partir deste prompt")} onclick={() => void forkFromEntry(entry)}><LumeIcon name="fork" size={14} /></button>
@@ -3585,6 +3613,11 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .outgoing-row.in-flight .user-message { visibility: hidden; }
   .outgoing-row.delivery-pending .user-message { border-style: dashed; opacity: .76; }
   .user-row.outgoing-replacement { display: none; }
+  /* Shown with the row, like the response actions; the button stays reachable by keyboard. */
+  .prompt-actions { margin-top: -5px; display: flex; justify-content: flex-end; opacity: 0; transition: opacity 140ms ease; }
+  .user-row:hover .prompt-actions, .prompt-actions:focus-within { opacity: 1; }
+  .prompt-actions button { width: 22px; height: 22px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 6px; color: var(--workspace-faint); background: transparent; cursor: pointer; }
+  .prompt-actions button:hover, .prompt-actions button:focus-visible { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .user-row.targeted .user-message { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
   .agent-message { align-self: flex-start; padding: 3px 0 7px; }
   :global(.workspace.agent-message-surface) .agent-message { padding: 11px 15px 9px; border: 1px solid var(--workspace-line); border-radius: 14px 14px 14px 4px; background: color-mix(in srgb, var(--workspace-raised) 93%, transparent); box-shadow: 0 6px 22px rgba(8, 18, 13, .08); }

@@ -53,3 +53,6 @@ export function noteTitleFrom(text: string, fallback: string): string {
   if (!line) return fallback;
   return line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line;
 }
+
+/** Sent on `window` when a chat saves a note, so the Inspector's list reloads. */
+export const NOTES_CHANGED_EVENT = "lume:notes-changed";

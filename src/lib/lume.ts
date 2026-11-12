@@ -1052,6 +1052,21 @@ export async function saveSessionNote(
   });
 }
 
+export interface AttachedNotes {
+  /** Appended to the prompt; empty when no note fit. */
+  transport: string;
+  included: number;
+  /** Notes left out because the prompt would pass its size limit. */
+  skipped: number;
+  /** Secret values hidden from the notes' text. */
+  redacted: number;
+}
+
+/** The redacted notes block to send after a prompt, within `budget` bytes. */
+export async function prepareAttachedNotes(noteIds: string[], budget: number): Promise<AttachedNotes> {
+  return invoke<AttachedNotes>("prepare_attached_notes", { noteIds, budget: Math.max(0, Math.floor(budget)) });
+}
+
 export async function deleteSessionNote(id: string): Promise<void> {
   await invoke("delete_session_note", { id });
 }

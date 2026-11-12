@@ -36,7 +36,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import LumeSelect from "$lib/LumeSelect.svelte";
   import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
   import { caretOnEdgeLine, dedupePromptEntries, emptyPromptHistory, historyEntries, stepPromptHistory } from "$lib/promptHistory";
-  import { applyMention, mentionAtCaret, parentMention, type MentionQuery } from "$lib/promptMentions";
+  import { applyMention, mentionAtCaret, noteMentionQuery, parentMention, removeMention, type MentionQuery } from "$lib/promptMentions";
+  import type { SessionNote } from "$lib/domain";
+  import { attachedNoteMimeType } from "$lib/chatAttachments";
   import { linkAtIndex, splitLinks } from "$lib/links";
   import { claudeEffortForModel, claudeEffortValues, claudeModelOptions } from "$lib/claudeModels";
   import { permissionDescription, permissionLabel, permissionTone } from "$lib/sessionPermissions";
@@ -106,6 +108,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     steerQueuedPrompt,
     submitPrompt,
     saveSessionNote,
+    listNotes,
+    prepareAttachedNotes,
     takeControlSession,
     type PermissionSettings,
     type CodexModelOption,
@@ -264,6 +268,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let writerConflictPrimaryButton = $state<HTMLButtonElement | null>(null);
   let sendError = $state("");
   let promptAttachments = $state<PromptAttachmentInput[]>([]);
+  // Notes sent with the next prompt (redacted, after it), and the ones an `@note:` search found.
+  let attachedNotes = $state<SessionNote[]>([]);
+  let noteResults = $state<SessionNote[]>([]);
   let paneElement = $state<HTMLElement | null>(null);
   let conversationElement = $state<HTMLDivElement | null>(null);
   let conversationContentElement = $state<HTMLDivElement | null>(null);
@@ -1287,7 +1294,16 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       }, 450);
     }
     try {
-      await submitPrompt(session.id, value, attachments, delivery);
+      const notes = attachedNotes;
+      let transported = value;
+      if (notes.length) {
+        // The prompt limit is 16 KB; the notes take what the typed text leaves.
+        const prepared = await prepareAttachedNotes(notes.map((note) => note.id), 16 * 1024 - new TextEncoder().encode(value).length - 64);
+        transported = value + prepared.transport;
+        if (prepared.skipped) actionNotice = tr(`${prepared.skipped} note(s) did not fit and were not sent`, `${prepared.skipped} nota(s) não couberam e não foram enviadas`);
+      }
+      await submitPrompt(session.id, transported, attachments, delivery);
+      attachedNotes = [];
       if (outgoing && session.source !== "web") updateOutgoingPrompt(outgoing.id, { accepted: true });
       else {
         prompt = "";
@@ -2008,7 +2024,45 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     mentionRequest += 1;
     activeMention = null;
     mentionResults = [];
+    noteResults = [];
     mentionIndex = 0;
+  }
+
+  /** `@note:` searches the project's notes; choosing one attaches it and drops the token. */
+  async function refreshNoteMention(query: string, request: number) {
+    try {
+      const found = await listNotes({ project: session.workingDirectory, query: query.trim() });
+      if (request !== mentionRequest) return;
+      noteResults = found.filter((note) => !attachedNotes.some((attached) => attached.id === note.id)).slice(0, 8);
+      mentionResults = [];
+      mentionIndex = 0;
+    } catch {
+      if (request === mentionRequest) noteResults = [];
+    }
+  }
+
+  async function selectNote(note: SessionNote) {
+    if (!activeMention || !promptInput) return;
+    const applied = removeMention(prompt, promptInput.selectionStart ?? prompt.length, activeMention);
+    prompt = applied.text;
+    if (attachedNotes.length < 4) attachedNotes = [...attachedNotes, note];
+    closeMention();
+    await tick();
+    promptInput?.focus();
+    promptInput?.setSelectionRange(applied.caret, applied.caret);
+  }
+
+  /** Starts an `@note:` search at the caret, from the composer's menu. */
+  async function startNoteMention() {
+    plusMenuOpen = false;
+    const caret = promptInput?.selectionStart ?? prompt.length;
+    const spacer = caret > 0 && !/\s$/.test(prompt.slice(0, caret)) ? " " : "";
+    prompt = `${prompt.slice(0, caret)}${spacer}@note:${prompt.slice(caret)}`;
+    await tick();
+    const next = caret + spacer.length + 6;
+    promptInput?.focus();
+    promptInput?.setSelectionRange(next, next);
+    void refreshMention();
   }
 
   async function refreshMention() {
@@ -2020,6 +2074,12 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     if (activeMention?.start === mention.start && activeMention.query === mention.query) return;
     activeMention = mention;
     const request = ++mentionRequest;
+    const noteQuery = noteMentionQuery(mention);
+    if (noteQuery !== null) {
+      await refreshNoteMention(noteQuery, request);
+      return;
+    }
+    noteResults = [];
     try {
       const results = await searchSessionPaths(session.id, mention.query);
       if (request !== mentionRequest) return;
@@ -2085,6 +2145,24 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       event.preventDefault();
       void leaveMentionFolder();
       return;
+    }
+    if (activeMention && noteResults.length) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        mentionIndex = (mentionIndex + (event.key === "ArrowDown" ? 1 : -1) + noteResults.length) % noteResults.length;
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeMention();
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        void selectNote(noteResults[Math.min(mentionIndex, noteResults.length - 1)]);
+        return;
+      }
     }
     if (activeMention && mentionResults.length) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -2766,6 +2844,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                     {#each item.attachments as attachment}
                       {#if attachment.previewDataUrl || (attachment.path && isImageAttachmentPath(attachment.path))}
                         <AttachmentImage {attachment} {language} width={92} height={68} />
+                      {:else if attachment.mimeType === attachedNoteMimeType}
+                        <span class="note-chip" title={tr("Note sent with this prompt", "Nota enviada com este prompt")}><LumeIcon name="note" size={11} />{attachment.name}</span>
                       {:else}
                         <span title={attachment.name}>{attachment.name}</span>
                       {/if}
@@ -3072,6 +3152,16 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         {/if}
       </div>
     {/if}
+    {#if attachedNotes.length}
+      <div class="attached-notes" aria-label={tr("Attached notes", "Notas anexadas")}>
+        {#each attachedNotes as note (note.id)}
+          <span class="note-chip" title={tr("Sent with the prompt, with secrets hidden", "Enviada com o prompt, com segredos ocultos")}>
+            <LumeIcon name="note" size={12} /><small>{note.title}</small>
+            <button type="button" onclick={() => (attachedNotes = attachedNotes.filter((item) => item.id !== note.id))} aria-label={tr(`Remove ${note.title}`, `Remover ${note.title}`)}>×</button>
+          </span>
+        {/each}
+      </div>
+    {/if}
     {#if promptAttachments.length}
       <div class="pending-attachments" aria-label={tr("Attached files", "Arquivos anexados")}>
         {#each promptAttachments as attachment, index}
@@ -3157,6 +3247,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                   <span><strong>{tr("Attach file", "Anexar arquivo")}</strong><small>{promptAttachments.length}/4</small></span>
                 </button>
               {/if}
+              <button type="button" role="menuitem" disabled={sending || takingControl || attachedNotes.length >= 4} onclick={() => void startNoteMention()}>
+                <LumeIcon name="note" size={15} />
+                <span><strong>{tr("Attach note", "Anexar nota")}</strong><small>@note:</small></span>
+              </button>
               {#if session.agent === "claude_code" || session.agent === "omp"}
                 <button type="button" role="menuitem" disabled={!canCompact} onclick={() => void compactContext()}>
                   <LumeIcon name="compact" size={15} />
@@ -3226,6 +3320,20 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             >
               <code>{command.prefix}{command.name}</code>
               <span>{command.description}<small>{command.source === "agent" ? session.agentLabel : "Lume"}{command.argumentHint ? ` · ${command.argumentHint}` : ""}</small></span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+      {#if activeMention && noteResults.length}
+        <div class="slash-command-menu mention-menu" aria-label={tr("Notes", "Notas")} transition:slide={{ duration: 140, easing: cubicOut }}>
+          <div class="slash-command-heading">
+            <strong>{tr("Attach a note", "Anexar uma nota")}</strong>
+            <small><kbd>↑↓</kbd> {tr("navigate", "navegar")} · <kbd>Enter</kbd> {tr("attach", "anexar")}</small>
+          </div>
+          {#each noteResults as note, index (note.id)}
+            <button class:active={mentionIndex === index} type="button" onmouseenter={() => (mentionIndex = index)} onclick={() => void selectNote(note)}>
+              <LumeIcon name="note" size={14} />
+              <span>{note.title}</span>
             </button>
           {/each}
         </div>
@@ -3613,6 +3721,12 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .outgoing-row.in-flight .user-message { visibility: hidden; }
   .outgoing-row.delivery-pending .user-message { border-style: dashed; opacity: .76; }
   .user-row.outgoing-replacement { display: none; }
+  .attached-notes { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 2px 6px; }
+  .note-chip { max-width: 220px; min-height: 24px; padding: 0 4px 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 11px; font-weight: 650; }
+  .note-chip small { min-width: 0; overflow: hidden; color: var(--workspace-strong); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .note-chip button { width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .note-chip button:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
+  .user-message .attachments .note-chip { padding: 0 8px; }
   /* Shown with the row, like the response actions; the button stays reachable by keyboard. */
   .prompt-actions { margin-top: -5px; display: flex; justify-content: flex-end; opacity: 0; transition: opacity 140ms ease; }
   .user-row:hover .prompt-actions, .prompt-actions:focus-within { opacity: 1; }

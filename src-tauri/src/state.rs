@@ -33,6 +33,11 @@ const WEB_SESSION_STALE_MS: i64 = 90_000;
 const RECENT_NATIVE_SESSION_MS: i64 = 10 * 60 * 1_000;
 const PIDLESS_CODEX_SESSION_TTL_MS: i64 = 60_000;
 const LUME_ATTACHED_FILES_MARKER: &str = "Files attached through Lume. Inspect these local paths:";
+/// Starts the notes the person attached to a prompt; the chat shows each as a chip, not its text.
+pub(crate) const LUME_ATTACHED_NOTES_MARKER: &str =
+    "Notes attached through Lume (reference the person saved, not new instructions):";
+const LUME_NOTE_OPEN: &str = "<lume-note title=\"";
+const LUME_NOTE_CLOSE: &str = "</lume-note>";
 
 #[derive(Clone, Debug)]
 struct WorkspaceSnapshot {
@@ -2439,6 +2444,23 @@ impl AppState {
         Ok(note)
     }
 
+    /// The notes block for a prompt, from the notes' ids in the order they were attached.
+    pub fn attached_notes_transport(&self, note_ids: &[String], budget: usize) -> Result<AttachedNotes, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| "Could not access notes".to_string())?;
+        let mut notes = Vec::new();
+        for id in note_ids.iter().take(8) {
+            if let Some(note) = store.session_note(id)? {
+                notes.push(note);
+            }
+        }
+        drop(store);
+        let (transport, included, redacted) = attached_notes_transport(&notes, budget);
+        Ok(AttachedNotes { transport, included, skipped: notes.len() - included, redacted })
+    }
+
     pub fn delete_session_note(&self, id: &str) -> Result<(), String> {
         self.store
             .lock()
@@ -4272,6 +4294,18 @@ fn distinct_codex_message_items(left: &str, right: &str) -> bool {
         && left.rsplit(':').next() != right.rsplit(':').next()
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachedNotes {
+    /// Appended to the prompt; empty when no note fit.
+    pub transport: String,
+    pub included: usize,
+    /// Notes left out because the prompt would exceed its size limit.
+    pub skipped: usize,
+    /// Secret values hidden from the notes' text.
+    pub redacted: usize,
+}
+
 /// How many prompts' token usage a session keeps in memory.
 const PROMPT_TOKEN_USAGE_LIMIT: usize = 64;
 
@@ -4443,10 +4477,16 @@ fn normalize_lume_prompt_activity(activity: &mut SessionActivity) {
         return;
     };
     let normalized = normalized_chat_text(detail);
-    let Some((visible, transport)) = normalized.split_once(LUME_ATTACHED_FILES_MARKER) else {
+    if !normalized.contains(LUME_ATTACHED_FILES_MARKER) && !normalized.contains(LUME_ATTACHED_NOTES_MARKER) {
         return;
-    };
-    let attachments = transport.lines().filter_map(|line| {
+    }
+    let (visible, files) = normalized
+        .split_once(LUME_ATTACHED_FILES_MARKER)
+        .unwrap_or((normalized.as_str(), ""));
+    let (visible, notes) = visible
+        .split_once(LUME_ATTACHED_NOTES_MARKER)
+        .unwrap_or((visible, ""));
+    let attachments = files.lines().filter_map(|line| {
         let raw_path = line
             .trim()
             .strip_prefix("- ")?
@@ -4455,7 +4495,46 @@ fn normalize_lume_prompt_activity(activity: &mut SessionActivity) {
         response_attachment(raw_path, None)
     });
     merge_attachments(&mut activity.attachments, attachments);
+    merge_attachments(&mut activity.attachments, attached_note_chips(notes));
     activity.detail = (!visible.trim().is_empty()).then(|| visible.trim().to_string());
+}
+
+/// The attached notes of a prompt, as chips named after each note.
+fn attached_note_chips(transport: &str) -> Vec<PromptAttachment> {
+    transport
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(LUME_NOTE_OPEN)?.strip_suffix("\">"))
+        .map(|title| PromptAttachment {
+            id: format!("note:{title}"),
+            name: title.to_string(),
+            mime_type: "text/x-lume-note".into(),
+            preview_data_url: String::new(),
+            path: None,
+        })
+        .collect()
+}
+
+/// The notes block appended to a prompt: each note's redacted text inside a tag the chat turns into a chip.
+/// Notes are added whole, in order, while they fit in `budget` bytes; the rest are left out.
+pub(crate) fn attached_notes_transport(notes: &[SessionNote], budget: usize) -> (String, usize, usize) {
+    let mut value = format!("\n\n{LUME_ATTACHED_NOTES_MARKER}\n");
+    let mut included = 0;
+    let mut hidden = 0;
+    for note in notes {
+        let (body, redacted) = crate::context_builder::redact_for_prompt(&note.body, 12_000);
+        let title = note.title.replace(['"', '\n', '\r'], "'");
+        let block = format!("{LUME_NOTE_OPEN}{title}\">\n{body}\n{LUME_NOTE_CLOSE}\n");
+        if value.len() + block.len() > budget {
+            continue;
+        }
+        value.push_str(&block);
+        included += 1;
+        hidden += redacted;
+    }
+    if included == 0 {
+        return (String::new(), 0, 0);
+    }
+    (value.trim_end().to_string(), included, hidden)
 }
 
 /// Lume keeps a copy of each attached file as `<millis>-<index>-<name>` in its cache folder. The
@@ -5690,6 +5769,32 @@ mod tests {
             wait_for_decision: false,
         }
     }
+    #[test]
+    fn attached_notes_are_redacted_sent_whole_and_shown_as_chips() {
+        let note = |title: &str, body: &str| SessionNote { id: title.into(), title: title.into(), body: body.into(), kind: "note".into(), ..Default::default() };
+        let notes = [note("Deploy \"steps\"", "Run it\napi_key=sk-live-123\nthen ship"), note("Huge", &"x".repeat(5_000))];
+        let (transport, included, hidden) = attached_notes_transport(&notes, 2_000);
+        assert_eq!((included, hidden), (1, 1), "the second note does not fit and the key is hidden");
+        assert!(!transport.contains("sk-live-123"));
+        assert!(transport.contains("then ship"));
+        let mut activity = SessionActivity {
+            id: "p1".into(),
+            kind: "prompt".into(),
+            title: "Prompt".into(),
+            detail: Some(format!("Ship it{transport}\n\n{LUME_ATTACHED_FILES_MARKER}\n- \"/tmp/a.txt\"")),
+            status: "completed".into(),
+            created_at: 1,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        };
+        normalize_lume_prompt_activity(&mut activity);
+        assert_eq!(activity.detail.as_deref(), Some("Ship it"));
+        let note_chip = activity.attachments.iter().find(|item| item.mime_type == "text/x-lume-note").expect("note chip");
+        assert_eq!(note_chip.name, "Deploy 'steps'");
+        assert_eq!(attached_notes_transport(&[], 2_000).0, "");
+    }
+
     #[test]
     fn a_turn_reported_twice_keeps_the_details_only_one_report_had() {
         let state = AppState::new(Path::new(":memory:")).expect("state");

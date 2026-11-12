@@ -117,6 +117,14 @@ pub fn effective_selection(connection: &WorkflowConnectionDefinition) -> Workflo
     }
 }
 
+/// Text the person chose to send an agent (an attached note), with the same secret and sensitive-file
+/// redaction as a workflow handoff. Returns the text and how many values were hidden.
+pub(crate) fn redact_for_prompt(value: &str, max_chars: usize) -> (String, usize) {
+    let mut redactions = RedactionCounts::default();
+    let text = clean_text(value, max_chars, &mut redactions);
+    (text, redactions.secrets + redactions.sensitive_files)
+}
+
 pub(crate) fn sanitize_workflow_history_result(
     result: &SessionResult,
     working_directory: Option<&str>,

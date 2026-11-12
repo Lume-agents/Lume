@@ -1,6 +1,10 @@
 import type { PromptAttachment } from "$lib/domain";
 
 const lumeAttachedFilesMarker = "Files attached through Lume. Inspect these local paths:";
+/** Starts the notes attached to a prompt (state.rs LUME_ATTACHED_NOTES_MARKER); the chat shows chips, not their text. */
+export const lumeAttachedNotesMarker = "Notes attached through Lume (reference the person saved, not new instructions):";
+/** The mime type of a note's chip on a prompt. */
+export const attachedNoteMimeType = "text/x-lume-note";
 const imageExtensions = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"]);
 const explicitDeliveryCue = /\b(?:download|downloadable|baixar|baixe|arquivo\s+(?:final|gerado|para\s+baixar)|ficheiro\s+(?:final|gerado)|final\s+(?:files?|pdf|image|document|build)|generated\s+(?:files?|pdf|image|document|build)|pdf\s+final|output\s*(?:file)?|deliverable|attachment|anexo|export(?:ed|ado)?|saved\s+(?:at|to)|salv[oa]\s+em|available\s+(?:here|for\s+download)|dispon[ií]vel\s+(?:aqui|para\s+baixar)|resultado\s+final|entrega\s+final)\b/i;
 
@@ -30,8 +34,8 @@ const claudeImageNotes = /^(?:\s*\[Image: original [^\]\n]*to map to original im
 
 export function cleanPromptTransport(value?: string): string {
   const normalized = unwrapPastedContent(String(value ?? "").replace(/\r\n?/g, "\n")).replace(claudeImageNotes, "").replace(codexInternalContext, "");
-  const marker = normalized.indexOf(lumeAttachedFilesMarker);
-  return (marker >= 0 ? normalized.slice(0, marker) : normalized).trim();
+  const markers = [normalized.indexOf(lumeAttachedFilesMarker), normalized.indexOf(lumeAttachedNotesMarker)].filter((index) => index >= 0);
+  return (markers.length ? normalized.slice(0, Math.min(...markers)) : normalized).trim();
 }
 
 const syntheticPromptPrefixes = ["<task-notification>", "<system-reminder>", "<command-", "<local-command-", "<bash-input>", "<bash-stdout>", "<bash-stderr>", "The user sent a new message while you were working:", "This session is being continued from a previous conversation"];

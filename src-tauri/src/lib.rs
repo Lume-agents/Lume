@@ -1739,6 +1739,16 @@ fn save_session_note(
     )
 }
 
+/// The redacted notes block to append to a prompt, kept within `budget` bytes.
+#[tauri::command]
+fn prepare_attached_notes(
+    state: State<'_, AppState>,
+    note_ids: Vec<String>,
+    budget: usize,
+) -> Result<state::AttachedNotes, String> {
+    state.attached_notes_transport(&note_ids, budget)
+}
+
 #[tauri::command]
 fn delete_session_note(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.delete_session_note(&id)
@@ -4015,6 +4025,7 @@ pub fn run() {
             set_review_decision,
             list_session_notes,
             list_notes,
+            prepare_attached_notes,
             save_session_note,
             delete_session_note,
             get_preferences,

@@ -39,3 +39,17 @@ export function applyMention(
   const value = `${text.slice(0, mention.start)}${inserted}${after}`;
   return { text: value, caret: mention.start + inserted.length };
 }
+
+/** The search after `@note:`, or null when the token is a path. */
+export function noteMentionQuery(mention: MentionQuery | null): string | null {
+  if (!mention || !/^note:/i.test(mention.query)) return null;
+  return mention.query.slice(5);
+}
+
+/** Drops the typed token, for a mention that attaches something instead of writing it. */
+export function removeMention(text: string, caret: number, mention: MentionQuery): { text: string; caret: number } {
+  const after = text.slice(caret).replace(/^[^\s]*/, "");
+  const before = text.slice(0, mention.start);
+  const value = before.endsWith(" ") && after.startsWith(" ") ? `${before}${after.slice(1)}` : `${before}${after}`;
+  return { text: value, caret: mention.start };
+}

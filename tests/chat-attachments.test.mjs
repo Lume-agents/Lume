@@ -161,3 +161,9 @@ assert.equal(isSyntheticPromptText('<pasted_content id="a">\nOlhe este log\n</pa
 assert.equal(isSyntheticPromptText(`Por que apareceu ${compactSummary}`), false);
 
 console.log("chat attachment test suite passed");
+
+// Attached notes travel after the prompt; the chat keeps the prompt and shows the notes as chips.
+const { lumeAttachedNotesMarker } = await import("../src/lib/chatAttachments.ts");
+const withNotes = `Ship the release\n\n${lumeAttachedNotesMarker}\n<lume-note title="Deploy steps">\n1. Build\n</lume-note>\n\nFiles attached through Lume. Inspect these local paths:\n- "/tmp/a.txt"`;
+assert.equal(cleanPromptTransport(withNotes), "Ship the release");
+assert.equal(cleanPromptTransport(`Only notes\n\n${lumeAttachedNotesMarker}\n<lume-note title="A">\nx\n</lume-note>`), "Only notes");

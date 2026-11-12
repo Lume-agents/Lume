@@ -73,3 +73,14 @@ test("web links are found in text without swallowing punctuation", () => {
   assert.equal(linkAtIndex("abre https://x.dev agora", 10), "https://x.dev");
   assert.equal(linkAtIndex("abre https://x.dev agora", 2), null);
 });
+
+test("@note: attaches a note instead of writing a path", async () => {
+  const { noteMentionQuery, removeMention } = await import("../src/lib/promptMentions.ts");
+  const text = "Fix it @note:depl please";
+  const mention = mentionAtCaret(text, 17);
+  assert.equal(noteMentionQuery(mention), "depl");
+  assert.equal(noteMentionQuery(mentionAtCaret("@src/", 5)), null, "a path is not a note");
+  assert.equal(noteMentionQuery(mentionAtCaret("@note:", 6)), "", "an empty search lists notes");
+  assert.deepEqual(removeMention(text, 17, mention), { text: "Fix it please", caret: 7 });
+  assert.deepEqual(removeMention("@note:x", 7, mentionAtCaret("@note:x", 7)), { text: "", caret: 0 });
+});

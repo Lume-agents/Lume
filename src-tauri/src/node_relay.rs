@@ -43,6 +43,10 @@ const CLIENT_IDENTITY_DIRECTORY: &str = "client-identity";
 const PAIR_REQUEST: u8 = 0x10;
 const PAIR_RESPONSE: u8 = 0x11;
 const PAIR_AAD: &[u8] = b"lume-relay-pair-v1";
+/// Plaintext answer of a Node to a sealed frame it has no session for: the type byte and 16 bytes of the frame's digest.
+const RESET: u8 = 0x04;
+const NODE_RESET: &str = "the Node no longer knows this connection";
+const NODE_OFFLINE: &str = "that computer is offline: its Lume Node is not connected to the Relay";
 const HEARTBEAT: Duration = Duration::from_secs(20);
 const STATUS_FILE: &str = "relay-status.json";
 // One persistent E2E connection per Node/device: all prompts and polls share its authorization,
@@ -292,7 +296,7 @@ fn serve(directory: &Path, relay_url: &str, identity: &NodeIdentity, stop: &Atom
     let mut authorized: HashSet<String> = HashSet::new();
     sync_authorized(directory, &mut link, &mut authorized)?;
     let mut last_sync = Instant::now();
-    let mut sessions: HashMap<String, Session> = HashMap::new();
+    let mut peers = Peers::default();
     let mut opened_offer = String::new();
     let mut last_heartbeat = Instant::now();
     let result = (|| -> Result<(), String> { loop {
@@ -319,21 +323,58 @@ fn serve(directory: &Path, relay_url: &str, identity: &NodeIdentity, stop: &Atom
             last_heartbeat = Instant::now();
         }
         match link.receive()? {
-            RelayEvent::Message { from, payload, .. } => {
-                if let Err(error) = handle_message(directory, identity, &mut link, &mut sessions, &from, &payload) {
-                    log(directory, &format!("Relay message from {}…: {error}", &from[..from.len().min(8)]));
+            RelayEvent::Message { from, payload, replayed, .. } => {
+                match handle_message(directory, identity, &mut peers, &from, &payload, replayed) {
+                    Ok(outgoing) => for frame in outgoing {
+                        match frame {
+                            Outgoing::Message { id, payload } => link.send(Some(&from), id, &payload)?,
+                            Outgoing::Authorize(key) => link.authorize(&key)?,
+                        }
+                    },
+                    Err(error) => log(directory, &format!("Relay message from {}…: {error}", &from[..from.len().min(8)])),
                 }
             }
             RelayEvent::Presence { fingerprint, online: false, .. } => {
-                sessions.remove(&fingerprint);
+                peers.forget(&fingerprint);
                 node_auth::disconnect(directory, &fingerprint);
             }
             _ => {}
         }
     } })();
     // Losing the Node's Relay connection invalidates its sessions, without stopping local tasks.
-    for fingerprint in sessions.keys() { node_auth::disconnect(directory, fingerprint); }
+    for fingerprint in peers.sessions.keys() { node_auth::disconnect(directory, fingerprint); }
     result
+}
+
+/// What the Node knows about each connected device during one Relay connection.
+#[derive(Default)]
+struct Peers {
+    sessions: HashMap<String, Session>,
+    /// The digest of the handshake that opened each session: the same handshake arriving again is a replay.
+    hellos: HashMap<String, [u8; 32]>,
+}
+
+impl Peers {
+    fn forget(&mut self, fingerprint: &str) {
+        self.sessions.remove(fingerprint);
+        self.hellos.remove(fingerprint);
+    }
+}
+
+/// A frame the Node sends back to the device a message came from, or a key the Relay must allow.
+#[derive(Debug, PartialEq)]
+enum Outgoing {
+    Message { id: &'static str, payload: Vec<u8> },
+    Authorize([u8; 32]),
+}
+
+/// The answer to a sealed frame the Node has no session for, so the device reconnects at once instead of waiting.
+/// It is not authenticated (there is no session to seal it with), and it names the frame it answers, so a device
+/// only acts on a reset of the frame it just sent; a forged one can do no more than a Relay dropping the frame.
+fn reset_frame(frame: &[u8]) -> Vec<u8> {
+    let mut reset = vec![RESET];
+    reset.extend_from_slice(&Sha256::digest(frame)[..16]);
+    reset
 }
 
 /// Makes the Relay's allow-list match the paired devices: new ones are authorized, removed ones revoked.
@@ -356,22 +397,41 @@ fn sync_authorized(directory: &Path, link: &mut RelayLink, authorized: &mut Hash
     Ok(())
 }
 
-fn handle_message(directory: &Path, identity: &NodeIdentity, link: &mut RelayLink, sessions: &mut HashMap<String, Session>, from: &str, payload: &[u8]) -> Result<(), String> {
+/// Answers one message from a device with the frames to send back to it. It never writes to the Relay itself.
+/// `replayed` marks a frame the Relay kept while this Node was offline: a handshake is then dropped, since the
+/// device that sent it has given up on it, and answering it would end the device's current session.
+fn handle_message(directory: &Path, identity: &NodeIdentity, peers: &mut Peers, from: &str, payload: &[u8], replayed: bool) -> Result<Vec<Outgoing>, String> {
     match payload.first().copied() {
-        Some(PAIR_REQUEST) => pair_device(directory, identity, link, from, payload),
+        Some(PAIR_REQUEST) => pair_device(directory, identity, from, payload),
         Some(1) => {
+            if replayed {
+                return Err("a handshake kept by the Relay while the Node was offline was ignored".into());
+            }
+            let hello: [u8; 32] = Sha256::digest(payload).into();
+            if peers.hellos.get(from) == Some(&hello) {
+                return Err("a repeated handshake was ignored".into());
+            }
             let client = node_pairing::clients(directory)?.into_iter().find(|client| client.identity.fingerprint == from && client.scopes.contains(&NodeScope::Observe)).ok_or("the device is not paired")?;
             let key = client_key(&client).ok_or("the paired key is invalid")?;
             let (reply, session) = relay_e2e::respond(identity, &key, payload)?;
-            if sessions.insert(from.to_string(), session).is_some() { node_auth::disconnect(directory, from); }
-            link.send(Some(from), "hs2", &reply)
+            // A new handshake from the device is a reconnection: the grant of the previous session ends with it.
+            if peers.sessions.insert(from.to_string(), session).is_some() { node_auth::disconnect(directory, from); }
+            peers.hellos.insert(from.to_string(), hello);
+            Ok(vec![Outgoing::Message { id: "hs2", payload: reply }])
         }
         Some(3) => {
             let Some(client) = node_pairing::clients(directory)?.into_iter().find(|client| client.identity.fingerprint == from && client.scopes.contains(&NodeScope::Observe)) else {
-                sessions.remove(from);
+                peers.forget(from);
                 return Err("the device is no longer paired".into());
             };
-            let session = sessions.get_mut(from).ok_or("no session: the device must start a handshake")?;
+            let Some(session) = peers.sessions.get_mut(from) else {
+                // A frame kept while the Node was offline belongs to a connection the device already gave up.
+                if replayed {
+                    return Err("a frame kept by the Relay for an earlier session was ignored".into());
+                }
+                log(directory, "Relay: a device sent a frame for a session this Node does not have; asking it to reconnect");
+                return Ok(vec![Outgoing::Message { id: "reset", payload: reset_frame(payload) }]);
+            };
             let plaintext = zeroize::Zeroizing::new(session.open(payload)?);
             let mut command: Value = serde_json::from_slice(&plaintext).map_err(io)?;
             let mut answer = answer_authenticated_command(directory, from, &command, &client.scopes);
@@ -381,8 +441,7 @@ fn handle_message(directory: &Path, identity: &NodeIdentity, link: &mut RelayLin
             let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&answer).map_err(io)?);
             scrub_sensitive_fields(&mut command);
             if let Some(result) = answer.get_mut("result") { scrub_sensitive_fields(result); }
-            let frame = session.seal(&plaintext)?;
-            link.send(Some(from), "reply", &frame)
+            Ok(vec![Outgoing::Message { id: "reply", payload: session.seal(&plaintext)? }])
         }
         _ => Err("unexpected frame".into()),
     }
@@ -417,7 +476,7 @@ fn answer_authenticated_command(directory: &Path, fingerprint: &str, command: &V
     }
 }
 
-fn pair_device(directory: &Path, identity: &NodeIdentity, link: &mut RelayLink, from: &str, payload: &[u8]) -> Result<(), String> {
+fn pair_device(directory: &Path, identity: &NodeIdentity, from: &str, payload: &[u8]) -> Result<Vec<Outgoing>, String> {
     let stored: StoredRelayOffer = serde_json::from_slice(&fs::read(directory.join(OFFER_FILE)).map_err(|_| "no pairing offer is open".to_string())?).map_err(io)?;
     let request: NodePairingRequest = serde_json::from_slice(&open_box(&stored.secret, PAIR_REQUEST, payload)?).map_err(io)?;
     if request.proof.identity.fingerprint != from {
@@ -425,11 +484,11 @@ fn pair_device(directory: &Path, identity: &NodeIdentity, link: &mut RelayLink, 
     }
     let client = node_pairing::accept_pairing(directory, &request, &[NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt, NodeScope::Approve, NodeScope::Interrupt], now_millis())?;
     let _ = fs::remove_file(directory.join(OFFER_FILE));
-    link.authorize(&client_key(&client).ok_or("the paired key is invalid")?)?;
+    let key = client_key(&client).ok_or("the paired key is invalid")?;
     let answer = json!({ "client": client, "nodeIdentity": identity.public() });
-    link.send(Some(from), "pair-response", &seal_box(&stored.secret, PAIR_RESPONSE, &serde_json::to_vec(&answer).map_err(io)?)?)?;
+    let response = seal_box(&stored.secret, PAIR_RESPONSE, &serde_json::to_vec(&answer).map_err(io)?)?;
     log(directory, "Relay: paired a new device");
-    Ok(())
+    Ok(vec![Outgoing::Authorize(key), Outgoing::Message { id: "pair-response", payload: response }])
 }
 
 /// What was said in one session: needs the owner's switch (off by default) and a device paired with the scope.
@@ -641,7 +700,7 @@ fn wait_for<F: FnMut(&RelayEvent) -> Option<Vec<u8>>>(link: &mut RelayLink, seco
         }
         // A Relay that tells a joining device its Node is offline saves the wait for an answer that cannot come.
         if matches!(&event, RelayEvent::Presence { role, online: false, .. } if role == "node") {
-            return Err("that computer is offline: its Lume Node is not connected to the Relay".into());
+            return Err(NODE_OFFLINE.into());
         }
     }
     Err("the Node did not answer in time (is it running and connected to the Relay?)".into())
@@ -746,7 +805,15 @@ pub(crate) fn query_commands(directory: &Path, node_id: &str, commands: &[Value]
             }
         }
     }
-    let result = query_remote_commands(guard.as_mut().expect("connection created"), &remote, commands, token.as_deref().map(String::as_str));
+    let mut result = query_remote_commands(guard.as_mut().expect("connection created"), &remote, commands, token.as_deref().map(String::as_str));
+    // The Node lost this session (it restarted or reconnected to the Relay) and did not act on the frame: one new
+    // connection and one more try, never a loop.
+    if result.as_ref().is_err_and(|error| error == NODE_RESET) {
+        if let Some(connection) = guard.take() { connection.link.close(); }
+        result = connect_remote(directory, &remote).and_then(|connection| {
+            query_remote_commands(guard.insert(connection), &remote, commands, token.as_deref().map(String::as_str))
+        });
+    }
     if result.is_err() {
         if let Some(connection) = guard.take() { connection.link.close(); }
     }
@@ -764,6 +831,11 @@ fn connect_remote(directory: &Path, remote: &RelayRemote) -> Result<ClientConnec
     let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
     let node_key: [u8; 32] = URL_SAFE_NO_PAD.decode(&remote.identity.public_key).map_err(io)?.try_into().map_err(|_| "invalid Node key".to_string())?;
     let mut link = RelayLink::connect(&remote.relay_url, &remote.identity.fingerprint, &identity, Role::Client, None)?;
+    // A Relay that says the Node is offline saves a handshake that could only wait out its timeout.
+    if link.node_online == Some(false) {
+        link.close();
+        return Err(NODE_OFFLINE.into());
+    }
     let (state, hello) = relay_e2e::initiate(&identity)?;
     link.send(None, "hs1", &hello)?;
     let reply = wait_for(&mut link, 15, |event| payload_of(event, 2))?;
@@ -783,8 +855,16 @@ fn query_remote_commands(connection: &mut ClientConnection, remote: &RelayRemote
         }
         let plaintext = zeroize::Zeroizing::new(serde_json::to_vec(&command).map_err(io)?);
         scrub_sensitive_fields(&mut command);
-        connection.link.send(None, "cmd", &connection.session.seal(&plaintext)?)?;
-        let frame = wait_for(&mut connection.link, 15, |event| payload_of(event, 3))?;
+        let sealed = connection.session.seal(&plaintext)?;
+        connection.link.send(None, "cmd", &sealed)?;
+        let reset = reset_frame(&sealed);
+        let frame = wait_for(&mut connection.link, 15, |event| match event {
+            RelayEvent::Message { payload, .. } if payload.first() == Some(&3) || *payload == reset => Some(payload.clone()),
+            _ => None,
+        })?;
+        if frame == reset {
+            return Err(NODE_RESET.into());
+        }
         let plaintext = zeroize::Zeroizing::new(connection.session.open(&frame)?);
         let answer: Value = serde_json::from_slice(&plaintext).map_err(io)?;
         if answer["error"].as_str() != Some(node_auth::OTP_REQUIRED) {
@@ -939,6 +1019,159 @@ mod tests {
         assert!(first_time("repeat-0002", now + 1_000));
         // After the memory window the id may be used again.
         assert!(first_time("repeat-0001", now + REQUEST_MEMORY_MS + 1));
+    }
+
+    use std::net::TcpListener;
+    use tungstenite::Message;
+
+    /// A Node and a device in their own directories, the device paired (with every scope) and a stand-in Relay address.
+    struct Fixture { node_dir: PathBuf, client_dir: PathBuf, node: NodeIdentity, device: NodeIdentity, remote: RelayRemote }
+
+    fn fixture(name: &str, listener: &TcpListener) -> Fixture {
+        let unique = format!("{name}-{}", random_token_for_test());
+        let node_dir = std::env::temp_dir().join(format!("lume-relay-node-{unique}"));
+        let client_dir = std::env::temp_dir().join(format!("lume-relay-client-{unique}"));
+        let config = node_service::load_or_create_config(&node_dir).unwrap();
+        let node = NodeIdentity::load_or_create(&node_dir).unwrap();
+        let device = NodeIdentity::load_or_create(&client_dir.join(CLIENT_IDENTITY_DIRECTORY)).unwrap();
+        let offer = node_pairing::begin_pairing(&node_dir, &config.node_id, &node).unwrap();
+        let scopes = vec![NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt, NodeScope::Approve, NodeScope::Interrupt];
+        let request = node_pairing::pairing_request(&device, &offer, "Test laptop", scopes.clone()).unwrap();
+        let paired = node_pairing::accept_pairing(&node_dir, &request, &scopes, now_millis()).unwrap();
+        let remote = RelayRemote { node_id: config.node_id, relay_url: format!("http://{}", listener.local_addr().unwrap()), identity: node.public().clone(), device_id: paired.device_id, paired_at: now_millis() };
+        save_remote(&client_dir, remote.clone()).unwrap();
+        Fixture { node_dir, client_dir, node, device, remote }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            close_client_connection(&self.client_dir, &self.remote.identity.fingerprint);
+            let _ = fs::remove_dir_all(&self.node_dir);
+            let _ = fs::remove_dir_all(&self.client_dir);
+        }
+    }
+
+    /// Accepts one connection as the Relay would: a challenge, any hello, then `ready`.
+    fn accept_client(listener: &TcpListener, ready: Value) -> tungstenite::WebSocket<std::net::TcpStream> {
+        let (stream, _) = listener.accept().unwrap();
+        let mut socket = tungstenite::accept(stream).unwrap();
+        socket.send(Message::text(json!({ "t": "challenge", "nonce": "bm9uY2U" }).to_string())).unwrap();
+        let _hello = socket.read().unwrap();
+        socket.send(Message::text(ready.to_string())).unwrap();
+        socket
+    }
+
+    /// The ciphertext of the next message a device sends, or `None` once it closes the connection.
+    fn next_payload(socket: &mut tungstenite::WebSocket<std::net::TcpStream>) -> Option<Vec<u8>> {
+        loop {
+            match socket.read() {
+                Ok(Message::Text(text)) => {
+                    let frame: Value = serde_json::from_str(text.as_str()).unwrap();
+                    return Some(URL_SAFE_NO_PAD.decode(frame["c"].as_str().unwrap()).unwrap());
+                }
+                Ok(Message::Close(_)) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    }
+
+    fn deliver(socket: &mut tungstenite::WebSocket<std::net::TcpStream>, from: &str, payload: &[u8]) {
+        socket.send(Message::text(json!({ "t": "msg", "id": "m", "from": from, "c": URL_SAFE_NO_PAD.encode(payload) }).to_string())).unwrap();
+    }
+
+    fn device_key(device: &NodeIdentity) -> [u8; 32] {
+        URL_SAFE_NO_PAD.decode(&device.public().public_key).unwrap().try_into().unwrap()
+    }
+
+    #[test]
+    fn a_node_the_relay_reports_offline_fails_at_once_and_nothing_is_sent() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("offline", &listener);
+        let relay = std::thread::spawn(move || {
+            let mut socket = accept_client(&listener, json!({ "t": "ready", "role": "client", "nodeOnline": false }));
+            let mut sent = 0;
+            while next_payload(&mut socket).is_some() { sent += 1; }
+            sent
+        });
+        let started = Instant::now();
+        let error = query(&fixture.client_dir, &fixture.remote.node_id, "health").unwrap_err();
+        assert!(error.contains("offline"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1), "it must not wait for a handshake answer");
+        assert_eq!(relay.join().unwrap(), 0, "not even the handshake is sent to an offline Node");
+    }
+
+    #[test]
+    fn a_replayed_handshake_leaves_the_live_session_intact() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("replayed-hello", &listener);
+        let from = fixture.device.public().fingerprint.clone();
+        let node_key: [u8; 32] = URL_SAFE_NO_PAD.decode(&fixture.node.public().public_key).unwrap().try_into().unwrap();
+        let mut peers = Peers::default();
+        let (state, hello) = relay_e2e::initiate(&fixture.device).unwrap();
+        let answered = handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &hello, false).unwrap();
+        let [Outgoing::Message { id: "hs2", payload: reply }] = answered.as_slice() else { panic!("{answered:?}") };
+        let mut session = state.finish(reply, &node_key).unwrap();
+        // The same handshake again, flagged by the Relay or not, and an older one the Relay kept: all dropped.
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &hello, true).is_err());
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &hello, false).is_err());
+        let (_, older) = relay_e2e::initiate(&fixture.device).unwrap();
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &older, true).is_err());
+        let frame = session.seal(&serde_json::to_vec(&json!({ "cmd": "keepalive" })).unwrap()).unwrap();
+        let answered = handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &frame, false).unwrap();
+        let [Outgoing::Message { id: "reply", payload }] = answered.as_slice() else { panic!("{answered:?}") };
+        let answer: Value = serde_json::from_slice(&session.open(payload).unwrap()).unwrap();
+        assert_eq!(answer["result"]["connected"], true, "the session the device holds still works");
+    }
+
+    #[test]
+    fn a_sealed_frame_without_a_session_is_answered_with_a_reset_unless_it_was_replayed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("reset", &listener);
+        let from = fixture.device.public().fingerprint.clone();
+        let mut peers = Peers::default();
+        let frame = [3u8; 40];
+        let answered = handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &frame, false).unwrap();
+        assert_eq!(answered, [Outgoing::Message { id: "reset", payload: reset_frame(&frame) }]);
+        assert_eq!(reset_frame(&frame).len(), 17);
+        assert!(handle_message(&fixture.node_dir, &fixture.node, &mut peers, &from, &frame, true).is_err(), "a kept frame gets no answer");
+    }
+
+    #[test]
+    fn a_reset_reconnects_and_retries_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let fixture = fixture("retry", &listener);
+        let node = NodeIdentity::load_or_create(&fixture.node_dir).unwrap();
+        let (client_key, node_fingerprint) = (device_key(&fixture.device), fixture.node.public().fingerprint.clone());
+        let relay = std::thread::spawn(move || {
+            // The first connection is reset; the second answers once and is reset on the next command; the third is reset.
+            let mut answered = 0;
+            for connection in 0..3 {
+                let mut socket = accept_client(&listener, json!({ "t": "ready", "role": "client" }));
+                let hello = next_payload(&mut socket).unwrap();
+                let (reply, mut session) = relay_e2e::respond(&node, &client_key, &hello).unwrap();
+                deliver(&mut socket, &node_fingerprint, &reply);
+                let mut commands = 0;
+                while let Some(frame) = next_payload(&mut socket) {
+                    commands += 1;
+                    if connection == 1 && commands == 1 {
+                        session.open(&frame).unwrap();
+                        let answer = session.seal(br#"{"ok":true,"result":{"answered":true}}"#).unwrap();
+                        deliver(&mut socket, &node_fingerprint, &answer);
+                        answered += 1;
+                    } else {
+                        // A reset of some other frame is ignored; the one naming this frame is not.
+                        deliver(&mut socket, &node_fingerprint, &reset_frame(b"another frame"));
+                        deliver(&mut socket, &node_fingerprint, &reset_frame(&frame));
+                    }
+                }
+            }
+            answered
+        });
+        let started = Instant::now();
+        assert_eq!(query(&fixture.client_dir, &fixture.remote.node_id, "keepalive").unwrap()["answered"], true, "a reset is retried on a new connection");
+        assert_eq!(query(&fixture.client_dir, &fixture.remote.node_id, "keepalive").unwrap_err(), NODE_RESET, "only once");
+        assert!(started.elapsed() < Duration::from_secs(5), "a reset never waits for the answer timeout");
+        assert_eq!(relay.join().unwrap(), 1);
     }
 
     #[test]

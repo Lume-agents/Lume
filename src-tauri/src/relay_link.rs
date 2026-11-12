@@ -45,6 +45,8 @@ pub struct RelayLink {
     pub room: String,
     pub fingerprint: String,
     pub role: String,
+    /// Whether the room's Node is connected, when the Relay says so in `ready`; `None` from a Relay that does not.
+    pub node_online: Option<bool>,
 }
 
 /// The value a Node registers (hashed) for a single-use pairing secret.
@@ -99,8 +101,9 @@ impl RelayLink {
             match frame["t"].as_str() {
                 Some("ready") => {
                     let granted = frame["role"].as_str().unwrap_or(role.name()).to_string();
+                    let node_online = frame["nodeOnline"].as_bool();
                     set_timeout(&mut socket, None)?;
-                    return Ok(Self { socket, room: room.into(), fingerprint: fingerprint(&signer.public_key()), role: granted });
+                    return Ok(Self { socket, room: room.into(), fingerprint: fingerprint(&signer.public_key()), role: granted, node_online });
                 }
                 Some("error") => return Err(format!("the Relay refused the connection: {}", frame["code"].as_str().unwrap_or("unknown"))),
                 _ => {}
@@ -241,6 +244,7 @@ mod tests {
         });
         let mut link = RelayLink::connect(&format!("http://{address}"), &room, &node, Role::Node, None).unwrap();
         assert_eq!((link.role.as_str(), link.fingerprint.as_str()), ("node", room.as_str()));
+        assert_eq!(link.node_online, None, "a Relay that does not report the Node leaves it unknown");
         link.send(Some("target"), "m1", b"ciphertext").unwrap();
         match link.receive().unwrap() {
             RelayEvent::Message { from, id, payload, replayed } => assert_eq!((from.as_str(), id.as_str(), payload.as_slice(), replayed), ("peer", "m1", &b"ciphertext"[..], true)),

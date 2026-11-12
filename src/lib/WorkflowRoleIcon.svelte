@@ -1,18 +1,24 @@
 <script lang="ts">
   import type { WorkflowRole } from "$lib/domain";
 
-  let { role } = $props<{ role: WorkflowRole }>();
+  /** `orchestrator`: the basic board names the planner the orchestrator and draws it as a brain. */
+  let { role, orchestrator = false } = $props<{ role: WorkflowRole; orchestrator?: boolean }>();
 </script>
 
 <svg
   xmlns="http://www.w3.org/2000/svg"
   class="workflow-role-icon role-{role}"
+  class:orchestrator={orchestrator && role === "planner"}
   viewBox="0 0 24 24"
   fill="none"
   aria-hidden="true"
   focusable="false"
 >
-  {#if role === "planner"}
+  {#if role === "planner" && orchestrator}
+    <path d="M12 5.2V19.5M12 5.2a2.9 2.9 0 0 0-5.3-1.1A3 3 0 0 0 4.2 8a3.1 3.1 0 0 0 .3 5.8 3.2 3.2 0 0 0 3.3 4.8A2.8 2.8 0 0 0 12 19.5" />
+    <path d="M12 5.2a2.9 2.9 0 0 1 5.3-1.1A3 3 0 0 1 19.8 8a3.1 3.1 0 0 1-.3 5.8 3.2 3.2 0 0 1-3.3 4.8A2.8 2.8 0 0 1 12 19.5" />
+    <path d="M7.4 9.2c1.4-.2 2.6.5 3 1.7M16.6 9.2c-1.4-.2-2.6.5-3 1.7M7.6 14.3c1.3.2 2.2 1 2.4 2.2M16.4 14.3c-1.3.2-2.2 1-2.4 2.2" />
+  {:else if role === "planner"}
     <path d="M7 4h10.5A2.5 2.5 0 0 1 20 6.5V20H7a3 3 0 1 1 0-6h1V6a2 2 0 0 0-4 0v11" />
     <path d="m10.5 15.5 1-3 6.1-7 2.4 2.1-6.1 7-3.4.9ZM16.8 6.4l2.4 2.1M11 18h5" />
   {:else if role === "implementer"}

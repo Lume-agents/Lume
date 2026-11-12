@@ -217,6 +217,14 @@ try {
   await wait("document.querySelectorAll('.board-card').length === 2");
   await wait("document.querySelector('.workflow-board.entered')");
   await wait("getComputedStyle(document.querySelector('.workflow-board')).opacity === '1'"); // the board fades in
+  // An Orb workflow with no board layout whose route fits the slots opens in the basic board.
+  assert.equal(await evaluate("document.querySelector('[data-board-layout=\"basic\"]').getAttribute('aria-pressed')"), "true", "a fitting workflow opens in the slots");
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('[data-slot]')).map(slot => slot.dataset.slotRole + ':' + (slot.querySelector('.board-card')?.dataset.boardCard ?? '-'))"),
+    ["planner:step-native-0", "implementer:step-native-1", "reviewer:-"], "each step sits in its role's slot");
+  await screenshot("basic-orb-dark");
+  await click('[data-board-layout="canvas"]');
+  await wait("document.querySelector('.board-viewport') && document.querySelectorAll('.board-card').length === 2");
+  assert.equal(await evaluate("parseFloat(document.querySelector('[data-board-card=\"step-native-1\"]').style.left) > parseFloat(document.querySelector('[data-board-card=\"step-native-0\"]').style.left)"), true, "the canvas lays the cards out in chain order");
   await click('[aria-label="Aumentar zoom"]');
   assert.equal(await evaluate("document.querySelector('.zoom-label').textContent"), "120%");
   await click('[aria-label="Restaurar zoom"]');
@@ -506,8 +514,95 @@ try {
   await click(rowOf("orb-fixture") + " .workflow-row-more");
   await click('.workflow-row-menu [data-workflow-menu="board"]');
   await wait("!document.querySelector('.workflow-board').hidden && document.querySelector('.workflow-name')?.value === 'Workflow do Orb 1'");
+  // The basic board: a workflow whose roles do not fit the slots stays on the canvas; a new one opens in three slots.
+  assert.equal(await evaluate(found('[data-board-layout="basic"]') + ".getAttribute('aria-disabled')"), "true", "the Orb workflow's roles do not fit the slots");
+  await click('[data-board-layout="basic"]');
+  assert.equal(await evaluate(found(".board-basic")), null, "a workflow that does not fit cannot switch");
+  await click('[aria-label="Novo workflow"]');
+  await wait(found(".board-basic"));
+  await click('[aria-label="Fechar painel"]');
+  await wait("window.__fixture.preferences.workflowGroups.length === 3");
+  const basicId = await evaluate("window.__fixture.preferences.workflowGroups[2].id");
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('[data-slot]')).map(slot => slot.querySelector('.slot-placeholder strong').textContent + '|' + (slot.querySelector('.slot-optional')?.textContent ?? ''))"),
+    ["Orquestrador|", "Implementador|", "Revisor|Opcional"], "three labelled slots, the third optional");
+  assert.ok(await evaluate(found('[data-slot="0"] .workflow-role-icon.orchestrator')), "the orchestrator is drawn as a brain");
+  await screenshot("basic-empty");
+  const dropOnSlot = (sessionId, index) => evaluate("(() => { const slot = document.querySelector('[data-slot=\"" + index + "\"]'); const r = slot.getBoundingClientRect(); for (const type of ['dragover', 'drop']) { const dataTransfer = new DataTransfer(); dataTransfer.setData('text/x-lume-session', '" + sessionId + "'); slot.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer, clientX: r.left + 20, clientY: r.top + 20 })); } })()");
+  const savedBasic = () => evaluate("(() => { const g = window.__fixture.preferences.workflowGroups.find(item => item.id === " + JSON.stringify(basicId) + "); return { steps: g.steps.map(s => s.sessionNativeId + ':' + s.role), arrows: g.connections.map(c => c.fromStepId + '>' + c.toStepId) }; })()");
+  const waitSteps = (count) => wait("window.__fixture.preferences.workflowGroups.find(item => item.id === " + JSON.stringify(basicId) + ").steps.length === " + count);
+  await dropOnSlot("session-3", 0);
+  await waitSteps(1);
+  await dropOnSlot("session-1", 1);
+  await waitSteps(2);
+  assert.deepEqual(await savedBasic(), { steps: ["native-3:planner", "native-1:implementer"], arrows: ["step-native-3>step-native-1"] }, "slots 1 and 2 make an orchestrator → implementer chain");
+  // A chat dragged from the sidebar lights the slot under it, then fills the optional third slot as a reviewer.
+  await click('[data-sidebar-tab="all"]');
+  await evaluate(found('.session-row[aria-label="Revisão"]') + ".dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }))");
+  await evaluate("(() => { const slot = document.querySelector('[data-slot=\"2\"]'); const dataTransfer = new DataTransfer(); dataTransfer.setData('text/x-lume-session', 'session-2'); slot.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer })); })()");
+  await wait(found('[data-slot="2"].drop-over'));
+  await screenshot("basic-drop");
+  await dropOnSlot("session-2", 2);
+  await waitSteps(3);
+  assert.deepEqual(await savedBasic(), { steps: ["native-3:planner", "native-1:implementer", "native-2:reviewer"], arrows: ["step-native-3>step-native-1", "step-native-1>step-native-2"] });
+  await wait("!" + found(".board-slot.drop-over"));
+  // Dragging a card onto another slot swaps the two and reorders the chain.
+  await pointerDrag('[data-slot="0"] .card-body', '[data-slot="1"] .slot-head');
+  await wait("window.__fixture.preferences.workflowGroups.find(item => item.id === " + JSON.stringify(basicId) + ").steps[0].sessionNativeId === 'native-1'");
+  assert.deepEqual(await savedBasic(), { steps: ["native-1:planner", "native-3:implementer", "native-2:reviewer"], arrows: ["step-native-1>step-native-3", "step-native-3>step-native-2"] }, "the swap keeps a valid chain");
+  await screenshot("basic-filled");
+  // The third slot switches to tester; Delete on a focused slot empties it.
+  await click('[data-slot="2"] .slot-third [role="radio"]:nth-child(2)');
+  await wait("window.__fixture.preferences.workflowGroups.find(item => item.id === " + JSON.stringify(basicId) + ").steps[2]?.role === 'tester'");
+  await evaluate(found('[data-slot="2"]') + ".focus()");
+  await keypress("Delete", "Delete", 46);
+  await waitSteps(2);
+  // Without an orchestrator the run is blocked with the reason.
+  await click('[data-slot="0"] .slot-remove');
+  await waitSteps(1);
+  await wait(found(".board-run .chain-problem") + "?.textContent.includes('orquestrador')");
+  await evaluate("(() => { const field = document.querySelector('.board-run textarea'); field.value = 'Objetivo'; field.dispatchEvent(new Event('input', { bubbles: true })); })()");
+  assert.equal(await evaluate(found(".board-run .primary") + ".disabled"), true, "an empty required slot blocks the run");
+  await dropOnSlot("session-1", 0);
+  await waitSteps(2);
+  await dropOnSlot("session-2", 2);
+  await waitSteps(3);
+  assert.deepEqual(await savedBasic(), { steps: ["native-1:planner", "native-3:implementer", "native-2:tester"], arrows: ["step-native-1>step-native-3", "step-native-3>step-native-2"] });
+  // Selecting a slot's card opens the step panel, which only offers that slot's roles.
+  await click('[data-slot="1"] .card-body');
+  await wait(found(".board-panel .role-picker"));
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('.role-picker button')).map(button => button.textContent.trim())"), ["Implementador"]);
+  await evaluate("(async () => { const p = window.__fixture.preferences; p.darkMode = false; await window.__TAURI_INTERNALS__.invoke('set_preferences', { preferences: p }); window.__fixture.emit('lume://preferences-changed', p); })()");
+  await delay(240);
+  await screenshot("basic-panel-light");
+  await click('[aria-label="Fechar painel"]');
+  await screenshot("basic-light");
+  await call("Emulation.setDeviceMetricsOverride", { width: 1024, height: 720, deviceScaleFactor: 1, mobile: false });
+  await delay(240);
+  await screenshot("basic-compact-light");
+  await evaluate("(async () => { const p = window.__fixture.preferences; p.darkMode = true; await window.__TAURI_INTERNALS__.invoke('set_preferences', { preferences: p }); window.__fixture.emit('lume://preferences-changed', p); })()");
+  await delay(240);
+  await screenshot("basic-compact-dark");
+  await click('[data-slot="1"] .card-body');
+  await wait(found(".board-panel .role-picker"));
+  await screenshot("basic-compact-panel-dark");
+  await click('[aria-label="Fechar painel"]');
+  assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"), true, "the slots do not overflow the window");
+  await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  // Canvas shows the same cards and arrows; a fourth agent there makes the slots unavailable.
+  await click('[data-board-layout="canvas"]');
+  await wait(found(".board-viewport"));
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('.board-viewport .board-card:not(.ghost)')).map(card => card.dataset.boardCard).sort()"), ["step-native-1", "step-native-2", "step-native-3"]);
+  assert.equal(await evaluate("document.querySelectorAll('.board-pipe').length"), 2, "the same arrows");
+  await click(".add-agent");
+  await wait("Array.from(document.querySelectorAll('.agent-options button')).some(button => button.textContent.includes('Pesquisa') && !button.disabled)");
+  await evaluate("Array.from(document.querySelectorAll('.agent-options button')).find(button => button.textContent.includes('Pesquisa')).click()");
+  await waitSteps(4);
+  await wait(found('[data-board-layout="basic"][aria-disabled="true"]'));
+  assert.match(await evaluate(found('[data-board-layout="basic"]') + ".title"), /3/, "the reason names the slot limit");
+  await click('[data-board-layout="basic"]');
+  assert.equal(await evaluate(found(".board-basic")), null, "a 4-step workflow cannot switch to Basic");
   assert.deepEqual(failures, [], "no browser exceptions");
-  console.log("Workflow board UI passed: Orb import, sidebar drop, arrows, cycle refusal, free drag, preview, zoom, all run controls, recovery, event order, draft/layout persistence, removal, insertion, overlay keyboard ownership, fit, light/dark contrast, sidebar workflow rows, chat strip approval, sidebar menu workflows.");
+  console.log("Workflow board UI passed: Orb import, sidebar drop, arrows, cycle refusal, free drag, preview, zoom, all run controls, recovery, event order, draft/layout persistence, removal, insertion, overlay keyboard ownership, fit, light/dark contrast, sidebar workflow rows, chat strip approval, sidebar menu workflows, basic board slots.");
   console.log("Screenshots: " + output);
 } finally {
   socket?.close();

@@ -25,6 +25,10 @@ export type BoardRect = BoardPoint & { width: number; height: number };
 export type BoardView = { x: number; y: number; zoom: number };
 export type BoardLayout = {
   name?: string;
+  /** Three fixed slots or the free canvas; the definition is the same either way. */
+  mode?: "basic" | "canvas";
+  /** The role the basic board's optional third slot gives a card. */
+  third?: "reviewer" | "tester";
   positions: Record<string, BoardPoint>;
   view: BoardView;
 };
@@ -360,6 +364,8 @@ export function normalizeLayout(raw: unknown): BoardLayout {
   const view = (value.view && typeof value.view === "object" ? value.view : {}) as Partial<BoardView>;
   return {
     name: typeof value.name === "string" && value.name.trim() ? value.name.trim().slice(0, 80) : undefined,
+    ...(value.mode === "basic" || value.mode === "canvas" ? { mode: value.mode } : {}),
+    ...(value.third === "reviewer" || value.third === "tester" ? { third: value.third } : {}),
     positions,
     view: { x: finite(view.x) ? view.x : 0, y: finite(view.y) ? view.y : 0, zoom: finite(view.zoom) ? clampZoom(view.zoom) : 1 },
   };

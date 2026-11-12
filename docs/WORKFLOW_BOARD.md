@@ -25,6 +25,20 @@ Uma segunda forma de **ver e conectar** o workflow que o orb já executa. A func
 
 Sem abrir o board antes, o menu de contexto de um chat na sidebar oferece **Adicionar ao workflow** (lista os workflows existentes e **Novo workflow**) e, com dois ou mais chats abertos, **Encadear os chats abertos em um workflow**, na ordem dos painéis. Depois de salvar, o board abre já no workflow criado ou alterado.
 
+## Board básico
+
+Uma alternativa ao canvas para o caso mais comum. O botão **Básico / Canvas** na barra do board troca a disposição do workflow ativo; a escolha fica no layout local (`mode` em `lume:workflow-board:v1`).
+
+- **Três espaços fixos** em linha, ligados por setas fixas (empilhados na vertical quando o board é estreito): **1. Orquestrador** (papel `planner` na definição; nada muda no runtime), **2. Implementador** e **3. Revisor ou Testador**, opcional. O terceiro tem um seletor Revisor/Testador (`third` no layout) e o selo "Opcional".
+- O orquestrador é desenhado como um **cérebro** (`WorkflowRoleIcon` com `orchestrator`). O ícone vale só no board básico, onde o papel se chama Orquestrador; no canvas o planejador mantém o ícone e o nome de sempre.
+- Um espaço vazio mostra o ícone e o nome do papel grandes e esmaecidos. Soltar um chat da sidebar (`text/x-lume-session`) ou arrastar um card de outro espaço **encaixa** o card ali; o espaço sob o cursor fica destacado (ou vermelho quando a soltura seria recusada). Um chat que já está no workflow é movido em vez de duplicado; um card vindo de outro espaço **troca de lugar** com o que estava lá; um chat de fora **substitui** o card. Com o run ativo, nada muda e o motivo aparece. O × no cabeçalho esvazia o espaço.
+- A definição é sempre a cadeia linear dos espaços preenchidos, em ordem (1 → 2 → 3, pulando o vazio). Cada card assume o papel do seu espaço, com o contrato atualizado por `preserveRoleOverrides` (campos ajustados à mão ficam). Cada seta mantém as configurações da seta que já saía do mesmo card; setas novas usam os padrões de `newConnection`. Tudo passa pela mesma fila de salvamento.
+- Orquestrador e implementador são obrigatórios: enquanto faltar um, o botão de executar fica desabilitado e o primeiro problema diz qual espaço preencher; depois valem `analyzeChain`/`problemMessage` como antes.
+- Objetivo, controles de execução, linha do tempo e o painel da etapa (selecionar o card de um espaço) funcionam igual; no painel, o papel só oferece os papéis daquele espaço. O seletor de agentes e um chat solto fora dos espaços preenchem o primeiro espaço vazio (ou o espaço de onde o seletor foi aberto).
+- Teclado: espaços focáveis; `Delete`/`Backspace` esvazia o espaço focado; `Enter` seleciona o card ou abre o seletor; `Esc` cancela o arraste de um card.
+- **Quando abre em cada modo:** workflow novo abre no básico. Um workflow sem layout salvo (por exemplo, criado pelo menu da sidebar ou vindo do Orb) abre no básico se couber; um que já tem layout no canvas continua no canvas. Não cabem: mais de 3 etapas, papéis fora da ordem orquestrador → implementador → revisor/testador (ou outros papéis) e cards soltos sem uma rota única. Nesses casos o botão Básico fica indisponível e o tooltip explica o motivo (`basicSlotsFor`).
+- Básico → Canvas mantém etapas e setas e põe os cards em linha na ordem da cadeia. Canvas → Básico só quando o workflow cabe.
+
 ## Decisões
 
 1. Posição é só layout. **A ordem vem das setas**, nunca de onde o card está.
@@ -118,6 +132,8 @@ O estado dos cards e das setas vem de `WorkflowRun` e do evento `lume://workflow
 
 `src/lib/workflowPresence.ts` (puro, testado em `tests/workflow-presence.test.mjs`): `newerRun`, `sessionWorkflowPresence`, `presenceTone`, `chainGroupFromSessions`, `workflowGroupName`, `boardLayoutNames` e `sidebarWorkflows`.
 
+`src/lib/workflowSlots.ts` (puro, testado em `tests/workflow-slots.test.mjs`): `basicSlotsFor` (se o grupo cabe nos espaços e onde cada etapa fica), `arrangeSlots` (reconstrói a cadeia a partir dos espaços), `placeInSlot`, `clearSlot`, `missingSlot` e `slotRole`.
+
 `src/lib/WorkflowBoard.svelte` reúne canvas, cards, setas, editores, preview de contexto e controles de execução. `src/lib/WorkflowChatStrip.svelte` é a faixa do chat. `src/lib/WorkspaceWindow.svelte` integra abertura, salvamento, sidebar, chips, menu e retorno aos chats. `tests/workflow-board-ui.test.mjs` exercita essa interface em navegador.
 
 ## Fora do escopo
@@ -137,6 +153,6 @@ Ramificação, laços, etapas que não são agente, cards sem sessão e qualquer
 
 - **Confirmado:** testes puros de regras/geometria e persistência passaram; `npm run check` terminou sem erros ou avisos e `npm run build` concluiu com exit 0.
 - **Confirmado:** `npm run test:workflow-board-ui` monta o Workspace e o Board reais em Chromium, mas usa **IPC Tauri simulado e conteúdo dos chats substituído por um stub**. Não envia prompts a agentes reais.
-- Esse smoke cobre importação de grupo existente do Orb, drop da sidebar, arraste livre, desenho de setas e recusa de ciclo, preview, inserção/remoção intermediária, zoom e ajustar à tela responsivo, controles de execução e recuperação, descarte de eventos antigos, retenção de rascunho de chat e restauração do layout; também a linha do workflow na sidebar após um `lume://workflow-run-changed` simulado (abas Todos/Workflows/Grupos, avatares, nome, chats aninhados sem repetição, abrir os chats nos painéis, mover para um grupo, aba e recolhimento persistidos, busca em cada aba), a aprovação pela faixa do chat (`approve_workflow_handoff`) e o menu da sidebar criando um workflow de duas etapas e abrindo o board nele. No teste, o painel do chat é um stub que só renderiza a faixa real.
+- Esse smoke cobre importação de grupo existente do Orb, drop da sidebar, arraste livre, desenho de setas e recusa de ciclo, preview, inserção/remoção intermediária, zoom e ajustar à tela responsivo, controles de execução e recuperação, descarte de eventos antigos, retenção de rascunho de chat e restauração do layout; também a linha do workflow na sidebar após um `lume://workflow-run-changed` simulado (abas Todos/Workflows/Grupos, avatares, nome, chats aninhados sem repetição, abrir os chats nos painéis, mover para um grupo, aba e recolhimento persistidos, busca em cada aba), a aprovação pela faixa do chat (`approve_workflow_handoff`) e o menu da sidebar criando um workflow de duas etapas e abrindo o board nele. Cobre também o board básico: workflow do Orb abrindo nos espaços, workflow novo com três espaços rotulados (o terceiro opcional), soltar chats nos espaços 1, 2 e 3, trocar cards de espaço, alternar revisor/testador, esvaziar pelo teclado, bloqueio do run sem orquestrador, papéis restritos no painel, Canvas com os mesmos cards e setas, e o Básico indisponível com 4 etapas. No teste, o painel do chat é um stub que só renderiza a faixa real.
 - A última execução também confirmou isolamento do teclado dos Ajustes e contraste de avisos/erros sobre a superfície do painel de pelo menos **4,5:1**, nos temas claro e escuro, medido com estilos computados. As capturas desktop/compacto foram atualizadas em `.impeccable/review/workflow-board/`.
 - **Ainda pendente:** aceitar execução e recuperação na janela Tauri nativa com agentes reais e verificar sincronização bidirecional entre board e Orb em múltiplas janelas. A cobertura simulada não prova integração nativa, comportamento de plataforma ou sincronização multi-janela; os critérios acima continuam sendo critérios de aceite, não declarações incondicionais de conclusão.

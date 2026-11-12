@@ -2,13 +2,14 @@
   import { onDestroy, onMount, untrack } from "svelte";
   import { fade, fly, slide } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
-  import type { Preferences, WorkflowContextPolicy, WorkflowContextSelection, WorkflowGroupDefinition, WorkflowRole, WorkflowStepDefinition, WorkflowConnectionDefinition, WorkflowContextPackage, WorkflowRun } from "$lib/domain";
+  import type { Preferences, WorkflowContextPolicy, WorkflowContextSelection, WorkflowGroupDefinition, WorkflowRole, WorkflowRoleContract, WorkflowStepDefinition, WorkflowConnectionDefinition, WorkflowContextPackage, WorkflowRun } from "$lib/domain";
   import type { HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import { displayText, localize } from "$lib/i18n";
   import { desktopWorkflowBackend, type WorkflowBoardBackend } from "$lib/workflowBoardBackend";
   import { BOARD_CARD_WIDTH, BOARD_CARD_HEIGHT, analyzeChain, checkConnection, connectionRefusalMessage, problemMessage, newGroup, newStep, preserveRoleOverrides, defaultRole, defaultContextSelection, addStep, updateStep, removeStep, addConnection, updateConnection, removeConnection, insertStep, edgeGeometry, cardRect, cardAt, placeCard, toBoardPoint, zoomAround, fitView, normalizeLayout, stepVisualState, connectionWaitsForApproval, type BoardPoint, type BoardLayout, type BoardView } from "$lib/workflowBoard";
   import { WorkflowBoardSaveQueue } from "$lib/workflowBoardPersistence";
+  import { arrangeSlots, basicSlotsFor, clearSlot, missingSlot, placeInSlot, slotRole, type BasicMisfit, type SlotIds, type ThirdRole } from "$lib/workflowSlots";
   import { newerRun } from "$lib/workflowPresence";
   import { activityFeed, lastResponse, stepActivity } from "$lib/boardActivity";
   import { formatAgentDuration } from "$lib/activityPresentation";
@@ -188,6 +189,177 @@
     return () => clearInterval(timer);
   });
   const objective = $derived(objectives[activeId] ?? run?.objective ?? "");
+
+  // The basic board: three fixed slots (orchestrator, implementer, optional reviewer or tester) over the same chain.
+  // A workflow with no layout yet opens there when the slots can show it; one already laid out stays on the canvas.
+  function layoutModeFor(item: WorkflowGroupDefinition, stored: BoardLayout | undefined): "basic" | "canvas" {
+    if (stored?.mode) return stored.mode;
+    if (stored && Object.keys(stored.positions).length) return "canvas";
+    return basicSlotsFor(item).ok ? "basic" : "canvas";
+  }
+  const basicFit = $derived(group ? basicSlotsFor(group, layout.third ?? "reviewer") : null);
+  const basicActive = $derived(Boolean(group && basicFit?.ok && layoutModeFor(group, layouts[group.id]) === "basic"));
+  const basicSlots = $derived<SlotIds>(basicFit?.ok ? basicFit.slots : [null, null, null]);
+  const thirdRole = $derived<ThirdRole>(basicFit?.ok ? basicFit.third : layout.third ?? "reviewer");
+  const slotIssue = $derived(basicActive ? missingSlot(basicSlots) : null);
+  let basicNode = $state<HTMLDivElement | null>(null);
+  let slotDropIndex = $state<number | null>(null);
+  let pickerSlot = $state<number | null>(null);
+  let slotDrag = $state<{ stepId: string; pointerId: number; start: BoardPoint; dx: number; dy: number; moved: boolean; over: number | null } | null>(null);
+  function slotName(index: number) {
+    return index === 0 ? tr("Orchestrator", "Orquestrador") : index === 1 ? roleName("implementer") : roleName(thirdRole);
+  }
+  /** In the basic board the planner is the orchestrator. */
+  function roleLabel(role: WorkflowRole) {
+    return basicActive && role === "planner" ? tr("Orchestrator", "Orquestrador") : roleName(role);
+  }
+  function basicMisfitMessage(reason: BasicMisfit) {
+    return {
+      "too-many": tr(`The basic board holds 3 agents; this workflow has ${group?.steps.length ?? 0}.`, `O board básico comporta 3 agentes; este workflow tem ${group?.steps.length ?? 0}.`),
+      roles: tr("The basic board needs an orchestrator (planner), an implementer and a reviewer or tester, in that order.", "O board básico precisa de um orquestrador (planejador), um implementador e um revisor ou testador, nessa ordem."),
+      route: tr("The basic board needs a single route. Connect or remove the loose cards first.", "O board básico precisa de uma única rota. Conecte ou remova os cards soltos antes."),
+    }[reason];
+  }
+  function setLayoutMode(mode: "basic" | "canvas") {
+    if (!group) return;
+    if (mode === "basic") {
+      if (basicActive) return;
+      if (basicFit && !basicFit.ok) { notify(basicMisfitMessage(basicFit.reason), "info"); return; }
+      cancelGesture();
+      choose(null);
+      patchLayout({ mode });
+      return;
+    }
+    if (!basicActive) return;
+    // The canvas gets the same cards in a row, in chain order, with the same arrows.
+    const order = [...(chain?.order ?? []), ...group.steps.map((step) => step.id).filter((id) => !chain?.order.includes(id))];
+    const positions = { ...layout.positions };
+    order.forEach((id, index) => { positions[id] = { x: 96 + index * (BOARD_CARD_WIDTH + 84), y: 120 }; });
+    slotDrag = null;
+    patchLayout({ mode, positions });
+  }
+  // Contracts are fetched once per role; a card that changes slots takes the new slot's role.
+  const contractCache = new Map<WorkflowRole, Promise<WorkflowRoleContract>>();
+  function contractFor(role: WorkflowRole) {
+    let pending = contractCache.get(role);
+    if (!pending) {
+      pending = backend.roleContract(role);
+      contractCache.set(role, pending);
+      pending.catch(() => contractCache.delete(role));
+    }
+    return pending;
+  }
+  function refuseLocked() {
+    notify(tr("The workflow is running. Let it finish or stop it before changing the slots.", "O workflow está em execução. Deixe terminar ou pare antes de mudar os espaços."), "warning");
+  }
+  async function arrangeBasic(next: SlotIds, extra: WorkflowStepDefinition[] = [], third: ThirdRole = thirdRole) {
+    if (!group) return;
+    if (locked) { refuseLocked(); return; }
+    const id = group.id;
+    const pool = [...group.steps, ...extra];
+    const involved = new Set<WorkflowRole>();
+    next.forEach((stepId, index) => {
+      const step = pool.find((item) => item.id === stepId);
+      if (step && step.role !== slotRole(index, third)) { involved.add(step.role); involved.add(slotRole(index, third)); }
+    });
+    try {
+      const contracts = Object.fromEntries(await Promise.all([...involved].map(async (role) => [role, await contractFor(role)] as const)));
+      const latest = groups.find((item) => item.id === id);
+      if (!latest || disposed || locked) return;
+      const arranged = arrangeSlots(latest, next, third, contracts, extra);
+      if (selection?.kind === "step" && !arranged.steps.some((step) => step.id === selection!.id)) choose(null);
+      edit(arranged);
+    } catch (error) { notify(errorMessage(error)); }
+  }
+  /** A chat dropped on a slot takes it; one already in this workflow moves there instead. */
+  async function dropSessionOnSlot(session: HubSession, index: number) {
+    if (!group || adding) return;
+    if (locked) { refuseLocked(); return; }
+    const key = session.nativeSessionId?.trim();
+    if (!key) { notify(tr("Connect this conversation before adding it.", "Conecte esta conversa antes de adicioná-la."), "warning"); return; }
+    const existing = group.steps.find((step) => step.sessionNativeId === key);
+    if (existing) { await arrangeBasic(placeInSlot(basicSlots, existing.id, index)); return; }
+    adding = true;
+    try {
+      const role = slotRole(index, thirdRole);
+      const step = newStep(key, role, await contractFor(role));
+      await arrangeBasic(placeInSlot(basicSlots, step.id, index), [step]);
+    } catch (error) { notify(errorMessage(error)); }
+    finally { adding = false; }
+  }
+  function removeFromSlot(index: number) {
+    if (!basicSlots[index]) return;
+    void arrangeBasic(clearSlot(basicSlots, index));
+  }
+  function setThird(role: ThirdRole) {
+    if (locked || role === thirdRole) return;
+    patchLayout({ third: role });
+    const stepId = basicSlots[2];
+    if (stepId) void changeRole(role, stepId);
+  }
+  function openSlotPicker(index: number) {
+    if (locked) return;
+    openPicker();
+    pickerSlot = index;
+  }
+  function slotDragOver(event: DragEvent, index: number) {
+    if (!Array.from(event.dataTransfer?.types ?? []).includes("text/x-lume-session")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    slotDropIndex = index;
+    if (event.dataTransfer) event.dataTransfer.dropEffect = locked || dragIssue === "unconnected" ? "none" : "move";
+  }
+  function slotDrop(event: DragEvent, index: number) {
+    event.preventDefault();
+    event.stopPropagation();
+    const session = boardSessions.find((item) => item.id === event.dataTransfer?.getData("text/x-lume-session"));
+    slotDropIndex = null;
+    endDragOver();
+    onFinishSidebarDrag();
+    if (session) void dropSessionOnSlot(session, index);
+  }
+  function slotKeydown(event: KeyboardEvent, index: number) {
+    if (event.target !== event.currentTarget) return;
+    if ((event.key === "Delete" || event.key === "Backspace") && basicSlots[index]) {
+      event.preventDefault();
+      removeFromSlot(index);
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      const stepId = basicSlots[index];
+      if (stepId) choose({ kind: "step", id: stepId });
+      else openSlotPicker(index);
+    }
+  }
+  // A card moves between slots with the pointer: it follows the cursor and snaps into the slot it is released over.
+  function slotAt(x: number, y: number) {
+    for (const node of basicNode?.querySelectorAll<HTMLElement>("[data-slot]") ?? []) {
+      const rect = node.getBoundingClientRect();
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return Number(node.dataset.slot);
+    }
+    return null;
+  }
+  function beginSlotDrag(event: PointerEvent, stepId: string) {
+    if (event.button !== 0) return;
+    (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
+    slotDrag = { stepId, pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, dx: 0, dy: 0, moved: false, over: null };
+  }
+  function moveSlotDrag(event: PointerEvent) {
+    if (!slotDrag || slotDrag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - slotDrag.start.x;
+    const dy = event.clientY - slotDrag.start.y;
+    const moved = slotDrag.moved || Math.hypot(dx, dy) > 6;
+    slotDrag = { ...slotDrag, dx, dy, moved, over: moved ? slotAt(event.clientX, event.clientY) : null };
+  }
+  function endSlotDrag(event: PointerEvent) {
+    const drag = slotDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    slotDrag = null;
+    if (!drag.moved) { choose({ kind: "step", id: drag.stepId }); return; }
+    if (drag.over === null || basicSlots[drag.over] === drag.stepId) return;
+    if (locked) { refuseLocked(); return; }
+    void arrangeBasic(placeInSlot(basicSlots, drag.stepId, drag.over));
+  }
+  $effect(() => { if (!draggingSessionId && slotDropIndex !== null && !dropActive) slotDropIndex = null; });
   const chain = $derived(group ? analyzeChain(group) : null);
   const selectedStep = $derived(selection?.kind === "step" ? group?.steps.find((step) => step.id === selection?.id) : undefined);
   const selectedConnection = $derived(selection?.kind === "connection" ? group?.connections.find((item) => item.id === selection?.id) : undefined);
@@ -367,14 +539,15 @@
   function ensureLayout(item: WorkflowGroupDefinition) {
     const stored = layouts[item.id] ?? normalizeLayout(null);
     const positions = { ...stored.positions };
-    let changed = !layouts[item.id];
+    const mode = layoutModeFor(item, layouts[item.id]);
+    let changed = !layouts[item.id] || !stored.mode;
     const orderedIds = [...(analyzeChain(item).order), ...item.steps.map((step) => step.id)];
     for (const id of new Set(orderedIds)) {
       if (positions[id]) continue;
       positions[id] = placeCard(Object.values(positions));
       changed = true;
     }
-    if (changed) patchLayout({ ...stored, positions }, item.id);
+    if (changed) patchLayout({ ...stored, positions, mode }, item.id);
   }
   function activate(id: string) {
     cancelGesture();
@@ -412,7 +585,7 @@
     const next = newGroup();
     drafts = { ...drafts, [next.id]: next };
     activate(next.id);
-    patchLayout({ name: "Workflow " + groups.length });
+    patchLayout({ name: "Workflow " + groups.length, mode: "basic" });
     void persistGroup(next);
     pickerOpen = true;
   }
@@ -420,6 +593,7 @@
     selection = selectionNext;
     orbitFor = null;
     pickerOpen = false;
+    pickerSlot = null;
     insertingConnectionId = null;
     edgeMenu = null;
     previewOpen = false;
@@ -450,6 +624,14 @@
     if (!group || locked || adding) return;
     if (!session.nativeSessionId?.trim()) { notify(tr("Connect this conversation before adding it.", "Conecte esta conversa antes de adicioná-la."), "warning"); return; }
     if (group.steps.some((step) => step.sessionNativeId === session.nativeSessionId)) { notify(tr("This conversation is already in the workflow.", "Esta conversa já está no workflow."), "info"); return; }
+    if (basicActive && !insertingConnectionId) {
+      const target = pickerSlot ?? basicSlots.findIndex((stepId) => !stepId);
+      if (target < 0) { notify(tr("All three slots are filled. Drop a chat on a slot to replace its card.", "Os três espaços estão ocupados. Solte um chat sobre um espaço para trocar o card."), "info"); return; }
+      pickerOpen = false;
+      pickerSlot = null;
+      await dropSessionOnSlot(session, target);
+      return;
+    }
     const id = group.id;
     const insertionId = insertingConnectionId;
     adding = true;
@@ -789,7 +971,8 @@
     dropActive = true;
     if (event.dataTransfer) event.dataTransfer.dropEffect = locked || dragIssue ? "none" : "move";
     if (viewport) dragPoint = boardPoint(event.clientX, event.clientY);
-    onSidebarDragOverBoard?.(true);
+    // The slots have no card under the cursor, so the sidebar keeps its own drag preview there.
+    if (!basicActive) onSidebarDragOverBoard?.(true);
   }
   function endDragOver() {
     dropActive = false;
@@ -815,7 +998,8 @@
     if (target instanceof Element && target.closest("input, textarea, select, [contenteditable='true']")) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      if (gesture || connectionSource) cancelGesture();
+      if (slotDrag) slotDrag = null;
+      else if (gesture || connectionSource) cancelGesture();
       else if (selection || pickerOpen) { choose(null); pickerOpen = false; }
       else onClose();
     } else if ((event.key === "Delete" || event.key === "Backspace") && selection) {
@@ -862,7 +1046,7 @@
     finally { actionLoading = false; }
   }
   async function execute() {
-    if (!group || !objective.trim() || chain?.problems.length || blockedStep || runLoading) return;
+    if (!group || !objective.trim() || chain?.problems.length || slotIssue !== null || blockedStep || runLoading) return;
     const definition = group;
     const runObjective = objective;
     await perform(async () => {
@@ -899,6 +1083,7 @@
   $effect(() => { if (!active) untrack(cancelGesture); });
   // The canvas takes the focus when the board opens, so Esc works straight away.
   $effect(() => { if (active && viewport) untrack(() => viewport?.focus({ preventScroll: true })); });
+  $effect(() => { if (active && basicNode) untrack(() => basicNode?.focus({ preventScroll: true })); });
 
   $effect(() => { if (!draggingSessionId && dragPoint) endDragOver(); });
 
@@ -1031,7 +1216,136 @@
 {/snippet}
 
 
+{#snippet stepCard(step: WorkflowStepDefinition, slotted: boolean)}
+      {@const position = layout.positions[step.id] ?? { x: 96, y: 120 }}
+      {@const session = sessionFor(step)}
+      {@const state = stepVisualState(run, step.id)}
+      {@const order = chain?.order.indexOf(step.id) ?? -1}
+      {@const shown = demoCells ? demoSession(session, demoCells[group?.steps.indexOf(step) ?? 0], now) : session}
+      {@const live = stepActivity(reactive ? shown : undefined, run?.steps.find((item) => item.stepId === step.id), language, now)}
+      {@const awaiting = stepAwaitsApproval(step.id)}
+      {@const trail = reactive && (state === "running" || shown?.status === "running") ? activityFeed(shown, language, 3) : []}
+      <article data-tour="board-card" class="board-card" class:orbiting={orbitFor === step.id} class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={(gesture?.kind === "card" && gesture.stepId === step.id && (!cardTapOnBadge || cardMoved)) || (slotted && slotDrag?.stepId === step.id && slotDrag.moved)} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={slotted ? null : position.x + "px"} style:top={slotted ? null : position.y + "px"} style:width={slotted ? null : BOARD_CARD_WIDTH + "px"} style:height={slotted ? null : BOARD_CARD_HEIGHT + "px"} style:translate={slotted && slotDrag?.stepId === step.id && slotDrag.moved ? slotDrag.dx + "px " + slotDrag.dy + "px" : null} style:--card-role={"var(--role-" + step.role + ")"}>
+        <button class="card-body" type="button" onpointerdown={(event) => slotted ? beginSlotDrag(event, step.id) : beginCard(event, step.id)} onpointermove={slotted ? moveSlotDrag : undefined} onpointerup={slotted ? endSlotDrag : undefined} onpointercancel={slotted ? () => (slotDrag = null) : undefined} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleLabel(step.role)}>
+          <span class="card-role-fab" aria-hidden="true">
+            <i class="role-symbol"><WorkflowRoleIcon role={step.role} orchestrator={slotted} /></i>
+            {#if order >= 0}<span class="step-number">{order + 1}</span>{/if}
+            <span class="role-tooltip"><strong>{step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleLabel(step.role)}</strong>{#if order >= 0}<small>{tr("Step ", "Etapa ") + (order + 1) + tr(" of ", " de ") + (chain?.order.length ?? 0)}</small>{/if}</span>
+          </span>
+          <span class="card-avatar"><ThreadAvatar seed={session?.nativeSessionId || step.sessionNativeId} label={name(session)} size={44} />{#if session}<span class="agent-badge" title={session.agentLabel}><BrandIcon name={session.agent} size={12} /></span>{/if}</span>
+          <span class="card-copy"><strong>{name(session)}</strong><small>{session?.agentLabel ?? tr("Disconnected", "Desconectado")} · {session?.project || tr("No project", "Sem projeto")}</small></span>
+          <span class="card-status"><i></i>{stepStatus(step) + (live.elapsed ? " · " + live.elapsed : "") + (live.progress ? " · " + live.progress.done + "/" + live.progress.total : "")}</span>
+          {#if live.line}<span class="card-activity" class:live={state === "running" || shown?.status === "running"}><i></i><span>{live.line}</span></span>{/if}
+        </button>
+        {#if trail.length}
+          <span class="card-trail" aria-hidden="true">
+            {#each trail as event, index (event.id)}
+              <span class="trail-item" class:newest={index === 0} class:running={event.status === "running"} style:--trail-fade={1 - index * 0.26}>
+                <span class="trail-icon">
+                  {#if event.path}<FileTypeIcon path={event.path} size={14} />
+                  {:else if event.category === "command" || event.category === "test"}<svg viewBox="0 0 20 20" width="13" height="13"><path d="m4 6 4 4-4 4M10 15h6" /></svg>
+                  {:else if event.category === "git"}<LumeIcon name="branch" size={13} />
+                  {:else if event.category === "search" || event.category === "read"}<LumeIcon name="search" size={13} />
+                  {:else if event.category === "plan"}<LumeIcon name="task-list" size={13} />
+                  {:else if event.category === "message"}<LumeIcon name="send" size={13} />
+                  {:else}<LumeIcon name="bolt" size={13} />{/if}
+                </span>
+                <span class="trail-text"><b>{event.detail || event.title}</b>{#if event.detail}<small>{event.title}</small>{/if}</span>
+              </span>
+            {/each}
+          </span>
+        {/if}
+        {#if live.progress}<span class="card-progress" aria-hidden="true"><i style:width={(live.progress.done / live.progress.total) * 100 + "%"}></i></span>{/if}
+        {#if live.attention && session}
+          <button class="card-attention" type="button" title={live.attention.text} aria-label={tr("Needs you: ", "Precisa de você: ") + live.attention.text} onpointerdown={(event) => event.stopPropagation()} onclick={() => onOpenChat(session)}><LumeIcon name="warning" size={11} />{live.attention.kind === "permission" ? tr("Approve", "Aprovar") : tr("Answer", "Responder")}</button>
+        {/if}
+        <span class="card-orb orb-{awaiting ? "approval" : state}" title={awaiting ? tr("Waiting for your approval", "Esperando sua aprovação") : stepStatus(step)} aria-hidden="true">
+          {#if awaiting}<LumeIcon name="shield" size={12} />
+          {:else if state === "running"}<WorkflowRoleIcon role={step.role} />
+          {:else if state === "completed"}<LumeIcon name="check" size={12} />
+          {:else if state === "failed"}<LumeIcon name="close" size={12} />
+          {:else if state === "skipped"}<LumeIcon name="arrow-right" size={12} />
+          {:else}<i></i>{/if}
+        </span>
+        {#if !slotted}
+        <button class="card-port port-in" type="button" disabled={locked} aria-label={tr("Connect to ", "Conectar a ") + name(session)} title={tr("Connection input", "Entrada da conexão")} onclick={() => connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id })}><i></i></button>
+        <button class="card-port port-out" data-tour="board-port" type="button" disabled={locked} aria-label={tr("Connect from ", "Conectar de ") + name(session)} title={tr("Drag to connect", "Arraste para conectar")} onpointerdown={(event) => beginConnection(event, step.id)} onclick={(event) => { if (event.detail === 0) keyboardConnect(step.id); }}><i></i></button>
+        {#if orbitFor === step.id}
+          <div class="role-orbit" use:orbitIn out:orbitOut style:--card-role={"var(--role-" + step.role + ")"}>
+            {#each roles as role, index (role)}
+              <button class="orbit-role" class:current={role === step.role} type="button" style:--card-role={"var(--role-" + role + ")"} style:--ox={orbitSpot(index).x + "px"} style:--oy={orbitSpot(index).y + "px"} aria-label={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} title={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} onpointerdown={(event) => event.stopPropagation()} onclick={() => void pickOrbitRole(step.id, role)}><span class="role-option-fab" aria-hidden="true"><i class="role-symbol"><WorkflowRoleIcon {role} /></i></span></button>
+            {/each}
+          </div>
+        {/if}
+        {/if}
+      </article>
+{/snippet}
+
 <section class="workflow-board" class:touch class:entered hidden={!shown} inert={!active} aria-label={tr("Workflow board", "Board de workflow")} data-testid="workflow-board" ondragover={dragOver} ondragleave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) endDragOver(); }} ondrop={drop}>
+  {#if basicActive && group}
+    <div class="board-basic" class:with-panel={Boolean(pickerOpen || selectedStep)} class:sorting={Boolean(slotDrag?.moved)} bind:this={basicNode} tabindex="-1" role="list" aria-label={tr("Basic workflow: orchestrator, implementer and an optional reviewer or tester", "Workflow básico: orquestrador, implementador e um revisor ou testador opcional")}>
+      <div class="slot-track">
+      {#each [0, 1, 2] as index (index)}
+        {@const stepId = basicSlots[index]}
+        {@const step = stepId ? group.steps.find((item) => item.id === stepId) : undefined}
+        {@const role = slotRole(index, thirdRole)}
+        {@const over = slotDropIndex === index || (slotDrag?.moved && slotDrag.over === index)}
+        {#if index > 0}
+          {@const incoming = step ? group.connections.find((item) => item.toStepId === step.id) : undefined}
+          {@const waiting = incoming ? connectionWaitsForApproval(run, incoming.id) : false}
+          <div class="slot-arrow" class:linked={Boolean(incoming)} class:waiting class:live={Boolean(step && stepVisualState(run, step.id) === "running")} style:--from-role={"var(--role-" + slotRole(index - 1, thirdRole) + ")"} style:--to-role={"var(--role-" + role + ")"}>
+            <svg viewBox="0 0 48 16" aria-hidden="true"><path d="M3 8h38" /><path d="m35 3 7 5-7 5" /></svg>
+            {#if waiting && run?.status === "waiting_for_approval"}<button class="edge-approve slot-approve" type="button" disabled={actionLoading || run.recovering} title={tr("Approve this handoff", "Aprovar esta passagem")} aria-label={tr("Approve this handoff", "Aprovar esta passagem")} onclick={() => void perform(() => backend.approve(activeId))}><LumeIcon name="check" size={13} /></button>{/if}
+          </div>
+        {/if}
+        <!-- A slot is a focusable drop target: Delete empties it, Enter selects its card or picks an agent. -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <div
+          class="board-slot"
+          class:filled={Boolean(step)}
+          class:optional={index === 2}
+          class:drop-over={over && !locked && !(slotDropIndex === index && dragIssue === "unconnected")}
+          class:drop-refused={over && (locked || (slotDropIndex === index && dragIssue === "unconnected"))}
+          class:missing={problemStepIds.length === 0 && slotIssue === index && Boolean(objective.trim())}
+          data-slot={index}
+          data-slot-role={role}
+          role="listitem"
+          tabindex="0"
+          aria-label={slotName(index) + (index === 2 ? " · " + tr("optional", "opcional") : "") + " · " + (step ? name(sessionFor(step)) : tr("empty", "vazio"))}
+          style:--card-role={"var(--role-" + role + ")"}
+          ondragover={(event) => slotDragOver(event, index)}
+          ondragleave={(event) => { if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) slotDropIndex = null; }}
+          ondrop={(event) => slotDrop(event, index)}
+          onkeydown={(event) => slotKeydown(event, index)}
+        >
+          <header class="slot-head">
+            <span class="slot-number">{index + 1}</span>
+            {#if index === 2}
+              <span class="slot-third" role="radiogroup" aria-label={tr("Role of the third slot", "Papel do terceiro espaço")}>
+                {#each ["reviewer", "tester"] as const as option (option)}
+                  <button class:on={thirdRole === option} type="button" role="radio" aria-checked={thirdRole === option} disabled={locked || changingRole} onclick={() => setThird(option)}>{roleName(option)}</button>
+                {/each}
+              </span>
+              <small class="slot-optional">{tr("Optional", "Opcional")}</small>
+            {:else}
+              <strong>{slotName(index)}</strong>
+            {/if}
+            {#if step}<button class="slot-remove" type="button" disabled={locked} title={tr("Empty this slot", "Esvaziar este espaço")} aria-label={tr("Empty the slot ", "Esvaziar o espaço ") + slotName(index)} onclick={() => removeFromSlot(index)}><LumeIcon name="close" size={13} /></button>{/if}
+          </header>
+          {#if step}
+            {@render stepCard(step, true)}
+          {:else}
+            <button class="slot-placeholder" type="button" tabindex="-1" disabled={locked} onclick={() => openSlotPicker(index)}>
+              <i class="slot-glyph"><WorkflowRoleIcon {role} orchestrator /></i>
+              <strong>{slotName(index)}</strong>
+              <small>{index === 2 ? tr("Optional · drop a chat here", "Opcional · solte um chat aqui") : tr("Drop a chat here", "Solte um chat aqui")}</small>
+            </button>
+          {/if}
+        </div>
+      {/each}
+      </div>
+    </div>
+  {:else}
   <div
     class="board-viewport"
     data-tour="board-canvas"
@@ -1110,68 +1424,7 @@
           {#if cargo.length}<span class="edge-cargo" class:waiting class:traveling aria-hidden="true">{#each cargo as item (item)}<b>{item}</b>{/each}</span>{/if}
         </div>
       {/each}
-      {#each group?.steps ?? [] as step (step.id)}
-        {@const position = layout.positions[step.id] ?? { x: 96, y: 120 }}
-        {@const session = sessionFor(step)}
-        {@const state = stepVisualState(run, step.id)}
-        {@const order = chain?.order.indexOf(step.id) ?? -1}
-        {@const shown = demoCells ? demoSession(session, demoCells[group?.steps.indexOf(step) ?? 0], now) : session}
-        {@const live = stepActivity(reactive ? shown : undefined, run?.steps.find((item) => item.stepId === step.id), language, now)}
-        {@const awaiting = stepAwaitsApproval(step.id)}
-        {@const trail = reactive && (state === "running" || shown?.status === "running") ? activityFeed(shown, language, 3) : []}
-        <article data-tour="board-card" class="board-card" class:orbiting={orbitFor === step.id} class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={gesture?.kind === "card" && gesture.stepId === step.id && (!cardTapOnBadge || cardMoved)} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={position.x + "px"} style:top={position.y + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + step.role + ")"}>
-          <button class="card-body" type="button" onpointerdown={(event) => beginCard(event, step.id)} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleName(step.role)}>
-            <span class="card-role-fab" aria-hidden="true">
-              <i class="role-symbol"><WorkflowRoleIcon role={step.role} /></i>
-              {#if order >= 0}<span class="step-number">{order + 1}</span>{/if}
-              <span class="role-tooltip"><strong>{step.role === "custom" ? step.customRoleLabel || roleName(step.role) : roleName(step.role)}</strong>{#if order >= 0}<small>{tr("Step ", "Etapa ") + (order + 1) + tr(" of ", " de ") + (chain?.order.length ?? 0)}</small>{/if}</span>
-            </span>
-            <span class="card-avatar"><ThreadAvatar seed={session?.nativeSessionId || step.sessionNativeId} label={name(session)} size={44} />{#if session}<span class="agent-badge" title={session.agentLabel}><BrandIcon name={session.agent} size={12} /></span>{/if}</span>
-            <span class="card-copy"><strong>{name(session)}</strong><small>{session?.agentLabel ?? tr("Disconnected", "Desconectado")} · {session?.project || tr("No project", "Sem projeto")}</small></span>
-            <span class="card-status"><i></i>{stepStatus(step) + (live.elapsed ? " · " + live.elapsed : "") + (live.progress ? " · " + live.progress.done + "/" + live.progress.total : "")}</span>
-            {#if live.line}<span class="card-activity" class:live={state === "running" || shown?.status === "running"}><i></i><span>{live.line}</span></span>{/if}
-          </button>
-          {#if trail.length}
-            <span class="card-trail" aria-hidden="true">
-              {#each trail as event, index (event.id)}
-                <span class="trail-item" class:newest={index === 0} class:running={event.status === "running"} style:--trail-fade={1 - index * 0.26}>
-                  <span class="trail-icon">
-                    {#if event.path}<FileTypeIcon path={event.path} size={14} />
-                    {:else if event.category === "command" || event.category === "test"}<svg viewBox="0 0 20 20" width="13" height="13"><path d="m4 6 4 4-4 4M10 15h6" /></svg>
-                    {:else if event.category === "git"}<LumeIcon name="branch" size={13} />
-                    {:else if event.category === "search" || event.category === "read"}<LumeIcon name="search" size={13} />
-                    {:else if event.category === "plan"}<LumeIcon name="task-list" size={13} />
-                    {:else if event.category === "message"}<LumeIcon name="send" size={13} />
-                    {:else}<LumeIcon name="bolt" size={13} />{/if}
-                  </span>
-                  <span class="trail-text"><b>{event.detail || event.title}</b>{#if event.detail}<small>{event.title}</small>{/if}</span>
-                </span>
-              {/each}
-            </span>
-          {/if}
-          {#if live.progress}<span class="card-progress" aria-hidden="true"><i style:width={(live.progress.done / live.progress.total) * 100 + "%"}></i></span>{/if}
-          {#if live.attention && session}
-            <button class="card-attention" type="button" title={live.attention.text} aria-label={tr("Needs you: ", "Precisa de você: ") + live.attention.text} onpointerdown={(event) => event.stopPropagation()} onclick={() => onOpenChat(session)}><LumeIcon name="warning" size={11} />{live.attention.kind === "permission" ? tr("Approve", "Aprovar") : tr("Answer", "Responder")}</button>
-          {/if}
-          <span class="card-orb orb-{awaiting ? "approval" : state}" title={awaiting ? tr("Waiting for your approval", "Esperando sua aprovação") : stepStatus(step)} aria-hidden="true">
-            {#if awaiting}<LumeIcon name="shield" size={12} />
-            {:else if state === "running"}<WorkflowRoleIcon role={step.role} />
-            {:else if state === "completed"}<LumeIcon name="check" size={12} />
-            {:else if state === "failed"}<LumeIcon name="close" size={12} />
-            {:else if state === "skipped"}<LumeIcon name="arrow-right" size={12} />
-            {:else}<i></i>{/if}
-          </span>
-          <button class="card-port port-in" type="button" disabled={locked} aria-label={tr("Connect to ", "Conectar a ") + name(session)} title={tr("Connection input", "Entrada da conexão")} onclick={() => connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id })}><i></i></button>
-          <button class="card-port port-out" data-tour="board-port" type="button" disabled={locked} aria-label={tr("Connect from ", "Conectar de ") + name(session)} title={tr("Drag to connect", "Arraste para conectar")} onpointerdown={(event) => beginConnection(event, step.id)} onclick={(event) => { if (event.detail === 0) keyboardConnect(step.id); }}><i></i></button>
-          {#if orbitFor === step.id}
-            <div class="role-orbit" use:orbitIn out:orbitOut style:--card-role={"var(--role-" + step.role + ")"}>
-              {#each roles as role, index (role)}
-                <button class="orbit-role" class:current={role === step.role} type="button" style:--card-role={"var(--role-" + role + ")"} style:--ox={orbitSpot(index).x + "px"} style:--oy={orbitSpot(index).y + "px"} aria-label={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} title={role === "custom" ? tr("Custom role", "Papel personalizado") : roleName(role)} onpointerdown={(event) => event.stopPropagation()} onclick={() => void pickOrbitRole(step.id, role)}><span class="role-option-fab" aria-hidden="true"><i class="role-symbol"><WorkflowRoleIcon {role} /></i></span></button>
-              {/each}
-            </div>
-          {/if}
-        </article>
-      {/each}
+      {#each group?.steps ?? [] as step (step.id)}{@render stepCard(step, false)}{/each}
       {#if dragSession && dragPoint}
         <div class="board-card ghost" class:invalid={dragIssue !== null} style:left={Math.round(dragPoint.x - BOARD_CARD_WIDTH / 2) + "px"} style:top={Math.round(dragPoint.y - BOARD_CARD_HEIGHT / 2) + "px"} style:width={BOARD_CARD_WIDTH + "px"} style:height={BOARD_CARD_HEIGHT + "px"} style:--card-role={"var(--role-" + dragRole + ")"} aria-hidden="true">
           <div class="card-body">
@@ -1184,6 +1437,7 @@
       {/if}
     </div>
   </div>
+  {/if}
 
   {#if boardMode === "timeline" && group?.steps.length}
     <div class="board-timeline" in:fade={{ duration: duration(140) }}>
@@ -1203,7 +1457,7 @@
     </div>
   {/if}
 
-  {#if !touch}
+  {#if !touch && !basicActive}
     <p class="shortcut-legend" aria-label={tr("Keyboard shortcuts", "Atalhos de teclado")}>
       <span><kbd>Esc</kbd>{tr("Back to chats", "Voltar aos chats")}</span>
       <span><kbd>Space</kbd>{tr("Pause or resume", "Pausar ou retomar")}</span>
@@ -1218,6 +1472,12 @@
       <button class:on={boardMode === "board"} type="button" aria-pressed={boardMode === "board"} onclick={() => setBoardMode("board")}>{tr("Board", "Board")}</button>
       <button class:on={boardMode === "timeline"} type="button" aria-pressed={boardMode === "timeline"} onclick={() => setBoardMode("timeline")}>{tr("Timeline", "Linha do tempo")}</button>
     </span>
+    {#if group}
+      <span class="board-mode board-layout" role="group" aria-label={tr("Layout", "Disposição")}>
+        <button class:on={basicActive} type="button" data-board-layout="basic" aria-pressed={basicActive} aria-disabled={basicFit && !basicFit.ok ? "true" : undefined} title={basicFit && !basicFit.ok ? basicMisfitMessage(basicFit.reason) : tr("Three fixed slots: orchestrator, implementer, reviewer or tester", "Três espaços fixos: orquestrador, implementador, revisor ou testador")} onclick={() => setLayoutMode("basic")}>{tr("Basic", "Básico")}</button>
+        <button class:on={!basicActive} type="button" data-board-layout="canvas" aria-pressed={!basicActive} title={tr("Free canvas with arrows", "Canvas livre com setas")} onclick={() => setLayoutMode("canvas")}>Canvas</button>
+      </span>
+    {/if}
     {#if groups.length}<LumeSelect value={activeId} options={groups.map((item, index) => ({ value: item.id, label: groupName(item, index) }))} ariaLabel={tr("Select workflow", "Selecionar workflow")} minWidth={132} variant="heading" onValueChange={activate} />{/if}
     <button type="button" title={tr("New workflow", "Novo workflow")} aria-label={tr("New workflow", "Novo workflow")} onclick={createGroup}><LumeIcon name="plus" size={16} /></button>
     <button class:confirm={confirmingDelete} class="delete-workflow" type="button" disabled={!group || locked || deleting} title={confirmingDelete ? tr("Click again to delete this workflow", "Clique de novo para excluir este workflow") : tr("Delete workflow", "Excluir workflow")} aria-label={confirmingDelete ? tr("Confirm deleting this workflow", "Confirmar exclusão deste workflow") : tr("Delete workflow", "Excluir workflow")} onclick={requestDeleteGroup}><LumeIcon name="trash" size={15} />{#if confirmingDelete}<span>{tr("Delete?", "Excluir?")}</span>{/if}</button>
@@ -1230,7 +1490,7 @@
     <button class="close-board" type="button" title={tr("Back to chats", "Voltar aos chats")} aria-label={tr("Back to chats", "Voltar aos chats")} onclick={onClose}><svg class="exit-icon" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 3v18M21 3l-4.4 1.7v14.6L21 21" /><circle cx="7.4" cy="6.4" r="1.7" /><path d="M7 9.2l1.4 4.6M7.6 10.5l3.4 1.6M7.4 10.2 4.4 11.8M8.4 13.8l2.7 3 .3 3.9M8.4 13.8l-2.9 2.6-1.3 3.5" /></svg></button>
   </header>
 
-  {#if !group?.steps.length && !pickerOpen}
+  {#if !group?.steps.length && !pickerOpen && !basicActive}
     <div class="board-empty">
       <div class="empty-card">
         <WorkspaceHeaderIcon name="workflow" size={42} />
@@ -1287,8 +1547,8 @@
           <div class="field" role="radiogroup" aria-label={tr("Step role", "Papel da etapa")}>
             <span>{tr("Role", "Papel")}</span>
             <div class="role-picker">
-              {#each roles as role (role)}
-                <button class:selected={selectedStep.role === role} class="role-option role-{role}" style:--card-role={`var(--role-${role})`} type="button" role="radio" aria-checked={selectedStep.role === role} disabled={locked || changingRole} onclick={() => { if (selectedStep.role !== role) void changeRole(role); }}><span class="role-option-fab" aria-hidden="true"><i class="role-symbol"><WorkflowRoleIcon {role} /></i></span><span class="role-option-name">{roleName(role)}</span></button>
+              {#each basicActive ? ([["planner"], ["implementer"], ["reviewer", "tester"]] as WorkflowRole[][])[basicSlots.indexOf(selectedStep.id)] ?? roles : roles as role (role)}
+                <button class:selected={selectedStep.role === role} class="role-option role-{role}" style:--card-role={`var(--role-${role})`} type="button" role="radio" aria-checked={selectedStep.role === role} disabled={locked || changingRole} onclick={() => { if (selectedStep.role !== role) void changeRole(role); }}><span class="role-option-fab" aria-hidden="true"><i class="role-symbol"><WorkflowRoleIcon {role} orchestrator={basicActive} /></i></span><span class="role-option-name">{roleLabel(role)}</span></button>
               {/each}
             </div>
           </div>
@@ -1350,7 +1610,7 @@
     {/if}
   {/if}
 
-  {#if !touch}<div class="board-navigation" role="group" aria-label={tr("Canvas view", "Vista do canvas")}>
+  {#if !touch && !basicActive}<div class="board-navigation" role="group" aria-label={tr("Canvas view", "Vista do canvas")}>
     <button type="button" aria-label={tr("Zoom out", "Diminuir zoom")} title={tr("Zoom out", "Diminuir zoom")} onclick={() => zoom(1 / 1.2)}><span aria-hidden="true">−</span></button>
     <button class="zoom-label" type="button" title={tr("Reset zoom", "Restaurar zoom")} aria-label={tr("Reset zoom", "Restaurar zoom")} onclick={() => patchLayout({ view: zoomAround(view, { x: viewportWidth / 2, y: viewportHeight / 2 }, 1) })}>{Math.round(view.zoom * 100)}%</button>
     <button type="button" aria-label={tr("Zoom in", "Aumentar zoom")} title={tr("Zoom in", "Aumentar zoom")} onclick={() => zoom(1.2)}><LumeIcon name="plus" size={14} /></button>
@@ -1395,7 +1655,9 @@
     <footer class="board-run" class:collapsed={touch && runCollapsed} data-tour="board-run" data-status={run?.status ?? "draft"}>
       <span class="run-track" aria-hidden="true"><i style:--progress={(run ? run.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length / Math.max(1, group.steps.length) * 100 : 0) + "%"}></i></span>
       <div class="run-heading"><span class="run-state"><i></i><strong>{runLoading ? tr("Loading run…", "Carregando execução…") : run ? runStatus(run.status) : tr("Ready to build", "Pronto para montar")}</strong></span>{#if touch}<button class="run-collapse" type="button" aria-expanded={!runCollapsed} aria-label={runCollapsed ? tr("Expand run panel", "Expandir painel de execução") : tr("Collapse run panel", "Recolher painel de execução")} onclick={() => (runCollapsed = !runCollapsed)}><svg viewBox="0 0 20 20" aria-hidden="true" style:transform={runCollapsed ? "rotate(180deg)" : "none"}><path d="m5 8 5 5 5-5" /></svg></button>{/if}<span class="run-progress">{run ? run.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length : chain?.order.length ?? 0}/{group.steps.length} {tr("steps", "etapas")}</span><input class="workflow-name" aria-label={tr("Workflow name", "Nome do workflow")} value={groupName(group)} maxlength="80" onchange={(event) => patchLayout({ name: event.currentTarget.value.trim() || undefined })} /></div>
-      {#if chain?.problems.length}
+      {#if slotIssue !== null}
+        <button class="chain-problem" type="button" onclick={() => basicNode?.querySelector<HTMLElement>(`[data-slot="${slotIssue}"]`)?.focus()}><LumeIcon name="warning" size={13} />{slotIssue === 0 ? tr("Put an agent in the orchestrator slot.", "Coloque um agente no espaço do orquestrador.") : tr("Put an agent in the implementer slot.", "Coloque um agente no espaço do implementador.")}</button>
+      {:else if chain?.problems.length}
         <button class="chain-problem" type="button" onclick={() => { problemStepIds = chain!.problems[0].stepIds; fit(); }}><LumeIcon name="warning" size={13} />{problemMessage(chain.problems[0], language === "pt-BR")}</button>
       {:else if blockedStep && !locked}
         <button class="chain-problem" type="button" onclick={() => choose({ kind: "step", id: blockedStep!.id })}><LumeIcon name="warning" size={13} />{tr("Connect or take control of ", "Conecte ou assuma o controle de ") + name(sessionFor(blockedStep))}</button>
@@ -1405,7 +1667,7 @@
         <textarea rows="1" maxlength="4000" aria-label={tr("Workflow objective", "Objetivo do workflow")} placeholder={tr("What should these agents accomplish?", "O que estes agentes devem realizar?")} disabled={locked} value={objective} oninput={(event) => { objectives = { ...objectives, [activeId]: event.currentTarget.value }; invalidatePreview(); persistLayout(); }}></textarea>
         <div class="run-actions">
           {#if !run || finished}
-            <button class="primary" type="button" disabled={actionLoading || runLoading || changingRole || adding || !objective.trim() || Boolean(chain?.problems.length) || Boolean(blockedStep)} onclick={() => void execute()}><LumeIcon name="send" size={14} />{actionLoading ? tr("Starting…", "Iniciando…") : finished ? tr("Run again", "Executar novamente") : tr("Run", "Executar")}</button>
+            <button class="primary" type="button" disabled={actionLoading || runLoading || changingRole || adding || !objective.trim() || Boolean(chain?.problems.length) || slotIssue !== null || Boolean(blockedStep)} onclick={() => void execute()}><LumeIcon name="send" size={14} />{actionLoading ? tr("Starting…", "Iniciando…") : finished ? tr("Run again", "Executar novamente") : tr("Run", "Executar")}</button>
           {:else}
             {#if run.recovering}<small>{tr("Waiting for the original agent", "Aguardando o agente original")}</small>{/if}
             {#if run.status === "waiting_for_approval"}<button class="primary" type="button" disabled={actionLoading || run.recovering} onclick={() => void perform(() => backend.approve(activeId))}>{tr("Approve handoff", "Aprovar handoff")}</button>
@@ -1853,4 +2115,52 @@
     .edge-hub { transition: none; }
     .card-orb, .edge-approve { animation: none !important; }
   }
+  /* Basic board: three fixed slots in a row, stacked on narrow boards. */
+  .board-toolbar .board-layout button[aria-disabled="true"] { opacity: .45; cursor: help; }
+  .board-basic { position: absolute; inset: 0; z-index: 0; box-sizing: border-box; padding: 92px 24px 168px; overflow: auto; outline: none; container-type: inline-size; background-image: radial-gradient(circle, color-mix(in srgb, var(--workspace-muted) 18%, transparent) 1px, transparent 1px); background-size: 24px 24px; transition: padding 180ms cubic-bezier(.16, 1, .3, 1); }
+  .board-basic.with-panel { padding-right: 330px; }
+  .slot-track { min-height: 100%; display: flex; align-items: center; justify-content: center; }
+  .board-slot { --card-role: var(--role-custom); position: relative; flex: 0 1 268px; min-width: 214px; box-sizing: border-box; padding: 10px 10px 12px; display: grid; grid-template-rows: auto 1fr; gap: 24px; border: 1.5px dashed color-mix(in srgb, var(--card-role) 42%, var(--workspace-line)); border-radius: 24px; background: color-mix(in srgb, var(--card-role) 5%, color-mix(in srgb, var(--workspace-raised) 55%, transparent)); outline: none; transition: border-color 140ms ease, background 140ms ease, box-shadow 160ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .board-slot.filled { border-style: solid; border-color: color-mix(in srgb, var(--card-role) 22%, var(--workspace-line)); }
+  .board-slot:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb, var(--workspace-accent) 40%, transparent); }
+  .board-slot.drop-over { border-style: solid; border-color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 11%, var(--workspace-raised)); box-shadow: 0 0 0 4px color-mix(in srgb, var(--workspace-accent) 16%, transparent); transform: scale(1.015); }
+  .board-slot.drop-refused { border-style: solid; border-color: var(--board-danger); background: color-mix(in srgb, var(--board-danger) 8%, var(--workspace-raised)); }
+  .board-slot.missing { border-color: var(--board-warning); }
+  .slot-head { min-width: 0; height: 24px; display: flex; align-items: center; gap: 7px; padding: 0 2px 0 4px; }
+  .slot-head strong { min-width: 0; overflow: hidden; color: color-mix(in srgb, var(--card-role) 70%, var(--workspace-strong)); font-size: 10px; font-weight: 750; letter-spacing: .06em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+  .slot-number { width: 18px; height: 18px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; color: #fff; background: var(--card-role); font-size: 10px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .slot-optional { padding: 2px 7px; border-radius: 999px; color: var(--workspace-muted); background: var(--workspace-subtle); font-size: 9px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }
+  .slot-third { display: inline-flex; gap: 1px; padding: 2px; border-radius: 8px; background: var(--workspace-subtle); }
+  .slot-third button { height: 20px; padding: 0 7px; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font-size: 10px; font-weight: 700; }
+  .slot-third button.on { color: color-mix(in srgb, var(--card-role) 72%, var(--workspace-strong)); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(20, 38, 30, .12); }
+  .slot-remove { width: 24px; height: 24px; margin-left: auto; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; }
+  .slot-remove:hover:not(:disabled) { color: var(--board-danger); background: color-mix(in srgb, var(--board-danger) 10%, transparent); }
+  .slot-placeholder { min-height: 168px; padding: 12px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 18px; color: color-mix(in srgb, var(--card-role) 55%, var(--workspace-muted)); background: transparent; text-align: center; }
+  .slot-placeholder:disabled { opacity: 1; }
+  .slot-glyph { width: 64px; height: 64px; display: grid; place-items: center; opacity: .5; font-style: normal; }
+  .slot-glyph :global(.workflow-role-icon) { width: 100%; height: 100%; stroke-width: 1.3; }
+  .slot-placeholder strong { color: color-mix(in srgb, var(--card-role) 62%, var(--workspace-muted)); font-size: 20px; font-weight: 650; letter-spacing: -.02em; opacity: .75; }
+  .slot-placeholder small { color: var(--workspace-muted); font-size: 10px; opacity: .85; }
+  .board-slot.drop-over .slot-glyph { opacity: .8; }
+  .board-slot .board-card { position: relative; width: 100%; height: 168px; }
+  .board-slot .board-card .card-body { cursor: grab; }
+  .board-slot .board-card.moving { z-index: 6; pointer-events: none; }
+  .board-slot .board-card.moving .card-body { pointer-events: auto; cursor: grabbing; }
+  .board-basic.sorting .board-slot:not(.drop-over) { border-style: dashed; }
+  .slot-arrow { position: relative; flex: 0 0 48px; height: 16px; display: grid; place-items: center; color: color-mix(in srgb, var(--workspace-muted) 55%, transparent); }
+  .slot-arrow svg { width: 44px; height: 16px; overflow: visible; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+  .slot-arrow.linked { color: color-mix(in srgb, var(--to-role) 70%, var(--workspace-muted)); }
+  .slot-arrow.live svg path:first-child { stroke-dasharray: 5 6; animation: slot-flow .9s linear infinite; }
+  .slot-arrow.waiting { color: var(--board-warning); }
+  .slot-arrow.waiting svg path:first-child { stroke-dasharray: 6 4; }
+  .slot-approve { left: 50%; top: calc(100% + 6px); transform: translateX(-50%); }
+  @keyframes slot-flow { to { stroke-dashoffset: -11; } }
+  @container (max-width: 760px) {
+    .slot-track { flex-direction: column; justify-content: flex-start; }
+    .board-slot { flex: 0 0 auto; width: min(320px, 100%); }
+    .slot-arrow { flex-basis: 40px; width: 16px; transform: rotate(90deg); }
+    .slot-approve { top: 50%; left: calc(100% + 6px); transform: translateY(-50%) rotate(-90deg); }
+  }
+  @media (max-width: 560px) { .board-basic, .board-basic.with-panel { padding: 104px 12px 170px; } }
+  @media (prefers-reduced-motion: reduce) { .board-basic, .board-slot { transition: none; } .slot-arrow.live svg path:first-child { animation: none; } }
 </style>

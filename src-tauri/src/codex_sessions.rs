@@ -73,6 +73,8 @@ struct TokenTotals {
     total: u64,
     input: u64,
     output: u64,
+    /// The part of `input` served from the prompt cache, when reported.
+    cached: Option<u64>,
     context: Option<u64>,
     context_window: Option<u64>,
 }
@@ -691,6 +693,7 @@ fn token_totals(payload: &RecordPayload) -> Option<TokenTotals> {
             .get("output_tokens")
             .and_then(Value::as_u64)
             .unwrap_or_default(),
+        cached: usage.get("cached_input_tokens").and_then(Value::as_u64),
         context: info.get("last_token_usage").and_then(|last| last.get("total_tokens")).and_then(Value::as_u64),
         context_window: info.get("model_context_window").and_then(Value::as_u64).filter(|limit| *limit > 0),
     })
@@ -714,7 +717,7 @@ fn completed_prompt_token_usage_event(file: &ObservedFile, completed_at: i64) ->
     }
     let started_at = file.prompt_started_at.unwrap_or(completed_at);
     let turn_id = format!("rollout-{started_at}");
-    let detail = serde_json::json!({
+    let mut detail = serde_json::json!({
         "turnId": turn_id,
         "totalTokens": total,
         "inputTokens": end.input.saturating_sub(start.input),
@@ -722,8 +725,17 @@ fn completed_prompt_token_usage_event(file: &ObservedFile, completed_at: i64) ->
         "contextTokens": end.context.unwrap_or_default(),
         "contextWindow": end.context.and(end.context_window),
         "createdAt": completed_at,
-    })
-    .to_string();
+    });
+    if let Some(cached) = end.cached {
+        detail["cacheReadTokens"] = cached.saturating_sub(start.cached.unwrap_or_default()).into();
+    }
+    if let Some(prompt_at) = file.prompt_started_at {
+        detail["promptAt"] = prompt_at.into();
+    }
+    if let Some(model) = file.last_model.as_ref() {
+        detail["model"] = model.as_str().into();
+    }
+    let detail = detail.to_string();
     let mut event = event_for(file, HookEventKind::Activity, "Uso de tokens", None)?;
     event.activity = Some(SessionActivity {
         id: format!("codex-token-usage:{turn_id}"),
@@ -2077,7 +2089,10 @@ mod tests {
                     r#"{"timestamp":"2026-09-21T12:01:00Z","type":"event_msg","payload":{"type":"task_started"}}"#,
                 ),
                 record(
-                    r#"{"timestamp":"2026-09-21T12:01:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":160,"input_tokens":125,"output_tokens":35},"last_token_usage":{"total_tokens":55},"model_context_window":128000}}}"#,
+                    r#"{"timestamp":"2026-09-21T12:01:05Z","type":"turn_context","payload":{"model":"gpt-test"}}"#,
+                ),
+                record(
+                    r#"{"timestamp":"2026-09-21T12:01:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":160,"input_tokens":125,"cached_input_tokens":30,"output_tokens":35},"last_token_usage":{"total_tokens":55},"model_context_window":128000}}}"#,
                 ),
                 record(
                     r#"{"timestamp":"2026-09-21T12:01:12Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
@@ -2099,6 +2114,11 @@ mod tests {
         assert_eq!(usage.output_tokens, 15);
         assert_eq!(usage.context_tokens, 55);
         assert_eq!(usage.context_window, Some(128_000));
+        // The cache only counts from when the earlier total left off, which did not report it.
+        assert_eq!(usage.cache_read_tokens, Some(30));
+        assert_eq!(usage.cache_creation_tokens, None);
+        assert_eq!(usage.prompt_at, Some(chrono::DateTime::parse_from_rfc3339("2026-09-21T12:01:00Z").unwrap().timestamp_millis()));
+        assert_eq!(usage.model.as_deref(), Some("gpt-test"));
     }
 
     #[test]

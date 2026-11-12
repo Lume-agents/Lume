@@ -2285,31 +2285,49 @@ struct ClaudeTurnTokens {
     turn_id: String,
     // A response is split into one entry per content block, all repeating the
     // same usage, so each message id is counted once.
-    responses: HashMap<String, (u64, u64)>,
+    responses: HashMap<String, ClaudeResponseTokens>,
+    /// When the prompt was written.
+    prompt_at: Option<i64>,
     last_at: i64,
+    /// The newest response's model.
+    model: Option<String>,
     /// The newest response's input plus output with its time: what the conversation holds after it.
     context: Option<(i64, u64)>,
 }
 
+/// One response's usage. `input` already includes both cache counts.
+#[derive(Clone, Copy, Default)]
+struct ClaudeResponseTokens {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+}
+
 impl ClaudeTurnTokens {
     fn finish(self, session_id: &str) -> Option<SessionActivity> {
-        let input = self.responses.values().map(|(input, _)| input).sum::<u64>();
-        let output = self
-            .responses
-            .values()
-            .map(|(_, output)| output)
-            .sum::<u64>();
+        let sum = |pick: fn(&ClaudeResponseTokens) -> u64| self.responses.values().map(pick).sum::<u64>();
+        let input = sum(|response| response.input);
+        let output = sum(|response| response.output);
         if input + output == 0 {
             return None;
         }
-        let detail = json!({
+        let mut detail = json!({
             "turnId": self.turn_id,
             "totalTokens": input + output,
             "inputTokens": input,
             "outputTokens": output,
             "contextTokens": self.context.map_or(0, |(_, tokens)| tokens),
             "createdAt": self.last_at,
+            "cacheReadTokens": sum(|response| response.cache_read),
+            "cacheCreationTokens": sum(|response| response.cache_creation),
         });
+        if let Some(prompt_at) = self.prompt_at {
+            detail["promptAt"] = json!(prompt_at);
+        }
+        if let Some(model) = self.model {
+            detail["model"] = json!(model);
+        }
         Some(SessionActivity {
             id: format!("claude:{session_id}:token-usage:{}", self.turn_id),
             kind: "token_usage".into(),
@@ -2347,7 +2365,9 @@ fn track_claude_turn_tokens(
         *turn = string(entry, "uuid").map(|turn_id| ClaudeTurnTokens {
             turn_id,
             responses: HashMap::new(),
+            prompt_at: created_at,
             last_at: created_at.unwrap_or_else(now_millis),
+            model: None,
             context: None,
         });
         return;
@@ -2362,11 +2382,26 @@ fn track_claude_turn_tokens(
         return;
     };
     let tokens = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-    let input = tokens("input_tokens")
-        + tokens("cache_creation_input_tokens")
-        + tokens("cache_read_input_tokens");
-    turn.responses
-        .insert(id.to_string(), (input, tokens("output_tokens")));
+    let cache_read = tokens("cache_read_input_tokens");
+    let cache_creation = tokens("cache_creation_input_tokens");
+    let input = tokens("input_tokens") + cache_creation + cache_read;
+    turn.responses.insert(
+        id.to_string(),
+        ClaudeResponseTokens {
+            input,
+            output: tokens("output_tokens"),
+            cache_read,
+            cache_creation,
+        },
+    );
+    // Resume fillers are "<synthetic>", not a model the person chose.
+    if let Some(model) = message
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty() && !model.starts_with('<'))
+    {
+        turn.model = Some(model.to_string());
+    }
     let at = created_at.unwrap_or(0);
     if turn.context.map_or(true, |(newest, _)| at >= newest) {
         turn.context = Some((at, input + tokens("output_tokens")));
@@ -3269,6 +3304,7 @@ mod tests {
                 "message": {
                     "id": id,
                     "role": "assistant",
+                    "model": "claude-test-model",
                     "content": [{ "type": "text", "text": "ok" }],
                     "usage": {
                         "input_tokens": input,
@@ -3314,7 +3350,7 @@ mod tests {
             "claude-session",
         );
         let _ = std::fs::remove_file(&path);
-        let usage = activities
+        let samples = activities
             .iter()
             .filter(|activity| activity.kind == "token_usage")
             .map(|activity| {
@@ -3323,6 +3359,17 @@ mod tests {
                 )
                 .expect("uso")
             })
+            .collect::<Vec<_>>();
+        // The cache is kept apart too (msg-1 read 100 from it, msg-2 130), with the prompt's time and the model.
+        assert_eq!(samples[0].cache_read_tokens, Some(230));
+        assert_eq!(samples[0].cache_creation_tokens, Some(0));
+        assert_eq!(
+            samples[0].prompt_at,
+            Some(DateTime::parse_from_rfc3339("2026-07-28T12:00:00.000Z").unwrap().timestamp_millis())
+        );
+        assert_eq!(samples[0].model.as_deref(), Some("claude-test-model"));
+        let usage = samples
+            .into_iter()
             .map(|usage| {
                 (
                     usage.turn_id,

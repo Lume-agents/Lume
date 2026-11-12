@@ -3142,7 +3142,7 @@ fn intercept_server_message(
         }
     }
     if method == "thread/tokenUsage/updated" {
-        if let Some((thread_id, turn_id, total_tokens, input_tokens, output_tokens, context_window)) =
+        if let Some((thread_id, turn_id, total_tokens, input_tokens, output_tokens, context_window, cached)) =
             turn_token_usage_from_message(&value)
         {
             let recorded = state.record_codex_turn_token_usage(
@@ -3152,6 +3152,7 @@ fn intercept_server_message(
                 input_tokens,
                 output_tokens,
                 context_window,
+                cached,
             );
             if recorded.is_ok() {
                 crate::protocol::emit_session_changed(app, &session_id(thread_id), Some(thread_id));
@@ -3187,7 +3188,8 @@ fn intercept_server_message(
     Ok(None)
 }
 
-fn turn_token_usage_from_message(value: &Value) -> Option<(&str, &str, u64, u64, u64, Option<u64>)> {
+/// Thread, turn, total, input, output, context window and the cached part of the input.
+fn turn_token_usage_from_message(value: &Value) -> Option<(&str, &str, u64, u64, u64, Option<u64>, Option<u64>)> {
     let params = value.get("params")?;
     let usage = params.get("tokenUsage")?.get("last")?;
     Some((
@@ -3203,6 +3205,7 @@ fn turn_token_usage_from_message(value: &Value) -> Option<(&str, &str, u64, u64,
             .and_then(Value::as_u64)
             .unwrap_or(0),
         params.get("tokenUsage")?.get("modelContextWindow").and_then(Value::as_u64).filter(|limit| *limit > 0),
+        usage.get("cachedInputTokens").and_then(Value::as_u64),
     ))
 }
 
@@ -5368,6 +5371,7 @@ mod tests {
                     "last": {
                         "totalTokens": 4_200,
                         "inputTokens": 3_000,
+                        "cachedInputTokens": 2_400,
                         "outputTokens": 1_200
                     }
                 }
@@ -5375,7 +5379,7 @@ mod tests {
         });
         let usage = turn_token_usage_from_message(&notification).expect("token usage");
 
-        assert_eq!(usage, ("thread-1", "turn-2", 4_200, 3_000, 1_200, Some(128_000)));
+        assert_eq!(usage, ("thread-1", "turn-2", 4_200, 3_000, 1_200, Some(128_000), Some(2_400)));
     }
 
     #[test]

@@ -241,6 +241,18 @@ pub struct PromptTokenUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     pub created_at: i64,
+    /// Input tokens served from the prompt cache; already part of `input_tokens`. Absent when unreported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Input tokens written to the prompt cache (Claude); already part of `input_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
+    /// When the prompt was sent, so the turn took `created_at - prompt_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_at: Option<i64>,
+    /// The model that answered, when the transcript names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

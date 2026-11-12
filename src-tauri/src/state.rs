@@ -2124,6 +2124,7 @@ impl AppState {
         input_tokens: u64,
         output_tokens: u64,
         context_window: Option<u64>,
+        cache_read_tokens: Option<u64>,
     ) -> Result<(), String> {
         if thread_id.trim().is_empty() || turn_id.trim().is_empty() {
             return Ok(());
@@ -2148,6 +2149,10 @@ impl AppState {
                 context_tokens: total_tokens,
                 context_window,
                 created_at: now_millis(),
+                cache_read_tokens,
+                cache_creation_tokens: None,
+                prompt_at: None,
+                model: None,
             },
         );
         Ok(())
@@ -4196,22 +4201,30 @@ fn distinct_codex_message_items(left: &str, right: &str) -> bool {
         && left.rsplit(':').next() != right.rsplit(':').next()
 }
 
-fn remember_prompt_token_usage(session: &mut AgentSession, usage: PromptTokenUsage) {
+/// How many prompts' token usage a session keeps in memory.
+const PROMPT_TOKEN_USAGE_LIMIT: usize = 64;
+
+fn remember_prompt_token_usage(session: &mut AgentSession, mut usage: PromptTokenUsage) {
     if let Some(existing) = session.prompt_token_usage.iter_mut().find(|existing| {
         existing.turn_id == usage.turn_id
             || ((existing.created_at - usage.created_at).abs() <= 15_000
                 && existing.total_tokens == usage.total_tokens)
     }) {
+        // The app-server and the rollout can report the same turn; keep what only one of them knew.
+        usage.cache_read_tokens = usage.cache_read_tokens.or(existing.cache_read_tokens);
+        usage.cache_creation_tokens = usage.cache_creation_tokens.or(existing.cache_creation_tokens);
+        usage.prompt_at = usage.prompt_at.or(existing.prompt_at);
+        usage.model = usage.model.take().or(existing.model.take());
         *existing = usage;
     } else {
         session.prompt_token_usage.push(usage);
         session
             .prompt_token_usage
             .sort_by_key(|sample| sample.created_at);
-        if session.prompt_token_usage.len() > 32 {
+        if session.prompt_token_usage.len() > PROMPT_TOKEN_USAGE_LIMIT {
             session
                 .prompt_token_usage
-                .drain(..session.prompt_token_usage.len() - 32);
+                .drain(..session.prompt_token_usage.len() - PROMPT_TOKEN_USAGE_LIMIT);
         }
     }
 }
@@ -5571,6 +5584,43 @@ mod tests {
             wait_for_decision: false,
         }
     }
+    #[test]
+    fn a_turn_reported_twice_keeps_the_details_only_one_report_had() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        state.ingest(started_event("claude:tokens", 4100)).expect("session");
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.first_mut().expect("session");
+        let sample = |turn: &str, at: i64| PromptTokenUsage {
+            turn_id: turn.into(),
+            total_tokens: 100,
+            input_tokens: 80,
+            output_tokens: 20,
+            context_tokens: 0,
+            context_window: None,
+            created_at: at,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            prompt_at: None,
+            model: None,
+        };
+        let mut rollout = sample("turn-1", 1_000);
+        rollout.prompt_at = Some(400);
+        rollout.model = Some("gpt-test".into());
+        remember_prompt_token_usage(session, rollout);
+        let mut live = sample("turn-1", 1_200);
+        live.cache_read_tokens = Some(60);
+        remember_prompt_token_usage(session, live);
+        assert_eq!(session.prompt_token_usage.len(), 1);
+        let merged = &session.prompt_token_usage[0];
+        assert_eq!((merged.cache_read_tokens, merged.prompt_at, merged.model.as_deref()), (Some(60), Some(400), Some("gpt-test")));
+        // Only the latest prompts are kept.
+        for index in 0..80 {
+            remember_prompt_token_usage(session, sample(&format!("turn-{}", index + 2), 100_000 * (index + 2)));
+        }
+        assert_eq!(session.prompt_token_usage.len(), PROMPT_TOKEN_USAGE_LIMIT);
+        assert_eq!(session.prompt_token_usage.last().unwrap().turn_id, "turn-81");
+    }
+
     #[test]
     fn omp_process_binds_to_existing_watched_native_session() {
         let state = AppState::new(Path::new(":memory:")).expect("state");

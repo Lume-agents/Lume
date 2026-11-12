@@ -1,6 +1,6 @@
 <script lang="ts">
   let { name, size = 20 }: {
-    name: "project" | "layout" | "extensions" | "workflow" | "inspector" | "settings" | "orb";
+    name: "project" | "layout" | "extensions" | "workflow" | "inspector" | "settings" | "orb" | "notes";
     size?: number;
   } = $props();
   const uid = $props.id();
@@ -63,6 +63,11 @@
       <rect class="board-node-two dim" x="3" y="14" width="6" height="6" rx="1.5" />
       <rect class="board-node-three" x="15" y="14" width="6" height="6" rx="1.5" />
     </g>
+  {:else if name === "notes"}
+    <!-- A page with a folded corner and two lines of writing. -->
+    <path class="dim" fill="currentColor" stroke="none" d="M6.5 3.5h7.8l4.2 4.2v11.3a1.5 1.5 0 0 1-1.5 1.5H6.5A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1.5-1.5Z" />
+    <path fill="currentColor" stroke="none" d="M14.3 3.5v3.2a1 1 0 0 0 1 1h3.2Z" />
+    <path stroke-width="1.8" d="M8.4 12.2h7.2M8.4 15.8h4.6" />
   {:else if name === "inspector"}
     <g fill="currentColor" stroke="none" transform="translate(12 12.2) scale(1.12) translate(-12 -12.2)">
       <g class="detective-face">

@@ -61,6 +61,8 @@
   import { WorkspaceStartup } from "$lib/workspaceStartup";
   import { sidebarGroupsKey } from "$lib/sidebarGroups";
   import type { PromptJumpRequest, PromptJumpTarget } from "$lib/tokenUsage";
+  import WorkspaceNotes from "$lib/WorkspaceNotes.svelte";
+  import type { SessionNote } from "$lib/domain";
   import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, PendingPairRequest, Preferences, ResumableSession, WorkflowGroupDefinition, WorkflowRole, WorkflowRoleContract, WorkflowRun } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
@@ -319,6 +321,7 @@
   let inspectorOpen = $state(true);
   let boardOpen = $state(false);
   let extensionsOpen = $state(false);
+  let notesOpen = $state(false);
   // A prompt a chat should scroll to; the pane showing that session handles it.
   let promptJumpRequest = $state<PromptJumpRequest | null>(null);
   let promptJumpNonce = 0;
@@ -328,7 +331,7 @@
   let activeTour = $state<"workspace" | "board" | null>(null);
   let boardTourTimer = 0;
   // The board and the extensions take over the stage: the chats, inspector and review step aside.
-  const stageTakeover = $derived(boardOpen || extensionsOpen);
+  const stageTakeover = $derived(boardOpen || extensionsOpen || notesOpen);
   let boardMounted = $state(false);
   let inspectorSection = $state<"session" | "repository">("session");
   let reviewOpen = $state(false);
@@ -2102,6 +2105,7 @@
     if (open) {
       boardMounted = true;
       extensionsOpen = false;
+      notesOpen = false;
     }
     try { localStorage.setItem("lume:workflow-board:open", String(open)); }
     catch { /* Opening the board is still available when storage is disabled. */ }
@@ -2170,6 +2174,7 @@
     if (activeTour === "board") { if (!boardOpen) showWorkflowBoard(true); }
     else { if (boardOpen) showWorkflowBoard(false); enterTourDemo(); }
     if (extensionsOpen) showExtensions(false);
+    if (notesOpen) showNotes(false);
     if (settingsOpen) closeSettings();
     headerControl = null;
     launcherOpen = false;
@@ -2178,7 +2183,27 @@
   function showExtensions(open: boolean) {
     finishSidebarSessionDrag();
     extensionsOpen = open;
-    if (open) showWorkflowBoard(false);
+    if (open) { showWorkflowBoard(false); notesOpen = false; }
+  }
+
+  function showNotes(open: boolean) {
+    finishSidebarSessionDrag();
+    if (open) { showWorkflowBoard(false); extensionsOpen = false; }
+    notesOpen = open;
+  }
+
+  /** The chat a note was saved from, if it is still in the workspace. */
+  function noteSession(note: SessionNote) {
+    return note.nativeSessionId ? sessions.find((session) => session.nativeSessionId === note.nativeSessionId) ?? null : null;
+  }
+
+  /** Leaves the Notes tab for the chat a note came from, scrolled to its prompt when it has one. */
+  function openNoteLink(note: SessionNote) {
+    const session = noteSession(note);
+    if (!session) return;
+    showNotes(false);
+    selectSession(session);
+    if (note.promptActivityId) requestPromptJump(session.id, { activityId: note.promptActivityId });
   }
 
   async function deleteWorkflowBoardGroup(id: string) {
@@ -3014,8 +3039,9 @@
       </div>
     <div class:expanded={headerControl !== null} class="header-selectors">
         <button class:active={extensionsOpen} class="inspector-button" data-tour="extensions" type="button" title={tr("Extensions", "Extensões")} aria-label={tr("Extensions", "Extensões")} aria-pressed={extensionsOpen} onclick={() => showExtensions(!extensionsOpen)}><WorkspaceHeaderIcon name="extensions" size={22} /></button>
-        <button class:active={inspectorOpen && !stageTakeover} class="inspector-button" data-tour="inspector" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen && !stageTakeover} onclick={() => { if (stageTakeover) { showWorkflowBoard(false); showExtensions(false); if (!inspectorOpen) toggleInspector(); } else toggleInspector(); }}><WorkspaceHeaderIcon name="inspector" size={23} /></button>
+        <button class:active={inspectorOpen && !stageTakeover} class="inspector-button" data-tour="inspector" type="button" title={tr("Toggle inspector", "Alternar inspector")} aria-label={tr("Toggle inspector", "Alternar inspector")} aria-pressed={inspectorOpen && !stageTakeover} onclick={() => { if (stageTakeover) { showWorkflowBoard(false); showExtensions(false); showNotes(false); if (!inspectorOpen) toggleInspector(); } else toggleInspector(); }}><WorkspaceHeaderIcon name="inspector" size={23} /></button>
         <button class:active={boardOpen} class="inspector-button" data-tour="board" type="button" title={tr("Workflow board", "Board de workflow")} aria-label={tr("Workflow board", "Board de workflow")} aria-pressed={boardOpen} onclick={() => showWorkflowBoard(!boardOpen)}><WorkspaceHeaderIcon name="workflow" size={22} /></button>
+        <button class:active={notesOpen} class="inspector-button" type="button" title={tr("Notes", "Notas")} aria-label={tr("Notes", "Notas")} aria-pressed={notesOpen} onclick={() => showNotes(!notesOpen)}><WorkspaceHeaderIcon name="notes" size={22} /></button>
       {#if headerControl === null}
       <div class="header-utilities">
         <button class:active={settingsOpen} class="settings-button" data-tour="settings" type="button" title={tr("Workspace settings", "Ajustes do Workspace")} aria-label={tr("Workspace settings", "Ajustes do Workspace")} aria-expanded={settingsOpen} onclick={() => settingsOpen ? closeSettings() : void openSettings()}><WorkspaceHeaderIcon name="settings" size={22} /></button>
@@ -3955,6 +3981,9 @@
     {/if}
     {#if extensionsOpen}
       <WorkspaceExtensions {language} project={focusedSession?.workingDirectory} onClose={() => showExtensions(false)} />
+    {/if}
+    {#if notesOpen}
+      <WorkspaceNotes {language} project={focusedSession?.workingDirectory} canOpenLinked={(note) => Boolean(noteSession(note))} onOpenLinked={openNoteLink} onClose={() => showNotes(false)} />
     {/if}
     </section>
     <div class:open={inspectorOpen && !stageTakeover} class="inspector-shell" aria-hidden={!inspectorOpen || stageTakeover} inert={!inspectorOpen || stageTakeover}>

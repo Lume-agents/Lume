@@ -47,7 +47,7 @@
   import WorkflowBoard from "$lib/WorkflowBoard.svelte";
   import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
   import { desktopWorkflowBackend } from "$lib/workflowBoardBackend";
-  import { boardLayoutNames, chainGroupFromSessions, newerRun, presenceTone, runIsActive, sessionWorkflowPresence, workflowGroupName, type PresenceTone, type WorkflowPresence, type WorkflowStripAction } from "$lib/workflowPresence";
+  import { boardLayoutNames, chainGroupFromSessions, newerRun, presenceTone, runIsActive, sessionWorkflowPresence, sidebarWorkflows, workflowGroupName, type PresenceTone, type SidebarWorkflow, type WorkflowPresence, type WorkflowStripAction } from "$lib/workflowPresence";
   import { defaultRole, newGroup } from "$lib/workflowBoard";
   import WorkspaceExtensions from "$lib/WorkspaceExtensions.svelte";
   import GuidedTour from "$lib/GuidedTour.svelte";
@@ -297,7 +297,18 @@
   let workspaceBackgroundImageOffset = $state({ x: 50, y: 50 });
   let agentMessageSurface = $state(true);
   let workspaceBackgroundInput = $state<HTMLInputElement | null>(null);
-  let filter = $state<"all" | "active" | "attention">("all");
+  // The sidebar lists every chat, the workflows with their chats, or the chat groups; the choice stays on this computer.
+  type SidebarTab = "all" | "workflows" | "groups";
+  const sidebarTabKey = "lume:workspace-sidebar-tab:v1";
+  let sidebarTab = $state<SidebarTab>((() => {
+    try { const saved = localStorage.getItem(sidebarTabKey); return saved === "workflows" || saved === "groups" ? saved : "all"; }
+    catch { return "all"; }
+  })());
+  function chooseSidebarTab(tab: SidebarTab) {
+    sidebarTab = tab;
+    try { localStorage.setItem(sidebarTabKey, tab); }
+    catch { /* The tab still changes for this run when storage is unavailable. */ }
+  }
   let projectFilter = $state("all");
   let primaryId = $state<string | null>(null);
   let secondaryId = $state<string | null>(null);
@@ -383,7 +394,7 @@
       headerControl = null;
       launcherOpen = false;
       sessionContextMenu = null;
-      filter = "all";
+      workflowMenu = null;
     }
     await tick();
     if (reducedMotion) {
@@ -599,10 +610,6 @@
   const filteredSessions = $derived.by(() => {
     const needle = query.trim().toLocaleLowerCase();
     return projectSessions.filter((session) => {
-      const matchesFilter = filter === "all"
-        || (filter === "active" && session.status === "running")
-        || (filter === "attention" && ["permission_required", "failed"].includes(session.status));
-      if (!matchesFilter) return false;
       if (!needle) return true;
       return [
         sessionName(session),
@@ -617,7 +624,8 @@
   type SidebarGroup = { id: string; name: string; collapsed: boolean };
   type SidebarRow =
     | { key: string; kind: "header"; group: SidebarGroup | null; count: number }
-    | { key: string; kind: "session"; session: HubSession; index: number };
+    | { key: string; kind: "workflow"; workflow: SidebarWorkflow; members: Array<HubSession | undefined>; expanded: boolean; forced: boolean }
+    | { key: string; kind: "session"; session: HubSession; index: number; nested?: { workflowId: string; role: WorkflowRole; roleLabel: string } };
   let sidebarGroups = $state<SidebarGroup[]>([]);
   let groupAssignments = $state<Record<string, string>>({});
   let groupDropTarget = $state<string | null>(null);
@@ -745,36 +753,111 @@
   function endSectionDrag() { draggingSectionId = null; reorderTarget = null; groupDropTarget = null; }
   function focusOnMount(node: HTMLInputElement) { node.focus(); node.select(); }
 
+  // A workflow is its own row above the list, with its chats nested under it instead of repeated in the list.
+  const workflowRowsKey = "lume:workspace-workflow-rows:v1";
+  let collapsedWorkflowRows = $state<Set<string>>(new Set());
+  function loadWorkflowRows() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(workflowRowsKey) || "{}");
+      collapsedWorkflowRows = new Set(Array.isArray(raw.collapsed) ? raw.collapsed.filter((id: unknown) => typeof id === "string") : []);
+    } catch { /* Every workflow starts expanded when the saved state cannot be read. */ }
+  }
+  function toggleWorkflowRow(id: string) {
+    const next = new Set(collapsedWorkflowRows);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    collapsedWorkflowRows = next;
+    try { localStorage.setItem(workflowRowsKey, JSON.stringify({ collapsed: [...next] })); }
+    catch { /* The row still folds for this run when storage is unavailable. */ }
+  }
+  function sessionForStep(nativeId: string) {
+    return sessions.find((session) => session.nativeSessionId === nativeId) ?? sessions.find((session) => session.id === nativeId);
+  }
+
+  // Workflows go into chat groups through the same assignments as chats, under a key no chat can have.
+  const workflowGroupKey = (id: string) => "workflow:" + id;
+  function assignWorkflowToGroup(id: string, groupId: string | null) {
+    const next = { ...groupAssignments };
+    if (groupId) next[workflowGroupKey(id)] = groupId;
+    else delete next[workflowGroupKey(id)];
+    groupAssignments = next;
+    saveSidebarGroups();
+  }
+
   const sidebarLayout = $derived.by(() => {
-    const filtering = Boolean(query.trim()) || filter !== "all";
+    const searching = Boolean(query.trim());
+    const narrowed = searching || projectFilter !== "all";
+    const needle = query.trim().toLocaleLowerCase();
     const rows: SidebarRow[] = [];
     const visible: HubSession[] = [];
     const push = (session: HubSession) => { rows.push({ key: session.id, kind: "session", session, index: visible.length }); visible.push(session); };
-    if (sidebarCollapsed || !sidebarGroups.length) { filteredSessions.forEach(push); return { rows, visible }; }
+    // "All" is the plain list: every chat once, workflow members included, nothing nested.
+    if (sidebarTab === "all") { filteredSessions.forEach(push); return { rows, visible }; }
+    const shown = new Set(filteredSessions.map((session) => session.id));
+    const claimed = new Set<string>();
+    const workflows = sidebarWorkflowList.flatMap((workflow) => {
+      const members = workflow.members.map((member) => sessionForStep(member.nativeId));
+      for (const session of members) if (session) claimed.add(session.id);
+      const matching = members.some((session) => session && shown.has(session.id));
+      const named = Boolean(needle) && workflow.name.toLocaleLowerCase().includes(needle);
+      return !narrowed || matching || named ? [{ workflow, members, matching, named }] : [];
+    });
+    const pushWorkflow = ({ workflow, members, matching, named }: (typeof workflows)[number]) => {
+      // A search opens the workflows whose chats match, so those chats are never hidden.
+      const forced = searching && matching;
+      const expanded = forced || !collapsedWorkflowRows.has(workflow.id);
+      rows.push({ key: `workflow:${workflow.id}`, kind: "workflow", workflow, members, expanded, forced });
+      if (!expanded) return;
+      workflow.members.forEach((member, index) => {
+        const session = members[index];
+        if (!session || (narrowed && !named && !shown.has(session.id))) return;
+        rows.push({ key: `workflow:${workflow.id}:${session.id}`, kind: "session", session, index: visible.length, nested: { workflowId: workflow.id, role: member.role, roleLabel: member.roleLabel } });
+        visible.push(session);
+      });
+    };
+    if (sidebarTab === "workflows") { workflows.forEach((entry) => pushWorkflow(entry)); return { rows, visible }; }
+    // "Groups": the chat groups, each holding its workflows (with their chats nested) and its other chats.
+    const listed = filteredSessions.filter((session) => !claimed.has(session.id));
+    if (sidebarCollapsed || !sidebarGroups.length) {
+      workflows.forEach((entry) => pushWorkflow(entry));
+      listed.forEach(push);
+      return { rows, visible };
+    }
     const members = new Map<string, HubSession[]>(sidebarGroups.map((group) => [group.id, []]));
+    const flows = new Map<string, typeof workflows>(sidebarGroups.map((group) => [group.id, []]));
     const loose: HubSession[] = [];
-    for (const session of filteredSessions) {
+    const looseFlows: typeof workflows = [];
+    for (const session of listed) {
       const list = members.get(groupAssignments[sessionGroupKey(session)]);
       if (list) list.push(session); else loose.push(session);
     }
+    for (const entry of workflows) {
+      const list = flows.get(groupAssignments[workflowGroupKey(entry.workflow.id)]);
+      if (list) list.push(entry); else looseFlows.push(entry);
+    }
     for (const id of orderedSections) {
       if (id === "none") {
-        if (loose.length || (!filtering && (draggingSessionId || draggingSectionId))) {
-          rows.push({ key: "group:none", kind: "header", group: null, count: loose.length });
+        if (loose.length || looseFlows.length || (!searching && (draggingSessionId || draggingSectionId))) {
+          rows.push({ key: "group:none", kind: "header", group: null, count: loose.length + looseFlows.length });
+          looseFlows.forEach((entry) => pushWorkflow(entry));
           loose.forEach(push);
         }
         continue;
       }
       const group = sidebarGroups.find((item) => item.id === id);
       const list = members.get(id) ?? [];
-      if (!group || (filtering && !list.length)) continue;
-      rows.push({ key: `group:${id}`, kind: "header", group, count: list.length });
-      if (!group.collapsed || filtering) list.forEach(push);
+      const groupFlows = flows.get(id) ?? [];
+      if (!group || (searching && !list.length && !groupFlows.length)) continue;
+      rows.push({ key: `group:${id}`, kind: "header", group, count: list.length + groupFlows.length });
+      if (!group.collapsed || searching) {
+        groupFlows.forEach((entry) => pushWorkflow(entry));
+        list.forEach(push);
+      }
     }
     return { rows, visible };
   });
   onMount(() => {
     loadSidebarGroups();
+    loadWorkflowRows();
     // The Orb can collapse a group too.
     const sync = (event: StorageEvent) => { if (event.key === sidebarGroupsKey) loadSidebarGroups(); };
     window.addEventListener("storage", sync);
@@ -782,7 +865,7 @@
   });
 
   const filteredInternalServices = $derived(
-    projectFilter === "all" && filter !== "attention"
+    projectFilter === "all" && sidebarTab === "all"
       ? internalServices.filter((service) =>
           !query.trim() || `${service.label} ${service.agent}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
         )
@@ -2144,6 +2227,7 @@
   });
   // Keyed by the chat's current native id: a Codex thread can change it, and the steps follow the new one.
   const workflowPresence = $derived(sessionWorkflowPresence(preferences.workflowGroups, workflowRuns, workflowLayoutNames, language === "pt-BR"));
+  const sidebarWorkflowList = $derived(sidebarWorkflows(preferences.workflowGroups, workflowRuns, workflowLayoutNames, language === "pt-BR"));
   function workflowStepsFor(session: HubSession): WorkflowPresence[] {
     const key = session.nativeSessionId?.trim();
     return key ? workflowPresence.get(key) ?? [] : [];
@@ -2177,6 +2261,35 @@
   function openWorkflowOnBoard(groupId: string, name?: string) {
     boardFocusRequest = { groupId, name, nonce: (boardFocusRequest?.nonce ?? 0) + 1 };
     showWorkflowBoard(true);
+  }
+  let workflowMenu = $state<{ id: string; x: number; y: number } | null>(null);
+  let workflowMenuNode = $state<HTMLDivElement | null>(null);
+  function openWorkflowMenu(id: string, x: number, y: number) {
+    sessionContextMenu = null;
+    workflowMenu = { id, x: Math.max(8, Math.min(x, window.innerWidth - 230)), y: Math.max(8, Math.min(y, window.innerHeight - 220)) };
+    void tick().then(() => workflowMenuNode?.querySelector<HTMLButtonElement>("button")?.focus());
+  }
+  const menuWorkflow = $derived(workflowMenu ? sidebarWorkflowList.find((item) => item.id === workflowMenu!.id) ?? null : null);
+  /** A workflow row opens its chats side by side, in chain order, as many as the panes hold. */
+  function openWorkflowChats(workflow: SidebarWorkflow) {
+    const chats = workflow.members.map((member) => sessionForStep(member.nativeId))
+      .filter((session, index, list): session is HubSession => Boolean(session) && list.indexOf(session) === index)
+      .slice(0, 3);
+    if (!chats.length) {
+      sessionContextError = tr("None of this workflow's chats is open.", "Nenhum chat deste workflow está aberto.");
+      return;
+    }
+    if (boardOpen) showWorkflowBoard(false);
+    if (chats.some((session) => !session.remote && projectFilter !== "all" && projectKey(session.workingDirectory ?? session.project) !== projectFilter)) projectFilter = "all";
+    const previousCount = currentPaneIds().length;
+    [primaryId, secondaryId, tertiaryId] = [chats[0]?.id ?? null, chats[1]?.id ?? null, chats[2]?.id ?? null];
+    if (chats.length > 1 && previousCount !== chats.length) {
+      splitRatio = .5;
+      tertiaryRatio = .34;
+    }
+    focusedPaneId = chats[0].id;
+    maximizedPaneId = null;
+    persistWorkspaceLayout();
   }
   // The sidebar menu builds the same groups the board does: one step per chat, chained from the end of the route.
   let workflowSubmenuOpen = $state(false);
@@ -2633,6 +2746,11 @@
         sessionContextMenu = null;
         return;
       }
+      if (event.key === "Escape" && workflowMenu) {
+        event.preventDefault();
+        workflowMenu = null;
+        return;
+      }
       if (event.key === "Escape" && headerControl) {
         headerControl = null;
         return;
@@ -2681,6 +2799,7 @@
       const target = event.target as Node;
       if (launcherOpen && launcherRoot && !launcherRoot.contains(target) && !launcherPopoverNode?.contains(target)) launcherOpen = false;
       if (sessionContextMenu && !(target instanceof Element && target.closest(".session-context-menu"))) sessionContextMenu = null;
+      if (workflowMenu && !(target instanceof Element && target.closest(".workflow-row-menu, .workflow-row-more"))) workflowMenu = null;
     };
     document.addEventListener("pointerdown", closeLauncher);
     const paneDragHost = workbenchElement;
@@ -2971,10 +3090,10 @@
     </div>
 
     <div class="session-tools">
-    <div class="session-filters" aria-label={tr("Filter agents", "Filtrar agentes")}>
-      <button class:active={filter === "all"} type="button" onclick={() => filter = "all"}>{tr("All", "Todos")}</button>
-      <button class:active={filter === "active"} type="button" onclick={() => filter = "active"}>{tr("Active", "Ativos")}</button>
-      <button class:active={filter === "attention"} type="button" onclick={() => filter = "attention"}>{tr("Attention", "Atenção")}</button>
+    <div class="session-filters" role="tablist" aria-label={tr("Show in the sidebar", "Mostrar na barra lateral")}>
+      {#each [["all", "All", "Todos"], ["workflows", "Workflows", "Workflows"], ["groups", "Groups", "Grupos"]] as [tab, english, portuguese] (tab)}
+        <button class:active={sidebarTab === tab} type="button" role="tab" aria-selected={sidebarTab === tab} data-sidebar-tab={tab} onclick={() => chooseSidebarTab(tab as SidebarTab)}>{tr(english, portuguese)}</button>
+      {/each}
     </div>
     </div>
 
@@ -2983,7 +3102,7 @@
         {#each [1, 2, 3] as item}
           <div class="session-skeleton" aria-hidden="true"><i></i><span></span></div>
         {/each}
-      {:else if filteredSessions.length}
+      {:else if sidebarLayout.rows.length}
         {#each sidebarLayout.rows as row (row.key)}
           {#if row.kind === "header"}
             <div class:drop-target={groupDropTarget === (row.group?.id ?? "none")} class:collapsed={row.group?.collapsed} class:dragging-section={draggingSectionId === (row.group?.id ?? "none")} class:reorder-before={reorderTarget?.id === (row.group?.id ?? "none") && !reorderTarget.after} class:reorder-after={reorderTarget?.id === (row.group?.id ?? "none") && reorderTarget.after} class="group-heading" role="group" aria-label={row.group?.name ?? tr("No group", "Sem grupo")}
@@ -3009,15 +3128,41 @@
                 <span class="group-label">{tr("No group", "Sem grupo")}</span><small>{row.count}</small>
               {/if}
             </div>
+          {:else if row.kind === "workflow"}
+          {@const workflow = row.workflow}
+          {@const opened = row.members.some(Boolean) && row.members.filter(Boolean).slice(0, 3).every((session) => currentPaneIds().includes(session!.id))}
+          <div class:expanded={row.expanded} class:opened class="workflow-row" role="group" aria-label={workflow.name} data-sidebar-workflow={workflow.id} title={sidebarCollapsed ? `${workflow.name} · ${workflow.subtitle}` : undefined} oncontextmenu={(event) => { event.preventDefault(); openWorkflowMenu(workflow.id, event.clientX, event.clientY); }} transition:slide={{ duration: motionDuration(190), easing: cubicOut }}>
+            <button class="workflow-row-select" type="button" aria-label={`${workflow.name} · ${workflow.subtitle} · ${tr("Open its chats side by side", "Abrir seus chats lado a lado")}`} onclick={() => openWorkflowChats(workflow)}>
+              <span class="workflow-avatars" class:more={workflow.members.length > 3} aria-hidden="true">
+                {#each workflow.members.slice(0, 3) as member, position (member.stepId)}
+                  {@const session = row.members[position]}
+                  <span class="workflow-avatar" style:--stack={position}><ThreadAvatar seed={session?.nativeSessionId || member.nativeId} label={session ? sessionName(session) : member.roleLabel} size={26} /></span>
+                {/each}
+                {#if workflow.members.length > 3}<span class="workflow-avatar workflow-avatar-more" style:--stack={3}>+{workflow.members.length - 3}</span>{/if}
+                <i class="workflow-row-dot tone-{workflow.tone}"></i>
+              </span>
+              <span class="session-copy">
+                <span class="session-title-row"><strong>{workflow.name}</strong></span>
+                <em class="workflow-row-state tone-{workflow.tone}"><i></i>{workflow.subtitle}</em>
+              </span>
+            </button>
+            {#if !sidebarCollapsed}
+              <span class="workflow-row-actions">
+                <button class="workflow-row-more" type="button" aria-haspopup="menu" aria-expanded={workflowMenu?.id === workflow.id} title={tr("Workflow actions", "Ações do workflow")} aria-label={tr(`Actions for ${workflow.name}`, `Ações para ${workflow.name}`)} onclick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); openWorkflowMenu(workflow.id, rect.left, rect.bottom + 4); }}><LumeIcon name="menu" size={14} /></button>
+                <button class="workflow-row-toggle" type="button" disabled={row.forced} aria-expanded={row.expanded} title={row.expanded ? tr("Hide its chats", "Ocultar seus chats") : tr("Show its chats", "Mostrar seus chats")} aria-label={row.expanded ? tr(`Hide the chats of ${workflow.name}`, `Ocultar os chats de ${workflow.name}`) : tr(`Show the chats of ${workflow.name}`, `Mostrar os chats de ${workflow.name}`)} onclick={() => toggleWorkflowRow(workflow.id)}><LumeIcon name="chevron-down" size={12} /></button>
+              </span>
+            {/if}
+          </div>
           {:else}
           {@const session = row.session}
           {@const index = row.index}
+          {@const nested = row.nested}
           {@const childAgents = subagentsBySession.get(session.id) ?? []}
           {@const waitingForChildren = parentWaitingForSubagents(session, childAgents)}
           {@const selected = currentPaneIds().includes(session.id)}
           {@const workflowSteps = workflowStepsFor(session)}
-          {@const workflowStep = workflowSteps[0]}
-          <div class:focused={session.id === focusedPaneId} class:secondary-selected={selected && session.id !== focusedPaneId} class:connected={selected} class:connected-above={selected && index > 0 && currentPaneIds().includes(sidebarLayout.visible[index - 1].id)} class:connected-below={selected && index < sidebarLayout.visible.length - 1 && currentPaneIds().includes(sidebarLayout.visible[index + 1].id)} class="session-tree-item" transition:slide={{ duration: motionDuration(190), easing: cubicOut }}>
+          {@const workflowStep = (nested && workflowSteps.find((step) => step.workflowId === nested.workflowId)) || workflowSteps[0]}
+          <div class:focused={session.id === focusedPaneId} class:secondary-selected={selected && session.id !== focusedPaneId} class:connected={selected} class:connected-above={selected && index > 0 && currentPaneIds().includes(sidebarLayout.visible[index - 1].id)} class:connected-below={selected && index < sidebarLayout.visible.length - 1 && currentPaneIds().includes(sidebarLayout.visible[index + 1].id)} class:nested={Boolean(nested)} class="session-tree-item" data-workflow-member={nested?.workflowId} transition:slide={{ duration: motionDuration(190), easing: cubicOut }}>
           <div
             class:dragging={draggingSessionId === session.id}
             class="session-row"
@@ -3039,7 +3184,8 @@
                     <span class="source-label"><BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />{sourceLabel(session)}</span>
                   {/if}
                   {#if workflowStep}
-                    <span class="workflow-chip tone-{presenceTone(workflowStep)}" title={workflowChipTitle(workflowSteps)}><span class="workflow-chip-role"><WorkflowRoleIcon role={workflowStep.role} /></span><span>{workflowStep.index}/{workflowStep.total}</span><i aria-hidden="true"></i>{#if workflowSteps.length > 1}<small>+{workflowSteps.length - 1}</small>{/if}</span>
+                    <!-- The workflow row above carries the run; a member only names the role it plays. -->
+                    <span class="workflow-role-mark role-{workflowStep.role}" title={workflowChipTitle(workflowSteps)}><WorkflowRoleIcon role={workflowStep.role} /></span>
                   {/if}
                 </span>
                 <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{sessionMeta(session)}</span>{#if session.forkedFrom}<span class="session-fork" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)} aria-label={tr("Fork", "Fork")}><LumeIcon name="fork" size={10} /></span>{/if}</small>
@@ -3071,6 +3217,8 @@
           </div>
           {/if}
         {/each}
+      {:else if sidebarTab === "workflows"}
+        <p class="no-results">{query ? tr("No matching workflows", "Nenhum workflow encontrado") : tr("No workflows yet. Add a chat to one from its menu.", "Nenhum workflow ainda. Adicione um chat pelo menu dele.")}</p>
       {:else if !filteredInternalServices.length}
         <p class="no-results">{query ? tr("No matching agents", "Nenhum agente encontrado") : tr("No agents detected", "Nenhum agente detectado")}</p>
       {/if}
@@ -3088,6 +3236,24 @@
 
   </aside>
 
+  {#if workflowMenu && menuWorkflow}
+    {@const assigned = groupAssignments[workflowGroupKey(menuWorkflow.id)]}
+    <div class="session-context-menu workflow-row-menu" role="menu" tabindex="-1" aria-label={tr(`Actions for ${menuWorkflow.name}`, `Ações para ${menuWorkflow.name}`)} bind:this={workflowMenuNode} style:left={`${workflowMenu.x}px`} style:top={`${workflowMenu.y}px`}>
+      <strong>{menuWorkflow.name}</strong>
+      <button class="session-context-command" type="button" role="menuitem" data-workflow-menu="open" onclick={() => { const workflow = menuWorkflow; workflowMenu = null; openWorkflowChats(workflow); }}><LumeIcon name="columns" size={15} /><span>{tr("Open chats side by side", "Abrir chats lado a lado")}</span></button>
+      <button class="session-context-command" type="button" role="menuitem" data-workflow-menu="board" onclick={() => { const id = menuWorkflow.id; workflowMenu = null; openWorkflowOnBoard(id); }}><WorkspaceHeaderIcon name="workflow" size={15} /><span>{tr("Open in board", "Abrir no board")}</span></button>
+      <div class="session-context-groups" role="group" aria-label={tr("Move to group", "Mover para grupo")}>
+        <small>{tr("Move to group", "Mover para grupo")}</small>
+        {#each sidebarGroups as group (group.id)}
+          <button class:current={assigned === group.id} class="session-context-command" type="button" role="menuitem" data-workflow-group={group.id} onclick={() => { assignWorkflowToGroup(menuWorkflow.id, group.id); workflowMenu = null; }}><LumeIcon name="folder" size={14} /><span>{group.name}</span>{#if assigned === group.id}<LumeIcon name="check" size={13} />{/if}</button>
+        {/each}
+        {#if assigned}
+          <button class="session-context-command" type="button" role="menuitem" onclick={() => { assignWorkflowToGroup(menuWorkflow.id, null); workflowMenu = null; }}><LumeIcon name="close" size={14} /><span>{tr("Remove from group", "Tirar do grupo")}</span></button>
+        {/if}
+        <button class="session-context-command" type="button" role="menuitem" data-workflow-group="new" onclick={() => { const group = newSidebarGroup(); assignWorkflowToGroup(menuWorkflow.id, group.id); workflowMenu = null; renamingGroupId = group.id; groupNameDraft = group.name; }}><LumeIcon name="plus" size={14} /><span>{tr("New group…", "Novo grupo…")}</span></button>
+      </div>
+    </div>
+  {/if}
   {#if sessionContextMenu && contextSession}
     <div
       class="session-context-menu"
@@ -4102,18 +4268,49 @@
   .session-title-row { min-width: 0; display: flex; align-items: center; gap: 6px; }
   .session-title-row strong { min-width: 0; flex: 0 1 auto; }
   .source-label { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; border-radius: 999px; color: var(--workspace-muted); background: color-mix(in srgb, var(--workspace-muted) 11%, transparent); font-size: 8px; font-weight: 720; letter-spacing: .045em; line-height: 1.25; text-transform: uppercase; }
-  .workflow-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 1px 5px 1px 3px; border-radius: 999px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 12%, transparent); font-size: 9px; font-weight: 720; line-height: 1.3; font-variant-numeric: tabular-nums; }
-  .workflow-chip-role { width: 13px; height: 13px; display: grid; place-items: center; }
-  .workflow-chip i, .session-workflow-dot { width: 5px; height: 5px; border-radius: 50%; background: #8a9891; }
-  .workflow-chip small { color: var(--workspace-muted); font-size: 8px; }
-  .workflow-chip.tone-idle i { display: none; }
-  .workflow-chip.tone-running i, .session-workflow-dot.tone-running { background: #4d99cc; animation: live-pulse 1.8s ease-out infinite; }
-  .workflow-chip.tone-approval i, .session-workflow-dot.tone-approval, .workflow-chip.tone-paused i, .session-workflow-dot.tone-paused { background: #d6a441; }
-  .workflow-chip.tone-ready i, .session-workflow-dot.tone-ready { background: var(--workspace-accent); }
-  .workflow-chip.tone-failed i, .session-workflow-dot.tone-failed { background: #c86662; }
-  .workflow-chip.tone-done i, .session-workflow-dot.tone-done { background: #4daa77; }
-  .session-workflow-dot { position: absolute; left: 0; bottom: 0; width: 9px; height: 9px; box-sizing: border-box; border: 2px solid var(--workspace-sidebar); display: none; pointer-events: none; }
+  .workflow-role-mark { width: 15px; height: 15px; flex: 0 0 auto; display: grid; place-items: center; color: var(--workspace-muted); }
+  .workflow-row { position: relative; min-width: 0; margin-bottom: 2px; display: flex; align-items: center; border-radius: 10px; transition: background 140ms ease; }
+  .workflow-row:hover { background: var(--workspace-subtle); }
+  .workflow-row.opened { background: color-mix(in srgb, var(--workspace-accent-soft) 42%, transparent); }
+  .workflow-row-select { min-width: 0; min-height: 56px; padding: 8px 4px 8px 10px; display: flex; align-items: center; gap: 9px; flex: 1; border: 0; border-radius: inherit; color: inherit; background: transparent; text-align: left; cursor: pointer; }
+  .workflow-row-select:focus-visible, .workflow-row-actions button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; }
+  /* Up to three avatars overlap from left to right, the first on top, like the order of the chain. */
+  .workflow-avatars { position: relative; width: 52px; height: 34px; flex: 0 0 auto; }
+  .workflow-avatar { position: absolute; top: 4px; left: calc(var(--stack) * 13px); z-index: calc(4 - var(--stack)); width: 26px; height: 26px; display: grid; place-items: center; border-radius: 27%; box-shadow: 0 0 0 2px var(--workspace-sidebar); }
+  .workflow-avatar-more { top: auto; bottom: -1px; left: auto; right: -3px; z-index: 5; width: auto; min-width: 16px; height: 14px; padding: 0 3px; box-sizing: border-box; border-radius: 999px; color: var(--workspace-strong); background: var(--workspace-raised); font-size: 8px; font-weight: 750; line-height: 1; font-variant-numeric: tabular-nums; }
+  .workflow-row-dot { position: absolute; top: 1px; left: -3px; z-index: 6; width: 9px; height: 9px; box-sizing: border-box; border: 2px solid var(--workspace-sidebar); border-radius: 50%; background: #8a9891; }
+  .workflow-row-dot.tone-running, .workflow-row-state.tone-running i { background: #4d99cc; animation: live-pulse 1.8s ease-out infinite; }
+  .workflow-row-dot.tone-approval, .workflow-row-state.tone-approval i, .workflow-row-dot.tone-paused, .workflow-row-state.tone-paused i, .session-workflow-dot.tone-approval, .session-workflow-dot.tone-paused { background: #d6a441; }
+  .workflow-row-dot.tone-ready, .workflow-row-state.tone-ready i, .session-workflow-dot.tone-ready { background: var(--workspace-accent); }
+  .workflow-row-dot.tone-failed, .workflow-row-state.tone-failed i, .session-workflow-dot.tone-failed { background: #c86662; }
+  .workflow-row-dot.tone-done, .workflow-row-state.tone-done i, .session-workflow-dot.tone-done { background: #4daa77; }
+  .session-workflow-dot.tone-running { background: #4d99cc; animation: live-pulse 1.8s ease-out infinite; }
+  .workflow-row-state.tone-idle i, .workflow-row-dot.tone-idle { display: none; }
+  .workflow-row-actions { display: flex; align-items: center; gap: 1px; padding-right: 5px; }
+  .workflow-row-actions button { width: 24px; height: 24px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .workflow-row-actions button:hover:not(:disabled) { color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 9%, transparent); }
+  .workflow-row-actions button:disabled { opacity: .4; cursor: default; }
+  .workflow-row-more { opacity: 0; transition: opacity 120ms ease; }
+  .workflow-row:hover .workflow-row-more, .workflow-row-more:focus-visible, .workflow-row-more[aria-expanded="true"] { opacity: 1; }
+  .workflow-row-toggle :global(.lume-icon) { transition: transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .workflow-row:not(.expanded) .workflow-row-toggle :global(.lume-icon) { transform: rotate(-90deg); }
+  /* The chats of a workflow hang from its row, with a guide line along their left edge. */
+  .session-tree-item.nested { margin-left: 16px; }
+  .session-tree-item.nested::after { position: absolute; top: 0; bottom: 0; left: -8px; width: 1px; background: var(--workspace-line); content: ""; pointer-events: none; }
+  .session-tree-item.nested .session-select { min-height: 54px; padding-top: 7px; padding-bottom: 7px; }
+  .session-workflow-dot { position: absolute; left: 0; bottom: 0; width: 9px; height: 9px; box-sizing: border-box; border: 2px solid var(--workspace-sidebar); border-radius: 50%; background: #8a9891; display: none; pointer-events: none; }
   .workspace.sidebar-collapsed .session-workflow-dot { display: block; }
+  .workspace.sidebar-collapsed .workflow-row { height: 44px; }
+  .workspace.sidebar-collapsed .workflow-row-select { min-height: 44px; padding: 5px 2px; justify-content: center; }
+  /* Collapsed, the avatars gather into a small cluster the size of one chat avatar. */
+  .workspace.sidebar-collapsed .workflow-avatars { width: 34px; }
+  .workspace.sidebar-collapsed .workflow-avatar { top: 0; left: 0; width: 20px; height: 20px; }
+  .workspace.sidebar-collapsed .workflow-avatar :global(.thread-avatar) { transform: scale(.77); }
+  .workspace.sidebar-collapsed .workflow-avatar:nth-child(2) { left: 14px; }
+  .workspace.sidebar-collapsed .workflow-avatar:nth-child(3) { top: 14px; left: 7px; }
+  .workspace.sidebar-collapsed .workflow-avatar-more { top: auto; left: auto; width: auto; height: 14px; }
+  .workspace.sidebar-collapsed .session-tree-item.nested { margin-left: 0; }
+  .workspace.sidebar-collapsed .session-tree-item.nested::after { left: 1px; top: 6px; bottom: 6px; }
   .session-copy strong { color: var(--workspace-strong); font-size: 11px; font-weight: 720; letter-spacing: -.01em; }
   .session-copy small { color: var(--workspace-muted); font-size: 10px; line-height: 1.3; }
   .session-copy .session-meta { display: flex; align-items: center; gap: 4px; }

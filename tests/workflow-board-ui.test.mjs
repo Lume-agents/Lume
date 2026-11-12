@@ -286,11 +286,18 @@ try {
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
   await evaluate("window.__fixture.status('waiting_for_approval', { pendingConnectionId: 'connection-fixture' })");
   await wait("document.querySelector('.edge-hub.waiting')");
-  // The sidebar follows the same run event: the chat whose handoff waits shows its step and that state.
-  await wait("document.querySelector('.session-row[aria-label=\"Pesquisa\"] .workflow-chip.tone-approval')");
-  assert.match(await evaluate("document.querySelector('.session-row[aria-label=\"Pesquisa\"] .workflow-chip').textContent"), /1\/3/, "the chip shows the step position");
+  // The sidebar follows the same run event: the workflow's own row shows the wait, and its chats name their role.
+  assert.equal(await evaluate("document.querySelector('[data-sidebar-tab=\"all\"]').getAttribute('aria-selected')"), "true", "the sidebar opens on every chat");
+  assert.equal(await evaluate("document.querySelector('.workflow-row')"), null, "the All tab lists chats only");
+  assert.equal(await evaluate("document.querySelector('.session-tree-item:not(.nested) .session-row[aria-label=\"Pesquisa\"] .workflow-role-mark.role-planner') !== null"), true, "a workflow chat stays a plain row in All, naming its role");
+  await click('[data-sidebar-tab="workflows"]');
+  await wait("document.querySelector('.workflow-row[data-sidebar-workflow=\"orb-fixture\"] .workflow-row-dot.tone-approval')");
+  assert.equal(await evaluate("document.querySelector('.workflow-row[data-sidebar-workflow=\"orb-fixture\"] .workflow-row-state').textContent.trim()"), "Aguardando aprovação", "the workflow row says what the run waits for");
+  assert.equal(await evaluate("document.querySelector('[data-workflow-member=\"orb-fixture\"] .session-row[aria-label=\"Pesquisa\"] .workflow-role-mark.role-planner') !== null"), true, "a nested chat shows only its role");
   assert.match(await evaluate("document.querySelector('.session-row[aria-label=\"Pesquisa\"] .session-select').getAttribute('aria-label')"), /Etapa 1\/3 · Planejador · .* · Aguardando aprovação/, "the row names its workflow step");
-  assert.equal(await evaluate("document.querySelector('.session-row[aria-label=\"Monitoramento\"] .workflow-chip')"), null, "chats outside the workflow show no chip");
+  assert.equal(await evaluate("document.querySelector('.session-row[aria-label=\"Monitoramento\"]')"), null, "the Workflows tab leaves out chats outside workflows");
+  await click('[data-sidebar-tab="all"]');
+  assert.equal(await evaluate("document.querySelector('.session-row[aria-label=\"Monitoramento\"] .workflow-role-mark')"), null, "chats outside the workflow show no role");
   assert.equal(await evaluate("document.querySelectorAll('.board-card:not(.ghost) .card-orb').length === document.querySelectorAll('.board-card:not(.ghost)').length"), true, "every card carries a status orb");
   assert.equal(await evaluate("document.querySelectorAll('.card-orb.orb-approval').length"), 1, "the step whose result waits for a decision says so");
   await wait("document.querySelector('.edge-approve')");
@@ -420,8 +427,87 @@ try {
   assert.deepEqual(await evaluate("(() => { const g = window.__fixture.preferences.workflowGroups[1]; return { steps: g.steps.map(step => step.sessionNativeId + ':' + step.role), arrows: g.connections.map(c => c.fromStepId + '>' + c.toStepId) }; })()"),
     { steps: ["native-3:planner", "native-0:implementer"], arrows: ["step-native-3>step-native-0"] }, "the menu chains the chat after the end of the route");
   await wait("document.querySelectorAll('.board-card:not(.ghost)').length === 2 && document.querySelector('.workflow-name')?.value === 'Workflow 2'");
+  // The sidebar tabs: All lists every chat once; Workflows shows each workflow as a row with its chats nested; Groups
+  // holds the chat groups, which can hold workflows too.
+  const found = (selector) => "document.querySelector(" + JSON.stringify(selector) + ")";
+  const rowOf = (id) => '.workflow-row[data-sidebar-workflow="' + id + '"]';
+  const membersOf = (id) => '[data-workflow-member="' + id + '"]';
+  const plainRows = () => evaluate("Array.from(document.querySelectorAll('.session-tree-item:not(.nested) .session-row')).map(row => row.getAttribute('aria-label')).sort().join()");
+  await click('[aria-label="Board de workflow"]');
+  await wait("document.querySelector('.workflow-board').hidden");
+  assert.equal(await plainRows(), "Implementação,Monitoramento,Pesquisa,Revisão", "All lists every chat once, workflow members included");
+  assert.equal(await evaluate("document.querySelectorAll('.workflow-row').length"), 0);
+  await click('[data-sidebar-tab="workflows"]');
+  await wait("document.querySelectorAll('.workflow-row').length === 2");
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('.workflow-row')).map(row => row.querySelector('strong').textContent + ':' + row.querySelectorAll('.workflow-avatar:not(.workflow-avatar-more)').length)"),
+    ["Workflow do Orb 1:3", "Workflow 2:2"], "each workflow row is named and stacks one avatar per chat");
+  const nestedNames = (id) => evaluate("Array.from(document.querySelectorAll(" + JSON.stringify(membersOf(id) + " .session-row") + ")).map(row => row.getAttribute('aria-label'))");
+  assert.deepEqual(await nestedNames("orb-fixture"), ["Pesquisa", "Implementação", "Revisão"], "the chats hang from their workflow in chain order");
+  assert.deepEqual(await nestedNames(created), ["Monitoramento", "Pesquisa"]);
+  assert.equal(await plainRows(), "", "Workflows shows chats only under their workflow");
+  // Dragging still starts from a nested chat.
+  await evaluate(found(membersOf(created) + ' .session-row[aria-label="Monitoramento"]') + ".dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }))");
+  await wait(found('.session-row.dragging[aria-label="Monitoramento"]'));
+  await evaluate(found(".session-row.dragging") + ".dispatchEvent(new DragEvent('dragend', { bubbles: true }))");
+  await wait("!" + found(".session-row.dragging"));
+  await screenshot("sidebar-workflows-dark");
+  // Clicking the row opens its chats side by side, in chain order.
+  await click(rowOf("orb-fixture") + " .workflow-row-select");
+  await wait("Array.from(document.querySelectorAll('[data-workspace-pane]')).map(pane => pane.dataset.workspacePane).join() === 'session-0,session-1,session-2'");
+  assert.equal(await evaluate(found(rowOf("orb-fixture")) + ".classList.contains('opened')"), true, "the row shows its chats are open");
+  // Folding the row hides its chats.
+  await click(rowOf("orb-fixture") + " .workflow-row-toggle");
+  await wait("!" + found(membersOf("orb-fixture")));
+  // The row's menu moves the workflow into a new chat group, where the Groups tab shows it with its chats.
+  await click(rowOf("orb-fixture") + " .workflow-row-more");
+  await wait(found(".workflow-row-menu"));
+  await screenshot("sidebar-workflow-menu-dark");
+  await click('.workflow-row-menu [data-workflow-group="new"]');
+  await wait("!" + found(".workflow-row-menu"));
+  await click('[data-sidebar-tab="groups"]');
+  await wait(found(".group-heading .group-rename input"));
+  await evaluate(found(".group-heading .group-rename input") + ".blur()");
+  await wait("Array.from(document.querySelectorAll('.group-heading, .workflow-row')).map(row => row.getAttribute('aria-label')).join('|') === 'Sem grupo|Workflow 2|Grupo 1|Workflow do Orb 1'");
+  assert.equal(await plainRows(), "", "Groups does not repeat a workflow's chats outside it");
+  await click(rowOf("orb-fixture") + " .workflow-row-toggle");
+  await wait(found(membersOf("orb-fixture")));
+  await evaluate("(async () => { const p = window.__fixture.preferences; p.darkMode = false; await window.__TAURI_INTERNALS__.invoke('set_preferences', { preferences: p }); window.__fixture.emit('lume://preferences-changed', p); })()");
+  await delay(240);
+  await screenshot("sidebar-groups-light");
+  await click(rowOf("orb-fixture") + " .workflow-row-toggle");
+  await wait("!" + found(membersOf("orb-fixture")));
+  // The tab, the folded row and the group survive reopening; a search still reaches the folded chats.
+  await call("Page.reload");
+  await wait("document.querySelectorAll('.workflow-row').length === 2");
+  assert.equal(await evaluate(found('[data-sidebar-tab="groups"]') + ".getAttribute('aria-selected')"), "true", "the tab is remembered");
+  assert.equal(await evaluate(found(rowOf("orb-fixture")) + ".classList.contains('expanded') || Boolean(" + found(membersOf("orb-fixture")) + ")"), false, "the folded row stays folded");
+  await click(".search-toggle");
+  await wait(found(".search-inline input"));
+  const search = (text) => evaluate("(() => { const field = document.querySelector('.search-inline input'); field.value = " + JSON.stringify(text) + "; field.dispatchEvent(new Event('input', { bubbles: true })); })()");
+  await search("Revis");
+  await wait(found(membersOf("orb-fixture") + ' .session-row[aria-label="Revisão"]'));
+  assert.equal(await evaluate("document.querySelectorAll('.workflow-row').length"), 1, "only the workflow with a matching chat stays");
+  await click('[data-sidebar-tab="all"]');
+  await wait("document.querySelectorAll('.session-row').length === 1 && " + found('.session-row[aria-label="Revisão"]'));
+  await click('[data-sidebar-tab="workflows"]');
+  await wait(found(membersOf("orb-fixture") + ' .session-row[aria-label="Revisão"]'));
+  await search("");
+  await click('[aria-label="Fechar busca de agentes"]');
+  await wait("!" + found(membersOf("orb-fixture")));
+  await click(".sidebar-toggle");
+  await wait(found(".workspace.sidebar-collapsed"));
+  await delay(600);
+  await screenshot("sidebar-workflows-collapsed");
+  await click(".sidebar-toggle");
+  await wait("!" + found(".workspace.sidebar-collapsed"));
+  // The menu also opens the same workflow on the board.
+  await click('[aria-label="Board de workflow"]');
+  await wait("document.querySelector('.workflow-board').hidden");
+  await click(rowOf("orb-fixture") + " .workflow-row-more");
+  await click('.workflow-row-menu [data-workflow-menu="board"]');
+  await wait("!document.querySelector('.workflow-board').hidden && document.querySelector('.workflow-name')?.value === 'Workflow do Orb 1'");
   assert.deepEqual(failures, [], "no browser exceptions");
-  console.log("Workflow board UI passed: Orb import, sidebar drop, arrows, cycle refusal, free drag, preview, zoom, all run controls, recovery, event order, draft/layout persistence, removal, insertion, overlay keyboard ownership, fit, light/dark contrast, sidebar chips, chat strip approval, sidebar menu workflows.");
+  console.log("Workflow board UI passed: Orb import, sidebar drop, arrows, cycle refusal, free drag, preview, zoom, all run controls, recovery, event order, draft/layout persistence, removal, insertion, overlay keyboard ownership, fit, light/dark contrast, sidebar workflow rows, chat strip approval, sidebar menu workflows.");
   console.log("Screenshots: " + output);
 } finally {
   socket?.close();

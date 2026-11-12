@@ -211,3 +211,64 @@ export function chainGroupFromSessions(
   }
   return { group, added };
 }
+
+export type SidebarWorkflowMember = { stepId: string; nativeId: string; role: WorkflowRole; roleLabel: string };
+
+/** A workflow as its own sidebar row: its chats in chain order and one line on where its run stands. */
+export type SidebarWorkflow = {
+  id: string;
+  name: string;
+  members: SidebarWorkflowMember[];
+  tone: PresenceTone;
+  runActive: boolean;
+  subtitle: string;
+};
+
+function runTone(run: WorkflowRun | null): PresenceTone {
+  switch (run?.status) {
+    case "running": return "running";
+    case "waiting_for_approval": return "approval";
+    case "ready": return "ready";
+    case "paused": return "paused";
+    case "failed": return "failed";
+    case "completed": return "done";
+    default: return "idle";
+  }
+}
+
+/** Every saved workflow with at least one step, in the order the board lists them. */
+export function sidebarWorkflows(
+  groups: WorkflowGroupDefinition[],
+  runs: Record<string, WorkflowRun | null | undefined>,
+  layoutNames: Record<string, string> = {},
+  portuguese = false,
+): SidebarWorkflow[] {
+  const tr = (english: string, portugueseText: string) => (portuguese ? portugueseText : english);
+  return groups.flatMap((group, groupIndex) => {
+    if (!group.steps.length) return [];
+    const run = runs[group.id] ?? null;
+    const chain = analyzeChain(group);
+    const order = [...chain.order, ...group.steps.map((step) => step.id).filter((id) => !chain.order.includes(id))];
+    const members = order.flatMap((stepId) => {
+      const step = group.steps.find((item) => item.id === stepId);
+      const nativeId = step?.sessionNativeId?.trim();
+      return step && nativeId ? [{ stepId, nativeId, role: step.role, roleLabel: stepRoleLabel(step, portuguese) }] : [];
+    });
+    const tone = runTone(run);
+    const position = run?.currentStepId ? order.indexOf(run.currentStepId) : -1;
+    const current = position >= 0 ? group.steps.find((step) => step.id === order[position]) : undefined;
+    const step = current ? tr(`Step ${position + 1}/${order.length}`, `Etapa ${position + 1}/${order.length}`) : "";
+    const role = current ? stepRoleLabel(current, portuguese) : "";
+    const idle = members.length === 1 ? tr("1 agent", "1 agente") : tr(`${members.length} agents`, `${members.length} agentes`);
+    const subtitle = {
+      running: current ? `${step} · ${role} ${tr("running", "executando")}` : tr("Running", "Executando"),
+      approval: tr("Waiting for approval", "Aguardando aprovação"),
+      ready: tr("Ready", "Pronto"),
+      paused: current ? `${step} · ${tr("Paused", "Pausado")}` : tr("Paused", "Pausado"),
+      failed: current ? `${step} · ${role} ${tr("failed", "falhou")}` : tr("Failed", "Falhou"),
+      done: tr("Completed", "Concluído"),
+      idle,
+    }[tone];
+    return [{ id: group.id, name: workflowGroupName(group, groupIndex, layoutNames, portuguese), members, tone, runActive: runIsActive(run), subtitle }];
+  });
+}

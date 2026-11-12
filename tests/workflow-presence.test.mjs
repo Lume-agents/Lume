@@ -11,7 +11,7 @@ registerHooks({
     return nextResolve(specifier, context);
   },
 });
-const { chainGroupFromSessions, newerRun, presenceTone, sessionWorkflowPresence, boardLayoutNames } = await import("../src/lib/workflowPresence.ts");
+const { chainGroupFromSessions, newerRun, presenceTone, sessionWorkflowPresence, boardLayoutNames, sidebarWorkflows } = await import("../src/lib/workflowPresence.ts");
 const { analyzeChain } = await import("../src/lib/workflowBoard.ts");
 
 const contract = (role) => ({ instruction: "Do " + role, expectedInput: "Input", producedOutput: "Output", completionCondition: "Done" });
@@ -113,4 +113,26 @@ test("board names are read defensively from local storage", () => {
   store.set("lume:workflow-board:v1", JSON.stringify({ layouts: { one: { name: " Release " }, two: { positions: {} } } }));
   assert.deepEqual(boardLayoutNames(), { one: "Release" });
   delete globalThis.localStorage;
+});
+
+test("a workflow becomes one sidebar row with its chats in chain order and the run in a line", () => {
+  const { group } = chainGroupFromSessions([{ nativeSessionId: "a" }, { nativeSessionId: "b" }, { nativeSessionId: "c" }], contracts);
+  // Steps listed out of order still come back in chain order.
+  const shuffled = { ...group, steps: [group.steps[2], group.steps[0], group.steps[1]] };
+  const empty = { ...group, id: "empty", steps: [], connections: [] };
+  const [row, ...rest] = sidebarWorkflows([shuffled, empty], {}, { [group.id]: "Release" });
+  assert.equal(rest.length, 0, "a workflow without steps has no row");
+  assert.equal(row.name, "Release");
+  assert.deepEqual(row.members.map((member) => member.nativeId + ":" + member.role), ["a:planner", "b:implementer", "c:reviewer"]);
+  assert.equal(row.tone, "idle");
+  assert.equal(row.subtitle, "3 agents");
+  const running = sidebarWorkflows([group], { [group.id]: run(group, { currentStepId: "step-b" }) })[0];
+  assert.equal(running.tone, "running");
+  assert.equal(running.runActive, true);
+  assert.equal(running.subtitle, "Step 2/3 · Implementer running");
+  assert.equal(sidebarWorkflows([group], { [group.id]: run(group, { status: "waiting_for_approval", currentStepId: "step-a" }) }, {}, true)[0].subtitle, "Aguardando aprovação");
+  assert.equal(sidebarWorkflows([group], { [group.id]: run(group, { status: "ready" }) })[0].subtitle, "Ready");
+  const done = sidebarWorkflows([group], { [group.id]: run(group, { status: "completed" }) })[0];
+  assert.equal(done.tone, "done");
+  assert.equal(done.runActive, false);
 });

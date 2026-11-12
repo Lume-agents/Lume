@@ -286,6 +286,11 @@ try {
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
   await evaluate("window.__fixture.status('waiting_for_approval', { pendingConnectionId: 'connection-fixture' })");
   await wait("document.querySelector('.edge-hub.waiting')");
+  // The sidebar follows the same run event: the chat whose handoff waits shows its step and that state.
+  await wait("document.querySelector('.session-row[aria-label=\"Pesquisa\"] .workflow-chip.tone-approval')");
+  assert.match(await evaluate("document.querySelector('.session-row[aria-label=\"Pesquisa\"] .workflow-chip').textContent"), /1\/3/, "the chip shows the step position");
+  assert.match(await evaluate("document.querySelector('.session-row[aria-label=\"Pesquisa\"] .session-select').getAttribute('aria-label')"), /Etapa 1\/3 · Planejador · .* · Aguardando aprovação/, "the row names its workflow step");
+  assert.equal(await evaluate("document.querySelector('.session-row[aria-label=\"Monitoramento\"] .workflow-chip')"), null, "chats outside the workflow show no chip");
   assert.equal(await evaluate("document.querySelectorAll('.board-card:not(.ghost) .card-orb').length === document.querySelectorAll('.board-card:not(.ghost)').length"), true, "every card carries a status orb");
   assert.equal(await evaluate("document.querySelectorAll('.card-orb.orb-approval').length"), 1, "the step whose result waits for a decision says so");
   await wait("document.querySelector('.edge-approve')");

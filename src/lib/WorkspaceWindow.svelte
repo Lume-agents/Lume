@@ -45,6 +45,9 @@
   import WorkspaceReviewCenter from "$lib/WorkspaceReviewCenter.svelte";
   import WorkspaceSessionPane from "$lib/WorkspaceSessionPane.svelte";
   import WorkflowBoard from "$lib/WorkflowBoard.svelte";
+  import WorkflowRoleIcon from "$lib/WorkflowRoleIcon.svelte";
+  import { desktopWorkflowBackend } from "$lib/workflowBoardBackend";
+  import { boardLayoutNames, newerRun, presenceTone, sessionWorkflowPresence, type PresenceTone, type WorkflowPresence } from "$lib/workflowPresence";
   import WorkspaceExtensions from "$lib/WorkspaceExtensions.svelte";
   import GuidedTour from "$lib/GuidedTour.svelte";
   import { boardTour, boardTourKey, workspaceTour, workspaceTourKey } from "$lib/tours";
@@ -56,7 +59,7 @@
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
   import { sidebarGroupsKey } from "$lib/sidebarGroups";
-  import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, PendingPairRequest, Preferences, ResumableSession, WorkflowGroupDefinition } from "$lib/domain";
+  import type { AgentKind, CompanionStatus, ExternalAgentPlugin, IntegrationDiagnostic, IntegrationStatus, InternalService, MobileGatewayStatus, MobilePairingOffer, MobileScope, PairedDevice, PendingPairRequest, Preferences, ResumableSession, WorkflowGroupDefinition, WorkflowRun } from "$lib/domain";
   import type { ExternalWriterConflict, HubSession } from "$lib/hubProtocol";
   import type { Language } from "$lib/i18n";
   import { displayText } from "$lib/i18n";
@@ -2112,6 +2115,56 @@
     }
   }
 
+  // Each chat shows the workflow step it plays. The runtime sends every run change to all windows, so the Workspace
+  // keeps the latest run of each saved group with the same rule as the board.
+  let workflowRuns = $state<Record<string, WorkflowRun | null>>({});
+  let workflowLayoutNames = $state<Record<string, string>>({});
+  const requestedWorkflowRuns = new Set<string>();
+  function acceptWorkflowRun(run: WorkflowRun | null) {
+    if (!run || !newerRun(workflowRuns[run.workflowId], run)) return;
+    workflowRuns = { ...workflowRuns, [run.workflowId]: run };
+  }
+  $effect(() => {
+    for (const group of preferences.workflowGroups) {
+      if (requestedWorkflowRuns.has(group.id)) continue;
+      requestedWorkflowRuns.add(group.id);
+      void desktopWorkflowBackend.loadRun(group.id).then(acceptWorkflowRun).catch(() => { requestedWorkflowRuns.delete(group.id); });
+    }
+  });
+  // Names given on the board live with its layout on this computer; they are read again when the board opens or
+  // closes and after it had time to save.
+  $effect(() => {
+    void boardOpen;
+    void preferences.workflowGroups;
+    workflowLayoutNames = boardLayoutNames();
+    const timer = window.setTimeout(() => { workflowLayoutNames = boardLayoutNames(); }, 400);
+    return () => window.clearTimeout(timer);
+  });
+  // Keyed by the chat's current native id: a Codex thread can change it, and the steps follow the new one.
+  const workflowPresence = $derived(sessionWorkflowPresence(preferences.workflowGroups, workflowRuns, workflowLayoutNames, language === "pt-BR"));
+  function workflowStepsFor(session: HubSession): WorkflowPresence[] {
+    const key = session.nativeSessionId?.trim();
+    return key ? workflowPresence.get(key) ?? [] : [];
+  }
+  function workflowToneLabel(tone: PresenceTone) {
+    return {
+      running: tr("Running", "Executando"),
+      approval: tr("Awaiting approval", "Aguardando aprovação"),
+      ready: tr("Ready for next step", "Pronto para a próxima etapa"),
+      paused: tr("Paused", "Pausado"),
+      failed: tr("Failed", "Falhou"),
+      done: tr("Done", "Concluído"),
+      idle: "",
+    }[tone];
+  }
+  function workflowStepLabel(step: WorkflowPresence) {
+    const state = workflowToneLabel(presenceTone(step));
+    return [tr(`Step ${step.index}/${step.total}`, `Etapa ${step.index}/${step.total}`), step.roleLabel, step.name, state].filter(Boolean).join(" · ");
+  }
+  function workflowChipTitle(steps: WorkflowPresence[]) {
+    return steps.map((step) => workflowStepLabel(step) + (step.objective && step.runActive ? "\n" + step.objective : "")).join("\n\n");
+  }
+
   async function savePreferencePatch(patch: Partial<Preferences>) {
     // A later change waits for the save in flight instead of being dropped (a slider can commit right behind another).
     while (settingsSaving) await new Promise((resolve) => setTimeout(resolve, 30));
@@ -2459,6 +2512,15 @@
       maximizedPaneId = null;
     }
   }
+
+  onMount(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void desktopWorkflowBackend.onRunChanged(acceptWorkflowRun)
+      .then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; })
+      .catch(() => undefined);
+    return () => { disposed = true; stop?.(); };
+  });
 
   onMount(() => {
     let disposed = false;
@@ -2900,6 +2962,8 @@
           {@const childAgents = subagentsBySession.get(session.id) ?? []}
           {@const waitingForChildren = parentWaitingForSubagents(session, childAgents)}
           {@const selected = currentPaneIds().includes(session.id)}
+          {@const workflowSteps = workflowStepsFor(session)}
+          {@const workflowStep = workflowSteps[0]}
           <div class:focused={session.id === focusedPaneId} class:secondary-selected={selected && session.id !== focusedPaneId} class:connected={selected} class:connected-above={selected && index > 0 && currentPaneIds().includes(sidebarLayout.visible[index - 1].id)} class:connected-below={selected && index < sidebarLayout.visible.length - 1 && currentPaneIds().includes(sidebarLayout.visible[index + 1].id)} class="session-tree-item" transition:slide={{ duration: motionDuration(190), easing: cubicOut }}>
           <div
             class:dragging={draggingSessionId === session.id}
@@ -2912,14 +2976,17 @@
             ondragend={finishSidebarSessionDrag}
             oncontextmenu={(event) => { event.preventDefault(); openSessionContextMenu(session, event.clientX, event.clientY); }}
           >
-            <button class="session-select" type="button" aria-label={`${sessionName(session)} · ${waitingForChildren ? tr("Waiting for subagents", "Aguardando subagentes") : statusLabel(session)}`} aria-current={session.id === focusedPaneId ? "page" : undefined} aria-expanded={childAgents.length ? expandedSubagentSessions.has(session.id) : undefined} aria-controls={childAgents.length ? `workspace-subagents-${session.id}` : undefined} onclick={() => activateSidebarSession(session, childAgents.length > 0)} onkeydown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openSessionContextMenu(session, rect.left + rect.width / 2, rect.bottom); } }}>
-              <span class="session-icon"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName(session)} size={34} /><i class="session-status-dot status-{waitingForChildren ? 'subagents' : session.status}" aria-hidden="true"></i></span>
+            <button class="session-select" type="button" aria-label={`${sessionName(session)} · ${waitingForChildren ? tr("Waiting for subagents", "Aguardando subagentes") : statusLabel(session)}${workflowStep ? " · " + workflowStepLabel(workflowStep) + (workflowSteps.length > 1 ? " · " + tr(`+${workflowSteps.length - 1} more workflows`, `+${workflowSteps.length - 1} outros workflows`) : "") : ""}`} aria-current={session.id === focusedPaneId ? "page" : undefined} aria-expanded={childAgents.length ? expandedSubagentSessions.has(session.id) : undefined} aria-controls={childAgents.length ? `workspace-subagents-${session.id}` : undefined} onclick={() => activateSidebarSession(session, childAgents.length > 0)} onkeydown={(event) => { if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openSessionContextMenu(session, rect.left + rect.width / 2, rect.bottom); } }}>
+              <span class="session-icon"><ThreadAvatar seed={session.nativeSessionId || session.sessionName || session.id} label={sessionName(session)} size={34} /><i class="session-status-dot status-{waitingForChildren ? 'subagents' : session.status}" aria-hidden="true"></i>{#if workflowStep}<i class="session-workflow-dot tone-{presenceTone(workflowStep)}" aria-hidden="true"></i>{/if}</span>
               <span class="session-copy">
                 <span class="session-title-row">
                   <strong>{sessionName(session)}</strong>
                   {#if session.remote}<RemoteComputerBadge computer={session.remote.computer} />{/if}
                   {#if session.controlOrigin === "external"}
                     <span class="source-label"><BrandIcon name={sourceIcon(session)} size={session.source === "web" ? 11 : 9} />{sourceLabel(session)}</span>
+                  {/if}
+                  {#if workflowStep}
+                    <span class="workflow-chip tone-{presenceTone(workflowStep)}" title={workflowChipTitle(workflowSteps)}><span class="workflow-chip-role"><WorkflowRoleIcon role={workflowStep.role} /></span><span>{workflowStep.index}/{workflowStep.total}</span><i aria-hidden="true"></i>{#if workflowSteps.length > 1}<small>+{workflowSteps.length - 1}</small>{/if}</span>
                   {/if}
                 </span>
                 <small class="session-meta"><BrandIcon name={session.agent} size={10} /><span>{sessionMeta(session)}</span>{#if session.forkedFrom}<span class="session-fork" title={tr(`Forked from conversation ${session.forkedFrom.slice(0, 8)}`, `Fork da conversa ${session.forkedFrom.slice(0, 8)}`)} aria-label={tr("Fork", "Fork")}><LumeIcon name="fork" size={10} /></span>{/if}</small>
@@ -3946,6 +4013,18 @@
   .session-title-row { min-width: 0; display: flex; align-items: center; gap: 6px; }
   .session-title-row strong { min-width: 0; flex: 0 1 auto; }
   .source-label { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; border-radius: 999px; color: var(--workspace-muted); background: color-mix(in srgb, var(--workspace-muted) 11%, transparent); font-size: 8px; font-weight: 720; letter-spacing: .045em; line-height: 1.25; text-transform: uppercase; }
+  .workflow-chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 1px 5px 1px 3px; border-radius: 999px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 12%, transparent); font-size: 9px; font-weight: 720; line-height: 1.3; font-variant-numeric: tabular-nums; }
+  .workflow-chip-role { width: 13px; height: 13px; display: grid; place-items: center; }
+  .workflow-chip i, .session-workflow-dot { width: 5px; height: 5px; border-radius: 50%; background: #8a9891; }
+  .workflow-chip small { color: var(--workspace-muted); font-size: 8px; }
+  .workflow-chip.tone-idle i { display: none; }
+  .workflow-chip.tone-running i, .session-workflow-dot.tone-running { background: #4d99cc; animation: live-pulse 1.8s ease-out infinite; }
+  .workflow-chip.tone-approval i, .session-workflow-dot.tone-approval, .workflow-chip.tone-paused i, .session-workflow-dot.tone-paused { background: #d6a441; }
+  .workflow-chip.tone-ready i, .session-workflow-dot.tone-ready { background: var(--workspace-accent); }
+  .workflow-chip.tone-failed i, .session-workflow-dot.tone-failed { background: #c86662; }
+  .workflow-chip.tone-done i, .session-workflow-dot.tone-done { background: #4daa77; }
+  .session-workflow-dot { position: absolute; left: 0; bottom: 0; width: 9px; height: 9px; box-sizing: border-box; border: 2px solid var(--workspace-sidebar); display: none; pointer-events: none; }
+  .workspace.sidebar-collapsed .session-workflow-dot { display: block; }
   .session-copy strong { color: var(--workspace-strong); font-size: 11px; font-weight: 720; letter-spacing: -.01em; }
   .session-copy small { color: var(--workspace-muted); font-size: 10px; line-height: 1.3; }
   .session-copy .session-meta { display: flex; align-items: center; gap: 4px; }

@@ -2864,7 +2864,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
               </section>
               {#if item.detail && session.nativeSessionId}
                 <div class="prompt-actions">
-                  <button type="button" title={tr("Save to note", "Salvar em nota")} aria-label={tr("Save prompt to note", "Salvar prompt em nota")} onclick={() => void saveToNote(item, item)}><LumeIcon name="note" size={13} /></button>
+                  <button type="button" title={tr("Save to note", "Salvar em nota")} aria-label={tr("Save prompt to note", "Salvar prompt em nota")} onclick={() => void saveToNote(item, item)}><LumeIcon name="bookmark" size={13} /></button>
                 </div>
               {/if}
             </div>
@@ -2890,7 +2890,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                     <div class="final-actions" aria-label={tr("Response actions", "Ações da resposta")}>
                       <button type="button" title={tr("Copy response", "Copiar resposta")} aria-label={tr("Copy response", "Copiar resposta")} onclick={() => void copyResponse(item.detail ?? "")}><LumeIcon name="copy" size={14} /></button>
                       {#if session.nativeSessionId}
-                        <button type="button" title={tr("Save to note", "Salvar em nota")} aria-label={tr("Save response to note", "Salvar resposta em nota")} onclick={() => void saveToNote(item, promptForEntry(entry))}><LumeIcon name="note" size={14} /></button>
+                        <button type="button" title={tr("Save to note", "Salvar em nota")} aria-label={tr("Save response to note", "Salvar resposta em nota")} onclick={() => void saveToNote(item, promptForEntry(entry))}><LumeIcon name="bookmark" size={14} /></button>
                       {/if}
                       <button class:active={sourceEntryId === entry.id} type="button" title={tr("View sources", "Visualizar fontes")} aria-label={tr("View sources", "Visualizar fontes")} aria-expanded={sourceEntryId === entry.id} onclick={() => { promptIndexOpen = false; sourceEntryId = sourceEntryId === entry.id ? null : entry.id; }}><LumeIcon name="sources" size={14} /></button>
                       {#if session.agent === "codex" && session.nativeSessionId && promptForEntry(entry)}

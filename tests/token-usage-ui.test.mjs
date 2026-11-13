@@ -16,8 +16,9 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const output = mkdtempSync(join(tmpdir(), "lume-token-usage-ui-"));
 const read = (path) => readFileSync(join(root, path), "utf8");
 
-// The Inspector and the header draw the same component, so the two charts cannot drift apart.
-assert.match(read("src/lib/WorkspaceInspector.svelte"), /<TokenUsageChart samples=\{tokenSamples\}/);
+// The per-prompt chart lives only in the Inspector's Metrics section, not beside the usage gauges.
+assert.ok(!/<TokenUsageChart/.test(read("src/lib/WorkspaceInspector.svelte")), "the usage gauges no longer carry a chart");
+assert.match(read("src/lib/TokenMetrics.svelte"), /<TokenUsageChart/);
 assert.match(read("src/lib/WorkspaceSessionPane.svelte"), /\{#if session\.promptTokenUsage\?\.length\}<ChatUsageButton usage=\{session\.promptTokenUsage\}/);
 assert.ok(!/<title>/.test(read("src/lib/TokenUsageChart.svelte")), "the points use the tooltip, not a native title");
 

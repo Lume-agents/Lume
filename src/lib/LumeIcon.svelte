@@ -19,6 +19,7 @@
     | "mode-default"
     | "mode-plan"
     | "note"
+    | "bookmark"
     | "maximize"
     | "orb"
     | "restore"
@@ -198,6 +199,8 @@
     <rect x="3" y="4" width="18" height="16" rx="3" />
     <circle cx="9" cy="9" r="1.6" />
     <path d="m5.5 17 4.2-4.2 3.1 3.1 2.2-2.2 3.5 3.3" />
+  {:else if name === "bookmark"}
+    <path d="M7 4h10a1 1 0 0 1 1 1v15l-6-3.8L6 20V5a1 1 0 0 1 1-1Z" />
   {:else if name === "note"}
     <path d="M5 4h14v13H9l-4 3v-3H5zM8 8h8M8 12h6" />
   {:else if name === "attachment"}

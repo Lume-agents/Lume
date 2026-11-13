@@ -9,7 +9,6 @@
 <script lang="ts">
   import BrandIcon from "$lib/BrandIcon.svelte";
   import FileTypeIcon from "$lib/FileTypeIcon.svelte";
-  import TokenUsageChart from "$lib/TokenUsageChart.svelte";
   import TokenMetrics from "$lib/TokenMetrics.svelte";
   import InspectorNotes from "$lib/InspectorNotes.svelte";
   import type { PromptJumpTarget } from "$lib/tokenUsage";
@@ -120,7 +119,6 @@
     .slice(0, 5));
   const totalAdded = $derived(changes.reduce((total, file) => total + file.added, 0));
   const totalRemoved = $derived(changes.reduce((total, file) => total + file.removed, 0));
-  const tokenSamples = $derived((session?.promptTokenUsage ?? []).slice(-14));
   // The first read of a session's limits is the only wait worth showing; later refreshes keep the last values.
   const usageLoading = $derived(Boolean(session && hasUsage(session.agent) && usagePendingKey !== usageSettledKey && !session.rateLimits?.length));
   const usageGroups = $derived(usageGaugeGroups(session?.rateLimits ?? [], language));
@@ -249,7 +247,6 @@
               {#each { length: usagePlaceholders }, index (index)}<i></i>{/each}
             {/each}
           </div>
-          <TokenUsageChart samples={tokenSamples} {language} loading={usageLoading} />
           {#if usageError}
             <p class="usage-error" role="status"><strong>{tr("Usage unavailable", "Uso indisponível")}</strong> {usageError}</p>
           {/if}
@@ -257,8 +254,8 @@
       {/if}
 
       {#if session.promptTokenUsage?.length}
-        <details class="inspector-section metrics-section">
-          <summary><span>{tr("Metrics", "Métricas")}</span><em>{session.promptTokenUsage.length}</em></summary>
+        <details class="inspector-section metrics-section" open>
+          <summary><svg class="metrics-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></svg><span>{tr("Metrics", "Métricas")}</span><em>{session.promptTokenUsage.length}</em></summary>
           <TokenMetrics samples={session.promptTokenUsage} agent={session.agent} {language} onJump={onJumpToPrompt} />
         </details>
       {/if}
@@ -266,7 +263,7 @@
       {#if mcpAgents.includes(session.agent) && mcpLoading && !mcpServers.length}
         <section class="mcp-loading" role="status" aria-label={tr("Loading MCP servers", "Carregando servidores MCP")}><div class="loading-rows" aria-hidden="true"><i></i><i></i><i></i></div></section>
       {:else if mcpAgents.includes(session.agent) && (mcpServers.length || mcpProbing)}
-        <details class="inspector-section mcp-section" open>
+        <details class="inspector-section mcp-section">
           <summary><LumeIcon name="sources" size={14} /><span>MCP</span><em>{mcpServers.length}</em></summary>
           <p class="section-description">{mcpProbing ? tr("Checking connections…", "Verificando conexões…") : tr("Tool servers this agent can use", "Servidores de ferramentas que este agente pode usar")}</p>
           <ul class="mcp-list">
@@ -282,7 +279,7 @@
       {/if}
 
       {#if session.nativeSessionId}
-        <details class="inspector-section notes-section" open>
+        <details class="inspector-section notes-section">
           <summary><LumeIcon name="note" size={14} /><span>{tr("Notes", "Notas")}</span>{#if noteCount}<em>{noteCount}</em>{/if}</summary>
           <InspectorNotes sessionId={session.id} {language} onJump={onJumpToPrompt} onCount={(count) => (noteCount = count)} />
         </details>
@@ -341,7 +338,6 @@
       <div class="inspector-scroll inspector-loading" role="status" aria-label={tr("Loading inspector", "Carregando o inspector")}>
         <section class="usage-section">
           <div class="usage-gauges loading"><i></i><i></i></div>
-          <TokenUsageChart samples={[]} {language} loading />
         </section>
         <div class="loading-rows" aria-hidden="true"><i></i><i></i><i></i></div>
       </div>
@@ -374,7 +370,7 @@
   .inspector-scroll::-webkit-scrollbar { width: 5px; }
   .inspector-scroll::-webkit-scrollbar-thumb { border-radius: 5px; background: transparent; }
   .inspector-scroll:global(.is-scrolling)::-webkit-scrollbar-thumb { background: var(--workspace-scroll-thumb); }
-  .usage-section { min-height: 72px; margin: 13px 0 3px; display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: center; gap: 12px; }.usage-section.stacked { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .usage-section { min-height: 72px; margin: 13px 0 3px; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; gap: 12px; }.usage-section.stacked { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .usage-gauges { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; }
   .usage-section.stacked .usage-gauges { justify-content: space-evenly; gap: 10px; }
   .usage-group { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; gap: 2px; }

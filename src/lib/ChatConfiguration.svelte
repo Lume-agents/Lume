@@ -102,7 +102,7 @@
     <div class="bar head"></div>
   </section>
 {:else if settings.length}
-  <details class="inspector-section config-section" open>
+  <details class="inspector-section config-section">
     <summary><LumeIcon name="settings" size={14} /><span>{tr("Settings", "Ajustes")}</span><em>{settings.length}</em></summary>
     <dl class="config-rows">
       {#each settings as row (row.label)}<dt>{row.label}</dt><dd title={row.title ?? row.value}>{row.value}</dd>{/each}

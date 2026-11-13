@@ -260,17 +260,21 @@ fn map_event_with_context(
         provider,
         std::env::var("LUME_ANTIGRAVITY_STREAM").ok().as_deref(),
     );
-    let managed_claude_prompt =
-        provider == "claude" && std::env::var("LUME_CLAUDE_PROMPT_CAPTURE").as_deref() == Ok("1");
-    let (process_id, source, headless_resume) =
+    let (process_id, source, headless_resume, nested_in_agent) =
         if matches!(&agent, AgentKind::Antigravity | AgentKind::Gemini) {
-            (None, SessionSource::Cli, false)
+            (None, SessionSource::Cli, false, false)
         } else if provider == "codex" && codex_context.is_some() {
             let (pid, source) = codex_context?;
-            (pid, source, false)
+            (pid, source, false, false)
         } else {
             agent_process_context(provider, string(raw, "session_id").as_deref())
         };
+    // Lume marks the processes it starts through their environment, and everything they start inherits it: an agent
+    // run from a Lume chat's shell (a test, a subagent) would otherwise be taken for one of Lume's own conversations.
+    let started_by_lume = !nested_in_agent;
+    let managed_claude_prompt = provider == "claude"
+        && started_by_lume
+        && std::env::var("LUME_CLAUDE_PROMPT_CAPTURE").as_deref() == Ok("1");
     let event = match (provider, hook_name.as_str()) {
         (_, "SessionStart") => HookEventKind::SessionStarted,
         ("codex", "UserPromptSubmit") | ("claude", "UserPromptSubmit") => HookEventKind::Running,
@@ -422,7 +426,7 @@ fn map_event_with_context(
         project: cwd.as_deref().and_then(project_name),
         source: Some(source),
         source_app: None,
-        control_origin: if matches!(std::env::var("LUME_MANAGED_SESSION").as_deref(), Ok("1")) {
+        control_origin: if started_by_lume && matches!(std::env::var("LUME_MANAGED_SESSION").as_deref(), Ok("1")) {
             SessionControlOrigin::Lume
         } else {
             SessionControlOrigin::External
@@ -1396,13 +1400,13 @@ fn status_label(hook: &str, event: &HookEventKind) -> Option<&'static str> {
 fn agent_process_context(
     provider: &str,
     session_id: Option<&str>,
-) -> (Option<u32>, SessionSource, bool) {
+) -> (Option<u32>, SessionSource, bool, bool) {
     if provider == "codex" {
         let (pid, source) = crate::codex_identity_probe::hook_process_context();
-        return (pid, source, false);
+        return (pid, source, false, false);
     }
     let Some(current_pid) = get_current_pid().ok() else {
-        return (None, SessionSource::Cli, false);
+        return (None, SessionSource::Cli, false, false);
     };
     let mut system = System::new();
     system.refresh_processes_specifics(
@@ -1419,7 +1423,7 @@ fn agent_process_context(
         .process(current_pid)
         .and_then(|process| process.parent())
     else {
-        return (None, SessionSource::Cli, false);
+        return (None, SessionSource::Cli, false, false);
     };
     let mut chain: Vec<(u32, String, Vec<String>)> = Vec::new();
     let mut source = SessionSource::Cli;
@@ -1468,11 +1472,37 @@ fn agent_process_context(
         .filter(|_| provider == "claude")
         .map(crate::integrations::claude_registered_pids)
         .unwrap_or_default();
-    (
-        pick_agent_pid(provider, &chain, &registered_pids),
-        source,
-        headless_resume,
-    )
+    let picked = pick_agent_pid(provider, &chain, &registered_pids);
+    let lume_name = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_stem().map(|stem| stem.to_string_lossy().to_lowercase()));
+    let nested = picked.is_some_and(|pid| nested_in_another_agent(provider, &chain, pid, lume_name.as_deref()));
+    (picked, source, headless_resume, nested)
+}
+
+/// Whether another agent process sits between the conversation's process and Lume (or the top of the tree): the
+/// agent was started by something running inside an agent, not by Lume itself. A shell or launcher shim between
+/// Lume and its agent is not an agent. A process whose parent is gone (Lume restarted) has nothing above it.
+fn nested_in_another_agent(
+    provider: &str,
+    chain: &[(u32, String, Vec<String>)],
+    picked: u32,
+    lume_name: Option<&str>,
+) -> bool {
+    let Some(index) = chain.iter().position(|(pid, _, _)| *pid == picked) else {
+        return false;
+    };
+    for (_, name, arguments) in &chain[index + 1..] {
+        let stem = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        let stem = stem.strip_suffix(".exe").unwrap_or(stem);
+        if lume_name.is_some_and(|lume| stem == lume) {
+            return false;
+        }
+        if hook_parent_is_user_agent(provider, name, arguments) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The process a hook reports as its conversation, from the hook's ancestors
@@ -1538,7 +1568,7 @@ fn hook_parent_is_user_agent(provider: &str, name: &str, arguments: &[String]) -
 
 #[cfg(test)]
 mod process_context_tests {
-    use super::{hook_parent_is_user_agent, pick_agent_pid};
+    use super::{hook_parent_is_user_agent, nested_in_another_agent, pick_agent_pid};
 
     // `argv` as the OS gives it. Claude retitles its daemon processes, so their
     // `argv[0]` is one string such as "claude bg-pty-host".
@@ -1584,6 +1614,30 @@ mod process_context_tests {
             ancestor(3_329_380, "claude", &["claude"]),
             ancestor(3_329_132, "bash", &["bash"]),
         ]
+    }
+
+    #[test]
+    fn an_agent_run_from_inside_another_agent_is_not_one_lume_started() {
+        // hook's ancestors, nearest first: the Claude a test started, the shell of the Lume chat, that chat's Claude, Lume.
+        let ghost = vec![
+            ancestor(30, "claude.exe", &["claude", "--print"]),
+            ancestor(29, "bash.exe", &["bash"]),
+            ancestor(28, "claude.exe", &["claude", "--print", "--input-format", "stream-json"]),
+            ancestor(27, "lume.exe", &["lume.exe"]),
+        ];
+        assert!(nested_in_another_agent("claude", &ghost, 30, Some("lume")));
+        // The chat's own process, and one behind a launcher shim, are Lume's.
+        assert!(!nested_in_another_agent("claude", &ghost, 28, Some("lume")));
+        let shimmed = vec![
+            ancestor(40, "claude.exe", &["claude", "--print"]),
+            ancestor(39, "cmd.exe", &["cmd.exe", "/c", "claude.cmd"]),
+            ancestor(38, "lume.exe", &["lume.exe"]),
+            ancestor(37, "claude.exe", &["claude"]),
+        ];
+        assert!(!nested_in_another_agent("claude", &shimmed, 40, Some("lume")), "an agent above Lume is not between them");
+        // Lume restarted and left its agent running: nothing above it, so it keeps its marker.
+        assert!(!nested_in_another_agent("claude", &[ancestor(50, "claude.exe", &["claude"])], 50, Some("lume")));
+        assert!(!nested_in_another_agent("claude", &ghost, 99, Some("lume")), "an unknown process is left alone");
     }
 
     #[test]

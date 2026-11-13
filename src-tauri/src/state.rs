@@ -5597,6 +5597,12 @@ fn same_directory(left: Option<&str>, right: Option<&str>) -> bool {
 
 fn normalize_directory(directory: &str) -> Option<String> {
     let normalized = directory.trim().replace('\\', "/");
+    // `canonicalize` on Windows answers `\\?\C:\dir`, which is the same place as `C:\dir`.
+    let normalized = match normalized.strip_prefix("//?/") {
+        Some(rest) if rest.len() >= 4 && rest.is_char_boundary(4) && rest[..4].eq_ignore_ascii_case("unc/") => format!("//{}", &rest[4..]),
+        Some(rest) => rest.to_string(),
+        None => normalized,
+    };
     let normalized = normalized.trim_end_matches('/');
     if normalized.is_empty() {
         return None;
@@ -9672,6 +9678,18 @@ mod tests {
         // A different file is still a different attachment.
         merge_attachments(&mut shown, [attachment("1791581411130-1-other.png", Some("/c/prompt-attachments/1791581411130-1-other.png"), "")]);
         assert_eq!(shown.len(), 2);
+    }
+
+    #[test]
+    fn a_windows_verbatim_path_is_the_same_attachment_as_the_plain_one() {
+        // The file read back from the message text is canonicalized (`\\?\C:\...`); the one attached is not.
+        let plain = r"C:\Users\ana\AppData\prompt-attachments\1794607553964-0-image.jpg";
+        let mut shown = vec![attachment("image.jpg", Some(plain), "data:image/jpeg;base64,AAAA")];
+        merge_attachments(&mut shown, [attachment("image.jpg", Some(&format!(r"\\?\{plain}")), "")]);
+        assert_eq!(shown.len(), 1, "the image is not shown twice");
+        let share = r"\\server\share\a.png";
+        assert!(same_directory(Some(share), Some(r"\\?\UNC\server\share\a.png")));
+        assert!(!same_directory(Some(plain), Some(r"\\?\C:\Users\ana\other.jpg")));
     }
 
     #[test]

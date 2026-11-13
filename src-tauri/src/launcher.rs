@@ -670,8 +670,7 @@ impl crate::claude_session::SessionEvents for ClaudeStreamEvents {
     fn exited(
         &self,
         live: &std::sync::Arc<crate::claude_session::Live>,
-        started: bool,
-        stderr: String,
+        exit: crate::claude_session::Exit,
     ) {
         crate::claude_session::remove(&self.session_id, live);
         let fallback = self
@@ -679,7 +678,10 @@ impl crate::claude_session::SessionEvents for ClaudeStreamEvents {
             .lock()
             .ok()
             .and_then(|mut fallback| fallback.take());
-        if let (false, Some((request, permission_mode))) = (started, fallback) {
+        if exit.by_lume {
+            return;
+        }
+        if let (false, Some((request, permission_mode))) = (exit.started, fallback) {
             // Streaming did not start (an older CLI, a login race): run this message the old way.
             if launch_claude_print_prompt(
                 request,
@@ -698,19 +700,36 @@ impl crate::claude_session::SessionEvents for ClaudeStreamEvents {
             follow_claude_interrupt(&self.app, &self.state, &self.session_id, interrupt);
             return;
         }
-        let detail = if stderr.is_empty() {
-            "Claude encerrou inesperadamente".to_string()
+        let detail = claude_exit_notice(&exit);
+        if exit.was_running || !exit.started {
+            finish_claude_prompt(
+                &self.app,
+                &self.state,
+                &self.session_id,
+                &self.native_id,
+                Err(detail),
+            );
         } else {
-            stderr
-        };
-        finish_claude_prompt(
-            &self.app,
-            &self.state,
-            &self.session_id,
-            &self.native_id,
-            Err(detail),
-        );
+            // Idle, so no turn fails; the notice says the next message starts a new process.
+            let mut event = claude_prompt_event(&self.session_id, &self.native_id);
+            event.event = HookEventKind::Activity;
+            event.activity = Some(claude_error_activity(&self.native_id, &detail));
+            let _ = event_server::publish_event(&self.state, &self.app, event);
+        }
     }
+}
+
+/// The chat notice for a Claude process that ended without Lume asking it to.
+fn claude_exit_notice(exit: &crate::claude_session::Exit) -> String {
+    let code = exit
+        .code
+        .map_or_else(|| "no exit code".to_string(), |code| format!("exit code {code}"));
+    let mut notice = format!("Claude process ended unexpectedly ({code})");
+    if !exit.stderr.is_empty() {
+        notice.push_str(": ");
+        notice.push_str(&exit.stderr.chars().take(2 * 1024).collect::<String>());
+    }
+    notice
 }
 
 /// After Lume stopped a prompt: a cancel pauses the queue; a steer moves on.
@@ -1346,6 +1365,25 @@ fn command_available(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unexpected_exit_notice_names_the_exit_code() {
+        let exit = |code, stderr: &str| crate::claude_session::Exit {
+            started: true,
+            was_running: true,
+            by_lume: false,
+            code,
+            stderr: stderr.into(),
+        };
+        assert_eq!(
+            super::claude_exit_notice(&exit(Some(3), "")),
+            "Claude process ended unexpectedly (exit code 3)"
+        );
+        assert_eq!(
+            super::claude_exit_notice(&exit(None, "boom")),
+            "Claude process ended unexpectedly (no exit code): boom"
+        );
+    }
+
     use super::*;
 
     #[test]

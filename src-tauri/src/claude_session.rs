@@ -219,8 +219,29 @@ pub fn interrupt_or_kill(
 pub trait SessionEvents: Send + Sync + 'static {
     fn turn_finished(&self, live: &Arc<Live>, is_error: bool, text: Option<String>);
     fn control_request(&self, live: &Arc<Live>, id: String, request: Value);
-    /// The process ended. `started` is false when it exited before its `init`.
-    fn exited(&self, live: &Arc<Live>, started: bool, stderr: String);
+    /// The process ended (reported unless Lume closed it while idle).
+    fn exited(&self, live: &Arc<Live>, exit: Exit);
+}
+
+/// How a process ended.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Exit {
+    /// False when it ended before its `init`: streaming never started.
+    pub started: bool,
+    pub was_running: bool,
+    /// Lume closed or killed it (idle timeout, session close, interrupt fallback).
+    pub by_lume: bool,
+    /// None when it was killed or its status could not be read.
+    pub code: Option<i32>,
+    pub stderr: String,
+}
+
+impl Exit {
+    /// Whether the person should be told the session stopped: Lume did not end it, and either a
+    /// turn was cut short or the process did not end cleanly.
+    pub fn is_unexpected(&self) -> bool {
+        !self.by_lume && (self.was_running || self.code != Some(0))
+    }
 }
 
 pub struct Live {
@@ -230,6 +251,7 @@ pub struct Live {
     running: AtomicBool,
     started: AtomicBool,
     alive: AtomicBool,
+    closed_by_lume: AtomicBool,
     last_used: Mutex<Instant>,
     pub controls: Controls,
     /// Held while a turn runs so background probes stay out of its way.
@@ -260,6 +282,7 @@ impl Live {
             running: AtomicBool::new(false),
             started: AtomicBool::new(false),
             alive: AtomicBool::new(true),
+            closed_by_lume: AtomicBool::new(false),
             last_used: Mutex::new(Instant::now()),
             controls: Controls::default(),
             in_flight: Mutex::new(None),
@@ -320,18 +343,27 @@ impl Live {
                 if let Ok(mut in_flight) = reader.in_flight.lock() {
                     in_flight.take();
                 }
-                if let Ok(mut child) = reader.child.lock() {
-                    let _ = child.wait();
-                }
+                let code = reader
+                    .child
+                    .lock()
+                    .ok()
+                    .and_then(|mut child| child.wait().ok())
+                    .and_then(|status| status.code());
                 // Give the stderr reader a moment to collect the last lines.
                 thread::sleep(Duration::from_millis(100));
                 let stderr = stderr_tail
                     .lock()
                     .map(|tail| tail.trim().to_string())
                     .unwrap_or_default();
-                let started = reader.started.load(Ordering::SeqCst);
-                if was_running || !started {
-                    events.exited(&reader, started, stderr);
+                let exit = Exit {
+                    started: reader.started.load(Ordering::SeqCst),
+                    was_running,
+                    by_lume: reader.closed_by_lume.load(Ordering::SeqCst),
+                    code,
+                    stderr,
+                };
+                if exit.is_unexpected() || !exit.started {
+                    events.exited(&reader, exit);
                 }
             })
             .map_err(|error| error.to_string())?;
@@ -402,6 +434,7 @@ impl Live {
 
     /// Closes stdin so Claude exits on its own; kills it if it lingers.
     pub fn close(self: &Arc<Self>) {
+        self.closed_by_lume.store(true, Ordering::SeqCst);
         self.running.store(false, Ordering::SeqCst);
         if let Ok(mut stdin) = self.stdin.lock() {
             stdin.take();
@@ -419,6 +452,7 @@ impl Live {
     }
 
     pub fn kill(&self) {
+        self.closed_by_lume.store(true, Ordering::SeqCst);
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
         }
@@ -651,8 +685,8 @@ mod tests {
             self.results.lock().unwrap().push((is_error, text));
         }
         fn control_request(&self, _: &Arc<Live>, _: String, _: Value) {}
-        fn exited(&self, _: &Arc<Live>, started: bool, _: String) {
-            self.exits.lock().unwrap().push(started);
+        fn exited(&self, _: &Arc<Live>, exit: Exit) {
+            self.exits.lock().unwrap().push(exit.started);
         }
     }
 
@@ -732,6 +766,22 @@ mod tests {
         while !condition() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn only_exits_lume_did_not_cause_are_unexpected() {
+        let exit = |was_running, by_lume, code| Exit {
+            started: true,
+            was_running,
+            by_lume,
+            code,
+            stderr: String::new(),
+        };
+        assert!(exit(true, false, Some(0)).is_unexpected());
+        assert!(exit(false, false, Some(1)).is_unexpected());
+        assert!(exit(false, false, None).is_unexpected());
+        assert!(!exit(false, false, Some(0)).is_unexpected());
+        assert!(!exit(true, true, None).is_unexpected());
     }
 
     #[test]

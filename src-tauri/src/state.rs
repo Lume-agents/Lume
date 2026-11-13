@@ -5258,7 +5258,11 @@ fn apply_metadata(session: &mut AgentSession, event: &HookEvent) {
         && event.native_session_id.is_some();
     let keeps_managed_desktop_source = matches!(
         session.agent,
-        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity | AgentKind::ClaudeCode
+        AgentKind::Codex
+            | AgentKind::OpenCode
+            | AgentKind::Grok
+            | AgentKind::Antigravity
+            | AgentKind::ClaudeCode
     ) && session.control_origin == SessionControlOrigin::Lume
         && session.source == SessionSource::Desktop
         && event.process_id.is_none();

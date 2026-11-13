@@ -113,7 +113,11 @@ impl SessionCapabilities {
         } else if session.control_origin == SessionControlOrigin::External
             && matches!(
                 session.agent,
-                AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::OpenCode | AgentKind::Omp
+                AgentKind::Codex
+                    | AgentKind::ClaudeCode
+                    | AgentKind::OpenCode
+                    | AgentKind::Grok
+                    | AgentKind::Omp
             )
         {
             Some(PromptUnavailableReason::ExternalSession)
@@ -135,7 +139,10 @@ impl SessionCapabilities {
                 || ((session.source == SessionSource::Cli && session.process_id.is_some())
                     || (matches!(
                         session.agent,
-                        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
+                        AgentKind::Codex
+                            | AgentKind::OpenCode
+                            | AgentKind::Grok
+                            | AgentKind::Antigravity
                     ) && session.source == SessionSource::Desktop
                         && session.control_origin == SessionControlOrigin::Lume
                         && has_nonempty_value(session.native_session_id.as_deref()))
@@ -203,7 +210,7 @@ fn can_interrupt_session(session: &AgentSession) -> bool {
     session.source != SessionSource::Web
         && (matches!(
             session.agent,
-            AgentKind::Codex | AgentKind::OpenCode | AgentKind::Antigravity
+            AgentKind::Codex | AgentKind::OpenCode | AgentKind::Grok | AgentKind::Antigravity
         ) || claude_queues_in_lume(session))
         && has_nonempty_value(session.native_session_id.as_deref())
 }
@@ -2044,6 +2051,30 @@ mod tests {
         );
         managed.control_origin = SessionControlOrigin::External;
         assert!(!SessionCapabilities::for_session(&managed).can_prompt);
+    }
+
+    #[test]
+    fn grok_chats_opened_by_lume_work_like_the_other_acp_chats_and_terminal_ones_only_observe() {
+        let mut grok = session();
+        grok.agent = AgentKind::Grok;
+        grok.source = SessionSource::Desktop;
+        grok.process_id = None;
+        grok.control_origin = SessionControlOrigin::Lume;
+        grok.status = SessionStatus::Running;
+        let capabilities = SessionCapabilities::for_session(&grok);
+        assert!(capabilities.can_prompt);
+        assert!(capabilities.can_terminate);
+        assert!(capabilities.can_interrupt);
+        // A session seen only through hooks in someone's terminal cannot be prompted from Lume.
+        grok.control_origin = SessionControlOrigin::External;
+        grok.source = SessionSource::Cli;
+        grok.status = SessionStatus::WaitingForInput;
+        let observed = SessionCapabilities::for_session(&grok);
+        assert!(!observed.can_prompt);
+        assert_eq!(
+            observed.prompt_unavailable_reason,
+            Some(PromptUnavailableReason::ExternalSession)
+        );
     }
 
     #[test]

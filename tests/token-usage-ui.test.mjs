@@ -40,7 +40,8 @@ await build({
 });
 
 function fixture() {
-  const start = Date.UTC(2026, 10, 12, 14, 0);
+  // The line chart shows the last hour, so the turns end a minute ago.
+  const start = Date.now() - 5 * 240_000 - 60_000;
   const turn = (index, totalTokens, context) => ({ turnId: "turn-" + index, totalTokens, inputTokens: Math.round(totalTokens * 0.86), outputTokens: Math.round(totalTokens * 0.14), createdAt: start + index * 240_000, ...(context ? { contextTokens: context, contextWindow: 200_000 } : {}) });
   const claude = [turn(0, 12_400, 22_000), turn(1, 31_800, 54_000), turn(2, 8_200, 61_000), turn(3, 46_100, 108_000), turn(4, 19_300, 127_000), turn(5, 27_600, 151_000)];
   window.__usage = { light: claude, dark: claude, codex: [turn(0, 5_100), turn(1, 9_400)], none: [] };
@@ -126,7 +127,7 @@ try {
     await wait("document.querySelector('#" + theme + " .usage-popover .token-graph')");
     assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('#" + theme + " .usage-totals dd')).map(item => item.textContent.split(String.fromCharCode(160)).join(' '))"), ["145 mil", "125 mil", "20 mil", "76%"], "session totals");
     assert.equal(await evaluate("document.querySelectorAll('#" + theme + " .token-graph circle').length"), 6);
-    await hover("#" + theme + " .token-plot", 0.62);
+    await hover("#" + theme + " .token-plot", 0.84);
     await wait("document.querySelector('#" + theme + " .token-tip')");
     const tip = await evaluate("document.querySelector('#" + theme + " .token-tip').innerText");
     assert.match(tip, /46\.100 tokens/, "the hovered prompt's total");

@@ -11,7 +11,7 @@ registerHooks({
     return nextResolve(specifier, context);
   },
 });
-const { compactTokens, contextPercent, tokenGraphGeometry, tokenUsageSummary } = await import("../src/lib/tokenUsage.ts");
+const { compactTokens, contextPercent, samplesInRange, tokenGraphGeometry, tokenTimeRange, tokenTimeTicks, tokenUsageSummary } = await import("../src/lib/tokenUsage.ts");
 
 const sample = (totalTokens, createdAt, extra = {}) => ({ turnId: "t" + createdAt, totalTokens, inputTokens: totalTokens * 0.8, outputTokens: totalTokens * 0.2, createdAt, ...extra });
 
@@ -24,6 +24,22 @@ test("the chart spreads prompts over time and scales to the largest", () => {
   const single = tokenGraphGeometry([sample(50, 5)]);
   assert.equal(single.dots[0].x, 113, "a single prompt sits in the middle");
   assert.match(single.points, /^4,[\d.]+ 222,[\d.]+$/, "and draws a flat line across");
+});
+
+test("the x axis is minutes before now over a window", () => {
+  const minute = 60_000;
+  const now = 100 * minute;
+  const prompts = [sample(100, 10 * minute), sample(300, 50 * minute), sample(200, 90 * minute), sample(400, 99 * minute)];
+  const range = tokenTimeRange(prompts, 60, now);
+  assert.deepEqual(range, { start: 40 * minute, end: now }, "the window ends now and reaches back that many minutes");
+  const inside = samplesInRange(prompts, range);
+  assert.deepEqual(inside.map((prompt) => prompt.totalTokens), [300, 200, 400], "older prompts fall outside");
+  const graph = tokenGraphGeometry(inside, 226, 54, range);
+  assert.deepEqual(graph.dots.map((dot) => Math.round(dot.x)), [40, 186, 218], "x is the time, so a gap stays a gap");
+  assert.deepEqual(tokenTimeTicks(range).map((tick) => tick.minutes), [60, 30, 0], "ticks count minutes back from now");
+  const all = tokenTimeRange(prompts, null, now);
+  assert.equal(all.start, 10 * minute, "no window starts at the first prompt");
+  assert.equal(tokenTimeRange(prompts, 15, 95 * minute).end, 99 * minute, "the axis never ends before the last prompt");
 });
 
 test("totals and context use", () => {

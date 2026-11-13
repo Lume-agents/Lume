@@ -11,25 +11,57 @@ export const TOKEN_GRAPH_HEIGHT = 54;
 export type TokenGraphDot = { x: number; y: number; sample: PromptTokenUsage };
 export type TokenGraph = { points: string; area: string; dots: TokenGraphDot[] };
 
-/** The line, the filled area and one dot per prompt, spread over the time between the first and the last. */
-export function tokenGraphGeometry(samples: PromptTokenUsage[], width = TOKEN_GRAPH_WIDTH, height = TOKEN_GRAPH_HEIGHT): TokenGraph {
+/** The time the chart's x axis covers, in milliseconds since the epoch. */
+export type TokenTimeRange = { start: number; end: number };
+
+/** The windows the line chart offers, in minutes; `null` is everything since the first prompt. */
+export const TOKEN_WINDOW_MINUTES = [15, 60, 180, null] as const;
+
+/** The last `minutes` before `now`, or from the first prompt to `now` when no window is set. */
+export function tokenTimeRange(samples: PromptTokenUsage[], minutes: number | null, now: number): TokenTimeRange {
+  const end = Math.max(now, samples.at(-1)?.createdAt ?? now);
+  const start = minutes === null ? Math.min(samples[0]?.createdAt ?? end, end - 60_000) : end - minutes * 60_000;
+  return { start, end };
+}
+
+/** The prompts that fall inside the range, in order. */
+export function samplesInRange(samples: PromptTokenUsage[], range: TokenTimeRange): PromptTokenUsage[] {
+  return samples.filter((sample) => sample.createdAt >= range.start && sample.createdAt <= range.end);
+}
+
+/** Tick labels in minutes before the end of the range: the start, evenly spaced middles, then 0. */
+export function tokenTimeTicks(range: TokenTimeRange, count = 3): { share: number; minutes: number }[] {
+  const span = Math.max(1, range.end - range.start);
+  return Array.from({ length: count }, (_, index) => {
+    const share = index / (count - 1);
+    return { share, minutes: Math.round((span * (1 - share)) / 60_000) };
+  });
+}
+
+/**
+ * The line, the filled area and one dot per prompt. With a `range` the x axis is real time over that range
+ * (so gaps between prompts show); without one it spreads the prompts between the first and the last.
+ */
+export function tokenGraphGeometry(samples: PromptTokenUsage[], width = TOKEN_GRAPH_WIDTH, height = TOKEN_GRAPH_HEIGHT, range?: TokenTimeRange): TokenGraph {
   if (!samples.length) return { points: "", area: "", dots: [] };
   const insetX = 4;
   const insetTop = 12;
   const insetBottom = 10;
-  const firstTime = samples[0]?.createdAt ?? 0;
-  const lastTime = samples.at(-1)?.createdAt ?? firstTime;
+  const firstTime = range ? range.start : samples[0]?.createdAt ?? 0;
+  const lastTime = range ? range.end : samples.at(-1)?.createdAt ?? firstTime;
   const timeSpan = Math.max(1, lastTime - firstTime);
   const maximum = Math.max(1, ...samples.map((sample) => sample.totalTokens));
   const dots = samples.map((sample, index) => ({
-    x: samples.length === 1 ? width / 2 : insetX + ((sample.createdAt - firstTime) / timeSpan || index / (samples.length - 1)) * (width - insetX * 2),
+    x: range ? insetX + ((sample.createdAt - firstTime) / timeSpan) * (width - insetX * 2) : samples.length === 1 ? width / 2 : insetX + ((sample.createdAt - firstTime) / timeSpan || index / (samples.length - 1)) * (width - insetX * 2),
     y: height - insetBottom - (sample.totalTokens / maximum) * (height - insetTop - insetBottom),
     sample,
   }));
-  const points = dots.length === 1
+  const points = dots.length === 1 && !range
     ? `${insetX},${dots[0].y.toFixed(1)} ${width - insetX},${dots[0].y.toFixed(1)}`
     : dots.map((dot) => `${dot.x.toFixed(1)},${dot.y.toFixed(1)}`).join(" ");
-  const area = `${insetX},${height - insetBottom} ${points} ${width - insetX},${height - insetBottom}`;
+  const area = range
+    ? `${dots[0].x.toFixed(1)},${height - insetBottom} ${points} ${dots.at(-1)!.x.toFixed(1)},${height - insetBottom}`
+    : `${insetX},${height - insetBottom} ${points} ${width - insetX},${height - insetBottom}`;
   return { points, area, dots };
 }
 

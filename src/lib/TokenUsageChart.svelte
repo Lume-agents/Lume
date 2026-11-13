@@ -1,10 +1,10 @@
 <script lang="ts">
   import type { PromptTokenUsage } from "$lib/domain";
   import type { Language } from "$lib/i18n";
-  import { TOKEN_GRAPH_WIDTH, contextPercent, tokenBarsGeometry, tokenGraphGeometry } from "$lib/tokenUsage";
+  import { TOKEN_GRAPH_WIDTH, TOKEN_WINDOW_MINUTES, contextPercent, samplesInRange, tokenBarsGeometry, tokenGraphGeometry, tokenTimeRange, tokenTimeTicks } from "$lib/tokenUsage";
 
   /** The tokens of each prompt over time, as the Inspector and the chat header show it. */
-  let { samples, language, loading = false, limit = 14, height = 48, mode = "line", title, onSelect }: {
+  let { samples, language, loading = false, limit = 14, height = 48, mode = "line", title, now = Date.now(), onSelect }: {
     samples: PromptTokenUsage[];
     language: Language;
     loading?: boolean;
@@ -15,14 +15,21 @@
     /** A line over time, or one bar per prompt with its output stacked on its input. */
     mode?: "line" | "bars";
     title?: string;
+    /** The end of the line chart's time axis; the clock unless a test fixes it. */
+    now?: number;
     /** Called with the index in `samples` of the prompt clicked (or chosen with Enter). */
     onSelect?: (index: number) => void;
   } = $props();
 
-  const shown = $derived(samples.slice(-limit));
+  /** The line chart's x axis is minutes before now over a window the person picks. */
+  let windowMinutes = $state<number | null>(60);
+  const range = $derived(tokenTimeRange(samples, windowMinutes, now));
+  const shown = $derived(mode === "line" ? samplesInRange(samples, range) : samples.slice(-limit));
   const offset = $derived(samples.length - shown.length);
   const viewHeight = $derived(height + 6);
-  const graph = $derived(tokenGraphGeometry(shown, TOKEN_GRAPH_WIDTH, viewHeight));
+  const graph = $derived(tokenGraphGeometry(shown, TOKEN_GRAPH_WIDTH, viewHeight, mode === "line" ? range : undefined));
+  const ticks = $derived(tokenTimeTicks(range));
+  const windowLabel = (minutes: number | null) => (minutes === null ? tr("All", "Tudo") : minutes < 60 ? `${minutes}m` : `${minutes / 60}h`);
   const bars = $derived(mode === "bars" ? tokenBarsGeometry(shown, TOKEN_GRAPH_WIDTH, viewHeight) : []);
   // Where each prompt sits, for the pointer, the cursor and the tooltip, whichever way it is drawn.
   const marks = $derived(mode === "bars" ? bars.map((bar) => ({ x: bar.x, y: bar.outputY, sample: bar.sample })) : graph.dots);
@@ -63,7 +70,16 @@
 </script>
 
 <div class="token-chart" class:selectable={Boolean(onSelect)} aria-busy={loading && !shown.length} style:--plot-height="{height}px">
-  <span>{title ?? tr("Tokens / prompt", "Tokens / prompt")}</span>
+  <div class="chart-head">
+    <span>{title ?? tr("Tokens / prompt", "Tokens / prompt")}</span>
+    {#if mode === "line"}
+      <div class="window-picker" role="group" aria-label={tr("Time window", "Janela de tempo")}>
+        {#each TOKEN_WINDOW_MINUTES as minutes (minutes)}
+          <button type="button" class:on={windowMinutes === minutes} aria-pressed={windowMinutes === minutes} onclick={() => (windowMinutes = minutes)}>{windowLabel(minutes)}</button>
+        {/each}
+      </div>
+    {/if}
+  </div>
   <!-- Pointer and arrow keys move between prompts; the details show in the tooltip, which is also announced. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
@@ -110,11 +126,27 @@
       </div>
     {/if}
   </div>
-  <small>{loading && !shown.length ? tr("Loading…", "Carregando…") : mode === "bars" ? tr("Prompts →", "Prompts →") : tr("Time →", "Tempo →")}</small>
+  {#if mode === "line" && !(loading && !shown.length)}
+    <div class="time-axis" aria-hidden="true">
+      {#each ticks as tick (tick.share)}
+        <small>{tick.minutes === 0 ? tr("now", "agora") : `−${tick.minutes} min`}</small>
+      {/each}
+    </div>
+  {:else}
+    <small>{loading && !shown.length ? tr("Loading…", "Carregando…") : tr("Prompts →", "Prompts →")}</small>
+  {/if}
 </div>
 
 <style>
   .token-chart { --plot-height: 48px; min-width: 0; display: grid; grid-template-rows: auto var(--plot-height) auto; gap: 3px; }
+  .chart-head { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .chart-head > span { min-width: 0; overflow: hidden; color: var(--workspace-muted); font-size: 10px; font-weight: 720; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+  .window-picker { flex: none; display: flex; gap: 2px; }
+  .window-picker button { padding: 1px 6px; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .window-picker button:hover { color: var(--workspace-strong); }
+  .window-picker button.on { color: var(--workspace-strong); background: color-mix(in srgb, var(--workspace-accent) 16%, transparent); }
+  .time-axis { display: flex; justify-content: space-between; color: var(--workspace-faint); font-variant-numeric: tabular-nums; }
+  .time-axis small { font-size: 10px; font-weight: 720; line-height: 1.2; }
   .token-chart > span, .token-chart > small { color: var(--workspace-muted); font-size: 10px; font-weight: 720; line-height: 1.2; }
   .token-chart > small { color: var(--workspace-faint); text-align: right; }
   .token-plot { position: relative; min-width: 0; height: var(--plot-height); border-radius: 6px; outline: none; }

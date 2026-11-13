@@ -207,6 +207,17 @@ fn map_event_with_context(
     let hook_name = forced_hook_name
         .map(str::to_string)
         .or_else(|| string(raw, "hook_event_name"))?;
+    // Lume's streaming Claude process answers permissions and questions itself (`can_use_tool`);
+    // the hook stays out so the request is not shown twice.
+    if provider == "claude"
+        && claude_stream_answers(
+            &hook_name,
+            raw,
+            std::env::var("LUME_CLAUDE_STREAM").ok().as_deref(),
+        )
+    {
+        return None;
+    }
     let hook_name = if provider == "antigravity"
         && matches!(hook_name.as_str(), "PreToolUseAllow" | "PreToolUseAsk")
     {
@@ -1011,6 +1022,11 @@ fn is_test_command(command: &str) -> bool {
     .any(|pattern| command.contains(pattern))
 }
 
+/// The profile of a Lume-controlled Claude conversation in a permission mode, answerable from Lume.
+pub(crate) fn claude_direct_profile(mode: Option<&str>) -> PermissionProfile {
+    permission_profile("claude", mode, &Value::Null, true)
+}
+
 /// The profile of a Claude conversation Lume opens with the given access mode;
 /// later hooks of each prompt keep it current.
 pub(crate) fn claude_launch_profile(mode: Option<&AccessMode>) -> PermissionProfile {
@@ -1090,6 +1106,12 @@ const CLAUDE_INTERNAL_TOOLS: &[&str] = &[
     "SendFeedback",
 ];
 
+fn claude_stream_answers(hook_name: &str, raw: &Value, marker: Option<&str>) -> bool {
+    marker == Some("1")
+        && (hook_name == "PermissionRequest"
+            || (hook_name == "PreToolUse" && is_claude_question(raw)))
+}
+
 fn is_claude_question(raw: &Value) -> bool {
     string(raw, "tool_name").as_deref() == Some("AskUserQuestion")
 }
@@ -1123,7 +1145,7 @@ fn antigravity_stop_event(raw: &Value) -> HookEventKind {
     }
 }
 
-fn claude_question_request(raw: &Value, session_id: &str) -> Option<PendingQuestion> {
+pub(crate) fn claude_question_request(raw: &Value, session_id: &str) -> Option<PendingQuestion> {
     let tool_input = raw.get("tool_input")?;
     let raw_questions = tool_input.get("questions")?.as_array()?;
     let questions = raw_questions
@@ -1182,7 +1204,7 @@ fn claude_question_item_id(session_id: &str, index: usize) -> String {
     format!("claude:{session_id}:question:{index}")
 }
 
-fn permission_request(provider: &str, raw: &Value, session_id: &str) -> PermissionRequest {
+pub(crate) fn permission_request(provider: &str, raw: &Value, session_id: &str) -> PermissionRequest {
     let tool_name = string(raw, "tool_name").unwrap_or_else(|| "Ferramenta".into());
     let tool_input = raw.get("tool_input").or_else(|| raw.get("details"));
     let resource = tool_input
@@ -1306,7 +1328,21 @@ fn claude_permission_output(action: Option<PermissionAction>, raw: &Value) -> Op
 }
 
 fn claude_question_output(answers: Option<Vec<QuestionAnswer>>, raw: &Value) -> Option<Value> {
-    let answers = answers?;
+    let updated_input = claude_question_updated_input(&answers?, raw)?;
+    Some(json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated_input
+        }
+    }))
+}
+
+/// The AskUserQuestion input with the answers Claude reads, keyed by question text.
+pub(crate) fn claude_question_updated_input(
+    answers: &[QuestionAnswer],
+    raw: &Value,
+) -> Option<Value> {
     let session_id = string(raw, "session_id")?;
     let mut updated_input = raw.get("tool_input")?.clone();
     let questions = updated_input.get("questions")?.as_array()?.clone();
@@ -1329,13 +1365,7 @@ fn claude_question_output(answers: Option<Vec<QuestionAnswer>>, raw: &Value) -> 
     updated_input
         .as_object_mut()?
         .insert("answers".into(), Value::Object(mapped));
-    Some(json!({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "updatedInput": updated_input
-        }
-    }))
+    Some(updated_input)
 }
 
 fn status_label(hook: &str, event: &HookEventKind) -> Option<&'static str> {

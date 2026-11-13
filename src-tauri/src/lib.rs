@@ -1,5 +1,7 @@
 mod acp_bridge;
 mod adapters;
+mod claude_permissions;
+mod claude_session;
 mod remote_sessions;
 mod agent_extensions;
 mod extension_github;
@@ -4136,6 +4138,7 @@ pub fn run() {
         .run(|app_handle, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 app_handle.state::<omp_rpc::OmpRpc>().terminate_all();
+                claude_session::close_all();
             }
         });
 }

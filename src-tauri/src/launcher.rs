@@ -426,10 +426,10 @@ pub fn claude_prompt_in_flight() -> bool {
     CLAUDE_PROMPTS_IN_FLIGHT.load(Ordering::SeqCst) > 0
 }
 
-struct InFlight;
+pub(crate) struct InFlight;
 
 impl InFlight {
-    fn begin() -> Self {
+    pub(crate) fn begin() -> Self {
         CLAUDE_PROMPTS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
         Self
     }
@@ -491,14 +491,322 @@ pub fn launch_claude_prompt(
     }
     // A stop that raced the previous run's exit must not be taken for this run's.
     forget_claude_interrupt(&session_id);
-    let mut payload = payload_for(&request, None);
-    if let Some(mode) = permission_mode.as_deref() {
+    if crate::claude_session::enabled() {
+        return launch_claude_stream_prompt(
+            request,
+            app,
+            state,
+            session_id,
+            permission_mode,
+            native_id,
+        );
+    }
+    launch_claude_print_prompt(request, app, state, session_id, permission_mode, native_id)
+}
+
+/// The command line of a Claude prompt in the chosen mode, with Lume's hooks.
+fn claude_prompt_payload(
+    request: &LaunchRequest,
+    permission_mode: Option<&str>,
+    native_id: &str,
+) -> Result<TerminalPayload, String> {
+    let mut payload = payload_for(request, None);
+    if let Some(mode) = permission_mode {
         apply_claude_permission_mode(&mut payload.arguments, mode);
     }
-    if !crate::integrations::claude_transcript_can_resume(&native_id) {
-        start_claude_session_with_id(&mut payload.arguments, &native_id);
+    if !crate::integrations::claude_transcript_can_resume(native_id) {
+        start_claude_session_with_id(&mut payload.arguments, native_id);
     }
     add_scoped_claude_hooks(&mut payload, &crate::integrations::lume_executable()?)?;
+    Ok(payload)
+}
+
+/// Sends the message to the conversation's long-lived process, starting one when there is none or
+/// its flags changed while idle. A process that cannot start falls back to one `claude --print`.
+fn launch_claude_stream_prompt(
+    request: LaunchRequest,
+    app: AppHandle,
+    state: AppState,
+    session_id: String,
+    permission_mode: Option<String>,
+    native_id: String,
+) -> Result<(), String> {
+    let prompt = request
+        .initial_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .ok_or("Mensagem vazia")?
+        .to_string();
+    let mut bare = request.clone();
+    bare.initial_prompt = None;
+    let payload = claude_prompt_payload(&bare, permission_mode.as_deref(), &native_id)?;
+    let signature = crate::claude_session::signature(&payload.arguments);
+    if let Some(live) = crate::claude_session::get(&session_id) {
+        // A changed model or mode needs a new process, unless a turn is running: then the
+        // message joins it and the change applies to the next process.
+        if live.signature == signature || live.is_running() {
+            return live.send_prompt(&prompt);
+        }
+        crate::claude_session::close(&session_id);
+    }
+    let mut command = crate::executables::command(&payload.command)?;
+    command
+        .args(crate::claude_session::stream_arguments(&payload.arguments))
+        .env("LUME_MANAGED_SESSION", "1")
+        .env("LUME_CLAUDE_PROMPT_CAPTURE", "1")
+        .env("LUME_CLAUDE_STREAM", "1")
+        .current_dir(&payload.working_directory);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let events = std::sync::Arc::new(ClaudeStreamEvents {
+        app: app.clone(),
+        state: state.clone(),
+        session_id: session_id.clone(),
+        native_id: native_id.clone(),
+        permission_mode: permission_mode.clone(),
+        fallback: Mutex::new(Some((request.clone(), permission_mode.clone()))),
+    });
+    let live = match crate::claude_session::Live::start(command, signature, events) {
+        Ok(live) => live,
+        Err(_) => {
+            return launch_claude_print_prompt(
+                request,
+                app,
+                state,
+                session_id,
+                permission_mode,
+                native_id,
+            )
+        }
+    };
+    crate::claude_session::insert(&session_id, live.clone());
+    live.send_prompt(&prompt)
+}
+
+/// Turns the long-lived process's output into session events.
+struct ClaudeStreamEvents {
+    app: AppHandle,
+    state: AppState,
+    session_id: String,
+    native_id: String,
+    permission_mode: Option<String>,
+    /// The first message, sent through `claude --print` instead if the process never starts.
+    fallback: Mutex<Option<(LaunchRequest, Option<String>)>>,
+}
+
+impl ClaudeStreamEvents {
+    fn started(&self) {
+        if let Ok(mut fallback) = self.fallback.lock() {
+            fallback.take();
+        }
+    }
+}
+
+impl crate::claude_session::SessionEvents for ClaudeStreamEvents {
+    fn turn_finished(
+        &self,
+        _live: &std::sync::Arc<crate::claude_session::Live>,
+        is_error: bool,
+        text: Option<String>,
+    ) {
+        self.started();
+        if let Some(interrupt) = take_claude_interrupt(&self.session_id) {
+            follow_claude_interrupt(&self.app, &self.state, &self.session_id, interrupt);
+            return;
+        }
+        let outcome = if is_error {
+            Err(text.unwrap_or_else(|| "Claude encerrou o turno com erro".into()))
+        } else {
+            Ok(text.unwrap_or_default())
+        };
+        finish_claude_prompt(
+            &self.app,
+            &self.state,
+            &self.session_id,
+            &self.native_id,
+            outcome,
+        );
+    }
+
+    fn control_request(
+        &self,
+        live: &std::sync::Arc<crate::claude_session::Live>,
+        id: String,
+        request: serde_json::Value,
+    ) {
+        self.started();
+        let (app, state, live) = (self.app.clone(), self.state.clone(), live.clone());
+        let (session_id, native_id, mode) = (
+            self.session_id.clone(),
+            self.native_id.clone(),
+            self.permission_mode.clone(),
+        );
+        // Each request waits on you, so it gets its own thread and the output keeps flowing.
+        let _ = thread::Builder::new()
+            .name("lume-claude-permission".into())
+            .spawn(move || {
+                let response = if request.get("subtype").and_then(serde_json::Value::as_str)
+                    == Some("can_use_tool")
+                {
+                    crate::claude_permissions::answer_can_use_tool(
+                        &app,
+                        &state,
+                        &session_id,
+                        &native_id,
+                        mode.as_deref(),
+                        &request,
+                    )
+                } else {
+                    crate::claude_session::deny("Lume does not answer this request")
+                };
+                let _ = live.respond(&id, response);
+            });
+    }
+
+    fn exited(
+        &self,
+        live: &std::sync::Arc<crate::claude_session::Live>,
+        started: bool,
+        stderr: String,
+    ) {
+        crate::claude_session::remove(&self.session_id, live);
+        let fallback = self
+            .fallback
+            .lock()
+            .ok()
+            .and_then(|mut fallback| fallback.take());
+        if let (false, Some((request, permission_mode))) = (started, fallback) {
+            // Streaming did not start (an older CLI, a login race): run this message the old way.
+            if launch_claude_print_prompt(
+                request,
+                self.app.clone(),
+                self.state.clone(),
+                self.session_id.clone(),
+                permission_mode,
+                self.native_id.clone(),
+            )
+            .is_ok()
+            {
+                return;
+            }
+        }
+        if let Some(interrupt) = take_claude_interrupt(&self.session_id) {
+            follow_claude_interrupt(&self.app, &self.state, &self.session_id, interrupt);
+            return;
+        }
+        let detail = if stderr.is_empty() {
+            "Claude encerrou inesperadamente".to_string()
+        } else {
+            stderr
+        };
+        finish_claude_prompt(
+            &self.app,
+            &self.state,
+            &self.session_id,
+            &self.native_id,
+            Err(detail),
+        );
+    }
+}
+
+/// After Lume stopped a prompt: a cancel pauses the queue; a steer moves on.
+fn follow_claude_interrupt(
+    app: &AppHandle,
+    state: &AppState,
+    session_id: &str,
+    interrupt: ClaudeInterrupt,
+) {
+    match interrupt {
+        ClaudeInterrupt::Cancel => set_claude_queue_paused(session_id, true),
+        ClaudeInterrupt::Steer => {
+            let _ = run_next_queued_claude_prompt(app, state, session_id, true);
+        }
+    }
+}
+
+/// Reports how a prompt ended and starts the next queued one. `Ok` carries Claude's reply.
+fn finish_claude_prompt(
+    app: &AppHandle,
+    state: &AppState,
+    session_id: &str,
+    native_id: &str,
+    outcome: Result<String, String>,
+) {
+    let mut event = claude_prompt_event(session_id, native_id);
+    match outcome {
+        Ok(response) => {
+            let response = response.trim().chars().take(32 * 1024).collect::<String>();
+            if response.is_empty() {
+                let recorded_response = state
+                    .connected_session(session_id)
+                    .ok()
+                    .and_then(|session| current_claude_reply(&session.activities, None));
+                if let Some(recorded_response) = recorded_response {
+                    event.event = HookEventKind::Completed;
+                    event.last_response = Some(recorded_response);
+                } else {
+                    event.event = HookEventKind::Failed;
+                    let detail = "Claude terminou sem enviar uma resposta";
+                    event.status_label = Some(detail.into());
+                    event.activity = Some(claude_error_activity(native_id, detail));
+                }
+            } else {
+                event.event = HookEventKind::Completed;
+                event.last_response = Some(response.clone());
+                let already_recorded = state
+                    .connected_session(session_id)
+                    .ok()
+                    .and_then(|session| current_claude_reply(&session.activities, Some(&response)))
+                    .is_some();
+                if !already_recorded {
+                    event.activity = Some(SessionActivity {
+                        id: format!(
+                            "claude:{native_id}:managed-response:{}",
+                            crate::state::now_millis()
+                        ),
+                        kind: "message".into(),
+                        title: "Resposta do agente".into(),
+                        detail: Some(response),
+                        status: "completed".into(),
+                        created_at: crate::state::now_millis(),
+                        files: Vec::new(),
+                        attachments: Vec::new(),
+                        append_detail: false,
+                    });
+                }
+            }
+        }
+        Err(detail) => {
+            event.event = HookEventKind::Failed;
+            event.status_label = Some(detail.chars().take(240).collect());
+            event.activity = Some(claude_error_activity(native_id, &detail));
+        }
+    }
+    let failed = matches!(event.event, HookEventKind::Failed);
+    let _ = event_server::publish_event(state, app, event);
+    // The next queued message follows a prompt that finished; after a failure
+    // the queue waits, so one error does not send everything behind it.
+    if failed {
+        set_claude_queue_paused(session_id, true);
+    } else {
+        let _ = run_next_queued_claude_prompt(app, state, session_id, false);
+    }
+}
+
+/// One `claude --print` per message: the fallback when streaming is off or cannot start.
+fn launch_claude_print_prompt(
+    request: LaunchRequest,
+    app: AppHandle,
+    state: AppState,
+    session_id: String,
+    permission_mode: Option<String>,
+    native_id: String,
+) -> Result<(), String> {
+    let payload = claude_prompt_payload(&request, permission_mode.as_deref(), &native_id)?;
     let child = spawn_claude_prompt(&payload)?;
     let in_flight = InFlight::begin();
     thread::Builder::new()
@@ -522,93 +830,26 @@ pub fn launch_claude_prompt(
                 }
             };
             // Lume stopped this prompt: it is already marked as interrupted, so the
-            // process dying is not a failure. A cancel pauses the queue; a steer moves on.
+            // process dying is not a failure.
             if let Some(interrupt) = take_claude_interrupt(&session_id) {
-                match interrupt {
-                    ClaudeInterrupt::Cancel => set_claude_queue_paused(&session_id, true),
-                    ClaudeInterrupt::Steer => {
-                        let _ = run_next_queued_claude_prompt(&app, &state, &session_id, true);
-                    }
-                }
+                follow_claude_interrupt(&app, &state, &session_id, interrupt);
                 return;
             }
-            let mut event = claude_prompt_event(&session_id, &native_id);
-            match output {
+            let outcome = match output {
                 Ok(output) if output.status.success() => {
-                    let response = String::from_utf8_lossy(&output.stdout)
-                        .trim()
-                        .chars()
-                        .take(32 * 1024)
-                        .collect::<String>();
-                    if response.is_empty() {
-                        let recorded_response = state
-                            .connected_session(&session_id)
-                            .ok()
-                            .and_then(|session| current_claude_reply(&session.activities, None));
-                        if let Some(recorded_response) = recorded_response {
-                            event.event = HookEventKind::Completed;
-                            event.last_response = Some(recorded_response);
-                        } else {
-                            event.event = HookEventKind::Failed;
-                            let detail = "Claude terminou sem enviar uma resposta";
-                            event.status_label = Some(detail.into());
-                            event.activity = Some(claude_error_activity(&native_id, detail));
-                        }
-                    } else {
-                        event.event = HookEventKind::Completed;
-                        event.last_response = Some(response.clone());
-                        let already_recorded = state
-                            .connected_session(&session_id)
-                            .ok()
-                            .and_then(|session| {
-                                current_claude_reply(&session.activities, Some(&response))
-                            })
-                            .is_some();
-                        if !already_recorded {
-                            event.activity = Some(SessionActivity {
-                                id: format!(
-                                    "claude:{native_id}:managed-response:{}",
-                                    crate::state::now_millis()
-                                ),
-                                kind: "message".into(),
-                                title: "Resposta do agente".into(),
-                                detail: Some(response),
-                                status: "completed".into(),
-                                created_at: crate::state::now_millis(),
-                                files: Vec::new(),
-                                attachments: Vec::new(),
-                                append_detail: false,
-                            });
-                        }
-                    }
+                    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
                 }
                 Ok(output) => {
                     let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    event.event = HookEventKind::Failed;
-                    let detail = if detail.is_empty() {
+                    Err(if detail.is_empty() {
                         format!("Claude encerrou com código {}", output.status)
                     } else {
                         detail
-                    };
-                    event.status_label = Some(detail.chars().take(240).collect());
-                    event.activity = Some(claude_error_activity(&native_id, &detail));
+                    })
                 }
-                Err(error) => {
-                    event.event = HookEventKind::Failed;
-                    let detail = format!("Falha ao aguardar o Claude: {error}");
-                    event.status_label = Some(detail.clone());
-                    event.activity = Some(claude_error_activity(&native_id, &detail));
-                }
-            }
-            let failed = matches!(event.event, HookEventKind::Failed);
-            let _ = event_server::publish_event(&state, &app, event);
-            // The next queued message follows a prompt that finished; after a failure
-            // the queue waits, so one error does not send everything behind it.
-            if failed {
-                set_claude_queue_paused(&session_id, true);
-            } else {
-                let _ = run_next_queued_claude_prompt(&app, &state, &session_id, false);
-            }
+                Err(error) => Err(format!("Falha ao aguardar o Claude: {error}")),
+            };
+            finish_claude_prompt(&app, &state, &session_id, &native_id, outcome);
         })
         .map_err(|error| error.to_string())?;
     Ok(())

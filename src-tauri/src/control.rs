@@ -251,6 +251,7 @@ pub fn submit_prompt(
                 .iter()
                 .map(|attachment| attachment.path.clone())
                 .collect::<Vec<_>>();
+            let full_prompt = prompt_with_attachment_paths(prompt, &all_paths);
             let activity_id = format!("local:{}:queued:{}", session.id, crate::state::now_millis());
             state.record_queued_prompt_activity(
                 &session.id,
@@ -258,11 +259,15 @@ pub fn submit_prompt(
                 prompt,
                 display_attachments,
             )?;
-            launcher::queue_claude_prompt(
-                &session.id,
-                activity_id,
-                prompt_with_attachment_paths(prompt, &all_paths),
-            );
+            // A live process takes the message now and Claude queues it itself; it shows as sent.
+            // Without one, each message is its own `claude --print` and waits for the running one.
+            let delivered = crate::claude_session::get(&session.id)
+                .is_some_and(|live| live.send_prompt(&full_prompt).is_ok());
+            if delivered {
+                state.promote_queued_prompt_activity(&session.id, &activity_id)?;
+            } else {
+                launcher::queue_claude_prompt(&session.id, activity_id, full_prompt);
+            }
             protocol::emit_sessions_changed(app);
             return Ok(());
         }
@@ -570,17 +575,35 @@ pub fn interrupt_prompt(
             .native_session_id
             .as_deref()
             .ok_or_else(|| "The Claude session did not provide its session id".to_string())?;
-        launcher::note_claude_interrupt(session_id, launcher::ClaudeInterrupt::Cancel);
-        if let Err(error) =
-            discovery::interrupt_resumed_prompt_process(native_session_id, &session.agent)
-        {
-            launcher::forget_claude_interrupt(session_id);
+        if let Err(error) = interrupt_claude_prompt(
+            session_id,
+            native_session_id,
+            &session.agent,
+            launcher::ClaudeInterrupt::Cancel,
+        ) {
             return Err(error);
         }
     }
     state.mark_prompt_interrupted(session_id)?;
     protocol::emit_sessions_changed(app);
     Ok(())
+}
+
+/// Stops a Lume-controlled Claude prompt: the live process gets the control protocol's interrupt, so its
+/// background tasks survive; a `claude --print` run is ended as before.
+fn interrupt_claude_prompt(
+    session_id: &str,
+    native_id: &str,
+    agent: &AgentKind,
+    kind: launcher::ClaudeInterrupt,
+) -> Result<(), String> {
+    launcher::note_claude_interrupt(session_id, kind);
+    let result = crate::claude_session::interrupt(session_id)
+        .unwrap_or_else(|| discovery::interrupt_resumed_prompt_process(native_id, agent));
+    if result.is_err() {
+        launcher::forget_claude_interrupt(session_id);
+    }
+    result
 }
 
 fn supports_safe_prompt_interrupt(agent: &AgentKind, source: &SessionSource) -> bool {
@@ -1584,9 +1607,12 @@ fn send_queued_claude_prompt_now(
             .native_session_id
             .as_deref()
             .ok_or_else(|| "The Claude session did not provide its session id".to_string())?;
-        launcher::note_claude_interrupt(&session.id, launcher::ClaudeInterrupt::Steer);
-        if let Err(error) = discovery::interrupt_resumed_prompt_process(native_id, &session.agent) {
-            launcher::forget_claude_interrupt(&session.id);
+        if let Err(error) = interrupt_claude_prompt(
+            &session.id,
+            native_id,
+            &session.agent,
+            launcher::ClaudeInterrupt::Steer,
+        ) {
             return Err(error);
         }
         state.mark_prompt_interrupted(&session.id)?;
@@ -1919,16 +1945,18 @@ pub fn terminate_session(
             session.status,
             SessionStatus::Running | SessionStatus::PermissionRequired
         ) {
-            launcher::note_claude_interrupt(session_id, launcher::ClaudeInterrupt::Cancel);
-            if let Err(error) =
-                discovery::interrupt_resumed_prompt_process(native_session_id, &session.agent)
-            {
-                launcher::forget_claude_interrupt(session_id);
+            if let Err(error) = interrupt_claude_prompt(
+                session_id,
+                native_session_id,
+                &session.agent,
+                launcher::ClaudeInterrupt::Cancel,
+            ) {
                 if !is_no_active_prompt(&error) {
                     return Err(error);
                 }
             }
         }
+        crate::claude_session::close(session_id);
         state.mark_session_terminated(session_id)?;
         protocol::emit_sessions_changed(app);
         return Ok(());

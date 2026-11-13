@@ -46,7 +46,7 @@ export interface PermissionProfile {
 
 export interface PermissionRequest {
   id: string;
-  kind: "command" | "file" | "network" | "tool";
+  kind: "command" | "file" | "network" | "tool" | "plan";
   summary: string;
   resource: string;
   risk: "low" | "medium" | "high";

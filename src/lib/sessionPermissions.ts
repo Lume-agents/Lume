@@ -64,3 +64,20 @@ export function permissionTone(mode: string): PermissionTone {
   if (mode === "bypassPermissions" || mode === "full_access" || mode === "agy_allow_all") return "danger";
   return mode === "auto" || mode === "auto_review" || mode === "agy_accept_edits" ? "auto" : "normal";
 }
+
+/** A Claude plan waiting for approval arrives as a permission of this kind (ExitPlanMode). */
+export const PLAN_PERMISSION_KIND = "plan";
+
+/** The buttons a permission card shows: a plan is approved or kept in planning, never allowed per session. */
+export function permissionChoices<Action extends string>(kind: string, actions: Action[]): Action[] {
+  if (kind !== PLAN_PERMISSION_KIND) return actions;
+  return actions.filter((action) => action === "allow_once" || action === "deny");
+}
+
+/** The label of a plan card's button, or null when the card is a normal permission. */
+export function planChoiceLabel(kind: string, action: string, translate: Translate): string | null {
+  if (kind !== PLAN_PERMISSION_KIND) return null;
+  if (action === "allow_once") return translate("Approve", "Aprovar");
+  if (action === "deny") return translate("Keep planning", "Continuar planejando");
+  return null;
+}

@@ -41,7 +41,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import { attachedNoteMimeType } from "$lib/chatAttachments";
   import { linkAtIndex, splitLinks } from "$lib/links";
   import { claudeEffortForModel, claudeEffortValues, claudeModelOptions } from "$lib/claudeModels";
-  import { permissionDescription, permissionLabel, permissionTone } from "$lib/sessionPermissions";
+  import { permissionChoices, permissionDescription, permissionLabel, permissionTone, planChoiceLabel, PLAN_PERMISSION_KIND } from "$lib/sessionPermissions";
   import { requiresCodexCliTakeover } from "$lib/sessionCapabilities";
   import AgentConnectionDialog from "$lib/AgentConnectionDialog.svelte";
   import { agentConnectionMessage, type ConnectableAgent } from "$lib/agentConnection";
@@ -1917,7 +1917,16 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     void loadSessionPermission();
   });
 
+  // Oh My Pi answers once or not at all; a Claude plan is approved or kept in planning.
+  const permissionButtons = $derived.by((): PermissionAction[] => {
+    const actions: PermissionAction[] = session.permissionProfile.availableActions;
+    const available = session.agent === "omp" ? actions.filter((action) => action === "allow_once" || action === "deny") : actions;
+    return pendingPermission ? permissionChoices(pendingPermission.kind, available) : available;
+  });
+
   function permissionActionLabel(action: PermissionAction) {
+    const planLabel = pendingPermission ? planChoiceLabel(pendingPermission.kind, action, tr) : null;
+    if (planLabel) return planLabel;
     if (session.agent === "omp" && action === "allow_once") return tr("Allow once", "Permitir uma vez");
     return {
       allow_once: tr("Allow", "Permitir"),
@@ -3181,11 +3190,11 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       <section class="agent-permission risk-{pendingPermission.risk}" role="group" aria-busy={permissionBusy} aria-label={tr("Permission request", "Pedido de permissão")}>
         <header>
           <LumeIcon name="warning" size={14} />
-          <strong>{displayText(language, pendingPermission.summary)}</strong>
+          <strong>{pendingPermission.kind === PLAN_PERMISSION_KIND ? tr("Approve this plan?", "Aprovar o plano?") : displayText(language, pendingPermission.summary)}</strong>
         </header>
         {#if pendingPermission.resource}<code title={pendingPermission.resource}>{pendingPermission.resource}</code>{/if}
         <div class="permission-actions">
-          {#each (session.agent === "omp" ? session.permissionProfile.availableActions.filter((action: PermissionAction) => action === "allow_once" || action === "deny") : session.permissionProfile.availableActions) as action (action)}
+          {#each permissionButtons as action (action)}
             <button class:allow={action === "allow_once"} class:danger={action === "deny"} class:loading={permissionAction === action} type="button" disabled={permissionBusy} onclick={() => void resolvePermission(action)}>
               {#if permissionAction === action}<i class="permission-spinner" aria-hidden="true"></i>{/if}
               {permissionActionLabel(action)}

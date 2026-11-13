@@ -29,3 +29,13 @@ test("only the modes that never ask are flagged as dangerous", () => {
   assert.equal(permissionTone("default"), "normal");
   assert.match(permissionDescription("full_access", en), /safe place/);
 });
+
+test("a Claude plan is approved or kept in planning", async () => {
+  const { permissionChoices, planChoiceLabel } = await import("../src/lib/sessionPermissions.ts");
+  const actions = ["allow_once", "allow_session", "deny"];
+  assert.deepEqual(permissionChoices("plan", actions), ["allow_once", "deny"]);
+  assert.deepEqual(permissionChoices("command", actions), actions);
+  assert.equal(planChoiceLabel("plan", "allow_once", en), "Approve");
+  assert.equal(planChoiceLabel("plan", "deny", pt), "Continuar planejando");
+  assert.equal(planChoiceLabel("command", "deny", en), null);
+});

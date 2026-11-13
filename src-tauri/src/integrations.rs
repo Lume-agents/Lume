@@ -615,15 +615,36 @@ pub fn claude_session_open_interactively(session_id: &str) -> bool {
         })
         .filter_map(|path| fs::read_to_string(path).ok())
         .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
-        .filter_map(|record| interactive_claude_pid(&record, session_id))
-        .any(|pid| {
+        .filter_map(|record| Some((interactive_claude_pid(&record, session_id)?, record)))
+        .any(|(pid, record)| {
             let pid = sysinfo::Pid::from_u32(pid);
             system.refresh_processes_specifics(
                 sysinfo::ProcessesToUpdate::Some(&[pid]),
                 true,
                 sysinfo::ProcessRefreshKind::nothing(),
             );
-            system.process(pid).is_some()
+            system
+                .process(pid)
+                .is_some_and(|process| !registry_pid_was_reused(&record, process.start_time()))
+        })
+}
+
+/// The `entrypoint` Claude registers for the SDK and headless runs, the way Lume itself keeps a chat
+/// open (`claude --print --input-format stream-json`). They say `kind: "interactive"` as well, but no
+/// terminal holds their conversation.
+const CLAUDE_HEADLESS_ENTRYPOINT: &str = "sdk-cli";
+
+/// How long after a registry record was written a process may start and still be the one it describes.
+const REGISTRY_START_MARGIN_SECONDS: u64 = 15;
+
+/// A registry file outlives its process, and the system hands a freed process id to something else.
+/// A process that started after the record was written is not the one the record describes.
+fn registry_pid_was_reused(record: &Value, process_started_at_seconds: u64) -> bool {
+    record
+        .get("startedAt")
+        .and_then(Value::as_u64)
+        .is_some_and(|started_at_ms| {
+            process_started_at_seconds > started_at_ms / 1000 + REGISTRY_START_MARGIN_SECONDS
         })
 }
 
@@ -733,7 +754,8 @@ pub(crate) fn claude_unused_home_cli(pid: u32, working_directory: Option<&str>) 
 
 fn interactive_claude_pid(record: &Value, session_id: &str) -> Option<u32> {
     (record.get("sessionId").and_then(Value::as_str) == Some(session_id)
-        && record.get("kind").and_then(Value::as_str) == Some("interactive"))
+        && record.get("kind").and_then(Value::as_str) == Some("interactive")
+        && record.get("entrypoint").and_then(Value::as_str) != Some(CLAUDE_HEADLESS_ENTRYPOINT))
     .then(|| record.get("pid").and_then(Value::as_u64))
     .flatten()
     .and_then(|pid| u32::try_from(pid).ok())
@@ -3761,6 +3783,53 @@ mod tests {
             None
         );
         assert_eq!(interactive_claude_pid(&record("print"), "session-id"), None);
+    }
+
+    #[test]
+    fn the_process_lume_keeps_a_chat_in_is_not_a_terminal_holding_it() {
+        let record = |entrypoint: Option<&str>| {
+            let mut record = json!({ "pid": 4242, "sessionId": "session-id", "kind": "interactive" });
+            if let Some(entrypoint) = entrypoint {
+                record["entrypoint"] = json!(entrypoint);
+            }
+            record
+        };
+        // The SDK entry point is what `claude --print --input-format stream-json` registers.
+        assert_eq!(interactive_claude_pid(&record(Some("sdk-cli")), "session-id"), None);
+        // A terminal, an editor extension, and a version that records no entry point all hold it.
+        for entrypoint in [Some("cli"), Some("claude-vscode"), None] {
+            assert_eq!(interactive_claude_pid(&record(entrypoint), "session-id"), Some(4242), "{entrypoint:?}");
+        }
+    }
+
+    #[test]
+    fn a_process_id_the_system_gave_to_another_process_is_not_the_claude_in_the_record() {
+        let record = json!({ "pid": 20, "startedAt": 1_790_644_128_154_u64 });
+        let written = 1_790_644_128_u64;
+        // Claude writes its record about a second after it starts.
+        assert!(!registry_pid_was_reused(&record, written - 1));
+        assert!(!registry_pid_was_reused(&record, written + REGISTRY_START_MARGIN_SECONDS));
+        // Started long after the record: the id was freed and handed out again.
+        assert!(registry_pid_was_reused(&record, written + 3_000_000));
+        // No start time recorded: the process id is all there is, so it is trusted.
+        assert!(!registry_pid_was_reused(&json!({ "pid": 20 }), written + 3_000_000));
+    }
+
+    #[test]
+    fn the_cheap_process_refresh_still_reports_when_a_process_started() {
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        let started = system.process(pid).expect("this process").start_time();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(started > 1_500_000_000 && started <= now, "start time {started}");
     }
 
     #[test]

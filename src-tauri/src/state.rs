@@ -63,6 +63,16 @@ fn lume_owns_codex_writer(sessions: &[AgentSession], process_id: u32, native_id:
     })
 }
 
+/// What writing a prompt down changed in a session, kept so the prompt can be taken back if it is refused.
+#[derive(Clone, Debug)]
+pub struct RecordedPrompt {
+    activity_id: String,
+    status: SessionStatus,
+    status_label: String,
+    updated_at: i64,
+    recorded_at: i64,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     sessions: Arc<Mutex<Vec<AgentSession>>>,
@@ -1442,6 +1452,18 @@ impl AppState {
         prompt: &str,
         attachments: Vec<PromptAttachment>,
     ) -> Result<(), String> {
+        self.record_prompt_activity_reversible(session_id, prompt, attachments)
+            .map(|_| ())
+    }
+
+    /// Writes the prompt down and marks the session running, like `record_prompt_activity`, and
+    /// returns what it changed so a message that cannot be sent can be taken back.
+    pub fn record_prompt_activity_reversible(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        attachments: Vec<PromptAttachment>,
+    ) -> Result<RecordedPrompt, String> {
         let now = now_millis();
         let mut sessions = self
             .sessions
@@ -1465,9 +1487,61 @@ impl AppState {
                 append_detail: false,
             },
         );
+        let recorded = RecordedPrompt {
+            activity_id: format!("local:{session_id}:{now}"),
+            status: session.status.clone(),
+            status_label: session.status_label.clone(),
+            updated_at: session.updated_at,
+            recorded_at: now,
+        };
         session.status = SessionStatus::Running;
         session.status_label = "Executando".into();
         session.updated_at = now;
+        Ok(recorded)
+    }
+
+    /// Takes back a prompt that was written down but never sent: the message leaves the chat and the
+    /// session is not left "running" with nothing running. A session an event has touched since keeps
+    /// the state that event gave it.
+    pub fn undo_prompt_activity(
+        &self,
+        session_id: &str,
+        recorded: &RecordedPrompt,
+    ) -> Result<(), String> {
+        let thread_key = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "Não foi possível atualizar o prompt da sessão".to_string())?;
+            let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
+                return Ok(());
+            };
+            session
+                .activities
+                .retain(|activity| activity.id != recorded.activity_id);
+            if session.status == SessionStatus::Running
+                && session.updated_at == recorded.recorded_at
+            {
+                session.status = recorded.status.clone();
+                session.status_label = recorded.status_label.clone();
+                session.updated_at = recorded.updated_at;
+            }
+            Store::conversation_key(session)
+        };
+        // Reading the chat copies its messages into the conversation archive, so the prompt may
+        // already be there: it goes from the archive too, or it would come back on the next read.
+        if let Some(thread_key) = thread_key {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| "Não foi possível acessar o histórico das conversas".to_string())?;
+            store.forget_conversation_activity(&thread_key, &recorded.activity_id)?;
+            if let Ok(mut cache) = self.archived_conversations.lock() {
+                if let Some(archived) = cache.get_mut(&thread_key) {
+                    archived.retain(|activity| activity.id != recorded.activity_id);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -9620,4 +9694,62 @@ mod tests {
         assert!(!rebind_to_registered_worker(&mut orphan, &live, &registry), "no worker holds it: it closes as before");
         assert_eq!(orphan.process_id, Some(777));
     }
+
+    #[test]
+    fn a_prompt_that_was_never_sent_is_taken_back() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        state
+            .ingest(started_event("claude:refused-prompt", 4242))
+            .expect("sessão");
+        let idle = |state: &AppState| state.sessions().expect("sessões").remove(0);
+        let before = idle(&state);
+
+        let recorded = state
+            .record_prompt_activity_reversible("claude:refused-prompt", "Run the tests", Vec::new())
+            .expect("prompt");
+        // The chat is read while the message is outstanding, which also copies it into the archive.
+        let during = idle(&state);
+        assert_eq!(during.status, SessionStatus::Running);
+        assert_eq!(during.activities.len(), before.activities.len() + 1);
+
+        state
+            .undo_prompt_activity("claude:refused-prompt", &recorded)
+            .expect("desfeito");
+        let after = idle(&state);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.status_label, before.status_label);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after.activities.len(), before.activities.len());
+        // Nor does a later read of the archive bring it back.
+        assert_eq!(idle(&state).activities.len(), before.activities.len());
+    }
+
+    #[test]
+    fn taking_a_prompt_back_keeps_what_an_event_changed_since() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        state
+            .ingest(started_event("claude:raced-prompt", 4242))
+            .expect("sessão");
+        let recorded = state
+            .record_prompt_activity_reversible("claude:raced-prompt", "Run the tests", Vec::new())
+            .expect("prompt");
+        // The agent reports in before the refusal is handled: the session really is working.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut running = started_event("claude:raced-prompt", 4242);
+        running.event = HookEventKind::Running;
+        state.ingest(running).expect("evento");
+        let working = state.sessions().expect("sessões").remove(0);
+
+        state
+            .undo_prompt_activity("claude:raced-prompt", &recorded)
+            .expect("desfeito");
+        let after = state.sessions().expect("sessões").remove(0);
+        assert_eq!(after.status, SessionStatus::Running);
+        assert_eq!(after.updated_at, working.updated_at);
+        // Undoing for a session that is gone is not an error.
+        state
+            .undo_prompt_activity("claude:nobody", &recorded)
+            .expect("sessão ausente");
+    }
 }
+

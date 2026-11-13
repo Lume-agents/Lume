@@ -369,6 +369,17 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets one archived item of a conversation, for a message that was written down and never sent.
+    pub fn forget_conversation_activity(&self, thread_key: &str, activity_id: &str) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM conversation_activities WHERE thread_key = ?1 AND activity_id = ?2",
+                params![thread_key, activity_id],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     fn save_managed_session(&self, session: &AgentSession) -> Result<(), String> {
         if session.control_origin != SessionControlOrigin::Lume
             || session.agent != AgentKind::Codex

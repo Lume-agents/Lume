@@ -445,16 +445,29 @@ pub fn submit_prompt(
         if agent == IntegrationKind::Claude {
             let (request, permission_mode) = claude_launch_request(state, &session, &prompt)?;
             // Messages a cancel left queued stay paused until you send them.
-            if session.source != SessionSource::Web {
-                state.record_prompt_activity(&session.id, &prompt, display_attachments.clone())?;
-            }
-            launcher::launch_claude_prompt(
+            let recorded = if session.source != SessionSource::Web {
+                Some(state.record_prompt_activity_reversible(
+                    &session.id,
+                    &prompt,
+                    display_attachments.clone(),
+                )?)
+            } else {
+                None
+            };
+            let launched = launcher::launch_claude_prompt(
                 request,
                 app.clone(),
                 state.clone(),
                 session.id.clone(),
                 permission_mode,
-            )
+            );
+            // A message that was refused was never sent: it leaves the chat, and the session is not
+            // left "running" with nothing running.
+            if let (Err(_), Some(recorded)) = (&launched, &recorded) {
+                let _ = state.undo_prompt_activity(&session.id, recorded);
+                protocol::emit_sessions_changed(app);
+            }
+            launched
         } else {
             let request = LaunchRequest {
                 agent,

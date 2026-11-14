@@ -1187,9 +1187,8 @@ fn refresh_antigravity_rate_limits(app: AppHandle, state: AppState) {
 
 fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
     // A probe is a `claude` process too; starting one while a prompt starts can collide on the token refresh.
-    if launcher::claude_prompt_in_flight() {
-        return;
-    }
+    // The process that runs the prompt can be asked instead, so the usage still follows a running task.
+    let prompt_in_flight = launcher::claude_prompt_in_flight();
     static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
@@ -1203,6 +1202,31 @@ fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
             }
         }
         let _release = Release;
+        // A process Lume already keeps answers faster and cheaper than a new one, and is the only
+        // answer while a message is in flight.
+        match claude_session::usage_from_live() {
+            Some(Ok(usage)) => match claude_control::rate_limits(&usage) {
+                Ok(limits) => {
+                    let _ = usage_monitor::publish(&app, &state, AgentKind::ClaudeCode, limits);
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("Claude Code usage (live process): {error}");
+                    if prompt_in_flight {
+                        return;
+                    }
+                }
+            },
+            // A failed live read keeps the last values: a banner in the middle of a task says nothing true.
+            Some(Err(error)) => {
+                eprintln!("Claude Code usage (live process): {error}");
+                if prompt_in_flight {
+                    return;
+                }
+            }
+            None if prompt_in_flight => return,
+            None => {}
+        }
         let working_directory = std::env::temp_dir().to_string_lossy().into_owned();
         match claude_control::usage(&working_directory) {
             Ok(limits) => {

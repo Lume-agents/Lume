@@ -28,6 +28,7 @@
   import { buildLatestReviewTurn } from "$lib/reviewDiffs";
   import { subagentsForSession } from "$lib/workspaceAgents";
   import { expectedUsageLimitCount, stacksUsageGauges, usageGaugeGroups } from "$lib/usageGauges";
+  import { usagePollInterval } from "$lib/usagePolling";
 
   let {
     session,
@@ -78,6 +79,17 @@
     mcpLoading = true;
     void loadMcp(id, agent);
   });
+  /** Reads the servers again, ignoring what was read once for this session. */
+  function reloadMcp() {
+    const id = session?.id;
+    const agent = session?.agent;
+    if (!id || !agent || !mcpAgents.includes(agent)) return;
+    mcpCache.delete(id);
+    mcpKey = id;
+    mcpServers = [];
+    mcpLoading = true;
+    void loadMcp(id, agent);
+  }
   async function loadMcp(id: string, agent: string) {
     try {
       const configured = await listSessionMcpServers(id, false);
@@ -140,6 +152,33 @@
     usagePendingKey = key;
     void refreshUsage(key);
   });
+
+  // A running task spends the limits as it goes, so they are read again on a timer while it runs.
+  $effect(() => {
+    const interval = session && hasUsage(session.agent) ? usagePollInterval(session.agent, session.status) : null;
+    if (!interval) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refreshUsage(usagePendingKey || requestedUsageKey);
+    }, interval);
+    return () => window.clearInterval(timer);
+  });
+
+  // The usage read returns at once (the app reads it in the background), so the icon turns for a moment
+  // anyway: the click needs an answer you can see.
+  let refreshClicked = $state(false);
+  const inspectorRefreshing = $derived(refreshClicked || usageRefreshing || mcpLoading || mcpProbing);
+  /** Reads again what the Inspector otherwise reads once per session: the usage and the MCP servers. */
+  function refreshInspector() {
+    if (!session || inspectorRefreshing) return;
+    refreshClicked = true;
+    window.setTimeout(() => (refreshClicked = false), 700);
+    if (hasUsage(session.agent)) {
+      const key = requestedUsageKey || `${session.agent}:${session.nativeSessionId ?? session.id}`;
+      usageRead.delete(key);
+      void refreshUsage(key);
+    }
+    reloadMcp();
+  }
 
   function tr(english: string, portuguese: string) {
     return language === "pt-BR" ? portuguese : english;
@@ -207,6 +246,11 @@
       {/if}
     {:else}
       <span class="header-copy"><strong>{tr("Inspector", "Inspector")}</strong><small>{tr("No session selected", "Nenhuma sessão selecionada")}</small></span>
+    {/if}
+    {#if session}
+      <button class="inspector-refresh" class:spinning={inspectorRefreshing} type="button" disabled={inspectorRefreshing} aria-label={tr("Refresh inspector", "Atualizar inspector")} title={tr("Refresh usage and MCP servers", "Atualizar o uso e os servidores MCP")} onclick={refreshInspector}>
+        <LumeIcon name="refresh" size={16} />
+      </button>
     {/if}
     {#if showCloseButton}
       <button type="button" aria-label={tr("Close inspector", "Fechar inspector")} title={tr("Close inspector", "Fechar inspector")} onclick={() => onClose?.()}>
@@ -419,4 +463,8 @@
   .loading-rows > i:nth-child(3) { width: 54%; }
   @keyframes usage-pulse { to { opacity: .9; } }
   @media (prefers-reduced-motion: reduce) { .inspector-section > summary::after, .gauge-progress { transition: none; }.usage-gauges.loading > i, .loading-rows > i { animation: none; } }
+  .inspector-refresh.spinning :global(svg) { animation: inspector-spin 700ms linear infinite; }
+  .inspector-refresh:disabled { cursor: default; }
+  @keyframes inspector-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .inspector-refresh.spinning :global(svg) { animation: none; } }
 </style>

@@ -23,6 +23,8 @@ use serde_json::{json, Value};
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// How long Stop waits for Claude to confirm the interrupt before killing the process.
 pub const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+/// How long to wait for a running process to answer a usage request.
+const USAGE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Flags that turn a `claude --print` command line into a streaming session.
 pub const STREAM_FLAGS: [&str; 7] = [
@@ -416,6 +418,22 @@ impl Live {
         self.write_line(&control_response_line(id, response))
     }
 
+    /// Asks the process for the account's usage. It answers in the middle of a turn, which a separate
+    /// probe cannot do without colliding with that turn on the token refresh.
+    pub fn usage(self: &Arc<Self>) -> Result<Value, String> {
+        let (id, receiver) = self.controls.register("usage");
+        if let Err(error) = self.write_line(&control_request_line(
+            &id,
+            json!({ "subtype": "get_usage" }),
+        )) {
+            self.controls.forget(&id);
+            return Err(error);
+        }
+        let response = receiver.recv_timeout(USAGE_TIMEOUT);
+        self.controls.forget(&id);
+        response.unwrap_or_else(|_| Err("Claude did not answer the usage request".into()))
+    }
+
     /// Asks Claude to stop the turn; kills the process in the background if it does not confirm.
     pub fn interrupt(self: &Arc<Self>) -> Result<(), String> {
         let (id, receiver) = self.controls.register("interrupt");
@@ -471,6 +489,20 @@ fn registry() -> &'static Mutex<HashMap<String, Arc<Live>>> {
             .ok();
         Mutex::new(HashMap::new())
     })
+}
+
+/// The account's usage, asked of a process Lume already keeps (the one in the middle of a turn first,
+/// since that is the usage being spent). None when no process is alive.
+pub fn usage_from_live() -> Option<Result<Value, String>> {
+    let live = {
+        let registry = registry().lock().ok()?;
+        registry
+            .values()
+            .filter(|live| live.is_alive())
+            .max_by_key(|live| live.is_running())
+            .cloned()?
+    };
+    Some(live.usage())
 }
 
 pub fn get(session_id: &str) -> Option<Arc<Live>> {
@@ -715,6 +747,64 @@ mod tests {
         let mut command = Command::new("sh");
         command.arg("-c").arg(script.join(";"));
         command
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn usage_is_asked_of_the_running_process_and_answered_by_request_id() {
+        let recorder = Arc::new(Recorder {
+            exits: Mutex::new(Vec::new()),
+            results: Mutex::new(Vec::new()),
+        });
+        // Reads the request first, then answers: someone else's response goes by before the one that is ours.
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(
+            r#"read request; echo '{"type":"control_response","response":{"subtype":"success","request_id":"someone-else","response":{"subscription_type":"free"}}}'; echo '{"type":"control_response","response":{"subtype":"success","request_id":"lume-usage-0","response":{"subscription_type":"max","rate_limits_available":true}}}'; sleep 5"#,
+        );
+        let live = Live::start(command, vec![], recorder).unwrap();
+        let usage = live.usage().unwrap();
+        assert_eq!(usage["subscription_type"], "max");
+        live.kill();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_usage_request_fails_at_once_when_the_process_is_gone() {
+        let recorder = Arc::new(Recorder {
+            exits: Mutex::new(Vec::new()),
+            results: Mutex::new(Vec::new()),
+        });
+        let live = Live::start(stub_command(&[]), vec![], recorder).unwrap();
+        wait_until(|| !live.is_alive());
+        let started = Instant::now();
+        assert!(live.usage().is_err());
+        assert!(started.elapsed() < Duration::from_secs(2), "it does not wait for an answer that cannot come");
+    }
+
+    /// Talks to the installed CLI: `cargo test --lib claude_session -- --ignored`.
+    #[test]
+    #[ignore]
+    fn live_cli_reports_usage_in_the_middle_of_a_turn() {
+        let recorder = Arc::new(Recorder {
+            exits: Mutex::new(Vec::new()),
+            results: Mutex::new(Vec::new()),
+        });
+        let mut command = crate::executables::command("claude").unwrap();
+        let arguments = stream_arguments(&[
+            "--model".into(),
+            "haiku".into(),
+            "--settings".into(),
+            r#"{"disableAllHooks":true}"#.into(),
+        ]);
+        command.args(&arguments).current_dir(std::env::temp_dir());
+        let live = Live::start(command, signature(&arguments), recorder.clone()).unwrap();
+        live.send_prompt("Write the numbers from 1 to 400 separated by commas. Output only the numbers.").unwrap();
+        thread::sleep(Duration::from_millis(800));
+        assert!(live.is_running(), "the turn is still going");
+        let usage = live.usage().expect("an answer in the middle of the turn");
+        assert!(usage.get("rate_limits_available").is_some(), "{usage}");
+        assert!(live.is_running() || !recorder.results.lock().unwrap().is_empty());
+        live.close();
     }
 
     /// Talks to the installed CLI: `cargo test --lib claude_session -- --ignored`.

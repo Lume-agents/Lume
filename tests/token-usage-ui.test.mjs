@@ -150,8 +150,7 @@ try {
   await wait("document.querySelectorAll('#metrics-light .token-bar').length === 6");
   assert.equal(await evaluate("document.querySelectorAll('#metrics-dark .context-fill polyline').length"), 1, "the context fill");
   const tiles = await evaluate("Array.from(document.querySelectorAll('#metrics-light .metric-tiles dt')).map(item => item.textContent)");
-  assert.deepEqual(tiles, ["Session total", "Per turn", "Largest turn", "Context now", "Cache hits", "Time per turn", "Model"]);
-  assert.equal(await evaluate("document.querySelector('#metrics-light .metric-tiles .wide dd').textContent"), "claude-opus-4-1");
+  assert.deepEqual(tiles, ["Session total", "Per turn", "Largest turn", "Context now", "Cache hits", "Time per turn"]);
   await hover("#metrics-dark .token-plot", 0.58);
   await wait("document.querySelector('#metrics-dark .token-tip')");
   await screenshot("metrics");

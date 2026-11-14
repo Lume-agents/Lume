@@ -75,9 +75,6 @@
     {#if stats.averageDurationMs !== null}
       <div><dt>{tr("Time per turn", "Tempo por turno")}</dt><dd>{compactDuration(stats.averageDurationMs)}</dd></div>
     {/if}
-    {#if stats.model}
-      <div class="wide"><dt>{tr("Model", "Modelo")}</dt><dd title={stats.model}>{stats.model}</dd></div>
-    {/if}
   </dl>
 </div>
 
@@ -101,7 +98,6 @@
   .context-fill polyline { stroke: var(--workspace-accent); stroke-width: 1.4; stroke-linejoin: round; stroke-linecap: round; }
   .metric-tiles { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
   .metric-tiles > div { min-width: 0; padding: 6px 8px; border-radius: 8px; background: var(--workspace-subtle); }
-  .metric-tiles > div.wide { grid-column: 1 / -1; }
   .metric-tiles dt { color: var(--workspace-muted); font-size: 9px; font-weight: 700; }
   .metric-tiles dd { margin: 2px 0 0; overflow: hidden; color: var(--workspace-strong); font-size: 12px; font-weight: 720; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .metric-tiles dd button { padding: 0; border: 0; color: var(--workspace-accent); background: transparent; font: inherit; text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }

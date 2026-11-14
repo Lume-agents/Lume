@@ -715,19 +715,25 @@ fn completed_prompt_token_usage_event(file: &ObservedFile, completed_at: i64) ->
     if total == 0 {
         return None;
     }
+    // Each request of the turn counts the whole conversation again as input; what Codex read from its cache is
+    // kept apart, so the prompt's input is what was new to the model.
+    let cached = end.cached.map(|cached| cached.saturating_sub(start.cached.unwrap_or_default()));
+    let input = end.input.saturating_sub(start.input).saturating_sub(cached.unwrap_or_default());
+    let output = end.output.saturating_sub(start.output);
     let started_at = file.prompt_started_at.unwrap_or(completed_at);
     let turn_id = format!("rollout-{started_at}");
     let mut detail = serde_json::json!({
         "turnId": turn_id,
-        "totalTokens": total,
-        "inputTokens": end.input.saturating_sub(start.input),
-        "outputTokens": end.output.saturating_sub(start.output),
+        // A rollout that reports only a total has no input or output to add up.
+        "totalTokens": if input + output > 0 { input + output } else { total },
+        "inputTokens": input,
+        "outputTokens": output,
         "contextTokens": end.context.unwrap_or_default(),
         "contextWindow": end.context.and(end.context_window),
         "createdAt": completed_at,
     });
-    if let Some(cached) = end.cached {
-        detail["cacheReadTokens"] = cached.saturating_sub(start.cached.unwrap_or_default()).into();
+    if let Some(cached) = cached {
+        detail["cacheReadTokens"] = cached.into();
     }
     if let Some(prompt_at) = file.prompt_started_at {
         detail["promptAt"] = prompt_at.into();
@@ -2109,8 +2115,9 @@ mod tests {
         let usage: crate::domain::PromptTokenUsage =
             serde_json::from_str(activity.detail.as_deref().expect("token usage detail"))
                 .expect("valid token usage");
-        assert_eq!(usage.total_tokens, 60);
-        assert_eq!(usage.input_tokens, 45);
+        // 45 input tokens of which 30 came from the cache: 15 were new, plus 15 of output.
+        assert_eq!(usage.total_tokens, 30);
+        assert_eq!(usage.input_tokens, 15);
         assert_eq!(usage.output_tokens, 15);
         assert_eq!(usage.context_tokens, 55);
         assert_eq!(usage.context_window, Some(128_000));

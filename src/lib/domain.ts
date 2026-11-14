@@ -119,7 +119,7 @@ export interface PromptTokenUsage {
   contextTokens?: number;
   contextWindow?: number;
   createdAt: number;
-  /** Input served from the prompt cache; already counted in inputTokens. Absent when unreported. */
+  /** Input served from the prompt cache, re-read on every request of the turn; not counted in inputTokens, which is what was new to the model. Absent when unreported. */
   cacheReadTokens?: number;
   /** Input written to the prompt cache (Claude); already counted in inputTokens. */
   cacheCreationTokens?: number;

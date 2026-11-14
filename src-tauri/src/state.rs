@@ -2226,12 +2226,14 @@ impl AppState {
         }) else {
             return Ok(());
         };
+        // The input counts the conversation again on every request; what came from the cache is kept apart.
+        let fresh_input = input_tokens.saturating_sub(cache_read_tokens.unwrap_or_default());
         remember_prompt_token_usage(
             session,
             PromptTokenUsage {
                 turn_id: turn_id.to_string(),
-                total_tokens,
-                input_tokens,
+                total_tokens: fresh_input + output_tokens,
+                input_tokens: fresh_input,
                 output_tokens,
                 context_tokens: total_tokens,
                 context_window,

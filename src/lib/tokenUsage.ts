@@ -174,8 +174,9 @@ export function tokenMetricStats(samples: PromptTokenUsage[]): TokenMetricStats 
   const summary = tokenUsageSummary(samples);
   let largest: TokenMetricStats["largest"] = null;
   samples.forEach((sample, index) => { if (!largest || sample.totalTokens > largest.sample.totalTokens) largest = { sample, index }; });
-  const cached = samples.filter((sample) => typeof sample.cacheReadTokens === "number" && sample.inputTokens > 0);
-  const cachedInput = cached.reduce((total, sample) => total + sample.inputTokens, 0);
+  const cached = samples.filter((sample) => typeof sample.cacheReadTokens === "number" && sample.inputTokens + (sample.cacheReadTokens ?? 0) > 0);
+  // What the model read is the new input plus what came from the cache.
+  const cachedInput = cached.reduce((total, sample) => total + sample.inputTokens + (sample.cacheReadTokens ?? 0), 0);
   const cacheHitPercent = cachedInput > 0
     ? Math.round((cached.reduce((total, sample) => total + (sample.cacheReadTokens ?? 0), 0) / cachedInput) * 100)
     : null;

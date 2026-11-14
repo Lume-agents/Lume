@@ -120,6 +120,7 @@
       <div class="token-tip" class:edge-left={point.x < 60} class:edge-right={point.x > TOKEN_GRAPH_WIDTH - 60} role="status" style:left={(point.x / TOKEN_GRAPH_WIDTH) * 100 + "%"} style:top={(point.y / viewHeight) * height + "px"}>
         <strong>{number(point.sample.totalTokens)} tokens</strong>
         <span>{tr("Input", "Entrada")} {number(point.sample.inputTokens)} · {tr("Output", "Saída")} {number(point.sample.outputTokens)}</span>
+        {#if point.sample.cacheReadTokens}<span>{tr("Cache read", "Lido do cache")} {number(point.sample.cacheReadTokens)}</span>{/if}
         {#if context !== null}<span>{tr("Context", "Contexto")} {context}%</span>{/if}
         {#if point.sample.model}<span>{point.sample.model}</span>{/if}
         <small>{time(point.sample.createdAt)}{onSelect ? " · " + tr("click to open", "clique para abrir") : ""}</small>

@@ -241,7 +241,7 @@ pub struct PromptTokenUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     pub created_at: i64,
-    /// Input tokens served from the prompt cache; already part of `input_tokens`. Absent when unreported.
+    /// Input tokens served from the prompt cache; not part of `input_tokens`, which is what was new to the model. Absent when unreported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u64>,
     /// Input tokens written to the prompt cache (Claude); already part of `input_tokens`.

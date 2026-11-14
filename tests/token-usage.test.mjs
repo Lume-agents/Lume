@@ -85,7 +85,7 @@ test("metric tiles hide what no prompt reports", () => {
     sample(1000, 30_000, { cacheReadTokens: 800, promptAt: 20_000, model: "b" }),
     sample(1000, 40_000),
   ]);
-  assert.equal(rich.cacheHitPercent, 75, "cache over the input of the prompts that report it");
+  assert.equal(rich.cacheHitPercent, 43, "the cache over everything the prompts that report it read (new input plus cache)");
   assert.equal(rich.averageDurationMs, 8_000);
   assert.equal(rich.model, "b");
   assert.equal(metrics.compactDuration(72_000), "1m 12s");

@@ -2391,7 +2391,11 @@ struct ClaudeResponseTokens {
 impl ClaudeTurnTokens {
     fn finish(self, session_id: &str) -> Option<SessionActivity> {
         let sum = |pick: fn(&ClaudeResponseTokens) -> u64| self.responses.values().map(pick).sum::<u64>();
-        let input = sum(|response| response.input);
+        // Every API call of a turn re-reads the whole conversation from the cache, so adding the calls up counts the
+        // same context over and over (millions for a turn of tool calls). The prompt's input is what was new to the
+        // model: what it read from the cache is kept apart, and the context after the turn has its own figure.
+        let cache_read = sum(|response| response.cache_read);
+        let input = sum(|response| response.input).saturating_sub(cache_read);
         let output = sum(|response| response.output);
         if input + output == 0 {
             return None;
@@ -2403,7 +2407,7 @@ impl ClaudeTurnTokens {
             "outputTokens": output,
             "contextTokens": self.context.map_or(0, |(_, tokens)| tokens),
             "createdAt": self.last_at,
-            "cacheReadTokens": sum(|response| response.cache_read),
+            "cacheReadTokens": cache_read,
             "cacheCreationTokens": sum(|response| response.cache_creation),
         });
         if let Some(prompt_at) = self.prompt_at {
@@ -3464,11 +3468,12 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        // The context after a prompt is its last response: msg-2 read 5 + 130 and wrote 7.
+        // The input is what was new to the model (10 + 5; the 230 read from the cache are kept apart, see above),
+        // and the context after a prompt is its last response: msg-2 read 5 + 130 and wrote 7.
         assert_eq!(
             usage,
             [
-                ("prompt-1".to_string(), 245, 27, 272, 142),
+                ("prompt-1".to_string(), 15, 27, 42, 142),
                 ("prompt-2".to_string(), 3, 4, 7, 7),
             ]
         );

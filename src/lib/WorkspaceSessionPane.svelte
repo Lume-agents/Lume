@@ -2973,7 +2973,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       {/if}
     {/each}
     {#if session.status === "running" && !waitingForSubagents}
-      <div class="agent-typing">
+      <div class="agent-typing" in:slide={{ duration: motionDuration(260), easing: cubicOut }} out:slide={{ duration: motionDuration(160), easing: cubicOut }}>
         <ThinkingOrb
           state={activeThinkingState}
           size={42}

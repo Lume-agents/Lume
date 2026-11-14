@@ -60,6 +60,7 @@
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
   import { sidebarGroupsKey } from "$lib/sidebarGroups";
+  import { keepInView } from "$lib/keepInView";
   import type { PromptJumpRequest, PromptJumpTarget } from "$lib/tokenUsage";
   import WorkspaceNotes from "$lib/WorkspaceNotes.svelte";
   import type { SessionNote } from "$lib/domain";
@@ -1768,8 +1769,8 @@
     workflowSubmenuOpen = false;
     sessionContextMenu = {
       sessionId: session.id,
-      x: Math.max(8, Math.min(x, window.innerWidth - 230)),
-      y: Math.max(8, Math.min(y, window.innerHeight - 170)),
+      x,
+      y,
       confirming: false,
       renaming: false,
     };
@@ -2298,7 +2299,7 @@
   let workflowMenuNode = $state<HTMLDivElement | null>(null);
   function openWorkflowMenu(id: string, x: number, y: number) {
     sessionContextMenu = null;
-    workflowMenu = { id, x: Math.max(8, Math.min(x, window.innerWidth - 230)), y: Math.max(8, Math.min(y, window.innerHeight - 220)) };
+    workflowMenu = { id, x, y };
     void tick().then(() => workflowMenuNode?.querySelector<HTMLButtonElement>("button")?.focus());
   }
   const menuWorkflow = $derived(workflowMenu ? sidebarWorkflowList.find((item) => item.id === workflowMenu!.id) ?? null : null);
@@ -3271,7 +3272,7 @@
 
   {#if workflowMenu && menuWorkflow}
     {@const assigned = groupAssignments[workflowGroupKey(menuWorkflow.id)]}
-    <div class="session-context-menu workflow-row-menu" role="menu" tabindex="-1" aria-label={tr(`Actions for ${menuWorkflow.name}`, `Ações para ${menuWorkflow.name}`)} bind:this={workflowMenuNode} style:left={`${workflowMenu.x}px`} style:top={`${workflowMenu.y}px`}>
+    <div class="session-context-menu workflow-row-menu" role="menu" tabindex="-1" aria-label={tr(`Actions for ${menuWorkflow.name}`, `Ações para ${menuWorkflow.name}`)} bind:this={workflowMenuNode} use:keepInView={{ x: workflowMenu.x, y: workflowMenu.y }}>
       <strong>{menuWorkflow.name}</strong>
       <button class="session-context-command" type="button" role="menuitem" data-workflow-menu="open" onclick={() => { const workflow = menuWorkflow; workflowMenu = null; openWorkflowChats(workflow); }}><LumeIcon name="columns" size={15} /><span>{tr("Open chats side by side", "Abrir chats lado a lado")}</span></button>
       <button class="session-context-command" type="button" role="menuitem" data-workflow-menu="board" onclick={() => { const id = menuWorkflow.id; workflowMenu = null; openWorkflowOnBoard(id); }}><WorkspaceHeaderIcon name="workflow" size={15} /><span>{tr("Open in board", "Abrir no board")}</span></button>
@@ -3294,8 +3295,7 @@
       aria-label={tr(`Actions for ${sessionName(contextSession)}`, `Ações para ${sessionName(contextSession)}`)}
       tabindex="-1"
       bind:this={sessionContextNode}
-      style:left={`${sessionContextMenu.x}px`}
-      style:top={`${sessionContextMenu.y}px`}
+      use:keepInView={{ x: sessionContextMenu.x, y: sessionContextMenu.y }}
     >
       <strong>{sessionName(contextSession)}</strong>
       {#if sessionContextMenu.renaming}

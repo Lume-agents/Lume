@@ -421,6 +421,20 @@ try {
     await wait("document.querySelector('[data-workflow-target=\"" + target + "\"]')");
     await click('[data-workflow-target="' + target + '"]');
   };
+  // The chat's menu, opened at the bottom right corner of the window, stays whole inside it, in a tall and a short window.
+  for (const height of [800, 520]) {
+    await call("Emulation.setDeviceMetricsOverride", { width: 1280, height, deviceScaleFactor: 1, mobile: false });
+    // This fixture stands in for the chat pane, which opens the same menu (`openSessionContextMenu`) at the mouse
+    // position when an empty part of the chat is right clicked, so the sidebar row is the way in here.
+    await evaluate("document.querySelector('.session-row').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: innerWidth - 3, clientY: innerHeight - 3 }))");
+    await wait("document.querySelector('.session-context-menu')");
+    await delay(120);
+    const box = await evaluate("(() => { const r = document.querySelector('.session-context-menu').getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: innerWidth, height: innerHeight }; })()");
+    assert.ok(box.left >= 0 && box.top >= 0 && box.right <= box.width && box.bottom <= box.height, `the menu stays inside a ${height}px window: ${JSON.stringify(box)}`);
+    await keypress("Escape", "Escape", 27);
+    await wait("!document.querySelector('.session-context-menu')");
+  }
+  await call("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
   await openMenu("Pesquisa");
   await pickWorkflow("orb-fixture");
   await wait("document.querySelector('.system-banner-stack')?.textContent.includes('já é uma etapa')");

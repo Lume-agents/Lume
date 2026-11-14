@@ -29,6 +29,13 @@
   const viewHeight = $derived(height + 6);
   const graph = $derived(tokenGraphGeometry(shown, TOKEN_GRAPH_WIDTH, viewHeight, mode === "line" ? range : undefined));
   const ticks = $derived(tokenTimeTicks(range));
+  // Minutes on the one-hour window, hours on the longer ones.
+  const inHours = $derived((range.end - range.start) > 60 * 60_000);
+  function tickLabel(minutes: number) {
+    if (minutes === 0) return tr("now", "agora");
+    if (!inHours) return `−${minutes} min`;
+    return `−${(minutes / 60).toLocaleString(language, { maximumFractionDigits: 1 })} h`;
+  }
   const windowLabel = (minutes: number | null) => (minutes === null ? tr("All", "Tudo") : minutes < 60 ? `${minutes}m` : `${minutes / 60}h`);
   const bars = $derived(mode === "bars" ? tokenBarsGeometry(shown, TOKEN_GRAPH_WIDTH, viewHeight) : []);
   // Where each prompt sits, for the pointer, the cursor and the tooltip, whichever way it is drawn.
@@ -130,7 +137,7 @@
   {#if mode === "line" && !(loading && !shown.length)}
     <div class="time-axis" aria-hidden="true">
       {#each ticks as tick (tick.share)}
-        <small>{tick.minutes === 0 ? tr("now", "agora") : `−${tick.minutes} min`}</small>
+        <small>{tickLabel(tick.minutes)}</small>
       {/each}
     </div>
   {:else}

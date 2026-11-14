@@ -14,8 +14,8 @@ export type TokenGraph = { points: string; area: string; dots: TokenGraphDot[] }
 /** The time the chart's x axis covers, in milliseconds since the epoch. */
 export type TokenTimeRange = { start: number; end: number };
 
-/** The windows the line chart offers, in minutes; `null` is everything since the first prompt. */
-export const TOKEN_WINDOW_MINUTES = [15, 60, 180, null] as const;
+/** The windows the line chart offers, in minutes (1 h, 5 h, 12 h); `null` is everything since the first prompt. */
+export const TOKEN_WINDOW_MINUTES = [60, 300, 720, null] as const;
 
 /** The last `minutes` before `now`, or from the first prompt to `now` when no window is set. */
 export function tokenTimeRange(samples: PromptTokenUsage[], minutes: number | null, now: number): TokenTimeRange {

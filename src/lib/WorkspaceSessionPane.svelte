@@ -563,8 +563,15 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let writingFeedItemId = $state<string | null>(null);
   let holdTimer: number | null = null;
   const finishedWritingIds = new Set<string>();
-  function messageWriting(feedItemId: string, active: boolean) {
+  // A message already written out is not written again when the same text comes back under another id
+  // (the agent's copy of a reply replacing the one Lume recorded, a history page read again).
+  const writtenTexts = new Set<string>();
+  const startedWriting = new Set<string>();
+  const writtenKey = (text: string) => text.replace(/\s+/g, " ").trim();
+  function messageWriting(feedItemId: string, active: boolean, text = "") {
     if (!active) {
+      // Only a message that really started writing counts: the component also reports "not writing" as it mounts.
+      if (text && startedWriting.delete(feedItemId)) writtenTexts.add(writtenKey(text));
       // Another message mounting must not cancel this one's hold.
       if (writingFeedItemId !== feedItemId) return;
       writingFeedItemId = null;
@@ -572,6 +579,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       holdTimer = null;
       return;
     }
+    startedWriting.add(feedItemId);
     if (finishedWritingIds.has(feedItemId)) return;
     writingFeedItemId = feedItemId;
     if (holdTimer !== null) window.clearTimeout(holdTimer);
@@ -2874,7 +2882,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             <span class="time-gutter"><time>{time(item.createdAt)}</time></span>
             <div class="conversation-entry">
               <section class="message agent-message">
-                <div class="markdown-content"><StreamedMessage text={item.detail} animate={streamMessages && feedItem.id === newestMessageEntryId && (item.createdAt > paneOpenedAt || item.status === "running")} live={item.status === "running"} startFromBeginning={item.createdAt > paneOpenedAt} onstreaming={(active) => messageWriting(feedItem.id, active)} render={(value) => renderMarkdown(entry.id, value)} /></div>
+                <div class="markdown-content"><StreamedMessage text={item.detail} animate={streamMessages && feedItem.id === newestMessageEntryId && (item.createdAt > paneOpenedAt || item.status === "running") && (item.status === "running" || !writtenTexts.has(writtenKey(item.detail)))} live={item.status === "running"} startFromBeginning={item.createdAt > paneOpenedAt} onstreaming={(active) => messageWriting(feedItem.id, active, item.detail)} render={(value) => renderMarkdown(entry.id, value)} /></div>
                 <ResponseAttachments
                   text={item.detail}
                   attachments={item.attachments ?? []}

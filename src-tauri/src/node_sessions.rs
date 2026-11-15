@@ -127,6 +127,18 @@ pub struct ConversationMessage {
     pub created_at: i64,
 }
 
+/// A mark in the middle of a conversation (a compaction, an interruption, a lost connection, a change of model).
+/// Only the kinds that say nothing about the machine are shared, and only with the text they carry.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationEvent {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub created_at: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Conversation {
@@ -135,7 +147,15 @@ pub struct Conversation {
     /// True when older messages, or the tail of a very long one, were left out.
     pub truncated: bool,
     pub messages: Vec<ConversationMessage>,
+    /// The marks between the messages; a Node that does not send them leaves this empty.
+    #[serde(default)]
+    pub events: Vec<ConversationEvent>,
 }
+
+/// The kinds of activity shared as events.
+const EVENT_KINDS: [&str; 4] = ["compact", "interrupt", "connection", "model_change"];
+const MAX_EVENTS: usize = 200;
+const MAX_EVENT_DETAIL_CHARS: usize = 300;
 
 fn clip(text: &str) -> (String, bool) {
     let text = text.trim();
@@ -174,6 +194,21 @@ pub fn conversation_of(session: &AgentSession, now: i64) -> Conversation {
         }
         messages.sort_by_key(|message| message.created_at);
     }
+    let mut events: Vec<ConversationEvent> = session
+        .activities
+        .iter()
+        .filter(|activity| EVENT_KINDS.contains(&activity.kind.as_str()))
+        .map(|activity| ConversationEvent {
+            id: activity.id.clone(),
+            kind: activity.kind.clone(),
+            detail: activity.detail.as_deref().map(str::trim).filter(|detail| !detail.is_empty()).map(|detail| detail.chars().take(MAX_EVENT_DETAIL_CHARS).collect()),
+            created_at: activity.created_at,
+        })
+        .collect();
+    events.sort_by_key(|event| event.created_at);
+    if events.len() > MAX_EVENTS {
+        events.drain(..events.len() - MAX_EVENTS);
+    }
     let mut truncated = false;
     if messages.len() > MAX_MESSAGES {
         messages.drain(..messages.len() - MAX_MESSAGES);
@@ -185,7 +220,7 @@ pub fn conversation_of(session: &AgentSession, now: i64) -> Conversation {
         size -= dropped.text.len() + dropped.id.len() + 64;
         truncated = true;
     }
-    Conversation { session: summarize(session), generated_at: now, truncated, messages }
+    Conversation { session: summarize(session), generated_at: now, truncated, messages, events }
 }
 
 pub fn read_conversation(database: &Path, session_id: &str, now: i64) -> Result<Conversation, String> {

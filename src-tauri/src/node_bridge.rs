@@ -406,7 +406,7 @@ mod tests {
         };
         let activity = |id: &str, kind: &str, detail: &str, at: i64| json!({ "id": id, "kind": kind, "title": "t", "detail": detail, "status": "completed", "createdAt": at, "files": [] });
         state
-            .ingest(event("session_started", "live-1", json!({ "activities": [activity("p1", "prompt", "Fix the cart", 1), activity("c1", "command", "cat ~/.ssh/id_rsa", 2), activity("m1", "message", "Fixed it.", 3)] })))
+            .ingest(event("session_started", "live-1", json!({ "activities": [activity("p1", "prompt", "Fix the cart", 1), activity("c1", "command", "cat ~/.ssh/id_rsa", 2), activity("k1", "compact", "", 3), activity("i1", "interrupt", "Interrompido", 4), activity("m1", "message", "Fixed it.", 5)] })))
             .expect("session");
         state
             .ingest(event("permission_request", "live-1", json!({ "permission": { "id": "perm", "kind": "command", "summary": "rm -rf secrets", "resource": "x", "risk": "high", "requestedAt": "now" } })))
@@ -420,6 +420,10 @@ mod tests {
         let conversation = live_conversation(&state, "live-1").expect("live conversation");
         let texts: Vec<_> = conversation["messages"].as_array().unwrap().iter().map(|message| message["text"].as_str().unwrap()).collect();
         assert_eq!(texts, ["Fix the cart", "Fixed it."]);
+        // The marks between the messages travel too, since they say nothing about the machine.
+        let events: Vec<_> = conversation["events"].as_array().unwrap().iter().map(|event| event["kind"].as_str().unwrap()).collect();
+        assert_eq!(events, ["compact", "interrupt"]);
+        assert_eq!(conversation["events"][1]["detail"], "Interrompido");
         assert!(!conversation.to_string().contains("id_rsa"), "commands never leave");
         assert!(live_conversation(&state, "unknown").is_err());
         assert!(live_conversation(&state, "").is_err());

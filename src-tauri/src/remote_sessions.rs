@@ -110,6 +110,21 @@ pub fn interrupt(session_id: &str) -> Result<(), String> {
 }
 
 fn conversation_activities(conversation: &Value) -> Vec<SessionActivity> {
+    // The marks between the messages (a compaction, an interruption, a lost connection, a change of model).
+    let events = conversation["events"].as_array().into_iter().flatten().filter_map(|event| {
+        let kind = event["kind"].as_str().filter(|kind| matches!(*kind, "compact" | "interrupt" | "connection" | "model_change"))?;
+        Some(SessionActivity {
+            id: format!("remote-{}", event["id"].as_str()?),
+            kind: kind.into(),
+            title: String::new(),
+            detail: event["detail"].as_str().map(str::to_string),
+            status: "completed".into(),
+            created_at: event["createdAt"].as_i64().unwrap_or_default(),
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        })
+    });
     conversation["messages"].as_array().into_iter().flatten().filter_map(|message| {
         let user = message["role"] == "user";
         Some(SessionActivity {
@@ -123,7 +138,7 @@ fn conversation_activities(conversation: &Value) -> Vec<SessionActivity> {
             attachments: Vec::new(),
             append_detail: false,
         })
-    }).collect()
+    }).chain(events).collect()
 }
 
 fn remote_profile() -> PermissionProfile {
@@ -335,13 +350,13 @@ mod tests {
     fn a_remote_session_carries_its_computer_and_only_the_allowed_controls() {
         let summary = json!({ "id": "s1", "agent": "codex", "agentLabel": "Codex", "name": "Cart", "project": "shop", "status": "permission_required",
             "statusLabel": "Needs permission", "startedAt": "1", "updatedAt": 5, "needsPermission": true, "needsAnswer": false, "canPrompt": true, "canInterrupt": true });
-        let conversation = json!({ "messages": [{ "id": "m2", "role": "assistant", "text": "Done.", "createdAt": 2 }, { "id": "m1", "role": "user", "text": "Fix it", "createdAt": 1 }] });
+        let conversation = json!({ "messages": [{ "id": "m2", "role": "assistant", "text": "Done.", "createdAt": 2 }, { "id": "m1", "role": "user", "text": "Fix it", "createdAt": 1 }], "events": [{ "id": "e1", "kind": "compact", "createdAt": 3 }, { "id": "e2", "kind": "command", "detail": "rm -rf /", "createdAt": 4 }] });
         let permission = json!({ "id": "perm", "kind": "command", "summary": "npm test", "risk": "low", "requestedAt": "now" });
         let session = session_of("node-1", "Home PC", &summary, Some(&conversation), Some(&permission)).unwrap();
         assert_eq!(session.id, "remote:node-1:s1");
         assert_eq!(parse(&session.id), Some(("node-1", "s1")));
         assert_eq!((session.project.as_str(), session.remote.as_ref().unwrap().computer.as_str()), ("shop", "Home PC"));
-        assert_eq!(session.activities.iter().map(|activity| activity.kind.as_str()).collect::<Vec<_>>(), ["prompt", "message"]);
+        assert_eq!(session.activities.iter().map(|activity| activity.kind.as_str()).collect::<Vec<_>>(), ["prompt", "message", "compact"], "the marks come along, anything else is dropped");
         let capabilities = protocol::SessionCapabilities::for_session(&session);
         assert!(capabilities.can_prompt && capabilities.can_interrupt && capabilities.can_approve);
         assert!(!capabilities.can_terminate && !capabilities.can_attach_images && !capabilities.can_take_control);

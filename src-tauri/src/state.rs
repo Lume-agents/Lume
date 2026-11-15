@@ -32,6 +32,8 @@ const PROCESS_MISSING_SCAN_LIMIT: u8 = 2;
 const WEB_SESSION_STALE_MS: i64 = 90_000;
 const RECENT_NATIVE_SESSION_MS: i64 = 10 * 60 * 1_000;
 const PIDLESS_CODEX_SESSION_TTL_MS: i64 = 60_000;
+/// The title of a prompt another computer sent through the Relay; the chat labels it.
+pub const REMOTE_PROMPT_TITLE: &str = "Prompt enviado por outro computador";
 const LUME_ATTACHED_FILES_MARKER: &str = "Files attached through Lume. Inspect these local paths:";
 /// Starts the notes the person attached to a prompt; the chat shows each as a chip, not its text.
 pub(crate) const LUME_ATTACHED_NOTES_MARKER: &str =
@@ -1454,6 +1456,17 @@ impl AppState {
     ) -> Result<(), String> {
         self.record_prompt_activity_reversible(session_id, prompt, attachments)
             .map(|_| ())
+    }
+
+    /// Marks the newest prompt Lume wrote down in a session as sent from another computer, so the chat can say so.
+    /// The marker is the activity's title; the prompt itself is untouched.
+    pub fn mark_remote_prompt(&self, session_id: &str) {
+        let Ok(mut sessions) = self.sessions.lock() else { return };
+        let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else { return };
+        let prefix = format!("local:{session_id}:");
+        if let Some(activity) = session.activities.iter_mut().rev().find(|activity| activity.kind == "prompt" && activity.id.starts_with(&prefix)) {
+            activity.title = REMOTE_PROMPT_TITLE.into();
+        }
     }
 
     /// Writes the prompt down and marks the session running, like `record_prompt_activity`, and

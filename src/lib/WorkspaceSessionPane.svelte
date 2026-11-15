@@ -13,6 +13,7 @@
   import ActivityTraceGroup from "$lib/ActivityTraceGroup.svelte";
   import StreamedMessage from "$lib/StreamedMessage.svelte";
   import { MAX_HOLD_MS } from "$lib/streamPacing";
+  import { REMOTE_PROMPT_TITLE } from "$lib/remotePrompt";
   import { compactNoticeText, connectionNoticeText, interruptNoticeText, modelChangeNoticeText } from "$lib/interruptNotice";
   import ChatSeparatorNotice from "$lib/ChatSeparatorNotice.svelte";
 import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/agentControls";
@@ -2851,10 +2852,17 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
           <div class:targeted={activePromptId === item.id} class:outgoing-replacement={outgoingPrompts.some((outgoing) => !outgoing.flightComplete && outgoingMatches.get(outgoing.id) === item.id)} class="conversation-row user-row" data-prompt-id={item.id} tabindex="-1">
             <span class="time-gutter"><time>{time(item.createdAt)}</time></span>
             <div class="conversation-entry">
-              {#if entry.sentDuringTurn}
-                <span class="during-turn-tab" title={tr("Sent while the agent was still working", "Enviada enquanto o agente ainda trabalhava")}><LumeIcon name="send" size={10} />{tr("During the task", "Durante a tarefa")}</span>
+              {#if entry.sentDuringTurn || item.title === REMOTE_PROMPT_TITLE}
+                <div class="prompt-tabs">
+                  {#if item.title === REMOTE_PROMPT_TITLE}
+                    <span class="during-turn-tab remote-origin-tab" title={tr("Sent from another computer connected to this one", "Enviada por outro computador conectado a este")}><LumeIcon name="server" size={10} />{tr("From the remote PC", "Pelo PC remoto")}</span>
+                  {/if}
+                  {#if entry.sentDuringTurn}
+                    <span class="during-turn-tab" title={tr("Sent while the agent was still working", "Enviada enquanto o agente ainda trabalhava")}><LumeIcon name="send" size={10} />{tr("During the task", "Durante a tarefa")}</span>
+                  {/if}
+                </div>
               {/if}
-              <section class="message user-message" class:with-tab={entry.sentDuringTurn}>
+              <section class="message user-message" class:with-tab={entry.sentDuringTurn || item.title === REMOTE_PROMPT_TITLE}>
                 {#if item.detail}<CollapsibleUserMessage text={item.detail} {language} />{/if}
                 {#if item.attachments?.length}
                   <div class="attachments">
@@ -3730,6 +3738,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .message { width: min(92%, 940px); min-width: 0; color: var(--workspace-text); font-size: var(--workspace-chat-font-size); }
   .user-message { --message-collapse-surface: var(--workspace-user); --user-message-font: inherit; --user-message-muted: var(--workspace-muted); --user-message-accent: var(--workspace-accent); width: fit-content; max-width: min(92%, 940px); align-self: flex-end; padding: 9px 12px; border: 1px solid var(--workspace-user-line); border-radius: 14px 14px 4px 14px; background: var(--workspace-user); }
   /* A tab on top of the bubble: the message went in while the agent was still working. */
+  .prompt-tabs { align-self: flex-end; margin-bottom: -10px; display: flex; gap: 4px; position: relative; z-index: 1; }
+  .prompt-tabs .during-turn-tab { margin-bottom: 0; }
+  .remote-origin-tab :global(.lume-icon) { color: var(--workspace-accent); }
   .during-turn-tab { align-self: flex-end; margin-bottom: -10px; padding: 3px 9px 4px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--workspace-user-line); border-bottom: 0; border-radius: 9px 9px 0 0; color: var(--workspace-muted); background: var(--workspace-user); font-size: var(--workspace-chat-tiny-size); font-weight: 700; position: relative; z-index: 1; }
   .during-turn-tab :global(.lume-icon) { color: var(--workspace-accent); }
   .user-message.with-tab { border-top-right-radius: 0; }

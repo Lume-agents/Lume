@@ -2372,7 +2372,14 @@ pub fn execute_hub_command(
             delivery,
             false,
         )
-        .map(|_| None),
+        .map(|_| {
+            // A prompt another computer sent through the Relay comes with an id tied to that computer.
+            if request_id.starts_with("relay:") {
+                state.mark_remote_prompt(&session_id);
+                protocol::emit_session_changed(app, &session_id, None);
+            }
+            None
+        }),
         protocol::HubCommand::TakeControlSession {
             session_id,
             prompt,

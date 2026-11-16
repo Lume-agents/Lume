@@ -1281,6 +1281,36 @@ fn command_has_codex_internal_workspace(command: &[std::ffi::OsString]) -> bool 
 }
 
 /// Subcomandos do Claude Code que são infraestrutura, não conversas.
+/// Claude subcommands that do something and exit instead of holding a conversation. Lume runs `mcp list`
+/// itself to read the servers' health, and it lasts several seconds.
+const CLAUDE_UTILITY_SUBCOMMANDS: [&str; 9] = [
+    "mcp",
+    "auth",
+    "plugin",
+    "plugins",
+    "config",
+    "doctor",
+    "update",
+    "install",
+    "setup-token",
+];
+
+/// Whether the argument right after the Claude executable is one of those subcommands. Only that argument
+/// counts: a prompt that happens to say "mcp list" is still a conversation.
+fn is_claude_utility_arguments(arguments: &[String]) -> bool {
+    let unquote = |argument: &str| argument.trim_matches(['"', '\'']).to_string();
+    let position = arguments.iter().position(|argument| {
+        let argument = unquote(argument);
+        let name = argument.rsplit(['/', '\\']).next().unwrap_or_default();
+        matches!(name, "claude" | "claude.exe" | "claude.cmd")
+            || is_versioned_claude_executable(&argument)
+            || (name == "cli.js" && argument.contains("claude-code"))
+    });
+    position
+        .and_then(|index| arguments.get(index + 1))
+        .is_some_and(|next| CLAUDE_UTILITY_SUBCOMMANDS.contains(&unquote(next).as_str()))
+}
+
 fn is_claude_infrastructure(tokens: &[&str]) -> bool {
     const SUBCOMMANDS: [&str; 2] = ["daemon", "bg-pty-host"];
     tokens
@@ -1609,7 +1639,10 @@ pub(crate) fn detect_agent_arguments(name: &str, arguments: &[String]) -> Option
         (!is_omp_helper_arguments(arguments)).then_some(AgentKind::Omp)
     } else if executable_matches("codex") {
         Some(AgentKind::Codex)
-    } else if is_claude_infrastructure(&command_tokens) || is_claude_spare(&command_tokens) {
+    } else if is_claude_infrastructure(&command_tokens)
+        || is_claude_spare(&command_tokens)
+        || is_claude_utility_arguments(arguments)
+    {
         None
     } else if executable_matches("claude")
         || raw_tokens
@@ -2905,4 +2938,32 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn claude_commands_that_are_not_a_conversation_are_not_sessions() {
+        let argv = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<Vec<_>>();
+        // What Lume itself runs next to a chat, or a person runs in a terminal: none holds a conversation.
+        for command in [
+            &["claude", "mcp", "list"][..],
+            &["/home/me/.local/bin/claude", "mcp", "list"],
+            &["claude", "auth", "status", "--json"],
+            &["claude", "update"],
+            &["claude", "doctor"],
+            &["claude", "plugin", "list"],
+            &["claude.exe", "mcp", "list"],
+        ] {
+            assert_eq!(detect_agent_arguments("claude", &argv(command)), None, "{command:?}");
+        }
+        // The conversations themselves still are.
+        for command in [
+            &["claude"][..],
+            &["claude", "--resume", "abc"],
+            &["/home/me/.local/bin/claude", "--model", "opus"],
+            &["claude", "--continue"],
+            &["claude", "fix the mcp list"],
+        ] {
+            assert_eq!(detect_agent_arguments("claude", &argv(command)), Some(AgentKind::ClaudeCode), "{command:?}");
+        }
+    }
 }
+

@@ -1079,6 +1079,27 @@ fn validate_model_selection(
     Ok(())
 }
 
+/// The effort a chat keeps when Fast mode moves it to a model that has it: the one picked for the chat,
+/// otherwise the one the chat runs with now, as long as the new model offers it. Only when it does not is
+/// the new model's own default used, so turning Fast on does not raise (or lower) the effort by itself.
+fn effort_for_fast_model(
+    picked: Option<&str>,
+    current: Option<&str>,
+    model: &claude_control::ClaudeModelOption,
+) -> Option<String> {
+    picked
+        .into_iter()
+        .chain(current)
+        .find(|effort| {
+            model
+                .supported_reasoning_efforts
+                .iter()
+                .any(|option| option.value == *effort)
+        })
+        .map(str::to_string)
+        .or_else(|| Some(model.default_reasoning_effort.clone()))
+}
+
 pub fn set_session_fast_mode(
     app: &AppHandle,
     state: &AppState,
@@ -1125,17 +1146,11 @@ pub fn set_session_fast_mode(
                         .ok_or_else(|| {
                             "Fast mode needs Claude Opus 5.5, Opus 5, or Opus 4.8 in the Claude Code model list".to_string()
                         })?;
-                    let effort = selected
-                        .reasoning_effort
-                        .as_deref()
-                        .filter(|effort| {
-                            model
-                                .supported_reasoning_efforts
-                                .iter()
-                                .any(|option| option.value == *effort)
-                        })
-                        .map(str::to_string)
-                        .or_else(|| Some(model.default_reasoning_effort.clone()));
+                    let effort = effort_for_fast_model(
+                        selected.reasoning_effort.as_deref(),
+                        settings.reasoning_effort.as_deref(),
+                        model,
+                    );
                     selected.model = Some(model.model.clone());
                     selected.reasoning_effort = effort;
                     state.set_session_model_override(session_id, selected)?;
@@ -2941,4 +2956,31 @@ mod tests {
         assert!(is_no_active_prompt("No active turn for this thread"));
         assert!(!is_no_active_prompt("App Server connection failed"));
     }
+
+    #[test]
+    fn fast_mode_keeps_the_effort_the_chat_already_runs_with() {
+        let option = |value: &str| claude_control::ClaudeEffortOption {
+            value: value.into(),
+            description: String::new(),
+        };
+        let opus = claude_control::ClaudeModelOption {
+            model: "claude-opus-5-5".into(),
+            display_name: "Opus 5.5".into(),
+            description: String::new(),
+            is_default: false,
+            default_reasoning_effort: "high".into(),
+            supported_reasoning_efforts: vec![option("low"), option("medium"), option("high")],
+            supports_auto_mode: true,
+            supports_fast_mode: true,
+        };
+        // The effort the chat runs with now is kept, not the new model's default.
+        assert_eq!(effort_for_fast_model(None, Some("low"), &opus).as_deref(), Some("low"));
+        // An effort picked for the chat comes first.
+        assert_eq!(effort_for_fast_model(Some("medium"), Some("low"), &opus).as_deref(), Some("medium"));
+        // One the new model does not offer falls to the next, then to its default.
+        assert_eq!(effort_for_fast_model(Some("max"), Some("low"), &opus).as_deref(), Some("low"));
+        assert_eq!(effort_for_fast_model(Some("max"), Some("xhigh"), &opus).as_deref(), Some("high"));
+        assert_eq!(effort_for_fast_model(None, None, &opus).as_deref(), Some("high"));
+    }
 }
+

@@ -206,6 +206,21 @@ jobs:
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: docs/releases
+      # O tauri-action só gera a linha "Full Changelog"; as notas da versão ficam em docs/releases/vX.md.
+      # Sem esse arquivo a release continua em rascunho, em vez de ir ao ar sem descrição.
+      - name: Aplicar as notas da versão
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="docs/releases/${LUME_RELEASE_TAG}.md"
+          if [ ! -s "$notes" ]; then
+            echo "::error::Faltam as notas desta versão em $notes. A release continua em rascunho: crie o arquivo antes de criar a tag, ou aplique-as à mão com gh release edit $LUME_RELEASE_TAG --notes-file."
+            exit 1
+          fi
+          gh release edit "$LUME_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
       - name: Publicar artefatos validados
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

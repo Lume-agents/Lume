@@ -1951,16 +1951,41 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     permissionBusy = true;
     permissionAction = action;
     sendError = "";
+    let answered = false;
     try {
       if (action === "open_source") await openSessionSource(session.id);
-      else await decidePermission(session.id, request.id, action);
+      else {
+        await decidePermission(session.id, request.id, action);
+        answered = true;
+      }
     } catch (error) {
       sendError = String(error).replace(/^Error:\s*/, "");
     } finally {
-      permissionBusy = false;
-      permissionAction = null;
+      if (answered && pendingPermission?.id === request.id) {
+        // The card stays until the session drops the request; the buttons keep loading meanwhile so
+        // the same request cannot be answered twice.
+        answeredPermissionId = request.id;
+        window.clearTimeout(answeredPermissionTimer);
+        answeredPermissionTimer = window.setTimeout(clearPermissionBusy, 8_000);
+      } else {
+        clearPermissionBusy();
+      }
     }
   }
+
+  function clearPermissionBusy() {
+    window.clearTimeout(answeredPermissionTimer);
+    answeredPermissionId = null;
+    permissionBusy = false;
+    permissionAction = null;
+  }
+
+  let answeredPermissionId: string | null = null;
+  let answeredPermissionTimer = 0;
+  $effect(() => {
+    const current = pendingPermission?.id ?? null;
+    if (answeredPermissionId && current !== answeredPermissionId) clearPermissionBusy();
+  });
 
   async function submitQuestionAnswers(answers: QuestionAnswer[]) {
     if (!pendingQuestion || questionSending) return;
@@ -3182,7 +3207,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         {#each attachedNotes as note (note.id)}
           <span class="note-chip" title={tr("Sent with the prompt, with secrets hidden", "Enviada com o prompt, com segredos ocultos")}>
             <LumeIcon name="note" size={12} /><small>{note.title}</small>
-            <button type="button" onclick={() => (attachedNotes = attachedNotes.filter((item) => item.id !== note.id))} aria-label={tr(`Remove ${note.title}`, `Remover ${note.title}`)}>×</button>
+            <button type="button" onclick={() => (attachedNotes = attachedNotes.filter((item) => item.id !== note.id))} aria-label={tr(`Remove ${note.title}`, `Remover ${note.title}`)} title={tr("Remove", "Remover")}><LumeIcon name="close" size={10} /></button>
           </span>
         {/each}
       </div>
@@ -3752,7 +3777,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .attached-notes { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 2px 6px; }
   .note-chip { max-width: 220px; min-height: 24px; padding: 0 4px 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 11px; font-weight: 650; }
   .note-chip small { min-width: 0; overflow: hidden; color: var(--workspace-strong); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-  .note-chip button { width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .note-chip button { width: 18px; height: 18px; padding: 0; display: grid; flex: 0 0 auto; place-items: center; border: 0; border-radius: 50%; color: var(--workspace-muted); background: transparent; cursor: pointer; }
   .note-chip button:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
   .user-message .attachments .note-chip { padding: 0 8px; }
   /* Shown with the row, like the response actions; the button stays reachable by keyboard. */

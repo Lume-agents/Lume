@@ -415,3 +415,20 @@ test("a message sent while the agent works is marked, for Claude's queue and for
     ["Corrija o login", false], ["e rode os testes", true], ["Revise o relay", false], ["olhe o node também", true], ["agora o mobile", false],
   ]);
 });
+
+test("a /compact turn shows only its compacted notice, not the prompt or what the agent did", () => {
+  const activities = [
+    activity("ask", "prompt", 10, "Fix the bug"),
+    activity("answer", "message", 20, "Fixed."),
+    activity("compact-prompt", "prompt", 30, "/compact"),
+    activity("compact-reply", "message", 40, "Compacting the conversation…"),
+    activity("compact-tool", "command", 45),
+    activity("compacted", "compact", 50, undefined, { title: "Context compacted" }),
+    activity("next", "prompt", 60, "Now the tests"),
+    activity("next-answer", "message", 70, "Done."),
+  ];
+  assert.deepEqual(
+    buildConversationFeed(entriesFor(activities)).map((item) => (item.kind === "trace" ? "trace" : item.entry.activity.id)),
+    ["ask", "answer", "compacted", "next", "next-answer"],
+  );
+});

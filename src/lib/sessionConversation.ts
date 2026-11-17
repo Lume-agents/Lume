@@ -88,6 +88,25 @@ function distinctCodexMessageItems(left: SessionActivity, right: SessionActivity
   return false;
 }
 
+function isCompactPrompt(activity: SessionActivity): boolean {
+  return activity.kind === "prompt" && /^\/compact(?:\s|$)/.test((activity.detail ?? "").trim());
+}
+
+/**
+ * A `/compact` turn shows nothing but its "context compacted" notice: not the `/compact` prompt, nor what
+ * the agent said or ran while compacting. While it runs, the chat only shows that the agent is working.
+ */
+function withoutCompactionTurns(sorted: SessionActivity[]): SessionActivity[] {
+  let compacting = false;
+  return sorted.filter((activity) => {
+    if (activity.kind === "prompt" || activity.kind === "queued_prompt" || activity.kind === "codex_queued_prompt") {
+      compacting = isCompactPrompt(activity);
+      return !compacting;
+    }
+    return !compacting || activity.kind === "compact";
+  });
+}
+
 export function buildConversationEntries(
   session: AgentSession | null,
   activities: SessionActivity[],
@@ -95,9 +114,9 @@ export function buildConversationEntries(
 ): ConversationEntry[] {
   let sequence = 0;
   // Exclude transport context before calculating prompt boundaries as well as before rendering.
-  const sortedActivities = activities
+  const sortedActivities = withoutCompactionTurns(activities
     .filter((activity) => activity.kind !== "prompt" || !isSyntheticPromptText(activity.detail))
-    .sort((left, right) => left.createdAt - right.createdAt);
+    .sort((left, right) => left.createdAt - right.createdAt));
   const supersededNotices = supersededNoticeIds(sortedActivities);
   const uniquePrompts: SessionActivity[] = [];
   let messageSinceLastPrompt = false;

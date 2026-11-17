@@ -4,9 +4,10 @@
   import { slide } from "svelte/transition";
   import BrandIcon from "$lib/BrandIcon.svelte";
   import LumeIcon from "$lib/LumeIcon.svelte";
+  import CliInstallDialog from "$lib/CliInstallDialog.svelte";
   import type { AgentKind, IntegrationDiagnostic, IntegrationStatus } from "$lib/domain";
   import type { Language } from "$lib/i18n";
-  import type { CliInstallPlan } from "$lib/lume";
+  import { checkCliUpdate, type CliInstallPlan, type CliUpdateCheck } from "$lib/lume";
 
   type Kind = IntegrationStatus["kind"] | "github";
   type Step = "missing" | "installed" | "connected" | "ready";
@@ -101,6 +102,24 @@
   const brand = (kind: Kind): AgentKind | "github" => (kind === "claude" ? "claude_code" : kind);
 
   let copied = $state<Kind | null>(null);
+  let checking = $state<Kind | null>(null);
+  let updateChecks = $state<Partial<Record<Kind, CliUpdateCheck>>>({});
+  let updateErrors = $state<Partial<Record<Kind, string>>>({});
+  let updatingPlan = $state<CliInstallPlan | null>(null);
+  async function checkUpdate(entry: Entry) {
+    if (checking) return;
+    checking = entry.kind;
+    updateErrors = { ...updateErrors, [entry.kind]: "" };
+    updateChecks = { ...updateChecks, [entry.kind]: undefined };
+    try { updateChecks = { ...updateChecks, [entry.kind]: await checkCliUpdate(entry.kind) }; }
+    catch (error) { updateErrors = { ...updateErrors, [entry.kind]: String(error).replace(/^Error:\s*/, "") }; }
+    finally { checking = null; }
+  }
+  function update(entry: Entry) {
+    const npm = entry.plan?.methods.find((method) => method.id === "npm" && method.available);
+    if (!entry.plan || !npm || !updateChecks[entry.kind]?.npmManaged) return;
+    updatingPlan = { ...entry.plan, methods: [{ ...npm, id: "npm-update" }] };
+  }
   async function copyLogin(entry: Entry) {
     if (!entry.plan) return;
     try {
@@ -164,28 +183,43 @@
           {#if description.length}<svg class="agent-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4" /></svg>{/if}
         </button>
         <span class="agent-actions">
+          {#if entry.step !== "missing" && ["codex", "claude", "gemini", "opencode"].includes(entry.kind)}
+            <button class="quiet icon-action" type="button" aria-label={tr("Check for updates", "Verificar atualizações")} data-tooltip={tr("Check for updates", "Verificar atualizações")} disabled={checking !== null} onclick={() => void checkUpdate(entry)}>{#if checking === entry.kind}…{:else}<LumeIcon name="refresh" size={16} />{/if}</button>
+            {#if updateChecks[entry.kind]?.available && updateChecks[entry.kind]?.npmManaged && entry.plan?.methods.some((method) => method.id === "npm" && method.available)}
+              <button class="primary icon-action" type="button" aria-label={tr("Update", "Atualizar")} data-tooltip={tr("Update", "Atualizar")} onclick={() => update(entry)}><LumeIcon name="download" size={16} /></button>
+            {/if}
+          {/if}
           {#if entry.step === "missing"}
             {#if canInstall(entry)}
-              <button class="primary" type="button" onclick={() => onInstall(entry.plan!)}>{tr("Install", "Instalar")}</button>
+              <button class="primary icon-action" type="button" aria-label={tr("Install", "Instalar")} data-tooltip={tr("Install", "Instalar")} onclick={() => onInstall(entry.plan!)}><LumeIcon name="download" size={16} /></button>
             {:else if pageFor(entry)}
-              <button class="external" type="button" title={tr(`Open ${pageFor(entry)}`, `Abrir ${pageFor(entry)}`)} onclick={() => void openUrl(pageFor(entry)!)}>
-                {tr("Install", "Instalar")}<LumeIcon name="external" size={13} />
+              <button class="external icon-action" type="button" aria-label={tr("Open installation page", "Abrir página de instalação")} data-tooltip={tr("Open installation page", "Abrir página de instalação")} onclick={() => void openUrl(pageFor(entry)!)}>
+                <LumeIcon name="external" size={16} />
               </button>
             {:else}
               <span class="unavailable">{tr("Install it yourself to use it", "Instale por conta própria para usar")}</span>
             {/if}
           {:else if entry.step === "installed" && entry.integration}
-            <button class="quiet" type="button" disabled={busy || diagnosing !== null} onclick={() => onTest(entry.integration!)}>{diagnosing === entry.integration.kind ? "…" : tr("Test", "Testar")}</button>
-            <button class="primary" type="button" disabled={busy || configuring !== null} onclick={() => onConnect(entry.integration!)}>{configuring === entry.integration.kind ? "…" : tr("Connect", "Conectar")}</button>
+            <button class="quiet icon-action" type="button" aria-label={tr("Test", "Testar")} data-tooltip={tr("Test", "Testar")} disabled={busy || diagnosing !== null} onclick={() => onTest(entry.integration!)}>{#if diagnosing === entry.integration.kind}…{:else}<LumeIcon name="check" size={16} />{/if}</button>
+            <button class="primary icon-action" type="button" aria-label={tr("Connect", "Conectar")} data-tooltip={tr("Connect", "Conectar")} disabled={busy || configuring !== null} onclick={() => onConnect(entry.integration!)}>{#if configuring === entry.integration.kind}…{:else}<LumeIcon name="plus" size={16} />{/if}</button>
           {:else if entry.step === "connected" && entry.integration}
-            <button class="quiet" type="button" disabled={busy || configuring !== null} onclick={() => onDisconnect(entry.integration!)}>{tr("Disconnect", "Desconectar")}</button>
-            <button class="primary" type="button" disabled={busy || diagnosing !== null} onclick={() => onTest(entry.integration!)}>{diagnosing === entry.integration.kind ? "…" : tr("Test", "Testar")}</button>
+            <button class="quiet icon-action" type="button" aria-label={tr("Disconnect", "Desconectar")} data-tooltip={tr("Disconnect", "Desconectar")} disabled={busy || configuring !== null} onclick={() => onDisconnect(entry.integration!)}><LumeIcon name="unplug" size={16} /></button>
+            <button class="primary icon-action" type="button" aria-label={tr("Test", "Testar")} data-tooltip={tr("Test", "Testar")} disabled={busy || diagnosing !== null} onclick={() => onTest(entry.integration!)}>{#if diagnosing === entry.integration.kind}…{:else}<LumeIcon name="check" size={16} />{/if}</button>
           {:else if entry.integration}
-            <button class="primary" type="button" disabled={diagnosing !== null} onclick={() => onTest(entry.integration!)}>{diagnosing === entry.integration.kind ? "…" : tr("Test", "Testar")}</button>
+            <button class="primary icon-action" type="button" aria-label={tr("Test", "Testar")} data-tooltip={tr("Test", "Testar")} disabled={diagnosing !== null} onclick={() => onTest(entry.integration!)}>{#if diagnosing === entry.integration.kind}…{:else}<LumeIcon name="check" size={16} />{/if}</button>
           {:else if entry.plan}
-            <button class="quiet" type="button" onclick={() => void copyLogin(entry)} title={entry.plan.loginCommand}>{copied === entry.kind ? tr("Copied", "Copiado") : tr("Copy sign-in command", "Copiar comando de login")}</button>
+            <button class="quiet icon-action" type="button" onclick={() => void copyLogin(entry)} aria-label={copied === entry.kind ? tr("Copied", "Copiado") : tr("Copy sign-in command", "Copiar comando de login")} data-tooltip={copied === entry.kind ? tr("Copied", "Copiado") : tr("Copy sign-in command", "Copiar comando de login")}><LumeIcon name={copied === entry.kind ? "check" : "copy"} size={16} /></button>
           {/if}
         </span>
+        {#if updateChecks[entry.kind] || updateErrors[entry.kind]}
+          <div class="update-result" role="status">
+            {#if updateErrors[entry.kind]}{tr("Could not check for updates:", "Não foi possível verificar atualizações:")} {updateErrors[entry.kind]}
+            {:else if updateChecks[entry.kind]?.available}
+              {tr("Update available", "Atualização disponível")}: {updateChecks[entry.kind]?.current} → {updateChecks[entry.kind]?.latest}.
+              {#if !updateChecks[entry.kind]?.npmManaged}{tr("Update using your original installation method.", "Atualize pelo método usado na instalação original.")}{/if}
+            {:else}{tr("No newer npm release", "Nenhuma versão mais recente no npm")}: {updateChecks[entry.kind]?.current}.{/if}
+          </div>
+        {/if}
         {#if open && description.length}
           <div class="agent-description" id={`agent-description-${entry.kind}`} transition:slide={{ duration: motionDuration(170), easing: cubicOut }}>
             {#each description as line (line)}<small>{line}</small>{/each}
@@ -202,6 +236,7 @@
     {/each}
   {/each}
 </div>
+{#if updatingPlan}<CliInstallDialog plan={updatingPlan} {language} mode="update" onClose={() => { updatingPlan = null; updateChecks = {}; }} />{/if}
 
 <style>
   .agent-setup { display: grid; gap: .9em; font-size: var(--agent-setup-font, 12px); }
@@ -232,6 +267,9 @@
   .badge.installed i, .badge.ready i { background: #4d8cb8; opacity: 1; }
   .agent-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
   .agent-actions button { min-height: 2.5em; padding: 0 1.1em; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: .8em; color: inherit; background: transparent; font: inherit; font-size: max(10px, .95em); font-weight: 650; cursor: pointer; }
+  .agent-actions button.icon-action { width: 2.8em; min-height: 2.8em; padding: 0; display: inline-grid; place-items: center; }
+  .agent-actions button:focus-visible { outline: 2px solid var(--workspace-accent, #3f9b69); outline-offset: 2px; }
+  .update-result { grid-column: 1 / -1; font-size: max(10px, .9em); opacity: .78; overflow-wrap: anywhere; line-height: 1.45; }
   /* Installing happens on the agent's own site: an outline button, not the accent one, with the external mark. */
   .agent-actions button.external { display: inline-flex; align-items: center; gap: 6px; }
   .agent-actions button:hover:not(:disabled) { background: color-mix(in srgb, currentColor 8%, transparent); }

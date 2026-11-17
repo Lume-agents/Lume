@@ -14,7 +14,7 @@ import { executable, browserArguments } from "./support/browser.mjs";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const output = mkdtempSync(join(tmpdir(), "lume-codex-settings-ui-"));
 await build({
-  stdin: { contents: 'import "./src/app.css"; import { mount } from "svelte"; import Pane from "./src/lib/WorkspaceSessionPane.svelte"; import Dialog from "./src/lib/CodexTakeoverDialog.svelte"; const isDialog = new URLSearchParams(location.search).has("dialog"); mount(isDialog ? Dialog : Pane, { target: document.getElementById("app"), props: { session: window.__session, language: "pt-BR", ...(isDialog ? { onClose: () => window.__closed = true, onTaken: () => window.__taken = true } : {}) } });', resolveDir: root },
+  stdin: { contents: 'import "./src/app.css"; import { mount } from "svelte"; import Pane from "./src/lib/WorkspaceSessionPane.svelte"; import Inspector from "./src/lib/WorkspaceInspector.svelte"; import Dialog from "./src/lib/CodexTakeoverDialog.svelte"; const query = new URLSearchParams(location.search); const isDialog = query.has("dialog"); mount(isDialog ? Dialog : query.has("inspector") ? Inspector : Pane, { target: document.getElementById("app"), props: { session: window.__session, language: "pt-BR", ...(isDialog ? { onClose: () => window.__closed = true, onTaken: () => window.__taken = true } : {}) } });', resolveDir: root },
   external: ["/fonts/*"], define: { "import.meta.env": '{"DEV":true}' }, outfile: join(output, "app.js"), bundle: true, format: "esm", platform: "browser", conditions: ["browser", "svelte"],
   loader: { ".woff2": "file", ".woff": "file", ".png": "file", ".svg": "file" },
   plugins: [{ name: "svelte-fixture", setup(builder) {
@@ -34,6 +34,12 @@ function fixture() {
     results: [], activities: [], activityTotal: 0, permissionProfile: { canRespondFromLume: true, mode: "workspace_write" }, workSummary: { files: [], checks: [], todos: [], sources: [] },
     capabilities: { canPrompt: owned, canTakeControl: !owned && !unidentified, canAttachImages: true, promptDeliveries: ["new_turn"], canReadResults: false },
   };
+  if (scenario.has("usage")) {
+    localStorage.setItem("lume-dismissed-usage-alerts-v1", JSON.stringify(["usage:codex:primary:current:low"]));
+    window.__session.rateLimits = [{ id: "primary", label: "5h", usedPercent: 96 }, { id: "weekly", label: "7d", usedPercent: 95 }];
+  }
+  if (scenario.has("no-thread")) delete window.__session.nativeSessionId;
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (value) => { window.__copied = value; } } });
   window.__TAURI_INTERNALS__ = {
     transformCallback: () => 1, unregisterCallback: () => {},
     invoke: async (command, args = {}) => {
@@ -42,6 +48,14 @@ function fixture() {
       if (command === "get_session_environments") return { environments: [], error: null };
       if (command === "get_session_model_settings") return { model: "gpt-test", reasoningEffort: "medium", serviceTier: "default", models: [{ model: "gpt-test", displayName: "Modelo de teste", defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ value: "medium", description: "Medium" }] }] };
       if (command === "get_session_fast_mode") return false;
+      if (command === "list_notes" && scenario.has("notes")) {
+        const notes = [
+          { id: "claude-other", title: "Decisões Claude", body: "Contexto revisado", project: "/outro/projeto", agent: "claude_code", nativeSessionId: "claude-thread", kind: "note", pinned: false, createdAt: 1, updatedAt: 3 },
+          { id: "local-note", title: "Nota local", body: "Contexto local", project: "/fixture", agent: "codex", nativeSessionId: "thread", kind: "note", pinned: false, createdAt: 1, updatedAt: 2 },
+        ];
+        return notes.filter((note) => (!args.project || note.project === args.project) && (!args.query || note.title.toLowerCase().includes(args.query.toLowerCase())));
+      }
+      if (command === "prepare_attached_notes" && scenario.has("notes")) return { transport: "\n\nNota preparada para teste", included: 1, skipped: 0, redacted: 0 };
       if (command === "plugin:event|listen") return 1;
       return command === "take_control_session" ? null : [];
     },
@@ -150,6 +164,42 @@ try {
   await evaluate("document.activeElement.click()");
   await wait("window.__taken === true");
   assert.deepEqual(await evaluate("window.__calls.filter(([command]) => command === 'take_control_session').map(([, args]) => args)"), [{ sessionId: "codex-cli", prompt: "", attachments: [], force: false }]);
+  await call("Page.navigate", { url: "http://127.0.0.1:" + server.address().port + "/?owned&usage" });
+  await wait("document.querySelectorAll('.composer-field > .usage-banner .usage-row').length === 2");
+  assert.equal(await evaluate("document.querySelectorAll('.composer-field > .usage-banner').length"), 1, "usage windows share one surface attached to the composer");
+  assert.equal(await evaluate("document.querySelectorAll('.usage-banner .usage-close').length"), 1, "a previously dismissed critical window is visible and cannot be closed, while exactly 5% can");
+  const usageImage = await call("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(output, "usage-banner.png"), Buffer.from(usageImage.data, "base64"));
+  await evaluate("document.querySelector('.usage-banner .usage-close').click()");
+  await wait("document.querySelectorAll('.usage-banner .usage-row').length === 1");
+  assert.match(await evaluate("document.querySelector('.usage-banner').textContent"), /5h/);
+  await call("Page.navigate", { url: "http://127.0.0.1:" + server.address().port + "/?inspector" });
+  await wait("document.querySelector('.session-information summary')");
+  await evaluate("document.querySelector('.session-information summary').click()");
+  assert.match(await evaluate("document.querySelector('.session-information').textContent"), /ID da thread/);
+  assert.match(await evaluate("document.querySelector('.session-information').textContent"), /thread/);
+  const inspectorImage = await call("Page.captureScreenshot", { format: "png" });
+  writeFileSync(join(output, "session-information.png"), Buffer.from(inspectorImage.data, "base64"));
+  await evaluate("document.querySelector('[aria-label=\"Copiar ID da thread\"]').click()");
+  await wait("window.__copied === 'thread'");
+  await call("Page.navigate", { url: "http://127.0.0.1:" + server.address().port + "/?inspector&no-thread" });
+  await wait("document.querySelector('.session-information summary')");
+  await evaluate("document.querySelector('.session-information summary').click()");
+  assert.match(await evaluate("document.querySelector('.session-information').textContent"), /Ainda não disponível/);
+  await call("Page.navigate", { url: "http://127.0.0.1:" + server.address().port + "/?owned&notes" });
+  await wait("document.querySelector('[aria-label=\"Mais ações\"]')");
+  await evaluate("document.querySelector('[aria-label=\"Mais ações\"]').click()");
+  await evaluate("Array.from(document.querySelectorAll('.plus-menu button')).find(button => button.textContent.includes('Anexar nota')).click()");
+  await wait("document.querySelectorAll('.mention-menu[aria-label=\"Notas\"] button').length === 2");
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('.mention-menu[aria-label=\"Notas\"] button')).map(button => button.textContent.trim())"), ["Nota localCodex · fixture", "Decisões ClaudeClaude Code · projeto"], "local notes come first and the Claude note remains discoverable");
+  await evaluate("Array.from(document.querySelectorAll('.mention-menu[aria-label=\"Notas\"] button')).find(button => button.textContent.includes('Decisões Claude')).click()");
+  await wait("document.querySelector('.attached-notes .note-chip')");
+  assert.match(await evaluate("document.querySelector('.attached-notes').textContent"), /Decisões Claude/);
+  assert.equal(await evaluate("window.__calls.filter(([command]) => command === 'submit_prompt').length"), 0, "selecting a note never sends a prompt");
+  await evaluate("(() => { const input = document.querySelector('textarea'); input.value = 'Use esta nota'; input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('form.composer').requestSubmit(); })()");
+  await wait("window.__calls.some(([command]) => command === 'submit_prompt')");
+  assert.deepEqual(await evaluate("window.__calls.find(([command]) => command === 'prepare_attached_notes')[1].noteIds"), ["claude-other"]);
+  assert.match(await evaluate("window.__calls.find(([command]) => command === 'submit_prompt')[1].prompt"), /Nota preparada para teste/);
   assert.deepEqual(failures, []);
   console.log("Codex CLI settings takeover UI passed. Screenshot: " + output);
 } finally {

@@ -112,7 +112,7 @@ fn prefer_daemon(cli_version: Option<&Version>, daemon_version: &Version) -> boo
     cli_version.is_some_and(|cli_version| daemon_version > cli_version)
 }
 
-fn executable_version(path: &Path) -> Option<Version> {
+pub(crate) fn executable_version(path: &Path) -> Option<Version> {
     let mut child = command_from_path(path)
         .arg("--version")
         .stdin(Stdio::null())

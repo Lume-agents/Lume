@@ -315,6 +315,74 @@ pub fn plans() -> Vec<InstallPlan> {
         .collect()
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliUpdateCheck {
+    current: String,
+    latest: String,
+    available: bool,
+    npm_managed: bool,
+}
+
+fn npm_owns_cli(binary: &str, package: &str) -> bool {
+    let Some(path) = crate::executables::path(binary).and_then(|p| std::fs::canonicalize(p).ok()) else { return false; };
+    let Ok(mut command) = crate::executables::command("npm") else { return false; };
+    let Ok(mut child) = command.args(["root", "-g"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return false; };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let mut output = String::new();
+                let Some(stdout) = child.stdout.take() else { return false; };
+                if stdout.take(4096).read_to_string(&mut output).is_err() { return false; }
+                let Ok(root) = std::fs::canonicalize(std::path::Path::new(output.trim()).join(package)) else { return false; };
+                return path.starts_with(root);
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => { let _ = child.kill(); let _ = child.wait(); return false; }
+        }
+    }
+}
+
+/// Check a fixed public registry catalog. No package name or URL is supplied by the webview.
+pub async fn check_update(kind: &str) -> Result<CliUpdateCheck, String> {
+    let (binary, package) = match kind {
+        "codex" => ("codex", "@openai/codex"),
+        "claude" => ("claude", "@anthropic-ai/claude-code"),
+        "gemini" => ("gemini", "@google/gemini-cli"),
+        "opencode" => ("opencode", "opencode-ai"),
+        _ => return Err("Update checking is not supported for this agent yet".into()),
+    };
+    let path = crate::executables::path(binary).ok_or("Agent executable not found")?;
+    let resolved = std::fs::canonicalize(&path).unwrap_or(path);
+    let version_path = resolved.clone();
+    let (current, npm_managed) = tauri::async_runtime::spawn_blocking(move ||
+        (crate::executables::executable_version(&version_path), npm_owns_cli(binary, package)))
+        .await.map_err(|error| error.to_string())?;
+    let current = current.ok_or("Could not determine installed version")?;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let client = reqwest::Client::builder().https_only(true)
+        .redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(8)).user_agent("Lume/agent-update-check")
+        .build().map_err(|error| error.to_string())?;
+    let url = format!("https://registry.npmjs.org/{package}/latest");
+    let response = client.get(url).send().await.map_err(|error| error.to_string())?
+        .error_for_status().map_err(|error| error.to_string())?;
+    if response.content_length().is_some_and(|length| length > 1024 * 1024) {
+        return Err("Registry response too large".into());
+    }
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if bytes.len() + chunk.len() > 1024 * 1024 { return Err("Registry response too large".into()); }
+        bytes.extend_from_slice(&chunk);
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let latest = value.get("version").and_then(|v| v.as_str()).ok_or("Missing latest version")?;
+    let latest = semver::Version::parse(latest).map_err(|error| error.to_string())?;
+    Ok(CliUpdateCheck { available: latest > current, current: current.to_string(), latest: latest.to_string(), npm_managed })
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InstallOutput {
@@ -354,10 +422,21 @@ pub fn start(app: &AppHandle, kind: &str, method_id: &str) -> Result<String, Str
         .ok_or_else(|| "Unknown CLI".to_string())?;
     let binary = entry.binary;
     let kind_name = entry.kind;
+    if method_id == "npm-update" {
+        let package = match kind {
+            "codex" => "@openai/codex", "claude" => "@anthropic-ai/claude-code",
+            "gemini" => "@google/gemini-cli", "opencode" => "opencode-ai",
+            _ => return Err("Unsupported update method".into()),
+        };
+        if !npm_owns_cli(binary, package) {
+            return Err("The current CLI is not the detected npm installation".into());
+        }
+    }
+    let selected_method = if method_id == "npm-update" { "npm" } else { method_id };
     let method = entry
         .methods
         .into_iter()
-        .find(|method| method.id == method_id)
+        .find(|method| method.id == selected_method)
         .ok_or_else(|| "Unknown install method".to_string())?;
     if !method.available() {
         return Err(match method.requires {
@@ -709,5 +788,11 @@ mod tests {
     #[test]
     fn every_plan_names_the_command_that_signs_in() {
         assert!(plans().iter().all(|plan| !plan.login_command.is_empty()));
+    }
+
+    #[test]
+    fn update_check_rejects_arbitrary_packages_before_network_access() {
+        let result = tauri::async_runtime::block_on(check_update("@attacker/package"));
+        assert!(matches!(result, Err(message) if message.contains("not supported")));
     }
 }

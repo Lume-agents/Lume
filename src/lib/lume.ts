@@ -1359,6 +1359,11 @@ export async function loadCliInstallPlans(): Promise<CliInstallPlan[]> {
   return invoke<CliInstallPlan[]>("cli_install_plans");
 }
 
+export interface CliUpdateCheck { current: string; latest: string; available: boolean; npmManaged: boolean }
+export async function checkCliUpdate(kind: string): Promise<CliUpdateCheck> {
+  return invoke<CliUpdateCheck>("check_cli_update", { kind });
+}
+
 /** Starts an install; progress arrives as `lume://cli-install-output` and the end as `lume://cli-install-finished`. */
 export async function startCliInstall(kind: string, method: string): Promise<string> {
   return invoke<string>("start_cli_install", { kind, method });

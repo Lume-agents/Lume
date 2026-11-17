@@ -6,9 +6,10 @@
   import type { Language } from "$lib/i18n";
   import { cancelCliInstall, startCliInstall, type CliInstallFinished, type CliInstallPlan } from "$lib/lume";
 
-  let { plan, language, onClose }: {
+  let { plan, language, onClose, mode = "install" }: {
     plan: CliInstallPlan;
     language: Language;
+    mode?: "install" | "update";
     /** Called when the dialog closes; `installed` says whether the CLI can be found now. */
     onClose: (installed: boolean) => void;
   } = $props();
@@ -93,15 +94,16 @@
   <button class="backdrop-dismiss" type="button" aria-label={tr("Close", "Fechar")} disabled={stage === "running"} onclick={close}></button>
   <div class="cli-install-dialog" role="dialog" aria-modal="true" aria-labelledby="cli-install-title" tabindex="-1" use:dialogFocus={{ onDismiss: close }}>
     <h2 id="cli-install-title">
-      {#if stage === "done" && succeeded}{tr(`${plan.label} is installed`, `${plan.label} instalado`)}
-      {:else if stage === "running"}{tr(`Installing ${plan.label}…`, `Instalando ${plan.label}…`)}
-      {:else}{tr(`Install ${plan.label}`, `Instalar ${plan.label}`)}{/if}
+      {#if stage === "done" && succeeded}{mode === "update" ? tr("Update command completed", "Comando de atualização concluído") : tr(`${plan.label} is installed`, `${plan.label} instalado`)}
+      {:else if stage === "running"}{mode === "update" ? tr(`Updating ${plan.label}…`, `Atualizando ${plan.label}…`) : tr(`Installing ${plan.label}…`, `Instalando ${plan.label}…`)}
+      {:else}{mode === "update" ? tr(`Update ${plan.label}`, `Atualizar ${plan.label}`) : tr(`Install ${plan.label}`, `Instalar ${plan.label}`)}{/if}
     </h2>
 
     {#if stage === "confirm"}
       {#if method}
         <p>{tr("Lume will run this command on your computer:", "O Lume vai executar este comando no seu computador:")}</p>
         <pre class="command"><code>{method.command}</code></pre>
+        {#if mode === "update"}<small>{tr("Finish or stop active sessions using this agent before updating. Open sessions may need to be restarted.", "Conclua ou interrompa as sessões ativas deste agente antes de atualizar. Sessões abertas podem precisar ser reiniciadas.")}</small>{/if}
         {#if available.length > 1}
           <div class="methods" role="radiogroup" aria-label={tr("Install method", "Método de instalação")}>
             {#each available as item (item.id)}
@@ -122,7 +124,7 @@
       <div class="actions">
         {#if plan.manualUrl}<button class="quiet" type="button" onclick={() => void openUrl(plan.manualUrl!).catch(() => undefined)}>{tr("Open install page", "Abrir página de instalação")}</button>{/if}
         <button class="quiet" type="button" onclick={close}>{tr("Cancel", "Cancelar")}</button>
-        <button class="primary" type="button" disabled={!method} onclick={() => void install()}>{tr("Install", "Instalar")}</button>
+        <button class="primary" type="button" disabled={!method} onclick={() => void install()}>{mode === "update" ? tr("Update", "Atualizar") : tr("Install", "Instalar")}</button>
       </div>
     {:else}
       <div bind:this={logElement} class="log" role="log" aria-live="polite">
@@ -137,7 +139,9 @@
           <button class="quiet" type="button" disabled={cancelling || !runId} onclick={() => void cancel()}>{tr("Cancel install", "Cancelar instalação")}</button>
         </div>
       {:else}
-        {#if succeeded}
+        {#if succeeded && mode === "update"}
+          <p class="ok">{tr("The update command finished. Check the version again and restart open agent sessions to use it.", "O comando terminou. Verifique a versão novamente e reinicie as sessões abertas do agente para usá-la.")}</p>
+        {:else if succeeded}
           <p class="ok">{tr("All set. Now sign in once, in a terminal:", "Tudo pronto. Agora entre na sua conta uma vez, em um terminal:")}</p>
           <div class="login"><code>{plan.loginCommand}</code><button type="button" onclick={() => void copyLogin()}>{copied ? tr("Copied", "Copiado") : tr("Copy", "Copiar")}</button></div>
           <small>{tr("Lume never sees your password; the sign-in happens in the CLI itself.", "O Lume nunca vê sua senha; o login acontece na própria CLI.")}</small>

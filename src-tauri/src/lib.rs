@@ -689,8 +689,25 @@ async fn cli_install_plans() -> Result<Vec<cli_installer::InstallPlan>, String> 
 }
 
 #[tauri::command]
-fn start_cli_install(app: AppHandle, kind: String, method: String) -> Result<String, String> {
-    cli_installer::start(&app, &kind, &method)
+async fn check_cli_update(kind: String) -> Result<cli_installer::CliUpdateCheck, String> {
+    cli_installer::check_update(&kind).await
+}
+
+#[tauri::command]
+async fn start_cli_install(app: AppHandle, state: State<'_, AppState>, kind: String, method: String) -> Result<String, String> {
+    if method == "npm-update" {
+        let agent = match kind.as_str() {
+            "codex" => AgentKind::Codex, "claude" => AgentKind::ClaudeCode,
+            "gemini" => AgentKind::Gemini, "opencode" => AgentKind::OpenCode,
+            _ => return Err("Unsupported update method".into()),
+        };
+        if state.connected_sessions()?.iter().any(|session| session.remote.is_none() && session.agent == agent
+            && matches!(session.status, domain::SessionStatus::Running | domain::SessionStatus::PermissionRequired)) {
+            return Err("Conclua ou interrompa as tarefas ativas deste agente antes de atualizar.".into());
+        }
+    }
+    tauri::async_runtime::spawn_blocking(move || cli_installer::start(&app, &kind, &method))
+        .await.map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -4008,6 +4025,7 @@ pub fn run() {
             get_github_reference,
             commit_session_repository,
             cli_install_plans,
+            check_cli_update,
             start_cli_install,
             cancel_cli_install,
             search_session_paths,

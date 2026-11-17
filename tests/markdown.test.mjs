@@ -89,3 +89,18 @@ assert.equal(renderSafeMarkdown("- a\n- b\n\ntext"), "<ul><li>a</li><li>b</li></
 assert.equal(renderSafeMarkdown("- a\n1. b"), "<ul><li>a</li></ul><ol><li>b</li></ol>");
 assert.equal(renderSafeMarkdown("1. a\n   more\n2. b"), "<ol><li>a<br>more</li><li>b</li></ol>");
 console.log("markdown list tests passed");
+
+// Checklist items: disabled checkboxes in chats, clickable in notes, numbered as notes.ts toggleTask counts them.
+{
+  const source = "- [ ] Tag `v1`\n- [x] Changelog\n\n```\n- [ ] in code\n```\n\n1. [X] ordered\n- [ ]no space\n- [y] other";
+  const chat = renderSafeMarkdown(source);
+  assert.match(chat, /<li class="md-task"><input type="checkbox" class="md-task-box" data-task="0" disabled> Tag <code>v1<\/code><\/li>/);
+  assert.match(chat, /data-task="1" checked disabled> Changelog/);
+  assert.match(chat, /data-task="2" checked disabled> ordered/);
+  assert.equal((chat.match(/md-task-box/g) ?? []).length, 3, "code, a missing space and [y] are not items");
+  assert.match(chat, /<li>\[ \]no space<\/li>/);
+  const notes = renderSafeMarkdown(source, { interactiveTasks: true });
+  assert.equal(notes.includes("disabled"), false);
+  assert.match(renderSafeMarkdown("- [ ] after"), /disabled/, "interactive items are not left on for the next render");
+  assert.match(renderSafeMarkdown("- [ ] <img src=x onerror=alert(1)>"), /&lt;img/, "the item's text is escaped");
+}

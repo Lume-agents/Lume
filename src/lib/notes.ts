@@ -56,3 +56,28 @@ export function noteTitleFrom(text: string, fallback: string): string {
 
 /** Sent on `window` when a chat saves a note, so the Inspector's list reloads. */
 export const NOTES_CHANGED_EVENT = "lume:notes-changed";
+
+/**
+ * The note with its `index`-th checklist item (`- [ ] text`, counted outside code fences, as the
+ * preview numbers them in `data-task`) checked or unchecked. Unchanged when there is no such item.
+ */
+export function toggleTask(body: string, index: number): string {
+  const lines = body.split("\n");
+  let fenced = false;
+  let count = 0;
+  for (let line = 0; line < lines.length; line += 1) {
+    if (/^\s*```/.test(lines[line])) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const task = /^(\s*(?:[-*+]|\d+\.)\s+)\[([ xX])\](\s.*)$/.exec(lines[line]);
+    if (!task) continue;
+    if (count === index) {
+      lines[line] = `${task[1]}[${task[2] === " " ? "x" : " "}]${task[3]}`;
+      return lines.join("\n");
+    }
+    count += 1;
+  }
+  return body;
+}

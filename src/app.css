@@ -79,3 +79,8 @@ button:focus-visible {
 /* Windows set --lume-font-ui / --lume-font-code inline from the appearance preferences. */
 [data-appearance] { font-family: var(--lume-font-ui, var(--lume-font-ui-default)); }
 [data-appearance] code, [data-appearance] pre, [data-appearance] kbd { font-family: var(--lume-font-code, "SFMono-Regular", Consolas, monospace); }
+
+/* Checklist items rendered by markdown.js, in chats and notes alike. */
+li.md-task { list-style: none; }
+li.md-task > .md-task-box { margin: 0 .4em 0 -1.3em; vertical-align: -1px; accent-color: var(--workspace-accent, currentColor); }
+li.md-task > .md-task-box:not(:disabled) { cursor: pointer; }

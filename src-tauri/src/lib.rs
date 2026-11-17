@@ -51,6 +51,7 @@ pub mod node_relay;
 pub mod node_sessions;
 pub mod node_service;
 pub mod omp_rpc;
+mod note_files;
 mod omp_sessions;
 mod overlay;
 mod path_mentions;
@@ -1753,6 +1754,7 @@ fn save_session_note(
     kind: String,
     pinned: bool,
     links: Option<SessionNoteLinks>,
+    expected_revision: Option<String>,
 ) -> Result<SessionNote, String> {
     state.save_session_note(
         session_id.as_deref(),
@@ -1762,7 +1764,17 @@ fn save_session_note(
         &kind,
         pinned,
         links.unwrap_or_default(),
+        expected_revision.as_deref(),
     )
+}
+
+/// Opens the folder of a project's note files (or of every note) in the system's file manager.
+#[tauri::command]
+fn open_notes_folder(app: AppHandle, state: State<'_, AppState>, project: Option<String>) -> Result<(), String> {
+    let folder = state.notes_folder(project.as_deref())?;
+    app.opener()
+        .open_path(folder.to_string_lossy(), None::<String>)
+        .map_err(|error| error.to_string())
 }
 
 /// The redacted notes block to append to a prompt, kept within `budget` bytes.
@@ -3823,6 +3835,12 @@ pub fn run() {
             trace.mark("omp sessions");
             event_server::start(state.clone(), app.handle().clone())?;
             trace.mark("hook server");
+            let notes_app = app.handle().clone();
+            if let Err(error) = state.watch_note_files(move || {
+                let _ = notes_app.emit("lume://notes-changed", ());
+            }) {
+                eprintln!("Lume will not see note files edited outside it: {error}");
+            }
             let browser_control = browser_server::BrowserControl::default();
             browser_server::start(state.clone(), app.handle().clone(), browser_control.clone())?;
             app.manage(browser_control.clone());
@@ -4051,6 +4069,7 @@ pub fn run() {
             set_review_decision,
             list_session_notes,
             list_notes,
+            open_notes_folder,
             prepare_attached_notes,
             save_session_note,
             delete_session_note,

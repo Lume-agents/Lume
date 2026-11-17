@@ -21,3 +21,12 @@ test("tags, labels and excerpts", () => {
   assert.equal(noteTitleFrom("\n## Fix the cart\nmore", "Note"), "Fix the cart");
   assert.equal(noteTitleFrom("   ", "Note"), "Note");
 });
+
+test("a checklist item is checked by its position, outside code fences", async () => {
+  const { toggleTask } = await import("../src/lib/notes.ts");
+  const body = "- [ ] one\n```\n- [ ] in code\n```\n  * [x] two\n1. [ ] three\n- [ ]no space";
+  assert.equal(toggleTask(body, 0), body.replace("- [ ] one", "- [x] one"));
+  assert.equal(toggleTask(body, 1), body.replace("* [x] two", "* [ ] two"));
+  assert.equal(toggleTask(body, 2), body.replace("1. [ ] three", "1. [x] three"));
+  assert.equal(toggleTask(body, 3), body, "no fourth item");
+});

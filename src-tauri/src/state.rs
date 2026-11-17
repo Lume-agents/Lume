@@ -102,6 +102,8 @@ pub struct AppState {
     hub_command_responses: Arc<Mutex<HashMap<String, (i64, crate::protocol::HubCommandResponse)>>>,
     /// Sessions of other computers paired through the Relay, listed with this computer's own (see remote_sessions.rs).
     remote_sessions: Arc<Mutex<Vec<AgentSession>>>,
+    /// Project notes as Markdown files beside the database; None for an in-memory database (tests).
+    note_files: Option<Arc<crate::note_files::NoteFiles>>,
 }
 
 impl AppState {
@@ -188,7 +190,11 @@ impl AppState {
             active_codex_turns: Arc::new(Mutex::new(HashMap::new())),
             hub_command_responses: Arc::new(Mutex::new(HashMap::new())),
             remote_sessions: Arc::new(Mutex::new(Vec::new())),
+            note_files: open_note_files(database_path),
         };
+        if let Err(error) = state.move_project_notes_to_files() {
+            eprintln!("Some project notes stay in the database for now: {error}");
+        }
         for recovery in queued_recoveries {
             let target = state.sessions()?.into_iter().find(|session| {
                 session.id == recovery.session_id
@@ -2425,10 +2431,79 @@ impl AppState {
         query: Option<&str>,
         kind: Option<&str>,
     ) -> Result<Vec<SessionNote>, String> {
-        self.store
+        let mut notes = self
+            .store
             .lock()
             .map_err(|_| "Could not access notes".to_string())?
-            .list_notes(project, query, kind)
+            .list_notes(project, query, kind)?;
+        if let Some(files) = &self.note_files {
+            files.refresh()?;
+            notes.extend(
+                files
+                    .list()?
+                    .into_iter()
+                    .filter(|note| file_note_matches(note, project, query, kind)),
+            );
+            notes.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.updated_at.cmp(&a.updated_at)));
+            notes.truncate(1000);
+        }
+        Ok(notes)
+    }
+
+    /// Moves the project notes still in the database into files, each removed only once its file reads back whole.
+    fn move_project_notes_to_files(&self) -> Result<usize, String> {
+        let Some(files) = &self.note_files else { return Ok(0) };
+        let notes = self
+            .store
+            .lock()
+            .map_err(|_| "Could not access notes".to_string())?
+            .list_notes(None, None, None)?
+            .into_iter()
+            .filter(|note| note.native_session_id.is_empty())
+            .collect::<Vec<_>>();
+        let mut moved = 0;
+        for note in notes {
+            // A file already there means an earlier move stopped before removing the row.
+            if files.get(&note.id)?.is_none() {
+                let saved = files.import(&note)?;
+                if saved.body != note.body.trim() || saved.title != note.title {
+                    return Err(format!("the file of \"{}\" did not read back as saved", note.title));
+                }
+            }
+            self.store
+                .lock()
+                .map_err(|_| "Could not access notes".to_string())?
+                .delete_session_note(&note.id)?;
+            moved += 1;
+        }
+        Ok(moved)
+    }
+
+    /// The folder of a project's note files (or of all of them), for the Notes tab to open.
+    pub fn notes_folder(&self, project: Option<&str>) -> Result<std::path::PathBuf, String> {
+        self.note_files
+            .as_ref()
+            .ok_or_else(|| "Notes are not kept in files in this session".to_string())?
+            .folder(project)
+    }
+
+    /// Calls `on_change` when a note file is edited outside Lume.
+    pub fn watch_note_files(&self, on_change: impl Fn() + Send + 'static) -> Result<(), String> {
+        match &self.note_files {
+            Some(files) => files.watch(on_change),
+            None => Ok(()),
+        }
+    }
+
+    /// A note by id, from its file or the database.
+    fn note_by_id(&self, id: &str) -> Result<Option<SessionNote>, String> {
+        if let Some(note) = self.note_files.as_ref().map(|files| files.get(id)).transpose()?.flatten() {
+            return Ok(Some(note));
+        }
+        self.store
+            .lock()
+            .map_err(|_| "Could not access session notes".to_string())?
+            .session_note(id)
     }
 
     /// Saves a note of a chat (`session_id`) or, without one, of a project. Links left out keep their value;
@@ -2443,6 +2518,7 @@ impl AppState {
         kind: &str,
         pinned: bool,
         links: SessionNoteLinks,
+        expected_revision: Option<&str>,
     ) -> Result<SessionNote, String> {
         let session = session_id
             .filter(|id| !id.trim().is_empty())
@@ -2457,10 +2533,7 @@ impl AppState {
         let now = now_millis();
         let existing = match note_id.filter(|id| !id.trim().is_empty()) {
             Some(id) => Some(
-                self.store
-                    .lock()
-                    .map_err(|_| "Could not access session notes".to_string())?
-                    .session_note(id)?
+                self.note_by_id(id)?
                     .ok_or_else(|| "This note no longer exists".to_string())?,
             ),
             None => None,
@@ -2525,7 +2598,26 @@ impl AppState {
             pinned,
             created_at: existing.as_ref().map(|note| note.created_at).unwrap_or(now),
             updated_at: now,
+            revision: None,
         };
+        // A file changed since the editor read it is not overwritten: the person chooses between the two.
+        if let (Some(expected), Some(current)) = (expected_revision, existing.as_ref().and_then(|note| note.revision.as_deref())) {
+            if expected != current {
+                return Err(NOTE_CONFLICT.into());
+            }
+        }
+        // A project note goes to its Markdown file; one still in the database moves there on its first save.
+        if let Some(files) = self.note_files.as_ref().filter(|_| note.native_session_id.is_empty()) {
+            let was_in_database = existing.is_some() && files.get(&note.id)?.is_none();
+            let saved = files.save(&note)?;
+            if was_in_database {
+                self.store
+                    .lock()
+                    .map_err(|_| "Could not save the session note".to_string())?
+                    .delete_session_note(&saved.id)?;
+            }
+            return Ok(saved);
+        }
         self.store
             .lock()
             .map_err(|_| "Could not save the session note".to_string())?
@@ -2535,22 +2627,22 @@ impl AppState {
 
     /// The notes block for a prompt, from the notes' ids in the order they were attached.
     pub fn attached_notes_transport(&self, note_ids: &[String], budget: usize) -> Result<AttachedNotes, String> {
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| "Could not access notes".to_string())?;
         let mut notes = Vec::new();
         for id in note_ids.iter().take(8) {
-            if let Some(note) = store.session_note(id)? {
+            if let Some(note) = self.note_by_id(id)? {
                 notes.push(note);
             }
         }
-        drop(store);
         let (transport, included, redacted) = attached_notes_transport(&notes, budget);
         Ok(AttachedNotes { transport, included, skipped: notes.len() - included, redacted })
     }
 
     pub fn delete_session_note(&self, id: &str) -> Result<(), String> {
+        if let Some(files) = &self.note_files {
+            if files.delete(id)? {
+                return Ok(());
+            }
+        }
         self.store
             .lock()
             .map_err(|_| "Could not delete the session note".to_string())?
@@ -4414,6 +4506,42 @@ fn note_project(session: &AgentSession) -> Option<String> {
         .or_else(|| Some(session.project.clone()).filter(|project| !project.trim().is_empty()))
 }
 
+/// The error a save gets when the note's file changed since it was read; the Notes tab looks for this text.
+pub const NOTE_CONFLICT: &str = "note_conflict: This note changed outside Lume since it was opened";
+
+/// The notes folder beside the database, or None when the database is in memory or the folder cannot be used.
+fn open_note_files(database_path: &Path) -> Option<Arc<crate::note_files::NoteFiles>> {
+    if database_path == Path::new(":memory:") {
+        return None;
+    }
+    let root = database_path.parent()?.join("notes");
+    crate::note_files::NoteFiles::open(&root)
+        .map(Arc::new)
+        .map_err(|error| eprintln!("Lume notes stay in the database: {error}"))
+        .ok()
+}
+
+/// The Notes tab's filters for a note kept in a file, as `Store::list_notes` applies them in SQL.
+fn file_note_matches(note: &SessionNote, project: Option<&str>, query: Option<&str>, kind: Option<&str>) -> bool {
+    if let Some(project) = project.filter(|project| !project.is_empty()) {
+        if note.project.as_deref() != Some(project) {
+            return false;
+        }
+    }
+    if let Some(kind) = kind.filter(|kind| !kind.is_empty()) {
+        if note.kind != kind {
+            return false;
+        }
+    }
+    let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+        return true;
+    };
+    let query = query.to_lowercase();
+    note.title.to_lowercase().contains(&query)
+        || note.body.to_lowercase().contains(&query)
+        || note.tags.iter().any(|tag| tag.to_lowercase().contains(&query))
+}
+
 /// Tags without `#`, trimmed, lowercase, unique, at most 12 of 32 characters.
 fn normalize_note_tags(tags: &[String]) -> Vec<String> {
     let mut normalized: Vec<String> = Vec::new();
@@ -5868,6 +5996,91 @@ mod tests {
             wait_for_decision: false,
         }
     }
+    #[test]
+    fn project_notes_live_in_markdown_files_and_old_ones_move_there_when_saved() {
+        let folder = std::env::temp_dir().join(format!("lume-state-note-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let database = folder.join("lume.sqlite3");
+        let state = AppState::new(&database).unwrap();
+        let links = |project: &str| SessionNoteLinks { project: Some(project.into()), ..Default::default() };
+
+        // A note saved before the files existed sits in the database.
+        let legacy = SessionNote { id: "project-note:1".into(), title: "Antiga".into(), body: "do banco".into(), kind: "note".into(), project: Some("/p".into()), created_at: 1, updated_at: 1, ..Default::default() };
+        state.store.lock().unwrap().save_session_note(&legacy).unwrap();
+
+        let fresh = state.save_session_note(None, None, "Pendências", "- [ ] item", "note", false, links("/p"), None).unwrap();
+        assert!(fresh.id.starts_with("project-note:"));
+        let notes = state.list_notes(Some("/p"), None, None).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(state.list_notes(Some("/p"), Some("ITEM"), None).unwrap().len(), 1);
+        assert_eq!(state.list_notes(Some("/outro"), None, None).unwrap().len(), 0);
+
+        // Editing the old note moves it out of the database into its own file.
+        state.save_session_note(None, Some("project-note:1"), "Antiga", "editada", "note", false, links("/p"), None).unwrap();
+        assert!(state.store.lock().unwrap().session_note("project-note:1").unwrap().is_none());
+        let notes = state.list_notes(None, None, None).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes.iter().find(|note| note.id == "project-note:1").unwrap().body, "editada");
+        let file_count = std::fs::read_dir(folder.join("notes")).unwrap().flatten()
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .flat_map(|entry| std::fs::read_dir(entry.path()).unwrap().flatten())
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "md"))
+            .count();
+        assert_eq!(file_count, 2);
+
+        // An edit made outside Lume is what the next listing shows.
+        let path = std::fs::read_dir(folder.join("notes")).unwrap().flatten()
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .flat_map(|entry| std::fs::read_dir(entry.path()).unwrap().flatten())
+            .map(|entry| entry.path())
+            .find(|path| path.file_name().is_some_and(|name| name == "pendencias.md"))
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap().replace("- [ ] item", "- [x] item");
+        std::fs::write(&path, text).unwrap();
+        let attached = state.attached_notes_transport(std::slice::from_ref(&fresh.id), 10_000).unwrap();
+        assert!(attached.transport.contains("- [x] item"));
+
+        state.delete_session_note(&fresh.id).unwrap();
+        assert_eq!(state.list_notes(None, None, None).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn project_notes_move_to_files_at_start_and_a_stale_save_is_refused() {
+        let folder = std::env::temp_dir().join(format!("lume-state-note-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let database = folder.join("lume.sqlite3");
+        {
+            let store = Store::open(&database).unwrap();
+            let note = |id: &str, session: &str| SessionNote { id: id.into(), native_session_id: session.into(), title: id.into(), body: "corpo".into(), kind: "note".into(), project: Some("/p".into()), created_at: 1_600_000_000_000, updated_at: 1_700_000_000_000, ..Default::default() };
+            store.save_session_note(&note("project-note:1", "")).unwrap();
+            store.save_session_note(&note("session-note:t:1", "thread-1")).unwrap();
+        }
+        let state = AppState::new(&database).unwrap();
+        // The project note left the database for a file, with its dates; the chat note stayed.
+        assert!(state.store.lock().unwrap().session_note("project-note:1").unwrap().is_none());
+        assert!(state.store.lock().unwrap().session_note("session-note:t:1").unwrap().is_some());
+        let moved = state.note_by_id("project-note:1").unwrap().unwrap();
+        assert_eq!((moved.created_at, moved.updated_at, moved.body.as_str()), (1_600_000_000_000, 1_700_000_000_000, "corpo"));
+        drop(state);
+        let state = AppState::new(&database).unwrap();
+        assert_eq!(state.list_notes(None, None, None).unwrap().len(), 2, "a second start moves nothing twice");
+
+        // Saving with the revision that was read works; saving with an older one is refused.
+        let read = state.note_by_id("project-note:1").unwrap().unwrap();
+        let links = SessionNoteLinks::default();
+        let saved = state.save_session_note(None, Some(&read.id), &read.title, "editada", "note", false, links.clone(), read.revision.as_deref()).unwrap();
+        let error = state.save_session_note(None, Some(&read.id), &read.title, "velha", "note", false, links.clone(), read.revision.as_deref()).unwrap_err();
+        assert!(error.starts_with("note_conflict"), "{error}");
+        // Overwriting on purpose sends no revision.
+        state.save_session_note(None, Some(&read.id), &read.title, "sobrescrita", "note", false, links, None).unwrap();
+        assert_ne!(saved.revision, read.revision);
+        assert_eq!(state.note_by_id("project-note:1").unwrap().unwrap().body, "sobrescrita");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     #[test]
     fn attached_notes_are_redacted_sent_whole_and_shown_as_chips() {
         let note = |title: &str, body: &str| SessionNote { id: title.into(), title: title.into(), body: body.into(), kind: "note".into(), ..Default::default() };

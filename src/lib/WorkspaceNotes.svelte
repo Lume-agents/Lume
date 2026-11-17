@@ -7,8 +7,8 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import LumeSelect, { type LumeSelectOption } from "$lib/LumeSelect.svelte";
   import { renderSafeMarkdown } from "$lib/markdown.js";
-  import { deleteSessionNote, listNotes, saveSessionNote } from "$lib/lume";
-  import { filterNotes, noteExcerpt, noteTags, parseNoteTags, projectLabel } from "$lib/notes";
+  import { deleteSessionNote, listNotes, NOTE_CONFLICT, openNotesFolder, saveSessionNote, watchNoteFiles } from "$lib/lume";
+  import { filterNotes, noteExcerpt, noteTags, parseNoteTags, projectLabel, toggleTask } from "$lib/notes";
 
   /** The Notes tab: every note and saved plan, by project, agent and tag, with a markdown editor. */
   let { language = "en", project, canOpenLinked, onOpenLinked, onClose } = $props<{
@@ -28,15 +28,18 @@
   let error = $state("");
   let query = $state("");
   let kind = $state<"" | "note" | "plan">("");
-  // svelte-ignore state_referenced_locally
-  let projectFilter = $state(project ?? "");
+  // Every project is listed first; `project` is where a new note goes while no project is chosen.
+  let projectFilter = $state("");
   let agentFilter = $state("");
   let tagFilter = $state("");
   let selectedId = $state<string | null>(null);
-  let draft = $state<{ id?: string; title: string; body: string; tags: string; pinned: boolean; kind: SessionNote["kind"] } | null>(null);
+  let draft = $state<{ id?: string; title: string; body: string; tags: string; pinned: boolean; kind: SessionNote["kind"]; revision?: string } | null>(null);
   let previewing = $state(false);
   let saving = $state(false);
+  /** The open note's file changed outside Lume after it was opened, and the draft has edits of its own. */
+  let conflict = $state(false);
   let titleInput = $state<HTMLInputElement | null>(null);
+  let bodyInput = $state<HTMLTextAreaElement | null>(null);
   let request = 0;
 
   const shown = $derived(filterNotes(notes, { agent: agentFilter, tag: tagFilter }));
@@ -92,11 +95,60 @@
     return () => window.clearTimeout(searchTimer);
   });
 
+  function draftOf(note: SessionNote) {
+    return { id: note.id, title: note.title, body: note.body, tags: (note.tags ?? []).join(", "), pinned: note.pinned, kind: note.kind, revision: note.revision };
+  }
+
   function open(note: SessionNote) {
     if (dirty && !window.confirm(tr("Discard the unsaved changes?", "Descartar as alterações não salvas?"))) return;
     selectedId = note.id;
     previewing = true;
-    draft = { id: note.id, title: note.title, body: note.body, tags: (note.tags ?? []).join(", "), pinned: note.pinned, kind: note.kind };
+    conflict = false;
+    draft = draftOf(note);
+  }
+
+  async function startEditing() {
+    if (!draft || !previewing) return;
+    previewing = false;
+    await tick();
+    bodyInput?.focus();
+  }
+
+  /** A file edited outside Lume: the list reloads, and the open note follows it unless it has edits of its own. */
+  async function filesChanged() {
+    // Whether the draft has edits is judged against the note as it was, before the list takes the new file.
+    const hadEdits = dirty;
+    await load();
+    const current = selectedId ? notes.find((note) => note.id === selectedId) : null;
+    if (!draft?.id || !current || current.revision === draft.revision) return;
+    if (hadEdits) conflict = true;
+    else draft = draftOf(current);
+  }
+
+  /** Drops the draft's edits for the note as its file reads now. */
+  async function reloadSelected() {
+    const id = draft?.id;
+    if (!id) return;
+    const current = (await listNotes()).find((note) => note.id === id);
+    conflict = false;
+    error = "";
+    if (current) {
+      notes = notes.map((note) => (note.id === id ? current : note));
+      draft = draftOf(current);
+    } else {
+      selectedId = null;
+      draft = null;
+    }
+  }
+
+  /** A checklist item clicked in the preview is checked in the note and saved at once. */
+  function toggleTaskAt(event: MouseEvent) {
+    const box = event.target instanceof HTMLInputElement && event.target.classList.contains("md-task-box") ? event.target : null;
+    if (!box || !draft) return;
+    const body = toggleTask(draft.body, Number(box.dataset.task));
+    if (body === draft.body) return;
+    draft = { ...draft, body };
+    void save();
   }
 
   async function create() {
@@ -108,22 +160,25 @@
     titleInput?.focus();
   }
 
-  async function save() {
+  async function save(overwrite = false) {
     if (!draft || !draft.body.trim() || saving) return;
     saving = true;
     error = "";
     try {
-      const saved = await saveSessionNote(null, { id: draft.id, title: draft.title, body: draft.body, kind: draft.kind, pinned: draft.pinned }, {
+      const saved = await saveSessionNote(null, { id: draft.id, title: draft.title, body: draft.body, kind: draft.kind, pinned: draft.pinned, revision: draft.revision }, {
         tags: parseNoteTags(draft.tags),
         ...(draft.id ? {} : { project: projectFilter || project || "" }),
-      });
+      }, { overwrite });
+      conflict = false;
       selectedId = saved.id;
-      draft = { id: saved.id, title: saved.title, body: saved.body, tags: (saved.tags ?? []).join(", "), pinned: saved.pinned, kind: saved.kind };
+      draft = draftOf(saved);
       notes = [saved, ...notes.filter((note) => note.id !== saved.id)];
       if (saved.project && !allProjects.includes(saved.project)) allProjects = [...allProjects, saved.project];
       previewing = true;
     } catch (reason) {
-      error = String(reason).replace(/^Error:\s*/, "");
+      const message = String(reason).replace(/^Error:\s*/, "");
+      if (message.startsWith(NOTE_CONFLICT)) conflict = true;
+      else error = message;
     } finally {
       saving = false;
     }
@@ -133,7 +188,17 @@
     try {
       const saved = await saveSessionNote(null, { ...note, pinned: !note.pinned });
       notes = notes.map((item) => (item.id === saved.id ? saved : item)).sort((left, right) => Number(right.pinned) - Number(left.pinned) || right.updatedAt - left.updatedAt);
-      if (draft?.id === saved.id) draft = { ...draft, pinned: saved.pinned };
+      if (draft?.id === saved.id) draft = { ...draft, pinned: saved.pinned, revision: saved.revision };
+    } catch (reason) {
+      const message = String(reason).replace(/^Error:\s*/, "");
+      if (message.startsWith(NOTE_CONFLICT)) conflict = true;
+      else error = message;
+    }
+  }
+
+  async function openFolder() {
+    try {
+      await openNotesFolder(projectFilter || undefined);
     } catch (reason) {
       error = String(reason).replace(/^Error:\s*/, "");
     }
@@ -156,7 +221,14 @@
 
   onMount(() => {
     window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
+    let stopWatching: (() => void) | null = null;
+    let mounted = true;
+    void watchNoteFiles(() => void filesChanged()).then((stop) => (mounted ? (stopWatching = stop) : stop()));
+    return () => {
+      mounted = false;
+      window.removeEventListener("keydown", keydown);
+      stopWatching?.();
+    };
   });
 </script>
 
@@ -172,6 +244,7 @@
       <LumeIcon name="search" size={14} />
       <input bind:value={query} type="search" placeholder={tr("Search notes", "Buscar notas")} aria-label={tr("Search notes", "Buscar notas")} />
     </label>
+    <button class="bar-icon" type="button" title={tr("Open the notes folder", "Abrir a pasta das notas")} aria-label={tr("Open the notes folder", "Abrir a pasta das notas")} onclick={() => void openFolder()}><LumeIcon name="folder" size={15} /></button>
     <button class="new-note" type="button" onclick={() => void create()}><LumeIcon name="plus" size={14} /><span>{tr("New note", "Nova nota")}</span></button>
     <button class="bar-icon" type="button" title={tr("Close", "Fechar")} aria-label={tr("Close notes", "Fechar notas")} onclick={onClose}><LumeIcon name="close" size={15} /></button>
   </header>
@@ -216,6 +289,13 @@
 
   <div class="notes-editor">
     {#if error}<p class="notes-error" role="alert">{error}</p>{/if}
+    {#if conflict}
+      <div class="notes-conflict" role="alert">
+        <span>{tr("This note changed outside Lume while you were editing it.", "Esta nota foi alterada fora do Lume enquanto você editava.")}</span>
+        <button type="button" class="ghost" onclick={() => void reloadSelected()}>{tr("Reload", "Recarregar")}</button>
+        <button type="button" class="ghost danger" onclick={() => void save(true)}>{tr("Keep mine", "Manter a minha")}</button>
+      </div>
+    {/if}
     {#if draft}
       <div class="editor-head">
         <input bind:this={titleInput} bind:value={draft.title} class="title-input" maxlength="120" placeholder={tr("Title", "Título")} aria-label={tr("Title", "Título")} />
@@ -235,11 +315,12 @@
         </div>
       {/if}
       {#if previewing}
-        <div class="markdown preview" aria-label={tr("Preview", "Visualização")}>
-          {#if draft.body.trim()}{@html renderSafeMarkdown(draft.body)}{:else}<p class="placeholder">{tr("Nothing written yet.", "Nada escrito ainda.")}</p>{/if}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div class="markdown preview" aria-label={tr("Preview", "Visualização")} title={tr("Double-click to edit", "Clique duas vezes para editar")} onclick={toggleTaskAt} ondblclick={(event) => { if (!(event.target instanceof HTMLInputElement)) void startEditing(); }}>
+          {#if draft.body.trim()}{@html renderSafeMarkdown(draft.body, { interactiveTasks: true })}{:else}<p class="placeholder">{tr("Nothing written yet.", "Nada escrito ainda.")}</p>{/if}
         </div>
       {:else}
-        <textarea bind:value={draft.body} class="body-input" spellcheck="true" placeholder={tr("Write in Markdown…", "Escreva em Markdown…")} aria-label={tr("Note", "Nota")}></textarea>
+        <textarea bind:this={bodyInput} bind:value={draft.body} class="body-input" spellcheck="true" placeholder={tr("Write in Markdown…", "Escreva em Markdown…")} aria-label={tr("Note", "Nota")}></textarea>
       {/if}
       <footer class="editor-actions">
         {#if selected}
@@ -323,6 +404,8 @@
   .ghost { height: 28px; padding: 0 9px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-muted); background: transparent; font: 650 11px/1 var(--lume-font-ui, Inter, sans-serif); cursor: pointer; }
   .ghost:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
   .ghost.danger:hover { color: #c0554f; }
+  .notes-conflict { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-radius: 8px; color: var(--workspace-strong); background: color-mix(in srgb, #d49a2a 16%, transparent); font-size: 11px; }
+  .notes-conflict span { min-width: 0; flex: 1; }
   .notes-error { margin: 0; padding: 7px 10px; border-radius: 8px; color: #a8463f; background: color-mix(in srgb, #c0554f 12%, transparent); font-size: 11px; }
   .editor-empty { margin: auto; display: grid; justify-items: center; gap: 10px; color: var(--workspace-faint); font-size: 11.5px; }
 </style>

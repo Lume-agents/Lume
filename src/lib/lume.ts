@@ -1035,11 +1035,18 @@ export async function listNotes(filters: { project?: string; query?: string; kin
   return invoke<SessionNote[]>("list_notes", { project: filters.project || null, query: filters.query || null, kind: filters.kind || null });
 }
 
-/** Saves a chat's note, or a project's when `sessionId` is null. Links left out keep their saved value. */
+/** The start of the error a save gets when the note's file changed outside Lume since it was read. */
+export const NOTE_CONFLICT = "note_conflict";
+
+/**
+ * Saves a chat's note, or a project's when `sessionId` is null. Links left out keep their saved value.
+ * A note read with a `revision` is only saved over the same file, unless `overwrite` is set.
+ */
 export async function saveSessionNote(
   sessionId: string | null,
-  note: Pick<SessionNote, "title" | "body" | "kind" | "pinned"> & { id?: string },
+  note: Pick<SessionNote, "title" | "body" | "kind" | "pinned"> & { id?: string; revision?: string },
   links?: SessionNoteLinks,
+  options: { overwrite?: boolean } = {},
 ): Promise<SessionNote> {
   return invoke<SessionNote>("save_session_note", {
     sessionId,
@@ -1049,7 +1056,19 @@ export async function saveSessionNote(
     kind: note.kind,
     pinned: note.pinned,
     links: links ?? null,
+    expectedRevision: options.overwrite ? null : note.revision ?? null,
   });
+}
+
+/** Opens the folder of a project's note files, or of every note, in the file manager. */
+export async function openNotesFolder(project?: string): Promise<void> {
+  await invoke("open_notes_folder", { project: project || null });
+}
+
+/** Calls `onChange` when a note file is added, edited or removed outside Lume. */
+export async function watchNoteFiles(onChange: () => void): Promise<() => void> {
+  if (!inDesktop()) return () => {};
+  return listen("lume://notes-changed", () => onChange());
 }
 
 export interface AttachedNotes {

@@ -228,6 +228,8 @@ export interface SessionNote {
   tags?: string[];
   /** The message or plan the note was saved from. */
   sourceActivityId?: string;
+  /** For a note kept in a file, a hash of the file as read; saving it back refuses a file changed since. */
+  revision?: string;
 }
 
 /** Links sent with a note; a field left out keeps its saved value and an empty one clears it. */

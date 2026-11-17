@@ -1008,6 +1008,7 @@ impl Store {
                         .and_then(|tags| serde_json::from_str(&tags).ok())
                         .unwrap_or_default(),
                     source_activity_id: row.get(13)?,
+                    revision: None,
                 })
             })
             .map_err(|error| error.to_string())?;

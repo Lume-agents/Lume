@@ -39,13 +39,21 @@ function fixture() {
   const now = Date.UTC(2026, 10, 12, 14, 0);
   let notes = [
     { id: "n1", nativeSessionId: "native-1", title: "Release checklist", body: "## Release\n\n- [x] Changelog\n- [ ] Tag `v0.19`\n\nRun **npm run check** first.", kind: "note", pinned: true, createdAt: now, updatedAt: now, agent: "codex", project: "/work/lume", tags: ["release"], promptActivityId: "p7", promptExcerpt: "Prepare the release" },
-    { id: "n2", nativeSessionId: "", title: "Ideas", body: "Try a dark board.", kind: "note", pinned: false, createdAt: now - 9e5, updatedAt: now - 9e5, project: "/work/lume", tags: ["ideas"] },
+    { id: "n2", nativeSessionId: "", title: "Ideas", body: "Try a dark board.", kind: "note", pinned: false, createdAt: now - 9e5, updatedAt: now - 9e5, project: "/work/lume", tags: ["ideas"], revision: "file-1" },
     { id: "p1", nativeSessionId: "native-2", title: "Saved plan", body: "1. Inspect\n2. Implement", kind: "plan", pinned: false, createdAt: now - 2e6, updatedAt: now - 2e6, agent: "claude_code", project: "/work/other", tags: [] },
   ];
   window.__notes = () => notes;
+  // Events: listen() registers a callback, __emit fires it, as the backend does for a file edited outside Lume.
+  const callbacks = new Map();
+  const listeners = new Map();
+  let revision = 0;
+  window.__emit = (event) => { for (const id of listeners.get(event) ?? []) callbacks.get(id)?.({ event, id, payload: null }); };
+  window.__editOutside = (id, body) => { notes = notes.map((note) => (note.id === id ? { ...note, body, revision: "outside-" + ++revision } : note)); window.__emit("lume://notes-changed"); };
+  window.__saves = [];
   window.__TAURI_INTERNALS__ = {
-    transformCallback: () => 1,
+    transformCallback: (callback) => { const id = callbacks.size + 1; callbacks.set(id, callback); return id; },
     invoke: async (command, args) => {
+      if (command === "plugin:event|listen") { listeners.set(args.event, [...(listeners.get(args.event) ?? []), args.handler]); return args.handler; }
       if (command === "list_notes") {
         const query = (args.query || "").toLowerCase();
         return notes.filter((note) => (!args.project || note.project === args.project) && (!args.kind || note.kind === args.kind)
@@ -53,7 +61,9 @@ function fixture() {
       }
       if (command === "save_session_note") {
         const existing = notes.find((note) => note.id === args.noteId);
-        const saved = { ...(existing ?? { id: "new-" + notes.length, nativeSessionId: "", createdAt: Date.now(), project: args.links?.project }), title: args.title || "Note", body: args.body, kind: args.kind, pinned: args.pinned, updatedAt: Date.now(), tags: args.links?.tags ?? existing?.tags ?? [] };
+        window.__saves.push(args);
+        if (args.expectedRevision && existing?.revision && args.expectedRevision !== existing.revision) throw "note_conflict: This note changed outside Lume since it was opened";
+        const saved = { ...(existing ?? { id: "new-" + notes.length, nativeSessionId: "", createdAt: Date.now(), project: args.links?.project }), title: args.title || "Note", body: args.body, kind: args.kind, pinned: args.pinned, updatedAt: Date.now(), tags: args.links?.tags ?? existing?.tags ?? [], revision: "saved-" + ++revision };
         notes = [saved, ...notes.filter((note) => note.id !== saved.id)];
         return saved;
       }
@@ -131,11 +141,21 @@ try {
     await delay();
   }
   await call("Page.navigate", { url: "http://127.0.0.1:" + server.address().port });
-  await wait("document.querySelectorAll('#light .note-row').length === 2");
-  // The focused project is chosen first: the other project's plan is not listed.
-  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('#light .note-row strong')).map(item => item.textContent)"), ["Release checklist", "Ideas"]);
+  await wait("document.querySelectorAll('#light .note-row').length === 3");
+  // Every project is listed first, even with a chat's project focused.
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('#light .note-row strong')).map(item => item.textContent)"), ["Release checklist", "Ideas", "Saved plan"]);
   await evaluate("document.querySelector('#light .note-row').click()");
   await wait("document.querySelector('#light .preview li')");
+  // A checklist item clicked in the preview is checked in the note and saved.
+  assert.equal(await evaluate("document.querySelectorAll('#light .preview input.md-task-box:not(:disabled)').length"), 2);
+  await evaluate("document.querySelector('#light .preview input.md-task-box[data-task=\"1\"]').click()");
+  await wait("window.__notes().find(note => note.id === 'n1').body.includes('- [x] Tag')");
+  assert.equal(await evaluate("document.querySelectorAll('#light .preview input.md-task-box:checked').length"), 2);
+  // A double click on the preview opens the editor.
+  await evaluate("document.querySelector('#light .preview p').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
+  await wait("document.activeElement?.classList.contains('body-input')");
+  await evaluate("Array.from(document.querySelectorAll('#light .mode-toggle button')).at(-1).click()");
+  await wait("document.querySelector('#light .preview')");
   assert.match(await evaluate("document.querySelector('#light .preview').innerHTML"), /<strong>npm run check<\/strong>/, "markdown preview");
   assert.match(await evaluate("document.querySelector('#light .linked').innerText"), /Prepare the release[\s\S]*Open linked prompt/);
   await evaluate("document.querySelector('#light .linked button').click()");
@@ -150,9 +170,35 @@ try {
   await evaluate(`(() => { const set = (selector, value) => { const field = document.querySelector('#light ' + selector); field.value = value; field.dispatchEvent(new Event('input', { bubbles: true })); };
     set('.title-input', 'Deploy steps'); set('.tags-input', '#Ops, release'); set('.body-input', '1. Build\\n2. Ship'); })()`);
   await evaluate("document.querySelector('#light .primary').click()");
-  await wait("document.querySelectorAll('#light .note-row').length === 3");
+  await wait("document.querySelectorAll('#light .note-row').length === 4");
   const saved = await evaluate("window.__notes()[0]");
   assert.deepEqual([saved.title, saved.tags, saved.project], ["Deploy steps", ["ops", "release"], "/work/lume"]);
+  // A note edited outside Lume: an open note without edits follows the file.
+  await evaluate("Array.from(document.querySelectorAll('#light .note-row')).find(row => row.textContent.includes('Ideas')).click()");
+  await wait("document.querySelector('#light .preview')?.textContent.includes('Try a dark board.')");
+  await evaluate("window.__editOutside('n2', 'Changed in an editor.')");
+  await wait("document.querySelector('#light .preview')?.textContent.includes('Changed in an editor.')");
+  assert.equal(await evaluate("Boolean(document.querySelector('#light .notes-conflict'))"), false);
+  // With edits of its own, Lume asks; keeping them saves over the file on purpose.
+  await evaluate("Array.from(document.querySelectorAll('#light .mode-toggle button'))[0].click()");
+  await wait("document.querySelector('#light .body-input')");
+  await evaluate("(() => { const field = document.querySelector('#light .body-input'); field.value = 'Mine.'; field.dispatchEvent(new Event('input', { bubbles: true })); })()");
+  await evaluate("window.__editOutside('n2', 'Theirs.')");
+  await wait("document.querySelector('#light .notes-conflict')");
+  await screenshot("notes-conflict");
+  await evaluate("document.querySelector('#light .notes-conflict .danger').click()");
+  await wait("!document.querySelector('#light .notes-conflict') && window.__notes().find(note => note.id === 'n2').body === 'Mine.'");
+  assert.equal(await evaluate("window.__saves.at(-1).expectedRevision"), null, "keeping mine sends no revision");
+  // A save from a stale editor is refused and offers the same choice; reloading takes the file's text.
+  await evaluate("window.__editOutside('n2', 'Theirs again.')");
+  await wait("document.querySelector('#light .preview')?.textContent.includes('Theirs again.')");
+  await evaluate("Array.from(document.querySelectorAll('#light .mode-toggle button'))[0].click()");
+  await evaluate("(() => { const field = document.querySelector('#light .body-input'); field.value = 'Stale.'; field.dispatchEvent(new Event('input', { bubbles: true })); })()");
+  await evaluate("window.__notes().find(note => note.id === 'n2').revision = 'outside-silent'");
+  await evaluate("document.querySelector('#light .primary').click()");
+  await wait("document.querySelector('#light .notes-conflict')");
+  await evaluate("document.querySelector('#light .notes-conflict .ghost:not(.danger)').click()");
+  await wait("!document.querySelector('#light .notes-conflict') && document.querySelector('#light .body-input')?.value === 'Theirs again.'");
   // Plans have their own filter, across projects.
   await evaluate("document.querySelector('#dark .notes-tabs button:last-child').click()");
   await wait("document.querySelectorAll('#dark .note-row').length === 1");
@@ -163,7 +209,7 @@ try {
   await evaluate("document.querySelector('#light .note-row').click()");
   await wait("document.querySelector('#light .ghost.danger')");
   await evaluate("document.querySelector('#light .ghost.danger').click()");
-  await wait("document.querySelectorAll('#light .note-row').length === 2");
+  await wait("document.querySelectorAll('#light .note-row').length === 3");
   assert.deepEqual(failures, []);
   console.log("Notes UI passed. Screenshots: " + output);
 } finally {

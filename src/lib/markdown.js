@@ -137,6 +137,20 @@ function startsBlock(line) {
 }
 
 const LIST_MARKER = /^(\s*)([-*+]|\d+\.)\s+(.+)$/;
+/** `[ ] text` or `[x] text` at the start of a list item: a checklist item. */
+const TASK_MARKER = /^\[([ xX])\]\s+(.*)$/;
+
+/** The checklist items of the document being rendered, counted in order so a click can find its line. */
+let taskCount = 0;
+let interactiveTasks = false;
+
+/** @param {RegExpExecArray} task */
+function renderTask(task) {
+  const index = taskCount++;
+  const checked = task[1] !== " " ? " checked" : "";
+  const disabled = interactiveTasks ? "" : " disabled";
+  return `<input type="checkbox" class="md-task-box" data-task="${index}"${checked}${disabled}> ${renderInline(task[2])}`;
+}
 
 /** @param {string} line */
 function listMarker(line) {
@@ -165,7 +179,8 @@ function renderList(lines, start) {
   while (index < lines.length) {
     const marker = listMarker(lines[index]);
     if (!marker || marker.indent !== first.indent || marker.ordered !== first.ordered) break;
-    const text = [renderInline(marker.text)];
+    const task = TASK_MARKER.exec(marker.text);
+    const text = [task ? renderTask(task) : renderInline(marker.text)];
     let children = "";
     index += 1;
     while (index < lines.length) {
@@ -185,7 +200,7 @@ function renderList(lines, start) {
       text.push(renderInline(lines[next].trim()));
       index += 1;
     }
-    items.push(`<li>${text.join("<br>")}${children}</li>`);
+    items.push(`<li${task ? ' class="md-task"' : ""}>${text.join("<br>")}${children}</li>`);
     // Skip the blank lines only when another item of this list follows.
     let next = index;
     while (next < lines.length && !lines[next].trim()) next += 1;
@@ -212,11 +227,16 @@ export function stripInternalAgentMetadata(value) {
 /**
  * Render the supported Markdown subset after escaping all source HTML.
  * Only generated markup and explicitly allowed http(s)/mailto links survive.
+ * Checklist items (`- [ ] text`) are checkboxes, disabled unless `interactiveTasks` is set; each carries
+ * `data-task`, its position among the document's items, for `toggleTask` in notes.ts.
  * @param {unknown} markdown
+ * @param {{ interactiveTasks?: boolean }} [options]
  */
-export function renderSafeMarkdown(markdown) {
+export function renderSafeMarkdown(markdown, options = {}) {
   const source = stripInternalAgentMetadata(markdown);
   if (!source) return "";
+  taskCount = 0;
+  interactiveTasks = Boolean(options.interactiveTasks);
 
   const lines = source.split("\n");
   /** @type {string[]} */

@@ -344,6 +344,9 @@ pub struct SessionNote {
     /// The message or plan the note was saved from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_activity_id: Option<String>,
+    /// For a note kept in a file, a hash of the file as last read: a save that sends an older one is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 /// Where a note points, as the composer and the Notes tab send it; every field is optional.

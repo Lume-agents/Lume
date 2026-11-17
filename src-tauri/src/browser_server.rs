@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -256,13 +256,23 @@ pub fn start(state: AppState, app: AppHandle, control: BrowserControl) -> Result
     thread::Builder::new()
         .name("lume-browser-server".into())
         .spawn(move || {
+            // Only this computer's extensions connect; a handful of places is plenty.
+            let connections = crate::http_limits::ConnectionLimit::new(16, 16);
             for stream in listener.incoming().flatten() {
+                let Some(place) = stream.peer_addr().ok().and_then(|peer| connections.admit(peer.ip())) else {
+                    continue;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(4)));
                 let state = state.clone();
                 let app = app.clone();
                 let control = control.clone();
                 let _ = thread::Builder::new()
                     .name("lume-browser-client".into())
-                    .spawn(move || handle(stream, state, app, control));
+                    .spawn(move || {
+                        let _place = place;
+                        handle(stream, state, app, control)
+                    });
             }
         })
         .map_err(|error| error.to_string())?;
@@ -427,28 +437,19 @@ struct HttpRequest {
 }
 
 fn read_request(stream: &TcpStream) -> Result<HttpRequest, String> {
-    let mut reader = BufReader::new(stream);
-    let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(crate::http_limits::DeadlineReader::new(stream, Duration::from_secs(10)));
+    let (request_line, header_lines) = crate::http_limits::read_head(&mut reader)?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next().ok_or("Método ausente")?.to_string();
     let path = parts.next().ok_or("Caminho ausente")?.to_string();
     let mut content_length = 0usize;
     let mut origin = String::new();
-    loop {
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
-        if line == "\r\n" || line.is_empty() {
-            break;
-        }
-        if let Some(value) = line.strip_prefix("Content-Length:") {
+    for line in header_lines {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        if name.trim().eq_ignore_ascii_case("content-length") {
             content_length = value.trim().parse().map_err(|_| "Tamanho inválido")?;
         }
-        if let Some(value) = line.strip_prefix("Origin:") {
+        if name.trim().eq_ignore_ascii_case("origin") {
             origin = value.trim().to_string();
         }
     }

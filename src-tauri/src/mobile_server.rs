@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Read, Write},
     net::{IpAddr, TcpListener, TcpStream, UdpSocket},
     path::Path,
     sync::{
@@ -49,6 +49,9 @@ pub const TLS_ADDRESS: &str = "127.0.0.1:43122";
 const NETWORK_ADDRESS: &str = "0.0.0.0:43124";
 const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_SECURE_BODY_BYTES: usize = 12 * 1024 * 1024;
+/// Open connections a gateway listener holds, in all and from one address (a phone keeps one realtime stream).
+const MAX_CONNECTIONS: usize = 32;
+const MAX_CONNECTIONS_PER_ADDRESS: usize = 8;
 const REALTIME_PATH: &str = "/api/v1/ws";
 const REALTIME_SUBPROTOCOL: &str = "lume.hub.v1";
 const REALTIME_POLL_INTERVAL: Duration = Duration::from_millis(80);
@@ -309,12 +312,14 @@ fn start_listener_pair(
         .map_err(|error| error.to_string())?;
     let thread_running = running.clone();
     let tls_config = identity.server_config.clone();
+    let connections = crate::http_limits::ConnectionLimit::new(MAX_CONNECTIONS, MAX_CONNECTIONS_PER_ADDRESS);
     thread::Builder::new()
         .name(format!("lume-mobile-{label}-gateway"))
         .spawn(move || {
             while thread_running.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((stream, _)) => {
+                    Ok((stream, address)) => {
+                        let Some(place) = connections.admit(address.ip()) else { continue };
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(4)));
                         let state = state.clone();
@@ -325,6 +330,7 @@ fn start_listener_pair(
                         let _ = thread::Builder::new()
                             .name("lume-mobile-client".into())
                             .spawn(move || {
+                                let _place = place;
                                 handle_tls(
                                     stream,
                                     state,
@@ -377,12 +383,15 @@ fn start_plain_listener(
     listener
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
+    let connections = crate::http_limits::ConnectionLimit::new(MAX_CONNECTIONS, MAX_CONNECTIONS_PER_ADDRESS);
     thread::Builder::new()
         .name("lume-mobile-network-gateway".into())
         .spawn(move || {
             while running.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((stream, _)) => {
+                    Ok((stream, address)) => {
+                        // A full listener drops the connection at once rather than start a thread for it.
+                        let Some(place) = connections.admit(address.ip()) else { continue };
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(4)));
                         let state = state.clone();
@@ -392,6 +401,7 @@ fn start_plain_listener(
                         let _ = thread::Builder::new()
                             .name("lume-mobile-network-client".into())
                             .spawn(move || {
+                                let _place = place;
                                 handle_stream(stream, state, gateway, app, connection_running)
                             });
                     }
@@ -679,7 +689,12 @@ fn handle_stream<S: MobileStream>(
     app: AppHandle,
     running: Arc<AtomicBool>,
 ) {
-    match read_request(&mut stream) {
+    // A large body keeps its place until it has been answered.
+    let (request, _large_body) = match read_request_guarded(&mut stream) {
+        Ok((request, guard)) => (Ok(request), guard),
+        Err(message) => (Err(message), None),
+    };
+    match request {
         Ok(request) if request.path.split('?').next() == Some(REALTIME_PATH) => {
             handle_realtime_stream(stream, request, state, gateway, running);
         }
@@ -1408,11 +1423,26 @@ struct HttpRequest {
 }
 
 fn read_request(stream: &mut impl Read) -> Result<HttpRequest, String> {
-    let mut reader = BufReader::new(stream);
-    let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .map_err(|error| error.to_string())?;
+    read_request_guarded(stream).map(|(request, _)| request)
+}
+
+/// The whole request must arrive within this, however slowly its bytes come.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
+/// Bodies over `MAX_BODY_BYTES` (only the encrypted transport sends them) read at once, before the
+/// sender is known; a few at a time keep many large ones from filling the memory.
+const MAX_LARGE_BODIES: usize = 4;
+
+fn large_bodies() -> &'static crate::http_limits::LargeBodies {
+    static LARGE_BODIES: std::sync::OnceLock<crate::http_limits::LargeBodies> = std::sync::OnceLock::new();
+    LARGE_BODIES.get_or_init(|| crate::http_limits::LargeBodies::new(MAX_LARGE_BODIES))
+}
+
+/// The request, and the place it holds while its large body is in memory (keep it until answered).
+fn read_request_guarded(
+    stream: &mut impl Read,
+) -> Result<(HttpRequest, Option<crate::http_limits::LargeBodyGuard>), String> {
+    let mut reader = BufReader::new(crate::http_limits::DeadlineReader::new(stream, REQUEST_DEADLINE));
+    let (request_line, header_lines) = crate::http_limits::read_head(&mut reader)?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next().ok_or("Método ausente")?.to_string();
     let path = parts.next().ok_or("Caminho ausente")?.to_string();
@@ -1421,14 +1451,7 @@ fn read_request(stream: &mut impl Read) -> Result<HttpRequest, String> {
     }
     let mut content_length = 0usize;
     let mut headers = HashMap::new();
-    loop {
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
-        if line == "\r\n" || line.is_empty() {
-            break;
-        }
+    for line in header_lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
@@ -1447,16 +1470,24 @@ fn read_request(stream: &mut impl Read) -> Result<HttpRequest, String> {
     if content_length > max_body_bytes {
         return Err("Requisição excede o limite permitido".into());
     }
+    let guard = if content_length > MAX_BODY_BYTES {
+        Some(large_bodies().admit().ok_or("O Lume está recebendo outros envios grandes; tente de novo")?)
+    } else {
+        None
+    };
     let mut body = vec![0; content_length];
     reader
         .read_exact(&mut body)
         .map_err(|error| error.to_string())?;
-    Ok(HttpRequest {
-        method,
-        path,
-        headers,
-        body,
-    })
+    Ok((
+        HttpRequest {
+            method,
+            path,
+            headers,
+            body,
+        },
+        guard,
+    ))
 }
 
 fn bearer_token(headers: &HashMap<String, String>) -> Option<&str> {

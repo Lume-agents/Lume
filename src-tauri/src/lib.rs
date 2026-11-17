@@ -29,6 +29,7 @@ pub mod distributed_protocol;
 mod domain;
 mod event_server;
 mod executables;
+mod http_limits;
 mod integrations;
 mod launcher;
 mod legacy_cli_gateway_cleanup;

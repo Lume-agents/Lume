@@ -5,7 +5,7 @@ use rusqlite::{params, Connection};
 use crate::domain::{
     AgentKind, AgentSession, HistoryEntry, MobileScope, PairedDevice, Preferences, ResultNote,
     ReviewDecision, ReviewDecisionKind, ReviewNote, SessionActivity, SessionControlOrigin,
-    SessionNote, SessionStatus, WorkflowHistoryRecord,
+    SessionModelOverride, SessionNote, SessionStatus, WorkflowHistoryRecord,
 };
 
 pub struct Store {
@@ -180,6 +180,12 @@ impl Store {
                     payload TEXT NOT NULL,
                     updated_at INTEGER NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS managed_model_settings (
+                    agent TEXT NOT NULL,
+                    native_session_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY(agent, native_session_id)
+                 );
                  CREATE TABLE IF NOT EXISTS codex_cli_display_links (
                     process_key TEXT PRIMARY KEY,
                     process_id INTEGER NOT NULL UNIQUE,
@@ -251,6 +257,22 @@ impl Store {
             }
         }
         Ok(sessions)
+    }
+
+    pub fn load_managed_model_settings(&self) -> Result<Vec<(AgentKind, String, SessionModelOverride)>, String> {
+        let mut query = self.connection.prepare("SELECT agent, native_session_id, payload FROM managed_model_settings").map_err(|error| error.to_string())?;
+        let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).map_err(|error| error.to_string())?;
+        Ok(rows.filter_map(Result::ok).filter_map(|(agent, id, payload)| {
+            Some((serde_json::from_str(&agent).ok()?, id, serde_json::from_str(&payload).ok()?))
+        }).collect())
+    }
+
+    pub fn save_managed_model_settings(&self, agent: &AgentKind, native_id: &str, settings: &SessionModelOverride) -> Result<(), String> {
+        let agent = serde_json::to_string(agent).map_err(|error| error.to_string())?;
+        let payload = serde_json::to_string(settings).map_err(|error| error.to_string())?;
+        self.connection.execute("INSERT INTO managed_model_settings(agent, native_session_id, payload) VALUES (?1, ?2, ?3)
+            ON CONFLICT(agent, native_session_id) DO UPDATE SET payload = excluded.payload", params![agent, native_id, payload]).map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     pub(crate) fn load_codex_cli_display_links(
@@ -382,7 +404,8 @@ impl Store {
 
     fn save_managed_session(&self, session: &AgentSession) -> Result<(), String> {
         if session.control_origin != SessionControlOrigin::Lume
-            || session.agent != AgentKind::Codex
+            || !matches!(session.agent, AgentKind::Codex | AgentKind::ClaudeCode | AgentKind::OpenCode | AgentKind::Antigravity | AgentKind::Gemini | AgentKind::Grok | AgentKind::DeepSeek | AgentKind::Omp)
+            || matches!(session.source, crate::domain::SessionSource::Web | crate::domain::SessionSource::Vscode)
             || session
                 .native_session_id
                 .as_deref()
@@ -393,8 +416,9 @@ impl Store {
         let mut durable = session.clone();
         durable.source_app = None;
         durable.process_id = None;
+        let interrupted = matches!(durable.status, SessionStatus::Running | SessionStatus::PermissionRequired);
         durable.status = SessionStatus::WaitingForInput;
-        durable.status_label = "Ready in Lume".into();
+        durable.status_label = if interrupted { "Task may have been interrupted by Lume restart" } else { "Ready in Lume" }.into();
         durable.pending_permission = None;
         durable.pending_question = None;
         durable.last_response = None;

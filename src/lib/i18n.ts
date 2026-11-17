@@ -93,6 +93,7 @@ const portugueseDisplayText = new Map<string, string>([
   ...[...englishDisplayText].map(([portuguese, english]) => [english, portuguese] as [string, string]),
   ["Waiting for input", "Aguardando ação"],
   ["Ready in Lume", "Pronto no Lume"],
+  ["Task may have been interrupted by Lume restart", "A tarefa pode ter sido interrompida pela reinicialização do Lume"],
   ["Recovered in Lume", "Recuperado no Lume"],
   ["Prompt interrupted", "Prompt interrompido"],
   ["Prompt queued", "Prompt na fila"],

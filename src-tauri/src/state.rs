@@ -122,6 +122,8 @@ impl AppState {
             codex_cli_identities.restore_root_hook_visibility(&id, observed_at, now);
         }
         let mut sessions = store.load_sessions()?;
+        let persisted_model_settings = store.load_managed_model_settings()?.into_iter()
+            .map(|(agent, id, settings)| ((agent, id), settings)).collect();
         for recovery in store.take_takeover_recoveries()? {
             let mut recovered = recovery.session;
             let recovered_id = recovered.id.clone();
@@ -184,7 +186,7 @@ impl AppState {
             agent_rate_limit_errors: Arc::new(Mutex::new(HashMap::new())),
             session_aliases: Arc::new(Mutex::new(preferences.session_aliases)),
             archived_conversations: Arc::new(Mutex::new(HashMap::new())),
-            session_model_overrides: Arc::new(Mutex::new(HashMap::new())),
+            session_model_overrides: Arc::new(Mutex::new(persisted_model_settings)),
             session_fast_mode_overrides: Arc::new(Mutex::new(HashMap::new())),
             permission_mode_overrides: Arc::new(Mutex::new(HashMap::new())),
             active_codex_turns: Arc::new(Mutex::new(HashMap::new())),
@@ -1571,7 +1573,7 @@ impl AppState {
         session_id: &str,
         native_session_id: String,
     ) -> Result<Option<String>, String> {
-        let old_native_session_id = {
+        let (old_native_session_id, managed, snapshot) = {
             let mut sessions = self
                 .sessions
                 .lock()
@@ -1586,16 +1588,26 @@ impl AppState {
             let old_native_session_id =
                 session.native_session_id.replace(native_session_id.clone());
             session.updated_at = now_millis();
-            old_native_session_id
+            (old_native_session_id, session.control_origin == SessionControlOrigin::Lume, session.clone())
         };
-        if let Some(old_native_session_id) = old_native_session_id.clone() {
+        {
+            let old_key = old_native_session_id.clone().unwrap_or_else(|| session_id.to_string());
             let mut settings = self
                 .session_model_overrides
                 .lock()
                 .map_err(|_| "Could not reconnect the Codex model settings".to_string())?;
-            if let Some(value) = settings.remove(&(AgentKind::Codex, old_native_session_id)) {
+            if let Some(value) = settings.get(&(AgentKind::Codex, old_key.clone())).cloned() {
+                if managed {
+                    self.store.lock().map_err(|_| "Could not persist the Codex model settings".to_string())?
+                        .save_managed_model_settings(&AgentKind::Codex, &native_session_id, &value)?;
+                }
+                settings.remove(&(AgentKind::Codex, old_key));
                 settings.insert((AgentKind::Codex, native_session_id), value);
             }
+        }
+        if managed {
+            self.store.lock().map_err(|_| "Could not persist the Codex session".to_string())?
+                .save_session(&snapshot)?;
         }
         Ok(old_native_session_id)
     }
@@ -1841,6 +1853,12 @@ impl AppState {
         settings: SessionModelOverride,
     ) -> Result<SessionModelOverride, String> {
         let session = self.connected_session(session_id)?;
+        if session.control_origin == SessionControlOrigin::Lume {
+            if let Some(native_id) = session.native_session_id.as_deref().filter(|id| !id.trim().is_empty()) {
+                self.store.lock().map_err(|_| "Could not save the session model settings".to_string())?
+                    .save_managed_model_settings(&session.agent, native_id, &settings)?;
+            }
+        }
         let key = (
             session.agent,
             session
@@ -3360,6 +3378,10 @@ impl AppState {
             }
         }
         store.save_session(&snapshot)?;
+        if session_ended {
+            // Keep archived activity, but never resurrect a conversation the user closed.
+            store.delete_session(&snapshot.id)?;
+        }
         if let Some(entry) = history {
             store.add_history(&entry)?;
         }
@@ -9475,6 +9497,20 @@ mod tests {
     }
 
     #[test]
+    fn ended_managed_session_is_not_restored() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut event = started_event("codex:ended-managed", 4343);
+        event.agent = AgentKind::Codex;
+        event.native_session_id = Some("ended-thread".into());
+        state.ingest(event.clone()).expect("start");
+        state.mark_session_lume_controlled("codex:ended-managed", SessionSource::Desktop, None).expect("managed");
+        assert_eq!(state.store.lock().unwrap().load_sessions().unwrap().len(), 1);
+        event.event = HookEventKind::SessionEnded;
+        state.ingest(event).expect("end");
+        assert!(state.store.lock().unwrap().load_sessions().unwrap().is_empty());
+    }
+
+    #[test]
     fn stale_browser_heartbeat_removes_the_web_agent() {
         let state = AppState::new(Path::new(":memory:")).expect("estado");
         let mut event = started_event("web:chatgpt:chat", 4343);
@@ -9744,6 +9780,41 @@ mod tests {
         assert!(sessions[0].last_response.is_none());
         drop(restarted);
 
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn restart_restores_managed_claude_and_codex_model_settings_without_replaying() {
+        let database_path = std::env::temp_dir().join(format!("lume-model-restart-{}-{}.sqlite3", std::process::id(), now_millis()));
+        {
+            let state = AppState::new(&database_path).expect("state");
+            for (id, agent, native) in [("codex:restore-model", AgentKind::Codex, "codex-thread"), ("claude:restore-model", AgentKind::ClaudeCode, "claude-thread")] {
+                let mut event = started_event(id, 4455);
+                event.agent = agent;
+                event.native_session_id = Some(native.into());
+                state.ingest(event).expect("session");
+                state.mark_session_lume_controlled(id, SessionSource::Desktop, None).expect("managed");
+                state.set_session_model_override(id, SessionModelOverride { model: Some("model-selected".into()), reasoning_effort: Some("high".into()) }).expect("settings");
+            }
+            state.rebind_codex_thread("codex:restore-model", "codex-thread-rebound".into()).expect("rebind");
+            let mut running = state.connected_session("claude:restore-model").expect("claude");
+            running.status = SessionStatus::Running;
+            state.store.lock().unwrap().save_session(&running).expect("persist running session");
+        }
+        let state = AppState::new(&database_path).expect("restarted");
+        let sessions = state.sessions().expect("sessions");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions.iter().find(|session| session.agent == AgentKind::Codex).unwrap().native_session_id.as_deref(), Some("codex-thread-rebound"));
+        let claude = sessions.iter().find(|session| session.agent == AgentKind::ClaudeCode).expect("claude restored");
+        assert_eq!(claude.status, SessionStatus::WaitingForInput);
+        assert_eq!(claude.status_label, "Task may have been interrupted by Lume restart");
+        assert!(claude.process_id.is_none());
+        for id in ["codex:restore-model", "claude:restore-model"] {
+            assert_eq!(state.session_model_override(id).expect("restored settings"), SessionModelOverride { model: Some("model-selected".into()), reasoning_effort: Some("high".into()) });
+        }
+        drop(state);
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_file(database_path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(database_path.with_extension("sqlite3-shm"));

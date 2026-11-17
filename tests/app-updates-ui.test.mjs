@@ -22,12 +22,14 @@ const fixture = `<script>
   window.__setDark = value => { dark = value; };
   window.__updates = appUpdates;
   window.__calls = [];
+  window.__sessions = [];
   window.__nativeVisible = true;
   window.__releaseBody = '## Improvements\\n- Unified updates in Orb and Workspace.\\n- Patch notes appear once per version.\\n\\n## Fixes\\n' + Array.from({ length: 30 }, (_, i) => '- Fix ' + (i + 1) + ': readable release notes.').join('\\n') + '\\n\\n<script>alert("unsafe")<\\/script>\\n[javascript](javascript:alert(1))';
   mockWindows('main', ['main', 'workspace']);
   mockIPC(async (command, args) => {
     window.__calls.push([command, args]);
     if (command === 'plugin:app|version') return '0.18.2';
+    if (command === 'get_hub_snapshot') return { sessions: window.__sessions };
     if (command === 'plugin:window|is_visible') return window.__nativeVisible;
     if (command === 'plugin:event|emit_to') return emit(args.event, args.payload);
     if (command === 'plugin:updater|check') return { rid: 1, currentVersion: '0.18.2', version: '0.18.3', body: '## Next release', rawJson: {} };
@@ -136,6 +138,15 @@ try {
   assert.equal(await evaluate("document.querySelector('.app-update-notice')"), null);
   await evaluate("window.__nativeVisible = true; window.dispatchEvent(new Event('focus'))");
   await wait("document.querySelector('.app-update-notice')");
+  await evaluate("window.__updates.update(s => ({ ...s, status: 'error', error: 'HTTP 403 Forbidden', errorOperation: 'install' }))");
+  await wait("document.querySelector('.app-update-notice').textContent.includes('negado (403)')");
+  await evaluate("window.__updates.update(s => ({ ...s, status: 'available', error: '', errorOperation: null }))");
+  await evaluate("window.__sessions = [{ id: 'active', controlOrigin: 'lume', status: 'running' }]");
+  await evaluate("document.querySelector('.app-update-notice button.primary').click()");
+  await wait("document.querySelector('.app-update-notice').textContent.includes('uma tarefa ativa')");
+  await screenshot("update-blocked-active-task");
+  assert.equal(await evaluate("window.__calls.filter(([command]) => command === 'plugin:updater|download_and_install').length"), 0);
+  await evaluate("window.__sessions = []");
   await evaluate("document.querySelector('.app-update-notice button.primary').click()");
   await wait("document.querySelector('.app-update-notice [role=progressbar]')?.getAttribute('aria-valuenow') === '40'");
   assert.equal(await evaluate("document.querySelector('.app-update-notice button:not(.dismiss)').disabled"), true);

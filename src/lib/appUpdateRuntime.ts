@@ -4,6 +4,7 @@ import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { version } from "../../package.json";
+import { loadHubSnapshot } from "$lib/lume";
 import { AppUpdateController, initialUpdateState, type AppUpdateState } from "./appUpdates";
 
 export const appUpdates = writable(initialUpdateState(version));
@@ -31,6 +32,15 @@ export async function loadReleaseBody(installedVersion: string): Promise<string>
 export async function startAppUpdatesOwner(): Promise<() => void> {
   if (!native()) return () => {};
   const owner = new AppUpdateController({ version, getVersion, loadReleaseBody, relaunch,
+    activeOwnedTasks: async () => {
+      try {
+        return (await loadHubSnapshot()).sessions.filter((session) =>
+          !session.remote && session.controlOrigin === "lume" && (session.status === "running" || session.status === "permission_required" || Boolean(session.pendingQuestion) || Boolean(session.pendingPermission))
+        ).length;
+      } catch (error) {
+        throw new Error(`Unable to verify active tasks: ${String(error).replace(/^Error:\s*/, "")}`);
+      }
+    },
     check: () => check({ timeout: 15_000, headers: { "Cache-Control": "no-cache", Pragma: "no-cache" } }),
     storage: { getItem: key => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value) },
   });

@@ -15,6 +15,7 @@ export type AppUpdateState = {
   progress: number | null;
   error: string;
   errorOperation: "check" | "install" | "restart" | null;
+  blockedByActiveTasks: number;
   notify: boolean;
   dismissedVersion: string | null;
   notes: ReleaseNotes | null;
@@ -24,7 +25,7 @@ export const releaseNotesCacheKey = "lume:updates:release-notes-cache";
 export const releaseUrl = (version: string) => `https://github.com/Lume-agents/Lume/releases/tag/v${encodeURIComponent(version)}`;
 export const initialUpdateState = (version: string): AppUpdateState => ({
   status: "idle", currentVersion: version, availableVersion: null, progress: null,
-  error: "", errorOperation: null, notify: false, dismissedVersion: null, notes: null,
+  error: "", errorOperation: null, blockedByActiveTasks: 0, notify: false, dismissedVersion: null, notes: null,
 });
 
 type UpdateDependencies = {
@@ -33,6 +34,7 @@ type UpdateDependencies = {
   check: () => Promise<InstallableUpdate | null>;
   loadReleaseBody: (version: string) => Promise<string>;
   relaunch: () => Promise<void>;
+  activeOwnedTasks?: () => Promise<number>;
   storage: Pick<Storage, "getItem" | "setItem">;
 };
 
@@ -85,7 +87,7 @@ export class AppUpdateController {
   check(notifyErrors = false): Promise<void> {
     if (this.checking) return this.checking;
     if (this.disposed || ["downloading", "ready"].includes(this.state.status)) return Promise.resolve();
-    this.patch({ status: "checking", error: "", errorOperation: null, progress: null });
+    this.patch({ status: "checking", error: "", errorOperation: null, blockedByActiveTasks: 0, progress: null });
     this.checking = Promise.resolve().then(async () => {
       try {
         const next = await this.dependencies.check();
@@ -106,10 +108,15 @@ export class AppUpdateController {
     const update = this.pending;
     // Cache before the installer can exit the process (notably on Windows).
     if (update.body?.trim()) this.write(releaseNotesCacheKey, JSON.stringify({ version: update.version, body: update.body }));
-    this.patch({ status: "downloading", progress: null, error: "", errorOperation: null, notify: true, dismissedVersion: null });
+    this.patch({ status: "downloading", progress: null, error: "", errorOperation: null, blockedByActiveTasks: 0, notify: true, dismissedVersion: null });
     let downloaded = 0;
     let total: number | undefined;
     try {
+      const active = await this.dependencies.activeOwnedTasks?.() ?? 0;
+      if (active > 0) {
+        this.patch({ status: "error", errorOperation: "install", blockedByActiveTasks: active, progress: null });
+        return;
+      }
       await update.downloadAndInstall((event) => {
         if (event.event === "Started") {
           total = event.data.contentLength;
@@ -129,7 +136,15 @@ export class AppUpdateController {
 
   async restart() {
     if (this.disposed || this.state.status !== "ready") return;
-    try { await this.dependencies.relaunch(); }
+    try {
+      const active = await this.dependencies.activeOwnedTasks?.() ?? 0;
+      if (active > 0) {
+        this.patch({ error: "", errorOperation: "restart", blockedByActiveTasks: active, notify: true });
+        return;
+      }
+      this.patch({ blockedByActiveTasks: 0, error: "", errorOperation: null });
+      await this.dependencies.relaunch();
+    }
     catch (error) {
       this.patch({ error: String(error).replace(/^Error:\s*/, ""), errorOperation: "restart", notify: true });
     }

@@ -37,6 +37,42 @@ test("startup checks once and never installs without an explicit action", async 
   controller.dispose();
 });
 
+test("an active Lume task blocks installation and a later retry can proceed", async () => {
+  let active = 1;
+  const { controller, calls } = fixture({ activeOwnedTasks: async () => active });
+  await controller.initialize();
+  await controller.install();
+  assert.equal(calls.installs, 0);
+  assert.equal(calls.restarts, 0);
+  assert.equal(controller.state.blockedByActiveTasks, 1);
+  active = 0;
+  await controller.install();
+  assert.equal(calls.installs, 1);
+  assert.equal(calls.restarts, 1);
+  assert.equal(controller.state.blockedByActiveTasks, 0);
+});
+
+test("a task started during download blocks the subsequent restart", async () => {
+  let checks = 0;
+  const { controller, calls } = fixture({ activeOwnedTasks: async () => ++checks === 1 ? 0 : 1 });
+  await controller.initialize();
+  await controller.install();
+  assert.equal(calls.installs, 1);
+  assert.equal(calls.restarts, 0);
+  assert.equal(controller.state.status, "ready");
+  assert.equal(controller.state.blockedByActiveTasks, 1);
+});
+
+test("a failed task check does not install or interrupt agents", async () => {
+  const { controller, calls } = fixture({ activeOwnedTasks: async () => { throw new Error("snapshot unavailable"); } });
+  await controller.initialize();
+  await controller.install();
+  assert.equal(calls.installs, 0);
+  assert.equal(calls.restarts, 0);
+  assert.equal(controller.state.errorOperation, "install");
+  assert.match(controller.state.error, /snapshot unavailable/);
+});
+
 test("concurrent checks share the native request and close replaced resources", async () => {
   const { controller, calls, update } = fixture();
   const request = deferred();

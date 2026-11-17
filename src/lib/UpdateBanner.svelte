@@ -8,9 +8,15 @@
     state: AppUpdateState; language: Language; dark?: boolean; notice?: boolean;
   } = $props();
   const pt = $derived(language === "pt-BR");
-  const busy = $derived(["checking", "downloading"].includes(update.status) || (update.status === "ready" && !update.error));
+  const busy = $derived(["checking", "downloading"].includes(update.status) || (update.status === "ready" && !update.error && !update.blockedByActiveTasks));
+  let actionError = $state("");
+  const reportedError = $derived(actionError || update.error);
   // The line under the card says what is happening; the header always shows the version in use.
-  const note = $derived(update.status === "available"
+  const note = $derived(update.blockedByActiveTasks
+    ? (pt ? (update.blockedByActiveTasks === 1 ? "Há uma tarefa ativa no Lume." : `Há ${update.blockedByActiveTasks} tarefas ativas no Lume.`) + " Aguarde a conclusão ou interrompa o trabalho antes de atualizar: a reinicialização pode interrompê-lo." : (update.blockedByActiveTasks === 1 ? "There is one active task in Lume." : `There are ${update.blockedByActiveTasks} active tasks in Lume.`) + " Wait for it to finish or stop the work before updating: restarting may interrupt it.")
+    : /unable to verify active tasks/i.test(reportedError) ? (pt ? "Não foi possível verificar se há tarefas ativas. Tente novamente antes de atualizar." : "Could not check for active tasks. Try again before updating.")
+    : /\b403\b|forbidden/i.test(reportedError) ? (pt ? "O acesso à atualização foi negado (403). Tente novamente e, se persistir, consulte os detalhes." : "Access to the update was denied (403). Try again and check the details if it persists.")
+    : update.status === "available"
     ? (pt ? `A versão ${update.availableVersion} está disponível.` : `Version ${update.availableVersion} is available.`)
     : update.status === "checking" ? (pt ? "Procurando atualizações…" : "Checking for updates…")
     : update.status === "downloading" ? (pt ? "Baixando e preparando a atualização…" : "Downloading and preparing the update…")
@@ -20,7 +26,6 @@
     : (pt ? "As atualizações são verificadas ao abrir o Lume." : "Updates are checked when Lume starts."));
   const action = $derived(update.status === "ready" ? "restart"
     : update.status === "available" || update.errorOperation === "install" ? "install" : "check");
-  let actionError = $state("");
   async function activate() {
     actionError = "";
     try { await appUpdateAction(action); }

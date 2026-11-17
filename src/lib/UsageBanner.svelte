@@ -6,7 +6,7 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import type { Language } from "$lib/i18n";
 
-  let { alerts, language, now = Date.now(), reducedMotion = false, onDismiss }: {
+  let { alerts, language, now, reducedMotion = false, onDismiss }: {
     alerts: AgentAlert[];
     language: Language;
     now?: number;
@@ -14,11 +14,21 @@
     onDismiss: (id: string) => void;
   } = $props();
 
+  let clock = $state(Date.now());
+  let needsClock = $derived(now === undefined && alerts.some((alert) => alert.usageInfo?.resetsAt != null));
+
+  $effect(() => {
+    if (!needsClock) return;
+    clock = Date.now();
+    const timer = setInterval(() => { clock = Date.now(); }, 10_000);
+    return () => clearInterval(timer);
+  });
+
   const tr = (english: string, portuguese: string) => (language === "pt-BR" ? portuguese : english);
 
   function resetIn(resetsAt: number | undefined) {
     if (!resetsAt) return "";
-    const minutes = Math.max(0, Math.round((resetsAt - now) / 60_000));
+    const minutes = Math.max(0, Math.round((resetsAt - (now ?? clock)) / 60_000));
     if (minutes < 1) return tr("resets now", "redefine agora");
     const days = Math.floor(minutes / 1_440);
     const hours = Math.floor((minutes % 1_440) / 60);

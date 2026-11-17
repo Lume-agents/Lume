@@ -122,10 +122,23 @@
   let usageSettledKey = $state("");
   let usagePendingKey = $state("");
   let requestedUsageKey = "";
-  const latestTurn = $derived(session ? buildLatestReviewTurn(session.activities, session.results, session.workingDirectory) : null);
+  // While a prompt runs, only the usage and the metrics follow it live; the changed files and subagents
+  // are read once the task stops, so the rest of the Inspector does not redraw on every event.
+  let settledView: { id: string; turn: ReturnType<typeof buildLatestReviewTurn>; subagents: ReturnType<typeof subagentsForSession> } | null = null;
+  const settled = $derived.by(() => {
+    if (!session) return null;
+    if (session.status === "running" && settledView?.id === session.id) return settledView;
+    settledView = {
+      id: session.id,
+      turn: buildLatestReviewTurn(session.activities, session.results, session.workingDirectory),
+      subagents: subagentsForSession(session),
+    };
+    return settledView;
+  });
+  const latestTurn = $derived(settled?.turn ?? null);
   const changes = $derived(latestTurn?.files ?? []);
   const visibleChanges = $derived(changes.slice(0, 6));
-  const subagents = $derived(session ? subagentsForSession(session) : []);
+  const subagents = $derived(settled?.subagents ?? []);
   const visibleSubagents = $derived([...subagents]
     .sort((left, right) => Number(["running", "waiting"].includes(right.status)) - Number(["running", "waiting"].includes(left.status)) || right.updatedAt - left.updatedAt)
     .slice(0, 5));

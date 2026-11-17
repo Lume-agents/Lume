@@ -16,6 +16,8 @@ export type AgentAlert = {
   usage?: boolean;
   /** Remains visible until manually dismissed or the usage window resets. */
   pinned?: boolean;
+  /** A critically low limit cannot be dismissed until the provider reports recovery or reset. */
+  critical?: boolean;
   /** What a usage alert is about, for the banner's meter and reset countdown. */
   usageInfo?: { agent: AgentSession["agent"]; agentLabel: string; windowLabel: string; remaining: number; resetsAt?: number };
 };
@@ -88,7 +90,11 @@ export function collectAgentAlerts(
       if (limit.resetsAt != null && limit.resetsAt <= now) continue;
       const used = Number(limit.usedPercent);
       if (!Number.isFinite(used)) continue;
-      const remaining = Math.max(0, Math.min(100, Math.round(100 - used)));
+      const remainingExact = Math.max(0, Math.min(100, 100 - used));
+      // Do not round 4.9% up to 5% when the critical notice is locked.
+      const remaining = remainingExact > 0 && remainingExact < 5
+        ? Math.max(0.1, Math.round(remainingExact * 10) / 10)
+        : Math.round(remainingExact);
       if (remaining > USAGE_WARNING_REMAINING) continue;
       const exhausted = remaining === 0;
       const windowLabel = limit.label.trim() || tr(language, "current window", "janela atual");
@@ -104,6 +110,7 @@ export function collectAgentAlerts(
         priority: exhausted ? 100 : 70,
         usage: true,
         pinned: remaining < USAGE_PINNED_REMAINING,
+        critical: remainingExact < 5,
         usageInfo: { agent: session.agent, agentLabel: session.agentLabel, windowLabel, remaining, resetsAt: limit.resetsAt },
       });
     }
@@ -169,6 +176,7 @@ export function collectAgentAlerts(
         ...(usageFailure ? {
           usage: true,
           pinned: true,
+          critical: true,
           usageInfo: { agent: session.agent, agentLabel: session.agentLabel, windowLabel: tr(language, "current window", "janela atual"), remaining: 0 },
         } : {}),
       });

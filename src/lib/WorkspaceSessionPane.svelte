@@ -930,7 +930,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   const agentAlerts = $derived(collectAgentAlerts([session], language));
   const archivedAgentAlerts = $derived(
-    agentAlerts.filter((alert) => dismissedAgentAlertIds.includes(alert.id) || hasUsageAlertDismissal($usageAlertDismissals, alert.id)),
+    agentAlerts.filter((alert) => !alert.critical && (dismissedAgentAlertIds.includes(alert.id) || hasUsageAlertDismissal($usageAlertDismissals, alert.id))),
   );
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
     const items: SystemBannerItem[] = [];
@@ -953,7 +953,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   // Dismissal is shared by all views of the account's current usage window.
   const usageNotices = $derived(
-    agentAlerts.filter((alert) => alert.usage && !dismissedAgentAlertIds.includes(alert.id) && !hasUsageAlertDismissal($usageAlertDismissals, alert.id)),
+    agentAlerts.filter((alert) => alert.usage && (alert.critical || (!dismissedAgentAlertIds.includes(alert.id) && !hasUsageAlertDismissal($usageAlertDismissals, alert.id)))),
   );
 
   function archiveAgentAlert(id: string) {
@@ -3187,7 +3187,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     {#if composerInIntroPosition}
       <div class="composer-welcome"><LumeMascot status="idle" awake size={45} /><strong>{tr("Hello. What shall we work on?", "Olá. No que vamos trabalhar?")}</strong></div>
     {/if}
-    <UsageBanner alerts={usageNotices} {language} onDismiss={archiveAgentAlert} />
     {#if queuedPrompts.length}
       <div class="queue-tray">
         <span><i>{queuedPrompts.length}</i><b>{nextQueuedPrompt?.kind === "codex_queued_prompt" ? tr("Codex CLI · read only", "CLI do Codex · somente leitura") : tr("Queued", "Na fila")}</b><small>{nextQueuedPrompt?.detail || nextQueuedPrompt?.title}</small></span>
@@ -3274,6 +3273,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       </section>
     {/if}
     <div class:beam={composerInIntroPosition && canCompose} class="composer-field">
+      <UsageBanner alerts={usageNotices} {language} attached onDismiss={archiveAgentAlert} />
       <div class="composer-input-row">
       {#if canAttach || supportsMcp || canCompact}
         <div class="composer-plus" bind:this={plusMenuElement}>

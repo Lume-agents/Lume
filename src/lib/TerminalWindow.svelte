@@ -413,7 +413,7 @@
 
   const agentAlerts = $derived(collectAgentAlerts(session ? [session] : [], language));
   const archivedAgentAlerts = $derived(
-    agentAlerts.filter((alert) => dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id)),
+    agentAlerts.filter((alert) => !alert.critical && (dismissedAgentAlertIds.includes(alert.id) || $usageAlertDismissals.includes(alert.id))),
   );
   const systemBanners = $derived.by<SystemBannerItem[]>(() => {
     const items: SystemBannerItem[] = [];
@@ -436,7 +436,7 @@
 
   // Dismissal is shared by all views of the account's current usage window.
   const usageNotices = $derived(
-    agentAlerts.filter((alert) => alert.usage && !dismissedAgentAlertIds.includes(alert.id) && !$usageAlertDismissals.includes(alert.id)),
+    agentAlerts.filter((alert) => alert.usage && (alert.critical || (!dismissedAgentAlertIds.includes(alert.id) && !$usageAlertDismissals.includes(alert.id)))),
   );
 
   function dismissAgentAlert(id: string) {

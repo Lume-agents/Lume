@@ -28,6 +28,7 @@ assert.match(usage[0].message, /Restam apenas 9%/);
 
 assert.equal(usage[0].usage, true);
 assert.equal(usage[0].pinned, true);
+assert.equal(usage[0].critical, false);
 assert.deepEqual({ ...usage[0].usageInfo }, { agent: session.agent, agentLabel: session.agentLabel, windowLabel: "5h", remaining: 9, resetsAt: undefined });
 const lowUsage = collectAgentAlerts([{ ...session, rateLimits: [{ id: "primary", label: "5h", usedPercent: 85 }] }], "pt-BR", now);
 assert.equal(lowUsage[0].pinned, false);
@@ -38,6 +39,10 @@ const exhausted = collectAgentAlerts([{ ...session, rateLimits: [{ id: "primary"
 assert.equal(exhausted[0].tone, "error");
 assert.equal(exhausted[0].duration, 0);
 assert.equal(exhausted[0].pinned, true);
+assert.equal(exhausted[0].critical, true);
+assert.equal(collectAgentAlerts([{ ...session, rateLimits: [{ id: "primary", label: "5h", usedPercent: 95 }] }], "pt-BR", now)[0].critical, false, "exactly five percent remains dismissible");
+assert.equal(collectAgentAlerts([{ ...session, rateLimits: [{ id: "primary", label: "5h", usedPercent: 95.1 }] }], "pt-BR", now)[0].critical, true, "less than five percent is not dismissible, even before rounding");
+assert.equal(collectAgentAlerts([{ ...session, rateLimits: [{ id: "primary", label: "5h", usedPercent: 95.1 }] }], "pt-BR", now)[0].usageInfo.remaining, 4.9, "a locked warning must not be rounded up to five percent");
 
 const claudeIdle = { ...session, agent: "claude_code", agentLabel: "Claude Code", status: "waiting_for_input", rateLimits: [{ id: "claude:session", label: "5h", usedPercent: 100, resetsAt: now + 60_000 }] };
 assert.deepEqual(collectAgentAlerts([claudeIdle], "pt-BR", now, { usageScope: "active" }), [], "idle accounts must not raise global usage banners");

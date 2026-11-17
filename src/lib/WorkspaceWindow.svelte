@@ -56,7 +56,7 @@
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
   import SessionEnvironmentMenu from "$lib/SessionEnvironmentMenu.svelte";
   import { sessionShells } from "$lib/sessionShells";
-  import { hasOpenWorkspacePane, resolveLiveResumableSession } from "$lib/sessionIdentity";
+  import { hasOpenWorkspacePane, resolveLiveResumableSession, resolveWorkspaceSessionId, type WorkspaceSessionReference } from "$lib/sessionIdentity";
   import { noteSubagentInteraction, parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { WorkspaceStartup } from "$lib/workspaceStartup";
   import { sidebarGroupsKey } from "$lib/sidebarGroups";
@@ -444,6 +444,7 @@
   let workspaceDropGeometry: WorkspaceDropGeometry | null = null;
 
   const workspaceLayoutKey = "lume:workspace-layout:v1";
+  let restoredPaneReferences: Record<string, WorkspaceSessionReference> = {};
   const workspaceStreamMessagesKey = "lume:workspace-stream-messages:v1";
   const workspaceBackgroundImageKey = "lume:workspace-background-image:v1";
   const workspaceBackgroundImageOpacityKey = "lume:workspace-background-image-opacity:v1";
@@ -1942,7 +1943,12 @@
 
   function persistWorkspaceLayout() {
     if (typeof localStorage === "undefined") return;
-    localStorage.setItem(workspaceLayoutKey, JSON.stringify({ primaryId, secondaryId, tertiaryId, focusedPaneId, maximizedPaneId, splitRatio, tertiaryRatio, projectFilter, inspectorOpen }));
+    const references: Record<string, WorkspaceSessionReference> = {};
+    for (const id of [primaryId, secondaryId, tertiaryId]) {
+      const session = sessions.find((item) => item.id === id);
+      if (id && session?.nativeSessionId) references[id] = { agent: session.agent, nativeSessionId: session.nativeSessionId, ...(session.remote ? { remoteComputerId: session.remote.computerId } : {}) };
+    }
+    localStorage.setItem(workspaceLayoutKey, JSON.stringify({ primaryId, secondaryId, tertiaryId, focusedPaneId, maximizedPaneId, splitRatio, tertiaryRatio, projectFilter, inspectorOpen, references }));
   }
 
   function restoreWorkspaceLayout() {
@@ -1957,12 +1963,14 @@
         tertiaryRatio?: number;
         projectFilter?: string;
         inspectorOpen?: boolean;
+        references?: Record<string, WorkspaceSessionReference>;
       } | null;
       primaryId = saved?.primaryId ?? null;
       secondaryId = saved?.secondaryId ?? null;
       tertiaryId = saved?.tertiaryId ?? null;
       focusedPaneId = saved?.focusedPaneId ?? primaryId;
       maximizedPaneId = saved?.maximizedPaneId ?? null;
+      restoredPaneReferences = saved?.references && typeof saved.references === "object" ? saved.references : {};
       if (Number.isFinite(saved?.splitRatio)) {
         splitRatio = Math.min(0.75, Math.max(0.25, saved?.splitRatio ?? 0.5));
       }
@@ -2689,6 +2697,17 @@
   }
 
   function reconcileSelection() {
+    if (Object.keys(restoredPaneReferences).length) {
+      const resolve = (id: string | null) => resolveWorkspaceSessionId(id, id ? restoredPaneReferences[id] : undefined, sessions);
+      const oldPrimary = primaryId, oldSecondary = secondaryId, oldTertiary = tertiaryId;
+      const oldFocused = focusedPaneId, oldMaximized = maximizedPaneId;
+      primaryId = resolve(oldPrimary);
+      secondaryId = resolve(oldSecondary);
+      tertiaryId = resolve(oldTertiary);
+      focusedPaneId = resolve(oldFocused);
+      maximizedPaneId = resolve(oldMaximized);
+      restoredPaneReferences = {};
+    }
     if (projectFilter !== "all" && !workspaceProjects.some((project) => project.value === projectFilter)) projectFilter = "all";
     const ids = new Set(projectSessions.map((session) => session.id));
     if (!primaryId || !ids.has(primaryId)) {
@@ -2859,6 +2878,7 @@
         const snapshot = await loadHubSnapshot();
         if (!disposed) {
           const hadOpenPane = hasOpenWorkspacePane(sessions, [primaryId, secondaryId, tertiaryId]);
+          const previousPaneSessions = new Map(liveSessions.filter((item) => currentPaneIds().includes(item.id)).map((item) => [item.id, item.nativeSessionId]));
           liveSessions = snapshot.sessions;
           internalServices = snapshot.internalServices ?? [];
           if (!rateLimitRefreshRequested && sessions.some((session) => session.agent === "codex")) {
@@ -2893,6 +2913,11 @@
             } else if (Date.now() - pending.startedAt > 30_000) {
               pendingOpenedSession = null;
             }
+          }
+          // A fresh chat can receive its permanent thread ID after it is already docked.
+          // Refresh the saved identity without changing its pane or relying on its temporary ID.
+          if (sessions.some((item) => currentPaneIds().includes(item.id) && previousPaneSessions.has(item.id) && item.nativeSessionId && item.nativeSessionId !== previousPaneSessions.get(item.id))) {
+            persistWorkspaceLayout();
           }
         }
         return !disposed;

@@ -69,8 +69,13 @@ function nativeFixture() {
   // Keep the draft on the same chat that the board's first card opens. Without an
   // explicit layout, equal-status fixture sessions are ordered by their timestamps
   // and opening another card legitimately replaces the focused pane.
-  localStorage.setItem("lume:workspace-layout:v1", JSON.stringify({ primaryId: "session-0", focusedPaneId: "session-0" }));
-  localStorage.setItem("lume:workflow-board:open", "true");
+  const restoreLayout = new URLSearchParams(location.search).has("restore-layout");
+  localStorage.setItem("lume:workspace-layout:v1", JSON.stringify(restoreLayout ? {
+    primaryId: "old-2", secondaryId: "old-0", tertiaryId: "old-1", focusedPaneId: "old-0",
+    splitRatio: .42, tertiaryRatio: .28,
+    references: { "old-2": { agent: "opencode", nativeSessionId: "native-2" }, "old-0": { agent: "codex", nativeSessionId: "native-0" }, "old-1": { agent: "claude_code", nativeSessionId: "native-1" } },
+  } : { primaryId: "session-0", focusedPaneId: "session-0" }));
+  localStorage.setItem("lume:workflow-board:open", restoreLayout ? "false" : "true");
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_, id) => listeners.delete(id) };
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "workspace" }, currentWebview: { label: "workspace" } },
@@ -615,6 +620,13 @@ try {
   assert.match(await evaluate(found('[data-board-layout="basic"]') + ".title"), /3/, "the reason names the slot limit");
   await click('[data-board-layout="basic"]');
   assert.equal(await evaluate(found(".board-basic")), null, "a 4-step workflow cannot switch to Basic");
+  await call("Page.navigate", { url: "http://127.0.0.1:" + server.address().port + "/?restore-layout" });
+  await wait("document.querySelectorAll('[data-workspace-pane]').length === 3");
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('[data-workspace-pane]')).map(pane => pane.dataset.workspacePane)"), ["session-2", "session-0", "session-1"], "the three panes restore in their original positions by thread identity");
+  await wait("document.querySelector('.session-row[aria-label=\"Pesquisa\"] .session-select[aria-current=\"page\"]')");
+  await evaluate("window.__fixture.sessions[0].nativeSessionId = 'native-0-final'; window.__fixture.emit('lume://sessions-changed', {})");
+  await wait("JSON.parse(localStorage.getItem('lume:workspace-layout:v1')).references?.['session-0']?.nativeSessionId === 'native-0-final'");
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('[data-workspace-pane]')).map(pane => pane.dataset.workspacePane)"), ["session-2", "session-0", "session-1"], "thread promotion keeps the existing pane order");
   assert.deepEqual(failures, [], "no browser exceptions");
   console.log("Workflow board UI passed: Orb import, sidebar drop, arrows, cycle refusal, free drag, preview, zoom, all run controls, recovery, event order, draft/layout persistence, removal, insertion, overlay keyboard ownership, fit, light/dark contrast, sidebar workflow rows, chat strip approval, sidebar menu workflows, basic board slots.");
   console.log("Screenshots: " + output);

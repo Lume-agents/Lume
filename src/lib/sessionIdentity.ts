@@ -89,3 +89,24 @@ export function hasOpenWorkspacePane(
   const sessionIds = new Set(sessions.map((session) => session.id));
   return paneIds.some((id) => id !== null && sessionIds.has(id));
 }
+
+/** Stable identity for restoring a pane after an agent gets a different Lume session id. */
+export type WorkspaceSessionReference = {
+  agent: AgentSession["agent"];
+  nativeSessionId: string;
+  remoteComputerId?: string;
+};
+
+export function resolveWorkspaceSessionId(
+  savedId: string | null,
+  reference: WorkspaceSessionReference | undefined,
+  sessions: AgentSession[],
+): string | null {
+  if (!savedId) return null;
+  if (!reference) return sessions.some((session) => session.id === savedId) ? savedId : null;
+  const matches = sessions.filter((session) => session.agent === reference.agent
+    && session.nativeSessionId === reference.nativeSessionId
+    && (session.remote?.computerId ?? "") === (reference.remoteComputerId ?? ""));
+  const exact = matches.find((session) => session.id === savedId);
+  return exact?.id ?? (matches.length === 1 ? matches[0].id : null);
+}

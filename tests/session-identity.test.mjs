@@ -2,9 +2,16 @@ import assert from "node:assert/strict";
 import {
   hasOpenWorkspacePane,
   resolveLiveResumableSession,
+  resolveWorkspaceSessionId,
   resolveTerminalSession,
   terminalMatchesSession,
 } from "../src/lib/sessionIdentity.ts";
+
+const stableReference = { agent: "codex", nativeSessionId: "thread-1" };
+assert.equal(resolveWorkspaceSessionId("old", stableReference, [{ id: "new", agent: "codex", nativeSessionId: "thread-1" }]), "new");
+assert.equal(resolveWorkspaceSessionId("old", stableReference, [{ id: "old", agent: "codex", nativeSessionId: "different" }]), null, "a reused transient id must not select another thread");
+assert.equal(resolveWorkspaceSessionId("old", stableReference, [{ id: "a", agent: "codex", nativeSessionId: "thread-1" }, { id: "b", agent: "codex", nativeSessionId: "thread-1" }]), null, "ambiguous identities must not choose an arbitrary chat");
+assert.equal(resolveWorkspaceSessionId("legacy", undefined, [{ id: "legacy" }]), "legacy");
 
 function terminal(overrides = {}) {
   return {

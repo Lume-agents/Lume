@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterNotes, noteExcerpt, noteTags, noteTitleFrom, parseNoteTags, projectLabel } from "../src/lib/notes.ts";
+import { filterNotes, noteExcerpt, noteMentionResults, noteTags, noteTitleFrom, parseNoteTags, projectLabel } from "../src/lib/notes.ts";
 
 const note = (id, extra = {}) => ({ id, nativeSessionId: "", title: id, body: id, kind: "note", pinned: false, createdAt: 1, updatedAt: 1, ...extra });
 
@@ -20,6 +20,14 @@ test("tags, labels and excerpts", () => {
   assert.equal(noteExcerpt("# Plan\n\n- [x] Ship **it**"), "Plan Ship it", "task boxes and marks are dropped");
   assert.equal(noteTitleFrom("\n## Fix the cart\nmore", "Note"), "Fix the cart");
   assert.equal(noteTitleFrom("   ", "Note"), "Note");
+});
+
+test("note mentions keep current-project priority and include other agents and projects", () => {
+  const local = note("local", { agent: "codex", project: "/work/app" });
+  const claude = note("claude", { agent: "claude_code", project: "/work/other" });
+  const sameProject = note("claude-local", { agent: "claude_code", project: "/work/app" });
+  assert.deepEqual(noteMentionResults([local, sameProject], [claude, sameProject, local], ["local"]).map((item) => item.id), ["claude-local", "claude"]);
+  assert.deepEqual(noteMentionResults([], [claude], []).map((item) => item.id), ["claude"]);
 });
 
 test("a checklist item is checked by its position, outside code fences", async () => {

@@ -30,7 +30,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import LumeIcon from "$lib/LumeIcon.svelte";
   import ChatUsageButton from "$lib/ChatUsageButton.svelte";
   import { promptJumpNeedsOlder, resolvePromptJump, type PromptJumpRequest } from "$lib/tokenUsage";
-  import { NOTES_CHANGED_EVENT, noteTitleFrom } from "$lib/notes";
+  import { NOTES_CHANGED_EVENT, noteMentionResults, noteTitleFrom, projectLabel } from "$lib/notes";
   import UsageBanner from "$lib/UsageBanner.svelte";
   import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
@@ -2071,12 +2071,16 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     mentionIndex = 0;
   }
 
-  /** `@note:` searches the project's notes; choosing one attaches it and drops the token. */
+  /** Search all notes; the current project's matches appear first. */
   async function refreshNoteMention(query: string, request: number) {
     try {
-      const found = await listNotes({ project: session.workingDirectory, query: query.trim() });
+      const filters = { query: query.trim() };
+      const [projectNotes, allNotes] = await Promise.all([
+        session.workingDirectory ? listNotes({ ...filters, project: session.workingDirectory }) : Promise.resolve([]),
+        listNotes(filters),
+      ]);
       if (request !== mentionRequest) return;
-      noteResults = found.filter((note) => !attachedNotes.some((attached) => attached.id === note.id)).slice(0, 8);
+      noteResults = noteMentionResults(projectNotes, allNotes, attachedNotes.map((note) => note.id));
       mentionResults = [];
       mentionIndex = 0;
     } catch {
@@ -3383,7 +3387,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
           {#each noteResults as note, index (note.id)}
             <button class:active={mentionIndex === index} type="button" onmouseenter={() => (mentionIndex = index)} onclick={() => void selectNote(note)}>
               <LumeIcon name="note" size={14} />
-              <span>{note.title}</span>
+              <span>{note.title}<small>{[note.agent === "claude_code" ? "Claude Code" : note.agent === "codex" ? "Codex" : note.agent, projectLabel(note.project)].filter(Boolean).join(" · ") || tr("Project note", "Nota de projeto")}</small></span>
             </button>
           {/each}
         </div>

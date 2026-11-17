@@ -18,6 +18,20 @@ export function filterNotes(notes: SessionNote[], filters: NoteFilters): Session
     && (!filters.tag || (note.tags ?? []).includes(filters.tag)));
 }
 
+/** Project matches first, then notes from any project or agent, without repeated attachments. */
+export function noteMentionResults(projectNotes: SessionNote[], allNotes: SessionNote[], attachedIds: string[], limit = 8): SessionNote[] {
+  if (limit <= 0) return [];
+  const seen = new Set(attachedIds);
+  const result: SessionNote[] = [];
+  for (const note of [...projectNotes, ...allNotes]) {
+    if (seen.has(note.id)) continue;
+    seen.add(note.id);
+    result.push(note);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
 /** Every tag in use, most used first, then by name. */
 export function noteTags(notes: SessionNote[]): string[] {
   const counts = new Map<string, number>();

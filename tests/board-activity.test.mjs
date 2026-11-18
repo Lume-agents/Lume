@@ -11,7 +11,7 @@ registerHooks({
     return nextResolve(specifier, context);
   },
 });
-const { currentActivityLine, stepActivity, stepElapsed, stepProgress } = await import("../src/lib/boardActivity.ts");
+const { currentActivityLine, latestSpeech, stepActivity, stepElapsed, stepProgress } = await import("../src/lib/boardActivity.ts");
 
 const activity = (kind, overrides = {}) => ({ id: kind + Math.random(), kind, title: kind, status: "completed", createdAt: 1, files: [], ...overrides });
 const session = (overrides = {}) => ({ status: "running", activities: [], results: [], workSummary: {}, ...overrides });
@@ -85,4 +85,18 @@ test("the last response is the newest result, trimmed", () => {
   assert.equal(lastResponse(session({ results: [{ response: "old" }, { response: "new" }] })), "new");
   assert.equal(lastResponse(session({ results: [{ response: "x".repeat(900) }] }), 100).length, 100);
   assert.equal(lastResponse(session()), null);
+});
+
+test("the speech bubble shows the agent's latest message of this turn as plain text", () => {
+  const talking = session({ activities: [
+    activity("message", { detail: "Old answer from before" }),
+    activity("prompt", { detail: "Do it" }),
+    activity("message", { title: "Thinking", detail: "hidden thoughts" }),
+    activity("message", { detail: "## Plan\n- read **the** `code`\n```js\nsecret()\n```\nsee [docs](http://x.y)" }),
+  ] });
+  assert.equal(latestSpeech(talking), "Plan read the code see docs");
+  assert.equal(latestSpeech(session({ activities: [activity("prompt", { detail: "Do it" })] })), null, "nothing said yet this turn");
+  assert.equal(latestSpeech(session({ status: "completed", lastResponse: "All done.", activities: [activity("prompt")] })), "All done.", "an idle agent's final answer");
+  assert.equal(latestSpeech(session({ activities: [activity("prompt"), activity("message", { detail: "x".repeat(400) })] }), 50).length, 50);
+  assert.equal(latestSpeech(undefined), null);
 });

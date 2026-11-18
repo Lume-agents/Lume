@@ -47,7 +47,10 @@ export function demoSession(base: HubSession | undefined, demo: DemoState, now: 
     : demo.progress === 2
       ? { kind: "command", title: "Search", detail: "rg -n \"nav\" src/lib", files: [] as string[] }
       : { kind: "file", title: "Editing", detail: "src/lib/Navigation.svelte", files: ["src/lib/Navigation.svelte", "src/routes/+layout.svelte"] };
-  const activities = running ? [{ id: "demo-live", status: "running" as const, createdAt: now, ...doing }] : [];
+  const activities = running ? [
+    { id: "demo-said", kind: "message", title: "Agent", detail: "I will adjust the navigation, then run the tests.", status: "completed" as const, createdAt: now - 1, files: [] as string[] },
+    { id: "demo-live", status: "running" as const, createdAt: now, ...doing },
+  ] : [];
   const items = todoLabels.map((label, index) => ({ label, status: index < demo.progress ? "completed" as const : index === demo.progress && running ? "in_progress" as const : "pending" as const }));
   return {
     ...base,

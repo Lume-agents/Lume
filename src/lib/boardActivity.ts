@@ -113,3 +113,27 @@ export function lastResponse(session: HubSession | undefined, max = 700): string
   const text = (session?.results[session.results.length - 1]?.response ?? session?.lastResponse ?? "").trim();
   return text ? shorten(text, max) : null;
 }
+
+/**
+ * What the agent said last, for the speech bubble beside its workflow card: its latest message of the
+ * current turn, as plain text (markdown marks and code fences removed) and cut to a few lines.
+ */
+export function latestSpeech(session: HubSession | undefined, max = 240): string | null {
+  if (!session) return null;
+  const lastPrompt = session.activities.map((activity) => activity.kind).lastIndexOf("prompt");
+  const message = session.activities
+    .slice(lastPrompt + 1)
+    .findLast((activity) => activity.kind === "message" && activity.title !== "Thinking" && (activity.detail ?? "").trim());
+  const raw = (message?.detail ?? (session.status === "running" ? "" : session.lastResponse ?? "")).trim();
+  if (!raw) return null;
+  const plain = raw
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/(\*\*|__|\*|_)(.+?)\1/g, "$2")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return plain ? shorten(plain, max) : null;
+}

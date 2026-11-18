@@ -11,7 +11,7 @@
   import { WorkflowBoardSaveQueue } from "$lib/workflowBoardPersistence";
   import { arrangeSlots, basicSlotsFor, clearSlot, missingSlot, placeInSlot, slotRole, type BasicMisfit, type SlotIds, type ThirdRole } from "$lib/workflowSlots";
   import { newerRun } from "$lib/workflowPresence";
-  import { activityFeed, lastResponse, stepActivity } from "$lib/boardActivity";
+  import { activityFeed, lastResponse, latestSpeech, stepActivity } from "$lib/boardActivity";
   import { formatAgentDuration } from "$lib/activityPresentation";
   import { demoFrames, demoSession, demoTodoCount, type DemoState } from "$lib/boardSimulator";
   import ThreadAvatar from "$lib/ThreadAvatar.svelte";
@@ -1224,6 +1224,7 @@
       {@const shown = demoCells ? demoSession(session, demoCells[group?.steps.indexOf(step) ?? 0], now) : session}
       {@const live = stepActivity(reactive ? shown : undefined, run?.steps.find((item) => item.stepId === step.id), language, now)}
       {@const awaiting = stepAwaitsApproval(step.id)}
+      {@const speech = reactive && (state !== "idle" || shown?.status === "running") ? latestSpeech(shown) : null}
       {@const trail = reactive && (state === "running" || shown?.status === "running") ? activityFeed(shown, language, 3) : []}
       <article data-tour="board-card" class="board-card" class:orbiting={orbitFor === step.id} class:working={reactive && (state === "running" || (state === "idle" && shown?.status === "running"))} class:selected={selection?.kind === "step" && selection.id === step.id} class:moving={(gesture?.kind === "card" && gesture.stepId === step.id && (!cardTapOnBadge || cardMoved)) || (slotted && slotDrag?.stepId === step.id && slotDrag.moved)} class:leaving={cardOutside && gesture?.kind === "card" && gesture.stepId === step.id} class:problem={problemStepIds.includes(step.id)} class:target-valid={connectionTarget === step.id && targetCheck?.ok} class:target-invalid={connectionTarget === step.id && targetCheck && !targetCheck.ok} data-board-card={step.id} data-attention={live.attention?.kind} data-state={state === "idle" ? (reactive ? session?.status : "idle") : state} style:left={slotted ? null : position.x + "px"} style:top={slotted ? null : position.y + "px"} style:width={slotted ? null : BOARD_CARD_WIDTH + "px"} style:height={slotted ? null : BOARD_CARD_HEIGHT + "px"} style:translate={slotted && slotDrag?.stepId === step.id && slotDrag.moved ? slotDrag.dx + "px " + slotDrag.dy + "px" : null} style:--card-role={"var(--role-" + step.role + ")"}>
         <button class="card-body" type="button" onpointerdown={(event) => slotted ? beginSlotDrag(event, step.id) : beginCard(event, step.id)} onpointermove={slotted ? moveSlotDrag : undefined} onpointerup={slotted ? endSlotDrag : undefined} onpointercancel={slotted ? () => (slotDrag = null) : undefined} onclick={(event) => { if (event.detail === 0) connectionSource ? connectTo(step.id) : choose({ kind: "step", id: step.id }); }} aria-label={name(session) + " · " + roleLabel(step.role)}>
@@ -1237,6 +1238,9 @@
           <span class="card-status"><i></i>{stepStatus(step) + (live.elapsed ? " · " + live.elapsed : "") + (live.progress ? " · " + live.progress.done + "/" + live.progress.total : "")}</span>
           {#if live.line}<span class="card-activity" class:live={state === "running" || shown?.status === "running"}><i></i><span>{live.line}</span></span>{/if}
         </button>
+        {#if speech}
+          {#key speech}<span class="card-speech" class:live={state === "running" || shown?.status === "running"} role="status" aria-label={tr("The agent said: ", "O agente disse: ") + speech} in:fly={{ y: 6, duration: duration(200), easing: cubicOut }}><span class="speech-text">{speech}</span></span>{/key}
+        {/if}
         {#if trail.length}
           <span class="card-trail" aria-hidden="true">
             {#each trail as event, index (event.id)}
@@ -1805,6 +1809,10 @@
   [data-state="failed"] .card-status i, [data-status="failed"] .run-state i { background: var(--board-danger); }
   [data-state="permission_required"] .card-status i, [data-status="waiting_for_approval"] .run-state i, [data-status="paused"] .run-state i { background: var(--board-warning); }
   @keyframes status-pulse { 50% { box-shadow: 0 0 0 5px rgba(86, 170, 218, 0); } }
+  .card-speech { position: absolute; z-index: 3; bottom: calc(100% + 30px); left: 6px; width: min(230px, 100%); padding: 8px 11px; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--card-role) 34%, var(--workspace-line)); border-radius: 12px 12px 3px 12px; color: var(--workspace-text); background: color-mix(in srgb, var(--card-role) 7%, var(--workspace-raised)); box-shadow: 0 6px 18px rgba(17, 35, 27, .1); font-size: 11px; font-weight: 560; line-height: 1.4; text-align: left; overflow-wrap: anywhere; pointer-events: none; }
+  .card-speech .speech-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; }
+  .card-speech::before { position: absolute; bottom: -6px; left: 22px; width: 10px; height: 10px; border-right: 1px solid color-mix(in srgb, var(--card-role) 34%, var(--workspace-line)); border-bottom: 1px solid color-mix(in srgb, var(--card-role) 34%, var(--workspace-line)); background: inherit; transform: rotate(45deg); content: ""; }
+  .card-speech.live { border-color: color-mix(in srgb, var(--card-role) 55%, transparent); }
   .card-trail { position: absolute; z-index: 1; top: calc(100% + 7px); left: 10px; right: 10px; display: grid; gap: 4px; pointer-events: none; }
   .trail-item { min-width: 0; width: fit-content; max-width: 100%; padding: 3px 9px 3px 6px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 999px; color: var(--workspace-muted); background: var(--workspace-raised); font-size: 10px; line-height: 1.3; opacity: var(--trail-fade, 1); animation: trail-in 220ms cubic-bezier(.16, 1, .3, 1) both; }
   .trail-item.newest { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 45%, var(--workspace-line)); }

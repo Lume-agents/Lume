@@ -382,8 +382,10 @@ try {
   await wait("document.querySelector('.board-sim')");
   assert.equal(await evaluate("document.querySelectorAll('.board-card.working').length"), 1, "the simulated running step sways");
   assert.ok(await evaluate("document.querySelector('.board-card.working .card-activity')?.textContent.length > 3"), "and shows what it is doing");
+  assert.match(await evaluate("document.querySelector('.board-card.working .card-speech')?.textContent ?? ''"), /navigation/, "the agent's latest words sit in a bubble beside its card");
   await evaluate("(() => { const select = document.querySelector('.sim-step select[aria-label=\"Precisa de atenção\"]'); select.value = 'permission'; select.dispatchEvent(new Event('change', { bubbles: true })); })()");
   await wait("document.querySelector('.card-attention')");
+  await wait("getComputedStyle(document.querySelector('.card-speech')).opacity === '1'");
   await screenshot("simulator");
   assert.equal(await evaluate("document.querySelector('.board-run')"), null, "the real run bar steps aside during a simulation");
   await click('.board-sim [aria-label="Fechar a simulação"]');

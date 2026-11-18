@@ -131,7 +131,7 @@ try {
     await wait("document.querySelector('#" + theme + " .token-tip')");
     const tip = await evaluate("document.querySelector('#" + theme + " .token-tip').innerText");
     assert.match(tip, /46\.100 tokens/, "the hovered prompt's total");
-    assert.match(tip, /Entrada 39\.646 · Saída 6\.454/, "input and output");
+    assert.match(tip, /Saída 6\.454\nEntrada 39\.646/, "output first, then input");
     assert.match(tip, /Contexto 54%/, "context use");
     assert.match(tip, /\d{2}:\d{2}/, "and its time");
     assert.equal(await evaluate("document.querySelectorAll('#" + theme + " .token-graph circle.active').length"), 1);
@@ -150,7 +150,7 @@ try {
   await wait("document.querySelectorAll('#metrics-light .token-bar').length === 6");
   assert.equal(await evaluate("document.querySelectorAll('#metrics-dark .context-fill polyline').length"), 1, "the context fill");
   const tiles = await evaluate("Array.from(document.querySelectorAll('#metrics-light .metric-tiles dt')).map(item => item.textContent)");
-  assert.deepEqual(tiles, ["Session total", "Per turn", "Largest turn", "Context now", "Cache hits", "Time per turn"]);
+  assert.deepEqual(tiles, ["Session output", "Session total", "Per turn", "Largest turn", "Context now", "Cache hits", "Time per turn"]);
   await hover("#metrics-dark .token-plot", 0.58);
   await wait("document.querySelector('#metrics-dark .token-tip')");
   await screenshot("metrics");
@@ -159,6 +159,9 @@ try {
   const jumps = await evaluate("window.__jumps");
   assert.equal(jumps.length, 2, "a bar and the largest turn open their prompts");
   assert.equal(jumps[1].promptAt, await evaluate("window.__metrics[3].promptAt"), "the largest turn is the fourth");
+  // Output alone, on its own scale.
+  await evaluate("Array.from(document.querySelectorAll('#metrics-light .mode-toggle button')).find(button => button.textContent === 'Output').click()");
+  await wait("document.querySelectorAll('#metrics-light .token-bar .bar-output').length === 6 && !document.querySelector('#metrics-light .bar-input')");
   await evaluate("document.querySelector('#metrics-light .mode-toggle button:last-child').click()");
   await wait("document.querySelectorAll('#metrics-light .token-graph circle').length === 6");
   assert.deepEqual(failures, []);

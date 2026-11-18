@@ -103,3 +103,31 @@ test("a sample jumps to its prompt", () => {
   assert.equal(metrics.promptJumpNeedsOlder({ sampleAt: 3_000, after: 1_800 }, 2_000), true);
   assert.equal(metrics.promptJumpNeedsOlder({ sampleAt: 3_000, after: 1_800 }, 1_500), false);
 });
+
+test("a turn that writes the conversation into the cache again is a lost cache, with its likely cause", async () => {
+  const metrics = await import("../src/lib/tokenUsage.ts");
+  const hour = 3_600_000;
+  const turn = (createdAt, context, written, extra = {}) => ({ turnId: "c" + createdAt, totalTokens: written + 1000, inputTokens: written, outputTokens: 1000, cacheCreationTokens: written, contextTokens: context, createdAt, model: "opus", ...extra });
+  const samples = [
+    turn(0, 260_000, 30_000),
+    turn(10 * 60_000, 268_000, 9_000), // the turn adds 8k and writes a little more: a warm cache
+    turn(5 * hour, 290_000, 285_000, { promptAt: 5 * hour - 60_000 }), // five hours later everything is written again
+    turn(5 * hour + 60_000, 300_000, 280_000, { model: "sonnet" }),
+    turn(5 * hour + 120_000, 310_000, 300_000), // back to opus at once, with no pause
+  ];
+  assert.equal(metrics.cacheMissAt(samples, 0), null, "the first turn always writes");
+  assert.equal(metrics.cacheMissAt(samples, 1), null);
+  assert.equal(metrics.cacheMissAt(samples, 2).cause, "idle");
+  assert.equal(metrics.cacheMissAt(samples, 2).rewritten, 263_000);
+  assert.equal(metrics.cacheMissAt(samples, 3).cause, "model");
+  assert.equal(metrics.cacheMissAt(samples, 4).cause, "model");
+  assert.equal(metrics.cacheMissAt([turn(0, 8_000, 8_000), turn(1, 9_000, 9_000)], 1), null, "a small conversation is not flagged");
+  const spend = metrics.tokenSpendStats(samples);
+  assert.equal(spend.outputTokens, 5_000);
+  assert.equal(spend.cacheWriteTokens, 904_000);
+  assert.equal(spend.misses, 3);
+  assert.equal(metrics.tokenSpendStats([sample(100, 0)]).cacheWriteTokens, null, "an agent that does not report cache writes shows none");
+  const outputOnly = metrics.tokenBarsGeometry([sample(1000, 0), sample(100, 1)], 226, 54, true);
+  assert.equal(outputOnly[0].inputHeight, 0);
+  assert.equal(outputOnly[0].outputY, 12, "the largest output reaches the top on its own scale");
+});

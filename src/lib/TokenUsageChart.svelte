@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { PromptTokenUsage } from "$lib/domain";
   import type { Language } from "$lib/i18n";
-  import { TOKEN_GRAPH_WIDTH, TOKEN_WINDOW_MINUTES, contextPercent, samplesInRange, tokenBarsGeometry, tokenGraphGeometry, tokenTimeRange, tokenTimeTicks } from "$lib/tokenUsage";
+  import { TOKEN_GRAPH_WIDTH, TOKEN_WINDOW_MINUTES, cacheMissAt, compactDuration, contextPercent, samplesInRange, tokenBarsGeometry, tokenGraphGeometry, tokenTimeRange, tokenTimeTicks } from "$lib/tokenUsage";
 
   /** The tokens of each prompt over time, as the Inspector and the chat header show it. */
   let { samples, language, loading = false, limit = 14, height = 48, mode = "line", title, now = Date.now(), onSelect }: {
@@ -12,8 +12,8 @@
     limit?: number;
     /** The chart's drawn height in pixels; the tooltip is placed over it. */
     height?: number;
-    /** A line over time, or one bar per prompt with its output stacked on its input. */
-    mode?: "line" | "bars";
+    /** A line over time, one bar per prompt with its output stacked on its input, or the output alone. */
+    mode?: "line" | "bars" | "output";
     title?: string;
     /** The end of the line chart's time axis; the clock unless a test fixes it. */
     now?: number;
@@ -37,9 +37,12 @@
     return `−${(minutes / 60).toLocaleString(language, { maximumFractionDigits: 1 })} h`;
   }
   const windowLabel = (minutes: number | null) => (minutes === null ? tr("All", "Tudo") : minutes < 60 ? `${minutes}m` : `${minutes / 60}h`);
-  const bars = $derived(mode === "bars" ? tokenBarsGeometry(shown, TOKEN_GRAPH_WIDTH, viewHeight) : []);
+  const barMode = $derived(mode === "bars" || mode === "output");
+  const bars = $derived(barMode ? tokenBarsGeometry(shown, TOKEN_GRAPH_WIDTH, viewHeight, mode === "output") : []);
+  // The turns that wrote the whole conversation into the cache again, by their place in `shown`.
+  const misses = $derived(shown.map((_, index) => cacheMissAt(samples, offset + index)));
   // Where each prompt sits, for the pointer, the cursor and the tooltip, whichever way it is drawn.
-  const marks = $derived(mode === "bars" ? bars.map((bar) => ({ x: bar.x, y: bar.outputY, sample: bar.sample })) : graph.dots);
+  const marks = $derived(barMode ? bars.map((bar) => ({ x: bar.x, y: bar.outputY, sample: bar.sample })) : graph.dots);
   const grid = $derived([0.25, 0.5, 0.75].map((share) => `M4 ${(viewHeight * share + 1).toFixed(1)}H222`).join(""));
   let plot = $state<HTMLDivElement | null>(null);
   let active = $state<number | null>(null);
@@ -107,27 +110,31 @@
     <svg class:empty={!graph.points} class:loading={loading && !shown.length} class="token-graph" viewBox="0 0 {TOKEN_GRAPH_WIDTH} {viewHeight}" preserveAspectRatio="none" aria-hidden="true">
       <path class="graph-grid" d={grid} />
       {#if point}<path class="graph-cursor" d="M{point.x} 4V{viewHeight - 6}" />{/if}
-      {#if mode === "bars" && bars.length}
+      {#if barMode && bars.length}
         {#each bars as bar, index (bar.sample.turnId + index)}
           <g class="token-bar" class:active={index === active}>
-            <rect class="bar-input" x={bar.x - bar.width / 2} y={bar.inputY} width={bar.width} height={Math.max(0.5, bar.inputHeight)} rx="1" />
-            {#if bar.outputHeight > 0}<rect class="bar-output" x={bar.x - bar.width / 2} y={bar.outputY} width={bar.width} height={bar.outputHeight} rx="1" />{/if}
+            {#if mode === "bars"}<rect class="bar-input" class:miss={misses[index]} x={bar.x - bar.width / 2} y={bar.inputY} width={bar.width} height={Math.max(0.5, bar.inputHeight)} rx="1" />{/if}
+            <rect class="bar-output" x={bar.x - bar.width / 2} y={bar.outputY} width={bar.width} height={Math.max(mode === "output" ? 0.5 : 0, bar.outputHeight)} rx="1" />
+            {#if misses[index]}<circle class="miss-mark" cx={bar.x} cy={Math.max(3, bar.outputY - 4)} r="1.8" />{/if}
           </g>
         {/each}
       {:else}
         <polygon points={graph.area} />
         <polyline points={graph.points || `4,${viewHeight - 12} 222,${viewHeight - 12}`} />
         {#each graph.dots as dot, index (dot.sample.turnId + index)}
-          <circle class:active={index === active} cx={dot.x} cy={dot.y} r={index === active ? 3 : 2} />
+          <circle class:active={index === active} class:miss={misses[index]} cx={dot.x} cy={dot.y} r={index === active ? 3 : 2} />
         {/each}
       {/if}
     </svg>
     {#if point}
       {@const context = contextPercent(point.sample)}
+      {@const miss = active !== null ? misses[active] : null}
       <div class="token-tip" class:edge-left={point.x < 60} class:edge-right={point.x > TOKEN_GRAPH_WIDTH - 60} role="status" style:left={(point.x / TOKEN_GRAPH_WIDTH) * 100 + "%"} style:top={(point.y / viewHeight) * height + "px"}>
         <strong>{number(point.sample.totalTokens)} tokens</strong>
-        <span>{tr("Input", "Entrada")} {number(point.sample.inputTokens)} · {tr("Output", "Saída")} {number(point.sample.outputTokens)}</span>
+        <span class="tip-output">{tr("Output", "Saída")} {number(point.sample.outputTokens)}</span>
+        <span>{tr("Input", "Entrada")} {number(point.sample.inputTokens)}{#if point.sample.cacheCreationTokens} ({tr("written to cache", "gravado no cache")} {number(point.sample.cacheCreationTokens)}){/if}</span>
         {#if point.sample.cacheReadTokens}<span>{tr("Cache read", "Lido do cache")} {number(point.sample.cacheReadTokens)}</span>{/if}
+        {#if miss}<span class="tip-miss">{tr("Cache lost", "Cache perdido")}: {miss.cause === "model" ? tr("model changed", "troca de modelo") : miss.cause === "idle" ? tr(`idle ${compactDuration(miss.idleMs)}`, `parado ${compactDuration(miss.idleMs)}`) : tr("restart or new context", "reinício ou contexto novo")} · {number(miss.rewritten)} {tr("rewritten", "regravados")}</span>{/if}
         {#if context !== null}<span>{tr("Context", "Contexto")} {context}%</span>{/if}
         {#if point.sample.model}<span>{point.sample.model}</span>{/if}
         <small>{time(point.sample.createdAt)}{onSelect ? " · " + tr("click to open", "clique para abrir") : ""}</small>
@@ -165,6 +172,11 @@
   /* Input below, output stacked on it; output uses the warm accent the context ring warns with. */
   .token-graph .bar-input { fill: color-mix(in srgb, var(--workspace-accent) 58%, transparent); }
   .token-graph .bar-output { fill: #c9963d; }
+  .token-graph .bar-input.miss { fill: color-mix(in srgb, #c0554f 62%, transparent); }
+  .token-graph .miss-mark { fill: #c0554f; stroke: none; }
+  .token-graph circle.miss { stroke: #c0554f; }
+  .token-tip .tip-output { color: #b07d2a; font-weight: 700; }
+  .token-tip .tip-miss { color: #c0554f; }
   .token-graph .token-bar.active rect { stroke: var(--workspace-strong); stroke-width: 1; }
   .token-graph .graph-grid { fill: none; stroke: color-mix(in srgb, var(--workspace-line) 54%, transparent); stroke-width: .7; }
   .token-graph polygon { fill: color-mix(in srgb, var(--workspace-accent) 8%, transparent); }

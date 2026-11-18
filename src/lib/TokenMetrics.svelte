@@ -3,7 +3,7 @@
   import type { Language } from "$lib/i18n";
   import TokenUsageChart from "$lib/TokenUsageChart.svelte";
   import { sampleContextPercent, sessionContextUsage } from "$lib/contextUsage";
-  import { TOKEN_GRAPH_WIDTH, compactDuration, compactTokens, contextFillGeometry, promptJumpForSample, tokenMetricStats, type PromptJumpTarget } from "$lib/tokenUsage";
+  import { TOKEN_GRAPH_WIDTH, compactDuration, compactTokens, contextFillGeometry, promptJumpForSample, tokenMetricStats, tokenSpendStats, type PromptJumpTarget } from "$lib/tokenUsage";
 
   /** The Inspector's Metrics section: every prompt's tokens, the context over time and the session's figures. */
   let { samples, agent, language, onJump }: {
@@ -14,8 +14,9 @@
     onJump?: (target: PromptJumpTarget) => void;
   } = $props();
 
-  let mode = $state<"line" | "bars">("bars");
+  let mode = $state<"line" | "bars" | "output">("bars");
   const stats = $derived(tokenMetricStats(samples));
+  const spend = $derived(tokenSpendStats(samples));
   const context = $derived(sessionContextUsage({ agent, promptTokenUsage: samples }));
   const fillHeight = 34;
   const fill = $derived(contextFillGeometry(samples, TOKEN_GRAPH_WIDTH, fillHeight, (sample) => sampleContextPercent(agent, sample)));
@@ -35,10 +36,11 @@
   <div class="metrics-toolbar">
     <div class="mode-toggle" role="group" aria-label={tr("Chart style", "Estilo do gráfico")}>
       <button type="button" class:active={mode === "bars"} aria-pressed={mode === "bars"} onclick={() => (mode = "bars")}>{tr("Bars", "Barras")}</button>
+      <button type="button" class:active={mode === "output"} aria-pressed={mode === "output"} onclick={() => (mode = "output")}>{tr("Output", "Saída")}</button>
       <button type="button" class:active={mode === "line"} aria-pressed={mode === "line"} onclick={() => (mode = "line")}>{tr("Line", "Linha")}</button>
     </div>
     {#if mode === "bars"}
-      <span class="legend" aria-hidden="true"><i class="input"></i>{tr("Input", "Entrada")}<i class="output"></i>{tr("Output", "Saída")}</span>
+      <span class="legend" aria-hidden="true"><i class="input"></i>{tr("Input", "Entrada")}<i class="output"></i>{tr("Output", "Saída")}{#if spend.misses}<i class="miss"></i>{tr("Cache lost", "Cache perdido")}{/if}</span>
     {/if}
   </div>
   <TokenUsageChart {samples} {language} {mode} limit={Math.max(1, samples.length)} height={108} title={tr(`All ${samples.length} prompts`, `Todos os ${samples.length} prompts`)} onSelect={onJump ? jump : undefined} />
@@ -55,6 +57,7 @@
   {/if}
 
   <dl class="metric-tiles">
+    <div class="output-tile"><dt>{tr("Session output", "Saída da sessão")}</dt><dd title={number(spend.outputTokens)}>{compact(spend.outputTokens)}</dd></div>
     <div><dt>{tr("Session total", "Total da sessão")}</dt><dd title={number(stats.totalTokens)}>{compact(stats.totalTokens)}</dd></div>
     <div><dt>{tr("Per turn", "Por turno")}</dt><dd title={number(stats.averageTokens)}>{compact(stats.averageTokens)}</dd></div>
     {#if stats.largest}
@@ -71,6 +74,12 @@
     {/if}
     {#if stats.cacheHitPercent !== null}
       <div><dt>{tr("Cache hits", "Acerto de cache")}</dt><dd title={tr("Share of input read from the prompt cache", "Parte da entrada lida do cache de prompt")}>{stats.cacheHitPercent}%</dd></div>
+    {/if}
+    {#if spend.cacheWriteTokens !== null}
+      <div><dt>{tr("Written to cache", "Gravado no cache")}</dt><dd title={tr("Part of the input: what each turn wrote into the prompt cache", "Parte da entrada: o que cada turno gravou no cache de prompt")}>{compact(spend.cacheWriteTokens)}</dd></div>
+    {/if}
+    {#if spend.misses}
+      <div class="level-warn"><dt>{tr("Cache lost", "Cache perdido")}</dt><dd title={tr(`${number(spend.rewrittenTokens)} tokens written again after a long pause, a model change or a restart`, `${number(spend.rewrittenTokens)} tokens regravados depois de uma pausa longa, troca de modelo ou reinício`)}>{spend.misses}× · {compact(spend.rewrittenTokens)}</dd></div>
     {/if}
     {#if stats.averageDurationMs !== null}
       <div><dt>{tr("Time per turn", "Tempo por turno")}</dt><dd>{compactDuration(stats.averageDurationMs)}</dd></div>
@@ -89,6 +98,8 @@
   .legend i { width: 8px; height: 8px; margin-left: 4px; border-radius: 2px; }
   .legend i.input { background: color-mix(in srgb, var(--workspace-accent) 58%, transparent); }
   .legend i.output { background: #c9963d; }
+  .legend i.miss { background: color-mix(in srgb, #c0554f 62%, transparent); }
+  .metric-tiles .output-tile dd { color: #b07d2a; }
   .context-fill { display: grid; gap: 3px; }
   .context-fill > span { color: var(--workspace-muted); font-size: 10px; font-weight: 720; }
   .context-fill svg { display: block; width: 100%; height: 34px; overflow: visible; }

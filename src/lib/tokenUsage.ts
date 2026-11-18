@@ -80,18 +80,19 @@ export type TokenBar = {
  * One bar per prompt, input at the bottom and output stacked on it, all scaled to the largest prompt.
  * Bars are spaced by order, not time, so a burst of short prompts stays readable.
  */
-export function tokenBarsGeometry(samples: PromptTokenUsage[], width = TOKEN_GRAPH_WIDTH, height = TOKEN_GRAPH_HEIGHT): TokenBar[] {
+export function tokenBarsGeometry(samples: PromptTokenUsage[], width = TOKEN_GRAPH_WIDTH, height = TOKEN_GRAPH_HEIGHT, outputOnly = false): TokenBar[] {
   if (!samples.length) return [];
   const insetX = 4;
   const insetTop = 12;
   const insetBottom = 10;
   const slot = (width - insetX * 2) / samples.length;
   const barWidth = Math.max(1, Math.min(18, slot * 0.66));
-  const maximum = Math.max(1, ...samples.map((sample) => Math.max(sample.totalTokens, sample.inputTokens + sample.outputTokens)));
+  // Output alone is a few percent of a turn; on its own scale it can be compared between prompts.
+  const maximum = Math.max(1, ...samples.map((sample) => outputOnly ? sample.outputTokens : Math.max(sample.totalTokens, sample.inputTokens + sample.outputTokens)));
   const scale = (height - insetTop - insetBottom) / maximum;
   const base = height - insetBottom;
   return samples.map((sample, index) => {
-    const inputHeight = Math.max(0, sample.inputTokens) * scale;
+    const inputHeight = outputOnly ? 0 : Math.max(0, sample.inputTokens) * scale;
     const outputHeight = Math.max(0, sample.outputTokens) * scale;
     return {
       x: insetX + slot * index + slot / 2,
@@ -192,6 +193,53 @@ export function tokenMetricStats(samples: PromptTokenUsage[]): TokenMetricStats 
     cacheHitPercent: cacheHitPercent === null ? null : Math.max(0, Math.min(100, cacheHitPercent)),
     averageDurationMs: durations.length ? Math.round(durations.reduce((total, value) => total + value, 0) / durations.length) : null,
     model: samples.findLast((sample) => sample.model?.trim())?.model?.trim() ?? null,
+  };
+}
+
+export type CacheMiss = {
+  /** Input written to the cache again: what was already in the conversation, not what the turn added. */
+  rewritten: number;
+  /** Most likely reason: a pause longer than the cache lasts, another model, or one Lume cannot tell. */
+  cause: "idle" | "model" | "unknown";
+  /** Time since the previous turn ended, for "idle". */
+  idleMs: number;
+};
+
+/** A pause after which a lost cache is put down to the cache expiring (Claude keeps it 5 minutes or 1 hour). */
+const CACHE_IDLE_MS = 5 * 60_000;
+
+/**
+ * Whether the turn had to write the conversation into the prompt cache again, as after a long pause or a model
+ * change: it wrote more than half of what the previous turn left in the context, beyond what this turn added.
+ * Null for the first turn, for turns that do not report the cache or the context, and for a small conversation.
+ */
+export function cacheMissAt(samples: PromptTokenUsage[], index: number): CacheMiss | null {
+  const sample = samples[index];
+  const previous = samples[index - 1];
+  if (!sample || !previous || !sample.cacheCreationTokens || !sample.contextTokens || !previous.contextTokens) return null;
+  if (previous.contextTokens < 20_000) return null;
+  const added = Math.max(0, sample.contextTokens - previous.contextTokens);
+  const rewritten = Math.min(previous.contextTokens, sample.cacheCreationTokens - added);
+  if (rewritten < previous.contextTokens * 0.5) return null;
+  const idleMs = Math.max(0, (sample.promptAt ?? sample.createdAt) - previous.createdAt);
+  const modelChanged = Boolean(sample.model && previous.model && sample.model !== previous.model);
+  return { rewritten, cause: modelChanged ? "model" : idleMs >= CACHE_IDLE_MS ? "idle" : "unknown", idleMs };
+}
+
+/** Totals over the session that say where the tokens went: output, cache writes and the turns that lost the cache. */
+export function tokenSpendStats(samples: PromptTokenUsage[]): { outputTokens: number; cacheWriteTokens: number | null; misses: number; rewrittenTokens: number } {
+  let misses = 0;
+  let rewrittenTokens = 0;
+  samples.forEach((_, index) => {
+    const miss = cacheMissAt(samples, index);
+    if (miss) { misses += 1; rewrittenTokens += miss.rewritten; }
+  });
+  const reportsWrites = samples.some((sample) => typeof sample.cacheCreationTokens === "number");
+  return {
+    outputTokens: samples.reduce((total, sample) => total + (sample.outputTokens || 0), 0),
+    cacheWriteTokens: reportsWrites ? samples.reduce((total, sample) => total + (sample.cacheCreationTokens ?? 0), 0) : null,
+    misses,
+    rewrittenTokens,
   };
 }
 

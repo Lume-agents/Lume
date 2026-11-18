@@ -425,6 +425,23 @@ async fn get_hub_snapshot(state: State<'_, AppState>) -> Result<protocol::HubSna
     .map_err(|error| error.to_string())?
 }
 
+/// One session as the snapshot would show it, so a change to one chat does not reserialize every session.
+/// None means the caller must reload the whole snapshot.
+#[tauri::command]
+async fn get_hub_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Option<protocol::HubSession>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(state
+            .bounded_session(&session_id, 60)?
+            .map(|session| protocol::HubSnapshot::with_activity_limit(vec![session], 60).sessions.remove(0)))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 async fn get_session_environments(
     app: AppHandle,
@@ -4059,6 +4076,7 @@ pub fn run() {
             rename_session,
             fork_session_from_message,
             get_hub_snapshot,
+            get_hub_session,
             get_session_environments,
             stop_session_environment,
             get_session_repository,

@@ -11,6 +11,7 @@ import type {
   HubCommandRequest,
   HubCommandResponse,
   ExternalWriterConflict,
+  HubSession,
   HubSnapshot,
 } from "$lib/hubProtocol";
 import type {
@@ -165,6 +166,11 @@ export async function forkSessionFromMessage(
 
 export async function loadHubSnapshot(): Promise<HubSnapshot> {
   return invoke<HubSnapshot>("get_hub_snapshot");
+}
+
+/** One session as the snapshot shows it; null when the whole snapshot must be reloaded instead. */
+export async function loadHubSession(sessionId: string): Promise<HubSession | null> {
+  return invoke<HubSession | null>("get_hub_session", { sessionId });
 }
 
 export async function loadWorkspaceConversationPage(

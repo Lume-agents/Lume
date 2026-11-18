@@ -81,6 +81,7 @@
     installExternalPlugin,
     loadExternalPlugins,
     loadHubSnapshot,
+    loadHubSession,
     listExternalWriterConflicts,
     listRemoteAuthRequired,
     loadIntegrationStatuses,
@@ -2864,16 +2865,59 @@
     let refreshAgain = false;
     const startup = new WorkspaceStartup();
 
+    // A change to one chat refetches only that session; the whole snapshot (every session with its 60 activities)
+    // is reloaded for anything else, and at least every few seconds so nothing the per-session path misses lingers.
+    const FULL_REFRESH_INTERVAL_MS = 3_000;
+    const changedSessionIds = new Set<string>();
+    let fullRefreshWanted = false;
+    let lastFullRefreshAt = 0;
+
     const refresh = (): Promise<boolean> => {
+      fullRefreshWanted = true;
+      return runRefresh();
+    };
+
+    function runRefresh(): Promise<boolean> {
       if (refreshPromise) {
         refreshAgain = true;
         return refreshPromise;
       }
-      refreshPromise = fetchSnapshot();
+      const ids = [...changedSessionIds];
+      changedSessionIds.clear();
+      const full = fullRefreshWanted || !ids.length || Date.now() - lastFullRefreshAt >= FULL_REFRESH_INTERVAL_MS;
+      fullRefreshWanted = false;
+      refreshPromise = (full ? fetchSnapshot() : fetchChangedSessions(ids)).finally(() => {
+        refreshPromise = undefined;
+        if (refreshAgain && !disposed) {
+          refreshAgain = false;
+          void runRefresh();
+        }
+      });
       return refreshPromise;
-    };
+    }
+
+    async function fetchChangedSessions(ids: string[]): Promise<boolean> {
+      let fetched: (HubSession | null)[];
+      try {
+        fetched = await Promise.all(ids.map((id) => loadHubSession(id)));
+      } catch {
+        return fetchSnapshot();
+      }
+      if (disposed) return false;
+      const byId = new Map(fetched.filter((item): item is HubSession => Boolean(item)).map((item) => [item.id, item]));
+      const known = new Map(liveSessions.map((item) => [item.id, item]));
+      // A session that left the list, or got its permanent thread ID, or the chat that is being opened: the full
+      // snapshot handles those.
+      if (pendingOpenedSession || byId.size !== ids.length || ids.some((id) => !known.has(id) || known.get(id)?.nativeSessionId !== byId.get(id)?.nativeSessionId)) {
+        return fetchSnapshot();
+      }
+      liveSessions = liveSessions.map((item) => byId.get(item.id) ?? item);
+      error = "";
+      return true;
+    }
 
     async function fetchSnapshot(): Promise<boolean> {
+      lastFullRefreshAt = Date.now();
       try {
         const snapshot = await loadHubSnapshot();
         if (!disposed) {
@@ -2924,16 +2968,13 @@
       } catch (reason) {
         if (!disposed) error = String(reason);
         return false;
-      } finally {
-        refreshPromise = undefined;
-        if (refreshAgain && !disposed) {
-          refreshAgain = false;
-          void refresh();
-        }
       }
     }
 
-    const queueRefresh = () => {
+    const queueRefresh = (event?: { payload?: { sessionId?: string | null } | null }) => {
+      const sessionId = event?.payload?.sessionId;
+      if (sessionId) changedSessionIds.add(sessionId);
+      else fullRefreshWanted = true;
       if (refreshTimer) return;
       if (refreshPromise) {
         refreshAgain = true;
@@ -2941,7 +2982,7 @@
       }
       refreshTimer = setTimeout(() => {
         refreshTimer = undefined;
-        void refresh();
+        void runRefresh();
       }, 160);
     };
 
@@ -2958,7 +2999,7 @@
           conflictEventRevision += 1;
           externalWriterConflicts = Object.fromEntries(payload.map((conflict) => [conflict.sessionId, conflict]));
         })),
-        startup.subscribe(() => listen("lume://sessions-changed", queueRefresh)),
+        startup.subscribe(() => listen<{ sessionId?: string | null }>("lume://sessions-changed", queueRefresh)),
         startup.subscribe(() => listen<{ nodeId: string; computer: string }>("lume://remote-auth-required", ({ payload }) => { remoteAuthRevision += 1; announceRemoteAuth(payload); })),
         startup.subscribe(() => listen<{ nodeId: string }>("lume://remote-auth-resolved", ({ payload }) => {
           remoteAuthRevision += 1;

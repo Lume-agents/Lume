@@ -1204,10 +1204,17 @@ impl HubSnapshot {
             });
             let activity_start = session.session.activities.len().saturating_sub(limit);
             if activity_start > 0 {
+                // The prompt that opened the oldest kept activity stays with it, as `bounded_sessions` keeps it.
+                let opening_prompt = session.session.activities[..activity_start]
+                    .iter()
+                    .rposition(|activity| activity.kind == "prompt");
                 let recent_children = session.session.activities[..activity_start]
                     .iter()
-                    .filter(|activity| recent_subagents.contains(&activity.id))
-                    .cloned()
+                    .enumerate()
+                    .filter(|(index, activity)| {
+                        recent_subagents.contains(&activity.id) || Some(*index) == opening_prompt
+                    })
+                    .map(|(_, activity)| activity.clone())
                     .collect::<Vec<_>>();
                 session.session.activities.drain(..activity_start);
                 session.session.activities.splice(0..0, recent_children);

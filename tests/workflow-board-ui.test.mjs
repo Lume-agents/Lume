@@ -93,6 +93,7 @@ function nativeFixture() {
         return structuredClone(fake.preferences);
       }
       if (command === "set_preferences") { fake.preferences = args.preferences; localStorage.setItem("fixture:preferences", JSON.stringify(fake.preferences)); fake.saved++; return; }
+      if (command === "get_hub_session") return structuredClone(sessions.find((session) => session.id === args.sessionId) ?? null);
       if (command === "get_hub_snapshot") return { protocolVersion: 1, desktopVersion: "0.15.3", generatedAt: Date.now(), features: [], sessions, internalServices: [], workflowGroups: [group], workflowHistory: [] };
       if (command === "get_workflow_role_contract") return { ...contract, instruction: "Papel: " + args.role };
       if (command === "get_workflow_run") return structuredClone(fake.runs[args.workflowId] ?? null);
@@ -640,6 +641,17 @@ try {
   await evaluate("window.__fixture.sessions[0].nativeSessionId = 'native-0-final'; window.__fixture.emit('lume://sessions-changed', {})");
   await wait("JSON.parse(localStorage.getItem('lume:workspace-layout:v1')).references?.['session-0']?.nativeSessionId === 'native-0-final'");
   assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('[data-workspace-pane]')).map(pane => pane.dataset.workspacePane)"), ["session-2", "session-0", "session-1"], "thread promotion keeps the existing pane order");
+  const snapshotCalls = () => evaluate("window.__fixture.calls.filter(command => command === 'get_hub_snapshot').length");
+  // A full reload first, so the per-session update below falls inside its few-second window.
+  const snapshotsEarlier = await snapshotCalls();
+  await evaluate("window.__fixture.emit('lume://sessions-changed', {})");
+  await wait(`window.__fixture.calls.filter(command => command === 'get_hub_snapshot').length > ${snapshotsEarlier}`);
+  const snapshotsBefore = await snapshotCalls();
+  await evaluate("window.__fixture.sessions[1].sessionName = 'Implementação ao vivo'; window.__fixture.emit('lume://sessions-changed', { sessionId: 'session-1' })");
+  await wait("document.querySelector('.session-row[aria-label=\"Implementação ao vivo\"]')");
+  assert.equal(await snapshotCalls(), snapshotsBefore, "a change to one chat refetches only that session");
+  await evaluate("window.__fixture.emit('lume://sessions-changed', { sessionId: 'session-gone' })");
+  await wait(`window.__fixture.calls.filter(command => command === 'get_hub_snapshot').length > ${snapshotsBefore}`);
   assert.deepEqual(failures, [], "no browser exceptions");
   console.log("Workflow board UI passed: Orb import, sidebar drop, arrows, cycle refusal, free drag, preview, zoom, all run controls, recovery, event order, draft/layout persistence, removal, insertion, overlay keyboard ownership, fit, light/dark contrast, sidebar workflow rows, chat strip approval, sidebar menu workflows, basic board slots.");
   console.log("Screenshots: " + output);

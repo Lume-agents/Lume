@@ -815,42 +815,32 @@ impl AppState {
         self.attach_recent_archived_conversations(&mut sessions, activity_limit)?;
         self.attach_session_plans(&mut sessions)?;
         for session in &mut sessions {
-            let recent_subagents = visible_subagent_ids(&session.activities);
-            let current_work = visible_work_activity_ids(&session.activities);
-            session.activities.retain(|activity| {
-                activity.kind != "subagent" || recent_subagents.contains(&activity.id)
-            });
-            let start = session
-                .activities
-                .len()
-                .saturating_sub(activity_limit.max(1));
-            if start > 0 {
-                let mut recent = session.activities.split_off(start);
-                // A long turn fills the window with its tools: the prompt that opened it stays, or the chat
-                // shows the answer without what the person asked.
-                let opening_prompt = session
-                    .activities
-                    .iter()
-                    .rposition(|activity| activity.kind == "prompt");
-                if let Some(index) = opening_prompt {
-                    recent.push(session.activities.swap_remove(index));
-                }
-                recent.extend(session.activities.drain(..).filter(|activity| {
-                    activity.kind == "plan_document"
-                        || (activity.kind == "queued_prompt" && activity.status == "waiting")
-                        || (activity.kind == "codex_queued_prompt" && activity.status == "waiting")
-                        || recent_subagents.contains(&activity.id)
-                        || current_work.contains(&activity.id)
-                }));
-                recent.sort_by_key(|activity| activity.created_at);
-                session.activities = recent;
-            }
-            let result_start = session.results.len().saturating_sub(activity_limit.max(1));
-            if result_start > 0 {
-                session.results.drain(..result_start);
-            }
+            bound_session_activities(session, activity_limit);
         }
         self.finalize_sessions(sessions)
+    }
+
+    /// One session as `bounded_sessions` would show it, without cloning the others. None when the list must be
+    /// rebuilt instead: a Codex session (its identity is projected from every CLI), a remote one, one that is gone or
+    /// one the list would hide.
+    pub fn bounded_session(&self, session_id: &str, activity_limit: usize) -> Result<Option<AgentSession>, String> {
+        let session = self
+            .sessions
+            .lock()
+            .map_err(|_| "Não foi possível acessar as sessões".to_string())?
+            .iter()
+            .find(|session| session.id == session_id && session.agent != AgentKind::Codex)
+            .cloned();
+        let Some(session) = session else {
+            return Ok(None);
+        };
+        let mut sessions = vec![session];
+        self.attach_recent_archived_conversations(&mut sessions, activity_limit)?;
+        self.attach_session_plans(&mut sessions)?;
+        for session in &mut sessions {
+            bound_session_activities(session, activity_limit);
+        }
+        Ok(self.finalize_sessions(sessions)?.pop())
     }
 
     pub fn bounded_sessions(&self, activity_limit: usize) -> Result<Vec<AgentSession>, String> {
@@ -4632,6 +4622,45 @@ fn remember_prompt_token_usage(session: &mut AgentSession, mut usage: PromptToke
     }
 }
 
+/// The window a view receives: the latest activities, the prompt that opened the oldest of them, and what is
+/// still in progress (plans, waiting prompts, live subagents and work).
+fn bound_session_activities(session: &mut AgentSession, activity_limit: usize) {
+    let recent_subagents = visible_subagent_ids(&session.activities);
+    let current_work = visible_work_activity_ids(&session.activities);
+    session.activities.retain(|activity| {
+        activity.kind != "subagent" || recent_subagents.contains(&activity.id)
+    });
+    let start = session
+        .activities
+        .len()
+        .saturating_sub(activity_limit.max(1));
+    if start > 0 {
+        let mut recent = session.activities.split_off(start);
+        // A long turn fills the window with its tools: the prompt that opened it stays, or the chat
+        // shows the answer without what the person asked.
+        let opening_prompt = session
+            .activities
+            .iter()
+            .rposition(|activity| activity.kind == "prompt");
+        if let Some(index) = opening_prompt {
+            recent.push(session.activities.swap_remove(index));
+        }
+        recent.extend(session.activities.drain(..).filter(|activity| {
+            activity.kind == "plan_document"
+                || (activity.kind == "queued_prompt" && activity.status == "waiting")
+                || (activity.kind == "codex_queued_prompt" && activity.status == "waiting")
+                || recent_subagents.contains(&activity.id)
+                || current_work.contains(&activity.id)
+        }));
+        recent.sort_by_key(|activity| activity.created_at);
+        session.activities = recent;
+    }
+    let result_start = session.results.len().saturating_sub(activity_limit.max(1));
+    if result_start > 0 {
+        session.results.drain(..result_start);
+    }
+}
+
 pub(crate) fn visible_subagent_ids(activities: &[SessionActivity]) -> HashSet<String> {
     activities
         .iter()
@@ -8259,6 +8288,18 @@ mod tests {
         assert_eq!(activities.first().map(|activity| activity.id.as_str()), Some("asked"));
         assert!(!activities.iter().any(|activity| activity.id == "old"));
         assert_eq!(activities.len(), 61);
+        let hub = crate::protocol::HubSnapshot::with_activity_limit(shown.clone(), 60);
+        let hub_session = hub.sessions.iter().find(|session| session.session.id == "claude:long-turn").unwrap();
+        assert_eq!(hub_session.session.activities.first().map(|activity| activity.id.as_str()), Some("asked"), "the snapshot's own cut keeps it too");
+
+        let one = state.bounded_session("claude:long-turn", 60).unwrap().expect("one session");
+        let listed = shown.iter().find(|session| session.id == "claude:long-turn").unwrap();
+        assert_eq!(serde_json::to_value(&one).unwrap(), serde_json::to_value(listed).unwrap(), "one session reads as it does in the list");
+        assert!(state.bounded_session("claude:missing", 60).unwrap().is_none());
+        let mut codex = session_from_event(&started_event("codex:projected", 0), now_millis());
+        codex.agent = AgentKind::Codex;
+        state.sessions.lock().unwrap().push(codex);
+        assert!(state.bounded_session("codex:projected", 60).unwrap().is_none(), "a Codex session needs the whole list");
     }
 
     #[test]

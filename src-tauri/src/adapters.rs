@@ -26,6 +26,16 @@ use crate::{
 const MAX_HOOK_STDIN_BYTES: u64 = 2 * 1024 * 1024;
 const HOOK_STDIN_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// A variable Lume sets on the agents it starts. Tests read none of them, so they behave the same when run
+/// from inside one of Lume's own chats (which inherits them).
+fn lume_env(name: &str) -> Option<String> {
+    if cfg!(test) {
+        None
+    } else {
+        std::env::var(name).ok()
+    }
+}
+
 pub fn run_hook(provider: &str) -> i32 {
     if runs_inside_grok(provider, std::env::var_os("GROK_HOOK_EVENT").is_some())
         || is_managed_acp_hook(
@@ -213,7 +223,7 @@ fn map_event_with_context(
         && claude_stream_answers(
             &hook_name,
             raw,
-            std::env::var("LUME_CLAUDE_STREAM").ok().as_deref(),
+            lume_env("LUME_CLAUDE_STREAM").as_deref(),
         )
     {
         return None;
@@ -258,7 +268,7 @@ fn map_event_with_context(
     // another same-workspace CLI process with this conversation.
     let managed_antigravity_stream = is_managed_antigravity_stream(
         provider,
-        std::env::var("LUME_ANTIGRAVITY_STREAM").ok().as_deref(),
+        lume_env("LUME_ANTIGRAVITY_STREAM").as_deref(),
     );
     let (process_id, source, headless_resume, nested_in_agent) =
         if matches!(&agent, AgentKind::Antigravity | AgentKind::Gemini) {
@@ -274,7 +284,7 @@ fn map_event_with_context(
     let started_by_lume = !nested_in_agent;
     let managed_claude_prompt = provider == "claude"
         && started_by_lume
-        && std::env::var("LUME_CLAUDE_PROMPT_CAPTURE").as_deref() == Ok("1");
+        && lume_env("LUME_CLAUDE_PROMPT_CAPTURE").as_deref() == Some("1");
     let event = match (provider, hook_name.as_str()) {
         (_, "SessionStart") => HookEventKind::SessionStarted,
         ("codex", "UserPromptSubmit") | ("claude", "UserPromptSubmit") => HookEventKind::Running,
@@ -426,7 +436,7 @@ fn map_event_with_context(
         project: cwd.as_deref().and_then(project_name),
         source: Some(source),
         source_app: None,
-        control_origin: if started_by_lume && matches!(std::env::var("LUME_MANAGED_SESSION").as_deref(), Ok("1")) {
+        control_origin: if started_by_lume && lume_env("LUME_MANAGED_SESSION").as_deref() == Some("1") {
             SessionControlOrigin::Lume
         } else {
             SessionControlOrigin::External

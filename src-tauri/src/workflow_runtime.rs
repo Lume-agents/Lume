@@ -14,9 +14,9 @@ use crate::{
     domain::{
         AgentSession, PromptDelivery, SessionStatus, WorkflowAdvanceMode,
         WorkflowConnectionDefinition, WorkflowGroupDefinition, WorkflowHistoryEvent,
-        WorkflowHistoryEventKind, WorkflowHistoryRecord, WorkflowRole, WorkflowRun,
-        WorkflowRunStatus, WorkflowSettings, WorkflowStepDefinition, WorkflowStepHistory,
-        WorkflowStepRun, WorkflowStepRunStatus,
+        WorkflowHistoryEventKind, WorkflowHistoryRecord, WorkflowQuestion, WorkflowQuestionRoute,
+        WorkflowRole, WorkflowRun, WorkflowRunStatus, WorkflowSettings, WorkflowStepDefinition,
+        WorkflowStepHistory, WorkflowStepRun, WorkflowStepRunStatus,
     },
     state::{now_millis, AppState},
 };
@@ -198,6 +198,7 @@ impl WorkflowRuntime {
             transition_count: 0,
             steps,
             error: None,
+            question: None,
             created_at: now,
             updated_at: now,
         };
@@ -318,6 +319,14 @@ impl WorkflowRuntime {
         if snapshot.run.status != WorkflowRunStatus::Ready {
             return Err("The current workflow step is not ready to advance".into());
         }
+        if snapshot.run.question.as_ref().is_some_and(|question| {
+            matches!(
+                question.route,
+                WorkflowQuestionRoute::ToPlanner | WorkflowQuestionRoute::ToOrigin
+            )
+        }) {
+            return self.route_question(app, state, bridge, browser, &snapshot);
+        }
         let settings = state.preferences()?.workflow_settings;
         if snapshot.run.transition_count >= settings.max_transitions {
             return self.pause_for_guardrail(
@@ -361,6 +370,7 @@ impl WorkflowRuntime {
             .markdown
         };
         let target = workflow_step(&snapshot.group, &connection.to_step_id)?;
+        let prompt = format!("{prompt}{}", role_rules(&snapshot.group, target));
         let sessions = state.bounded_sessions(WORKFLOW_ACTIVITY_LIMIT)?;
         let session = available_session_for_step(&sessions, target)?;
         if let Err(error) = ensure_rate_limit_reserve(session, &settings) {
@@ -840,6 +850,172 @@ impl WorkflowRuntime {
         Ok(Some(run))
     }
 
+    /// The user answers the doubt the workflow stopped on. The answer goes to the step that asked them:
+    /// the orchestrator, or a step that has no orchestrator above it.
+    pub fn answer_question(
+        &self,
+        app: &AppHandle,
+        state: &AppState,
+        bridge: &CodexBridge,
+        browser: &BrowserControl,
+        workflow_id: &str,
+        answer: &str,
+    ) -> Result<WorkflowRun, String> {
+        let answer = answer.trim();
+        if answer.is_empty() {
+            return Err("Write an answer before sending it".into());
+        }
+        if answer.len() > 8_000 {
+            return Err("The answer cannot exceed 8000 characters".into());
+        }
+        self.reconcile(state, workflow_id)?;
+        let snapshot = self.snapshot(workflow_id)?;
+        let question = snapshot
+            .run
+            .question
+            .clone()
+            .filter(|question| {
+                snapshot.run.status == WorkflowRunStatus::WaitingForUser
+                    && question.route == WorkflowQuestionRoute::ToUser
+            })
+            .ok_or_else(|| "This workflow is not waiting for an answer".to_string())?;
+        let target = workflow_step(&snapshot.group, &question.step_id)?;
+        let prompt = format!(
+            "# Lume workflow\n\nThe user answered your question.\n\n## Your question\n\n{}\n\n## The user's answer\n\n{}\n\n## Objective\n\n{}\n\nContinue your step with this answer.{}",
+            question.text.trim(),
+            answer,
+            snapshot.run.objective.trim(),
+            role_rules(&snapshot.group, target),
+        );
+        let sessions = state.bounded_sessions(WORKFLOW_ACTIVITY_LIMIT)?;
+        let session = available_session_for_step(&sessions, target)?;
+        let baseline = result_ids(session);
+        submit_workflow_prompt(app, state, bridge, browser, session, &prompt)?;
+
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| "Could not update the workflow run".to_string())?;
+        let active = runs
+            .get_mut(workflow_id)
+            .filter(|active| active.run.id == snapshot.run.id)
+            .ok_or_else(|| "The workflow run changed while answering".to_string())?;
+        let now = now_millis();
+        start_step(active, &target.id, prompt, baseline, now)?;
+        // The orchestrator still owes the step that asked first an answer; otherwise the doubt is closed.
+        active.run.question = (question.origin_step_id != question.step_id).then(|| WorkflowQuestion {
+            route: WorkflowQuestionRoute::ToPlanner,
+            ..question
+        });
+        record_history_event(
+            active,
+            WorkflowHistoryEventKind::QuestionAnswered,
+            Some(&target.id),
+            None,
+            "The user answered the question",
+            now,
+        );
+        persist_active(state, active)?;
+        let run = active.run.clone();
+        drop(runs);
+        emit_changed(app, &run);
+        Ok(run)
+    }
+
+    /// Sends a doubt to the orchestrator, or the orchestrator's answer back to the step that asked.
+    fn route_question(
+        &self,
+        app: &AppHandle,
+        state: &AppState,
+        bridge: &CodexBridge,
+        browser: &BrowserControl,
+        snapshot: &ActiveWorkflowRun,
+    ) -> Result<WorkflowRun, String> {
+        let workflow_id = snapshot.run.workflow_id.as_str();
+        let settings = state.preferences()?.workflow_settings;
+        if snapshot.run.transition_count >= settings.max_transitions {
+            return self.pause_for_guardrail(
+                app,
+                state,
+                workflow_id,
+                "Workflow paused after reaching the transition limit",
+            );
+        }
+        let question = snapshot
+            .run
+            .question
+            .clone()
+            .ok_or_else(|| "The workflow has no question to route".to_string())?;
+        let origin = workflow_step(&snapshot.group, &question.origin_step_id)?;
+        let (target, prompt) = match question.route {
+            WorkflowQuestionRoute::ToPlanner => {
+                let planner = workflow_step(&snapshot.group, &question.step_id)?;
+                (
+                    planner,
+                    format!(
+                        "# Lume workflow\n\nThe **{}** step has a question and stopped until it is answered.\n\n## Question\n\n{}\n\n## Objective\n\n{}\n\nAnswer it from your plan and the project. Your whole response goes back to the {} as the answer, so write only the answer and what it should do next. If only the user can decide, end your response with `<lume-question>your question to the user</lume-question>` instead.{}",
+                        role_label(origin),
+                        question.text.trim(),
+                        snapshot.run.objective.trim(),
+                        role_label(origin),
+                        role_rules(&snapshot.group, planner),
+                    ),
+                )
+            }
+            WorkflowQuestionRoute::ToOrigin => {
+                let planner = workflow_step(&snapshot.group, &question.step_id)?;
+                (
+                    origin,
+                    format!(
+                        "# Lume workflow\n\nThe **{}** answered your question.\n\n## Your question\n\n{}\n\n## Answer\n\n{}\n\nContinue your step with this answer.{}",
+                        role_label(planner),
+                        question.text.trim(),
+                        question.answer.as_deref().unwrap_or_default().trim(),
+                        role_rules(&snapshot.group, origin),
+                    ),
+                )
+            }
+            WorkflowQuestionRoute::ToUser => {
+                return Err("This question is waiting for the user's answer".into())
+            }
+        };
+        let sessions = state.bounded_sessions(WORKFLOW_ACTIVITY_LIMIT)?;
+        let session = available_session_for_step(&sessions, target)?;
+        if let Err(error) = ensure_rate_limit_reserve(session, &settings) {
+            return self.pause_for_guardrail(app, state, workflow_id, &error);
+        }
+        let baseline = result_ids(session);
+        submit_workflow_prompt(app, state, bridge, browser, session, &prompt)?;
+
+        let mut runs = self
+            .runs
+            .lock()
+            .map_err(|_| "Could not update the workflow run".to_string())?;
+        let active = runs
+            .get_mut(workflow_id)
+            .filter(|active| active.run.id == snapshot.run.id)
+            .ok_or_else(|| "The workflow run changed while routing a question".to_string())?;
+        let now = now_millis();
+        start_step(active, &target.id, prompt, baseline, now)?;
+        active.run.transition_count = active.run.transition_count.saturating_add(1);
+        if question.route == WorkflowQuestionRoute::ToOrigin {
+            active.run.question = None;
+        }
+        record_history_event(
+            active,
+            WorkflowHistoryEventKind::StepStarted,
+            Some(&target.id),
+            None,
+            &format!("{} started", role_label(target)),
+            now,
+        );
+        persist_active(state, active)?;
+        let run = active.run.clone();
+        drop(runs);
+        emit_changed(app, &run);
+        Ok(run)
+    }
+
     fn snapshot(&self, workflow_id: &str) -> Result<ActiveWorkflowRun, String> {
         self.runs
             .lock()
@@ -876,6 +1052,10 @@ impl WorkflowRuntime {
 
     fn should_advance_automatically(&self, workflow_id: &str) -> bool {
         self.snapshot(workflow_id).ok().is_some_and(|active| {
+            // A doubt travels between the orchestrator and the step that asked on its own.
+            if active.run.status == WorkflowRunStatus::Ready && active.run.question.is_some() {
+                return true;
+            }
             active.run.status == WorkflowRunStatus::Ready
                 && active
                     .run
@@ -1063,6 +1243,11 @@ impl WorkflowRuntime {
                 &format!("{step_label} completed"),
                 result.created_at,
             );
+            let response = result.response.clone();
+            if route_after_completion(active, &step_id, &response, now) {
+                persist_active(state, active)?;
+                return Ok(Some(active.run.clone()));
+            }
             set_pending_transition(active, &step_id, now)?;
             if settings.require_approval_for_sensitive_context
                 && active
@@ -1381,7 +1566,7 @@ fn initial_step_prompt(
         step.expected_input.trim(),
         step.produced_output.trim(),
         step.completion_condition.trim(),
-    )
+    ) + &role_rules(group, step)
 }
 
 fn skipped_step_prompt(
@@ -1457,6 +1642,192 @@ fn set_pending_transition(
     Ok(())
 }
 
+const QUESTION_OPEN: &str = "<lume-question>";
+const QUESTION_CLOSE: &str = "</lume-question>";
+
+/// The doubt a step ended its response with, inside `<lume-question>…</lume-question>`.
+fn extract_question(response: &str) -> Option<String> {
+    let lower = response.to_ascii_lowercase();
+    let start = lower.rfind(QUESTION_OPEN)? + QUESTION_OPEN.len();
+    let rest = &response[start..];
+    let end = rest.to_ascii_lowercase().find(QUESTION_CLOSE).unwrap_or(rest.len());
+    let text = rest[..end].trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The orchestrator a step answers to: the closest planner step before it in the route.
+fn orchestrator_for(active: &ActiveWorkflowRun, step_id: &str) -> Option<String> {
+    let index = active.run.steps.iter().position(|step| step.step_id == step_id)?;
+    active.run.steps[..index]
+        .iter()
+        .rev()
+        .find(|step| {
+            workflow_step(&active.group, &step.step_id)
+                .is_ok_and(|definition| definition.role == WorkflowRole::Planner)
+        })
+        .map(|step| step.step_id.clone())
+}
+
+fn has_orchestrator_before(group: &WorkflowGroupDefinition, step: &WorkflowStepDefinition) -> bool {
+    let mut current = step.id.as_str();
+    for _ in 0..group.steps.len() {
+        let Some(connection) = group.connections.iter().find(|item| item.to_step_id == current) else {
+            return false;
+        };
+        current = connection.from_step_id.as_str();
+        if workflow_step(group, current).is_ok_and(|candidate| candidate.role == WorkflowRole::Planner) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The rules Lume adds to every workflow prompt: an orchestrator only plans, and a doubt is asked in a
+/// `<lume-question>` block so the workflow can route it instead of the step guessing.
+fn role_rules(group: &WorkflowGroupDefinition, step: &WorkflowStepDefinition) -> String {
+    if step.role == WorkflowRole::Planner {
+        return "\n\n## Workflow rules\n\n- You are the orchestrator of this workflow. Do not implement anything: do not edit, create or delete files, and do not run commands that change the project. Read, analyze and plan only.\n- Your final response is handed to the next step as its instructions, so write everything it needs to do the work.\n- If something needs a decision or information only the user can give, do not guess: end your response with `<lume-question>your question</lume-question>`. The workflow then stops and asks the user instead of handing off.".into();
+    }
+    let who = if has_orchestrator_before(group, step) {
+        "The orchestrator answers it, or asks the user when it cannot."
+    } else {
+        "The user answers it."
+    };
+    format!(
+        "\n\n## Workflow rules\n\n- If you are unsure about something you cannot resolve from the plan or the project, do not guess: stop and end your response with `<lume-question>your question</lume-question>`. {who} Then you continue with the answer."
+    )
+}
+
+/// After a step finishes: a doubt goes to the orchestrator or the user, and an orchestrator's answer goes back
+/// to the step that asked. Returns false when the run follows its route as usual.
+fn route_after_completion(
+    active: &mut ActiveWorkflowRun,
+    step_id: &str,
+    response: &str,
+    now: i64,
+) -> bool {
+    let existing = active.run.question.clone();
+    if let Some(text) = extract_question(response) {
+        let is_planner = workflow_step(&active.group, step_id)
+            .is_ok_and(|step| step.role == WorkflowRole::Planner);
+        let planner = (!is_planner).then(|| orchestrator_for(active, step_id)).flatten();
+        set_step_status(active, step_id, WorkflowStepRunStatus::Waiting);
+        active.run.pending_connection_id = None;
+        active.run.handoff_approved = false;
+        let paused = active.run.status == WorkflowRunStatus::Paused;
+        match planner {
+            Some(planner_id) => {
+                active.run.question = Some(WorkflowQuestion {
+                    origin_step_id: step_id.to_string(),
+                    step_id: planner_id,
+                    route: WorkflowQuestionRoute::ToPlanner,
+                    text,
+                    answer: None,
+                    created_at: now,
+                });
+                if !paused {
+                    active.run.status = WorkflowRunStatus::Ready;
+                }
+                record_history_event(
+                    active,
+                    WorkflowHistoryEventKind::QuestionForPlanner,
+                    Some(step_id),
+                    None,
+                    "Question sent to the orchestrator",
+                    now,
+                );
+            }
+            None => {
+                let origin = existing
+                    .filter(|question| question.step_id == step_id)
+                    .map(|question| question.origin_step_id)
+                    .unwrap_or_else(|| step_id.to_string());
+                active.run.question = Some(WorkflowQuestion {
+                    origin_step_id: origin,
+                    step_id: step_id.to_string(),
+                    route: WorkflowQuestionRoute::ToUser,
+                    text,
+                    answer: None,
+                    created_at: now,
+                });
+                if !paused {
+                    active.run.status = WorkflowRunStatus::WaitingForUser;
+                }
+                record_history_event(
+                    active,
+                    WorkflowHistoryEventKind::QuestionForUser,
+                    Some(step_id),
+                    None,
+                    "Waiting for the user's answer",
+                    now,
+                );
+            }
+        }
+        active.run.updated_at = now;
+        return true;
+    }
+    if let Some(question) = existing {
+        if question.step_id == step_id && question.origin_step_id != step_id {
+            active.run.question = Some(WorkflowQuestion {
+                route: WorkflowQuestionRoute::ToOrigin,
+                answer: Some(response.trim().to_string()),
+                ..question
+            });
+            if active.run.status != WorkflowRunStatus::Paused {
+                active.run.status = WorkflowRunStatus::Ready;
+            }
+            record_history_event(
+                active,
+                WorkflowHistoryEventKind::QuestionAnswered,
+                Some(step_id),
+                None,
+                "The orchestrator answered the question",
+                now,
+            );
+            active.run.updated_at = now;
+            return true;
+        }
+        active.run.question = None;
+    }
+    false
+}
+
+fn set_step_status(active: &mut ActiveWorkflowRun, step_id: &str, status: WorkflowStepRunStatus) {
+    if let Some(step) = active.run.steps.iter_mut().find(|step| step.step_id == step_id) {
+        step.status = status;
+    }
+}
+
+/// Marks a step as running a prompt Lume just sent it.
+fn start_step(
+    active: &mut ActiveWorkflowRun,
+    step_id: &str,
+    prompt: String,
+    baseline: HashSet<String>,
+    now: i64,
+) -> Result<(), String> {
+    let step_run = active
+        .run
+        .steps
+        .iter_mut()
+        .find(|step| step.step_id == step_id)
+        .ok_or_else(|| "The workflow step is missing".to_string())?;
+    step_run.status = WorkflowStepRunStatus::Running;
+    step_run.attempt = step_run.attempt.saturating_add(1);
+    step_run.started_at = Some(now);
+    step_run.completed_at = None;
+    step_run.result_id = None;
+    step_run.error = None;
+    active.prompts.insert(step_id.to_string(), prompt);
+    active.result_baselines.insert(step_id.to_string(), baseline);
+    active.unavailable_since.remove(step_id);
+    active.run.current_step_id = Some(step_id.to_string());
+    active.run.status = WorkflowRunStatus::Running;
+    active.run.error = None;
+    active.run.updated_at = now;
+    Ok(())
+}
+
 fn fail_step(active: &mut ActiveWorkflowRun, step_id: &str, message: &str) {
     let now = now_millis();
     let was_failed = active
@@ -1492,6 +1863,22 @@ fn fail_step(active: &mut ActiveWorkflowRun, step_id: &str, message: &str) {
 }
 
 fn status_after_pause(active: &ActiveWorkflowRun) -> WorkflowRunStatus {
+    if let Some(question) = active.run.question.as_ref() {
+        let current_is_running = active
+            .run
+            .current_step_id
+            .as_deref()
+            .and_then(|id| active.run.steps.iter().find(|step| step.step_id == id))
+            .is_some_and(|step| step.status == WorkflowStepRunStatus::Running);
+        if current_is_running {
+            return WorkflowRunStatus::Running;
+        }
+        return if question.route == WorkflowQuestionRoute::ToUser {
+            WorkflowRunStatus::WaitingForUser
+        } else {
+            WorkflowRunStatus::Ready
+        };
+    }
     if active.paused_from == Some(WorkflowRunStatus::WaitingForApproval)
         && !active.run.handoff_approved
     {
@@ -1523,6 +1910,7 @@ fn status_after_pause(active: &ActiveWorkflowRun) -> WorkflowRunStatus {
             })
             .unwrap_or(WorkflowRunStatus::Completed),
         WorkflowStepRunStatus::Failed => WorkflowRunStatus::Failed,
+        WorkflowStepRunStatus::Waiting => WorkflowRunStatus::Ready,
         WorkflowStepRunStatus::Pending => active.paused_from.unwrap_or(WorkflowRunStatus::Ready),
     }
 }
@@ -1608,6 +1996,97 @@ mod tests {
             step_history: HashMap::new(),
             recovery_deadline: None,
         }
+    }
+
+    fn planner_workflow() -> WorkflowGroupDefinition {
+        let mut planner = step("plan");
+        planner.role = WorkflowRole::Planner;
+        WorkflowGroupDefinition {
+            id: "workflow".into(),
+            terminal_group_id: "terminals".into(),
+            steps: vec![planner, step("build")],
+            connections: vec![connection("plan", "build")],
+        }
+    }
+
+    #[test]
+    fn a_question_is_read_from_the_end_of_a_response() {
+        assert_eq!(
+            extract_question("Plan...\n\n<lume-question>\nShould the cache be shared?\n</lume-question>").as_deref(),
+            Some("Should the cache be shared?")
+        );
+        assert_eq!(extract_question("No doubts here."), None);
+        assert_eq!(extract_question("<lume-question>  </lume-question>"), None);
+    }
+
+    #[test]
+    fn the_orchestrator_is_told_not_to_implement_and_how_to_ask() {
+        let group = planner_workflow();
+        let planner = initial_step_prompt(&group, &group.steps[0], "Ship it");
+        assert!(planner.contains("Do not implement anything"));
+        assert!(planner.contains("<lume-question>"));
+        let builder = role_rules(&group, &group.steps[1]);
+        assert!(builder.contains("The orchestrator answers it"));
+    }
+
+    #[test]
+    fn an_orchestrator_question_stops_the_handoff_and_waits_for_the_user() {
+        let mut active = active_run(planner_workflow(), "plan");
+        assert!(route_after_completion(&mut active, "plan", "Plan\n<lume-question>Which database?</lume-question>", 10));
+        assert_eq!(active.run.status, WorkflowRunStatus::WaitingForUser);
+        assert_eq!(active.run.pending_connection_id, None);
+        let question = active.run.question.as_ref().expect("question");
+        assert_eq!(question.route, WorkflowQuestionRoute::ToUser);
+        assert_eq!(question.step_id, "plan");
+        assert_eq!(question.text, "Which database?");
+        assert_eq!(active.run.steps[0].status, WorkflowStepRunStatus::Waiting);
+    }
+
+    #[test]
+    fn an_implementer_question_goes_to_the_orchestrator_and_its_answer_comes_back() {
+        let mut active = active_run(planner_workflow(), "build");
+        assert!(route_after_completion(&mut active, "build", "<lume-question>Keep the old API?</lume-question>", 10));
+        assert_eq!(active.run.status, WorkflowRunStatus::Ready);
+        let question = active.run.question.clone().expect("question");
+        assert_eq!((question.route, question.step_id.as_str(), question.origin_step_id.as_str()), (WorkflowQuestionRoute::ToPlanner, "plan", "build"));
+        assert_eq!(active.run.steps[1].status, WorkflowStepRunStatus::Waiting);
+
+        // The orchestrator answers without a question of its own: the answer goes back to the implementer.
+        active.run.status = WorkflowRunStatus::Running;
+        assert!(route_after_completion(&mut active, "plan", "Yes, keep it.", 20));
+        let question = active.run.question.clone().expect("question");
+        assert_eq!(question.route, WorkflowQuestionRoute::ToOrigin);
+        assert_eq!(question.answer.as_deref(), Some("Yes, keep it."));
+        assert_eq!(active.run.status, WorkflowRunStatus::Ready);
+    }
+
+    #[test]
+    fn an_orchestrator_that_cannot_answer_asks_the_user_for_the_implementer() {
+        let mut active = active_run(planner_workflow(), "build");
+        route_after_completion(&mut active, "build", "<lume-question>Keep the old API?</lume-question>", 10);
+        active.run.status = WorkflowRunStatus::Running;
+        assert!(route_after_completion(&mut active, "plan", "<lume-question>Do clients still call v1?</lume-question>", 20));
+        assert_eq!(active.run.status, WorkflowRunStatus::WaitingForUser);
+        let question = active.run.question.clone().expect("question");
+        assert_eq!((question.route, question.step_id.as_str(), question.origin_step_id.as_str()), (WorkflowQuestionRoute::ToUser, "plan", "build"));
+        assert_eq!(status_after_pause(&active), WorkflowRunStatus::WaitingForUser);
+    }
+
+    #[test]
+    fn a_step_without_an_orchestrator_asks_the_user_and_a_closed_question_follows_the_route() {
+        let group = WorkflowGroupDefinition {
+            id: "workflow".into(),
+            terminal_group_id: "terminals".into(),
+            steps: vec![step("one"), step("two")],
+            connections: vec![connection("one", "two")],
+        };
+        assert!(role_rules(&group, &group.steps[1]).contains("The user answers it"));
+        let mut active = active_run(group, "one");
+        assert!(route_after_completion(&mut active, "one", "<lume-question>Which port?</lume-question>", 10));
+        assert_eq!(active.run.status, WorkflowRunStatus::WaitingForUser);
+        // After the user's answer the question is closed, so the next result hands off as usual.
+        active.run.question = None;
+        assert!(!route_after_completion(&mut active, "one", "Done on port 80.", 20));
     }
 
     #[test]

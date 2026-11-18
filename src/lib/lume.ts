@@ -1134,6 +1134,10 @@ export async function approveWorkflowHandoff(workflowId: string): Promise<Workfl
   return invoke<WorkflowRun>("approve_workflow_handoff", { workflowId });
 }
 
+export async function answerWorkflowQuestion(workflowId: string, answer: string): Promise<WorkflowRun> {
+  return invoke<WorkflowRun>("answer_workflow_question", { workflowId, answer });
+}
+
 export async function advanceWorkflowRun(workflowId: string): Promise<WorkflowRun> {
   return invoke<WorkflowRun>("advance_workflow_run", { workflowId });
 }

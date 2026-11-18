@@ -2311,6 +2311,26 @@ fn approve_workflow_handoff(
 }
 
 #[tauri::command]
+fn answer_workflow_question(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    bridge: State<'_, codex_bridge::CodexBridge>,
+    browser: State<'_, browser_server::BrowserControl>,
+    runtime: State<'_, workflow_runtime::WorkflowRuntime>,
+    workflow_id: String,
+    answer: String,
+) -> Result<domain::WorkflowRun, String> {
+    runtime.answer_question(
+        &app,
+        state.inner(),
+        bridge.inner(),
+        browser.inner(),
+        &workflow_id,
+        &answer,
+    )
+}
+
+#[tauri::command]
 fn advance_workflow_run(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -4169,6 +4189,7 @@ pub fn run() {
             get_workflow_run,
             start_workflow_run,
             approve_workflow_handoff,
+            answer_workflow_question,
             advance_workflow_run,
             pause_workflow_run,
             resume_workflow_run,

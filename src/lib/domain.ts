@@ -436,6 +436,7 @@ export type WorkflowRunStatus =
   | "ready"
   | "running"
   | "waiting_for_approval"
+  | "waiting_for_user"
   | "paused"
   | "completed"
   | "failed"
@@ -446,7 +447,20 @@ export type WorkflowStepRunStatus =
   | "running"
   | "completed"
   | "failed"
-  | "skipped";
+  | "skipped"
+  | "waiting";
+
+/** A doubt a step raised: answered by the orchestrator when it can, by the user otherwise. */
+export interface WorkflowQuestion {
+  /** The step that raised it first. */
+  originStepId: string;
+  /** The step that gets the next prompt: the orchestrator, the step that asked the user, or the origin. */
+  stepId: string;
+  route: "to_planner" | "to_user" | "to_origin";
+  text: string;
+  answer?: string;
+  createdAt: number;
+}
 
 export interface WorkflowStepRun {
   stepId: string;
@@ -470,6 +484,7 @@ export interface WorkflowRun {
   transitionCount: number;
   steps: WorkflowStepRun[];
   error?: string;
+  question?: WorkflowQuestion;
   createdAt: number;
   updatedAt: number;
 }
@@ -487,6 +502,9 @@ export type WorkflowHistoryEventKind =
   | "step_skipped"
   | "session_replaced"
   | "guardrail_paused"
+  | "question_for_planner"
+  | "question_for_user"
+  | "question_answered"
   | "completed"
   | "cancelled";
 

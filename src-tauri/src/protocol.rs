@@ -1290,6 +1290,10 @@ pub enum HubCommand {
     ApproveWorkflowHandoff {
         workflow_id: String,
     },
+    AnswerWorkflowQuestion {
+        workflow_id: String,
+        answer: String,
+    },
     AdvanceWorkflow {
         workflow_id: String,
     },
@@ -1472,6 +1476,18 @@ impl HubCommandRequest {
                     return Err(ProtocolError::new(
                         "workflow_objective_too_large",
                         "The workflow objective exceeds 4000 characters",
+                    ));
+                }
+            }
+            HubCommand::AnswerWorkflowQuestion {
+                workflow_id,
+                answer,
+            } => {
+                validate_identifier("workflow_id", workflow_id, 256)?;
+                if answer.trim().is_empty() || answer.len() > 8_000 {
+                    return Err(ProtocolError::new(
+                        "invalid_workflow_answer",
+                        "The answer must have between 1 and 8000 characters",
                     ));
                 }
             }

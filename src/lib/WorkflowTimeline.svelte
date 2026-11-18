@@ -103,7 +103,7 @@
   }
   function statusLine() {
     if (!model || !run) return "";
-    const state = { running: tr("Running", "Executando"), waiting_for_approval: tr("Waiting for approval", "Aguardando aprovação"), paused: tr("Paused", "Pausado"), ready: tr("Ready", "Pronto"), completed: tr("Finished", "Concluído"), failed: tr("Failed", "Falhou"), cancelled: tr("Cancelled", "Cancelado"), draft: tr("Draft", "Rascunho") }[run.status];
+    const state = { running: tr("Running", "Executando"), waiting_for_approval: tr("Waiting for approval", "Aguardando aprovação"), waiting_for_user: tr("Question for you", "Dúvida para você"), paused: tr("Paused", "Pausado"), ready: tr("Ready", "Pronto"), completed: tr("Finished", "Concluído"), failed: tr("Failed", "Falhou"), cancelled: tr("Cancelled", "Cancelado"), draft: tr("Draft", "Rascunho") }[run.status];
     const parts = [state, seconds(model.end - model.start), tr(`${model.rows.length} steps`, `${model.rows.length} etapas`)];
     const waited = model.end - model.start - model.workMs;
     if (!model.live && waited > 1_000) parts.push(tr(`${seconds(waited)} waiting`, `${seconds(waited)} esperando`));

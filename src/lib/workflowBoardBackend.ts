@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { WorkflowGroupDefinition, WorkflowRole, WorkflowRoleContract, WorkflowRun } from "$lib/domain";
 import {
   advanceWorkflowRun,
+  answerWorkflowQuestion,
   approveWorkflowHandoff,
   cancelWorkflowRun,
   loadWorkflowRoleContract,
@@ -24,6 +25,8 @@ export type WorkflowBoardBackend = {
   loadRun(workflowId: string): Promise<WorkflowRun | null>;
   startRun(group: WorkflowGroupDefinition, objective: string): Promise<WorkflowRun>;
   approve(workflowId: string): Promise<WorkflowRun>;
+  /** Sends the user's answer to the doubt the run stopped on. */
+  answer(workflowId: string, answer: string): Promise<WorkflowRun>;
   advance(workflowId: string): Promise<WorkflowRun>;
   pause(workflowId: string): Promise<WorkflowRun>;
   resume(workflowId: string): Promise<WorkflowRun>;
@@ -40,6 +43,7 @@ export const desktopWorkflowBackend: WorkflowBoardBackend = {
   loadRun: loadWorkflowRun,
   startRun: startWorkflowRun,
   approve: approveWorkflowHandoff,
+  answer: answerWorkflowQuestion,
   advance: advanceWorkflowRun,
   pause: pauseWorkflowRun,
   resume: resumeWorkflowRun,

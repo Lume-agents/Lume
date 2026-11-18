@@ -485,7 +485,7 @@
     return { planner: tr("Planner", "Planejador"), implementer: tr("Implementer", "Implementador"), reviewer: tr("Reviewer", "Revisor"), tester: tr("Tester", "Testador"), researcher: tr("Researcher", "Pesquisador"), custom: tr("Custom", "Personalizado") }[role];
   }
   function runStatus(status: WorkflowRun["status"]) {
-    return { draft: tr("Draft", "Rascunho"), ready: tr("Ready for next step", "Pronto para a próxima etapa"), running: tr("Running", "Executando"), waiting_for_approval: tr("Waiting for approval", "Aguardando aprovação"), paused: tr("Paused", "Pausado"), completed: tr("Completed", "Concluído"), failed: tr("Failed", "Falhou"), cancelled: tr("Cancelled", "Cancelado") }[status];
+    return { draft: tr("Draft", "Rascunho"), ready: tr("Ready for next step", "Pronto para a próxima etapa"), running: tr("Running", "Executando"), waiting_for_approval: tr("Waiting for approval", "Aguardando aprovação"), waiting_for_user: tr("Waiting for your answer", "Aguardando sua resposta"), paused: tr("Paused", "Pausado"), completed: tr("Completed", "Concluído"), failed: tr("Failed", "Falhou"), cancelled: tr("Cancelled", "Cancelado") }[status];
   }
   // "Manual" and "approval" were the same pause with an extra click, so a handoff is either automatic or asks first.
   function handoffMode(connection: WorkflowConnectionDefinition) {
@@ -498,7 +498,7 @@
   function stepStatus(step: WorkflowStepDefinition) {
     const state = stepVisualState(run, step.id);
     if (state === "idle") { const label = sessionFor(step)?.statusLabel; return label ? displayText(language, label) : tr("Unavailable", "Indisponível"); }
-    return { pending: tr("Pending", "Pendente"), running: tr("Running", "Executando"), completed: tr("Completed", "Concluído"), failed: tr("Failed", "Falhou"), skipped: tr("Skipped", "Ignorado") }[state];
+    return { pending: tr("Pending", "Pendente"), running: tr("Running", "Executando"), completed: tr("Completed", "Concluído"), failed: tr("Failed", "Falhou"), skipped: tr("Skipped", "Ignorado"), waiting: tr("Waiting for an answer", "Aguardando resposta") }[state];
   }
   function notify(message: string, tone: SystemBannerItem["tone"] = "error") {
     const id = crypto.randomUUID();
@@ -1045,6 +1045,20 @@
     catch (error) { notify(errorMessage(error)); }
     finally { actionLoading = false; }
   }
+  // The doubt the run stopped on, and who raised it: the orchestrator, or a step it could not answer for.
+  let questionAnswer = $state("");
+  const questionAsker = $derived(run?.question ? group?.steps.find((step) => step.id === run!.question!.stepId) : undefined);
+  const questionOrigin = $derived(run?.question && run.question.originStepId !== run.question.stepId ? group?.steps.find((step) => step.id === run!.question!.originStepId) : undefined);
+  function questionTitle() {
+    if (!questionAsker || questionAsker.role === "planner") return tr("The orchestrator has a question", "O orquestrador tem uma dúvida");
+    return tr(`The ${roleName(questionAsker.role).toLowerCase()} has a question`, `O ${roleName(questionAsker.role).toLowerCase()} tem uma dúvida`);
+  }
+  async function answerQuestion() {
+    const answer = questionAnswer.trim();
+    if (!answer || !activeId) return;
+    await perform(() => backend.answer(activeId, answer));
+    if (run?.status !== "waiting_for_user") questionAnswer = "";
+  }
   async function execute() {
     if (!group || !objective.trim() || chain?.problems.length || slotIssue !== null || blockedStep || runLoading) return;
     const definition = group;
@@ -1269,6 +1283,7 @@
           {:else if state === "completed"}<LumeIcon name="check" size={12} />
           {:else if state === "failed"}<LumeIcon name="close" size={12} />
           {:else if state === "skipped"}<LumeIcon name="arrow-right" size={12} />
+          {:else if state === "waiting"}<LumeIcon name="warning" size={11} />
           {:else}<i></i>{/if}
         </span>
         {#if !slotted}
@@ -1667,6 +1682,18 @@
         <button class="chain-problem" type="button" onclick={() => choose({ kind: "step", id: blockedStep!.id })}><LumeIcon name="warning" size={13} />{tr("Connect or take control of ", "Conecte ou assuma o controle de ") + name(sessionFor(blockedStep))}</button>
       {/if}
       {#if run?.error}<p class="run-error">{run.error}</p>{/if}
+      {#if run?.question && run.status === "waiting_for_user"}
+        <section class="run-question" aria-label={questionTitle()}>
+          <header><LumeIcon name="warning" size={13} /><strong>{questionTitle()}</strong>{#if questionOrigin}<small>{tr("Raised by the ", "Levantada pelo ") + roleName(questionOrigin.role).toLowerCase()}</small>{/if}</header>
+          <p>{run.question.text}</p>
+          <div class="question-reply">
+            <textarea rows="2" maxlength="8000" aria-label={tr("Your answer", "Sua resposta")} placeholder={tr("Answer so the workflow can continue", "Responda para o workflow continuar")} bind:value={questionAnswer} onkeydown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void answerQuestion(); } }}></textarea>
+            <button class="primary" type="button" disabled={actionLoading || !questionAnswer.trim()} onclick={() => void answerQuestion()}><LumeIcon name="send" size={13} />{tr("Answer", "Responder")}</button>
+          </div>
+        </section>
+      {:else if run?.question && run.question.route !== "to_user" && ["ready", "running"].includes(run.status)}
+        <p class="run-question-note"><LumeIcon name="steer" size={12} />{run.question.route === "to_origin" ? tr("The orchestrator answered; the answer goes back to the step that asked.", "O orquestrador respondeu; a resposta volta para quem perguntou.") : tr("A step has a question; the orchestrator is answering it.", "Uma etapa tem uma dúvida; o orquestrador está respondendo.")}</p>
+      {/if}
       <div class="run-controls">
         <textarea rows="1" maxlength="4000" aria-label={tr("Workflow objective", "Objetivo do workflow")} placeholder={tr("What should these agents accomplish?", "O que estes agentes devem realizar?")} disabled={locked} value={objective} oninput={(event) => { objectives = { ...objectives, [activeId]: event.currentTarget.value }; invalidatePreview(); persistLayout(); }}></textarea>
         <div class="run-actions">
@@ -1744,6 +1771,7 @@
   .card-orb > i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .85; }
   .card-orb :global(.workflow-role-icon) { width: 14px; height: 14px; }
   .orb-pending, .orb-idle { color: var(--workspace-muted); background: color-mix(in srgb, var(--workspace-muted) 22%, var(--workspace-raised)); }
+  .orb-waiting { color: #fff; background: var(--board-warning); }
   .orb-running { background: var(--workspace-accent); animation: orb-ping 1.5s ease-out infinite; }
   .orb-completed { background: var(--board-ok); }
   .orb-failed { background: var(--board-danger); }
@@ -1807,7 +1835,7 @@
   [data-state="running"] .card-status i, [data-status="running"] .run-state i { background: #56aada; box-shadow: 0 0 0 3px rgba(86, 170, 218, .22); animation: status-pulse 1.4s ease-in-out infinite; }
   [data-state="completed"] .card-status i, [data-status="completed"] .run-state i { background: var(--workspace-accent); }
   [data-state="failed"] .card-status i, [data-status="failed"] .run-state i { background: var(--board-danger); }
-  [data-state="permission_required"] .card-status i, [data-status="waiting_for_approval"] .run-state i, [data-status="paused"] .run-state i { background: var(--board-warning); }
+  [data-state="permission_required"] .card-status i, [data-status="waiting_for_approval"] .run-state i, [data-status="waiting_for_user"] .run-state i, [data-status="paused"] .run-state i { background: var(--board-warning); }
   @keyframes status-pulse { 50% { box-shadow: 0 0 0 5px rgba(86, 170, 218, 0); } }
   .card-speech { position: absolute; z-index: 3; bottom: calc(100% + 30px); left: 6px; width: min(230px, 100%); padding: 8px 11px; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--card-role) 34%, var(--workspace-line)); border-radius: 12px 12px 3px 12px; color: var(--workspace-text); background: color-mix(in srgb, var(--card-role) 7%, var(--workspace-raised)); box-shadow: 0 6px 18px rgba(17, 35, 27, .1); font-size: 11px; font-weight: 560; line-height: 1.4; text-align: left; overflow-wrap: anywhere; pointer-events: none; }
   .card-speech .speech-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; }
@@ -1893,11 +1921,11 @@
   :global(.workspace.dark) .role-option.selected .role-option-fab, :global(.mobile-app.dark) .role-option.selected .role-option-fab { box-shadow: inset 0 1px 0 rgba(255, 255, 255, .16), inset 0 -3px 5px rgba(0, 0, 0, .3), 0 5px 12px rgba(0, 0, 0, .45), 0 0 0 5px color-mix(in srgb, var(--card-role) 26%, transparent); }
   .role-option:focus-visible { outline: 2px solid var(--card-role); outline-offset: 2px; }
   .role-option:disabled { opacity: .5; cursor: default; }
-  .field input, .field textarea, .run-controls textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-subtle); font: inherit; line-height: 1.5; resize: vertical; caret-color: var(--workspace-accent); }
+  .field input, .field textarea, .run-controls textarea, .question-reply textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-strong); background: var(--workspace-subtle); font: inherit; line-height: 1.5; resize: vertical; caret-color: var(--workspace-accent); }
   .field textarea { min-height: 56px; max-height: 220px; }
   .panel-actions { display: flex; gap: 6px; margin-top: 5px; }
-  .panel-actions button, .run-actions button, .empty-card button { min-height: 31px; padding: 0 10px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-text); background: var(--workspace-subtle); font-size: 11px; }
-  .panel-actions button:hover:not(:disabled), .run-actions button:hover:not(:disabled) { border-color: var(--workspace-accent); }
+  .panel-actions button, .run-actions button, .question-reply button, .empty-card button { min-height: 31px; padding: 0 10px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--workspace-line); border-radius: 8px; color: var(--workspace-text); background: var(--workspace-subtle); font-size: 11px; }
+  .panel-actions button:hover:not(:disabled), .run-actions button:hover:not(:disabled), .question-reply button:hover:not(:disabled) { border-color: var(--workspace-accent); }
   .panel-actions .danger, .run-actions .danger { color: var(--board-danger); background: transparent; }
   .session-warning { margin: 0; display: flex; align-items: flex-start; gap: 7px; color: var(--board-warning); font-size: 11px; line-height: 1.5; }
   .bridge { padding: 10px; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-line) transparent; border-radius: 16px; }
@@ -2058,7 +2086,7 @@
   .run-track { position: absolute; inset: 0 0 auto; height: 3px; background: color-mix(in srgb, var(--workspace-muted) 14%, transparent); }
   .run-track i { display: block; height: 100%; width: var(--progress, 0%); border-radius: 0 3px 3px 0; background: linear-gradient(90deg, var(--role-planner), var(--role-implementer)); transition: width 320ms cubic-bezier(.2, .8, .2, 1); }
   [data-status="failed"] .run-track i { background: var(--board-danger); }
-  [data-status="waiting_for_approval"] .run-track i, [data-status="paused"] .run-track i { background: var(--board-warning); }
+  [data-status="waiting_for_approval"] .run-track i, [data-status="waiting_for_user"] .run-track i, [data-status="paused"] .run-track i { background: var(--board-warning); }
   .run-heading { min-width: 0; display: flex; align-items: center; gap: 9px; }
   .run-state { padding: 4px 10px 4px 9px; display: flex; align-items: center; border-radius: 999px; color: var(--workspace-strong); background: color-mix(in srgb, var(--workspace-muted) 10%, transparent); font-size: 11px; white-space: nowrap; }
   .run-state strong { font-weight: 600; }
@@ -2069,9 +2097,17 @@
   .run-controls textarea { min-height: 35px; max-height: 100px; flex: 1; font-size: 11px; resize: none; }
   .run-controls textarea::placeholder { color: var(--workspace-muted); }
   .run-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; flex-wrap: wrap; }
-  .run-actions .primary { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 48%, var(--workspace-line)); background: var(--workspace-accent-soft); }
+  .run-actions .primary, .question-reply .primary { color: var(--workspace-strong); border-color: color-mix(in srgb, var(--workspace-accent) 48%, var(--workspace-line)); background: var(--workspace-accent-soft); }
   .run-actions small { flex-basis: 100%; font-size: 10px; color: var(--workspace-muted); text-align: right; }
   .chain-problem { min-width: 0; padding: 0; display: flex; align-items: flex-start; gap: 6px; border: 0; color: var(--board-warning); background: transparent; text-align: left; font-size: 10px; line-height: 1.4; }
+  .run-question { display: grid; gap: 6px; padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--board-warning) 38%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--board-warning) 8%, transparent); }
+  .run-question header { display: flex; align-items: center; gap: 6px; color: var(--board-warning); }
+  .run-question header strong { font-size: 11px; }
+  .run-question header small { margin-left: auto; color: var(--workspace-muted); font-size: 10px; }
+  .run-question p { margin: 0; max-height: 120px; overflow: auto; color: var(--workspace-strong); font-size: 11px; line-height: 1.5; white-space: pre-wrap; }
+  .question-reply { display: flex; align-items: flex-end; gap: 6px; }
+  .question-reply textarea { flex: 1; min-height: 36px; max-height: 120px; font-size: 11px; resize: none; }
+  .run-question-note { margin: 0; display: flex; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 10px; }
   .run-error { margin: 0; max-height: 44px; overflow: auto; color: var(--board-danger); font-size: 10px; line-height: 1.5; }
   /* Touch: the toolbar clears the notch and the Dynamic Island, and the role bubbles orbit the badge of the tapped card. */
   .workflow-board.touch .board-toolbar { top: max(10px, env(safe-area-inset-top, 0px)); left: max(10px, env(safe-area-inset-left, 0px)); right: max(10px, env(safe-area-inset-right, 0px)); max-width: none; overflow-x: auto; scrollbar-width: none; }

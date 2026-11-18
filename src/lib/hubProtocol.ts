@@ -113,6 +113,11 @@ export type HubCommand =
       workflowId: string;
     }
   | {
+      type: "answer_workflow_question";
+      workflowId: string;
+      answer: string;
+    }
+  | {
       type: "advance_workflow";
       workflowId: string;
     }

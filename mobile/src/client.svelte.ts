@@ -1209,6 +1209,10 @@ export class MobileClient {
         return data<WorkflowRun>({ type: "start_workflow", workflowId: group.id, objective }, true);
       },
       approve: run("approve_workflow_handoff"),
+      answer: async (workflowId, answer) => {
+        if (!(await this.verify())) throw new Error(this.tr("Device verification was not completed.", "A verificação do aparelho não foi concluída."));
+        return data<WorkflowRun>({ type: "answer_workflow_question", workflowId, answer }, true);
+      },
       advance: run("advance_workflow"),
       pause: run("pause_workflow"),
       resume: run("resume_workflow"),

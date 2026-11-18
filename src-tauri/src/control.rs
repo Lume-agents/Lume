@@ -2476,6 +2476,13 @@ pub fn execute_hub_command(
             .approve(app, state, &workflow_id)
             .and_then(|run| serde_json::to_value(run).map_err(|error| error.to_string()))
             .map(Some),
+        protocol::HubCommand::AnswerWorkflowQuestion {
+            workflow_id,
+            answer,
+        } => workflow_runtime
+            .answer_question(app, state, bridge, browser, &workflow_id, &answer)
+            .and_then(|run| serde_json::to_value(run).map_err(|error| error.to_string()))
+            .map(Some),
         protocol::HubCommand::AdvanceWorkflow { workflow_id } => workflow_runtime
             .advance(app, state, bridge, browser, &workflow_id)
             .and_then(|run| serde_json::to_value(run).map_err(|error| error.to_string()))

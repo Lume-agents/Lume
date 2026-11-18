@@ -524,7 +524,7 @@ impl WorkflowRole {
     pub fn default_contract(self) -> WorkflowRoleContract {
         let fields = match self {
             Self::Planner => (
-                "Analyze the objective, constraints, dependencies, and risks. Produce a clear, ordered, actionable plan. Resolve important ambiguities before handing work off, and do not implement the solution unless explicitly requested.",
+                "You orchestrate this workflow: analyze the objective, constraints, dependencies, and risks, and produce a clear, ordered, actionable plan for the Implementer. Never implement anything yourself: do not edit files or run commands that change the project. Resolve important ambiguities before handing work off.",
                 "The objective, relevant context, constraints, and any existing decisions.",
                 "An ordered implementation plan with key decisions, dependencies, risks, and validation steps.",
                 "The plan is actionable, covers the full requested scope, and clearly identifies any remaining blocker or decision.",
@@ -679,6 +679,8 @@ pub enum WorkflowRunStatus {
     Ready,
     Running,
     WaitingForApproval,
+    /// The orchestrator, or a step with no orchestrator above it, asked the user something.
+    WaitingForUser,
     Paused,
     Completed,
     Failed,
@@ -694,6 +696,35 @@ pub enum WorkflowStepRunStatus {
     Completed,
     Failed,
     Skipped,
+    /// The step asked a question and waits for the orchestrator's (or the user's) answer.
+    Waiting,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowQuestionRoute {
+    /// The question goes to the orchestrator (planner) step.
+    #[default]
+    ToPlanner,
+    /// Nobody in the workflow can answer it: the user has to.
+    ToUser,
+    /// The orchestrator answered: the answer goes back to the step that asked.
+    ToOrigin,
+}
+
+/// A doubt raised by a step. It is answered inside the workflow when the orchestrator can, by the user otherwise.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WorkflowQuestion {
+    /// The step that raised the doubt first.
+    pub origin_step_id: String,
+    /// The step that receives the next prompt: the orchestrator, the step that asked the user, or the origin.
+    pub step_id: String,
+    pub route: WorkflowQuestionRoute,
+    pub text: String,
+    /// The orchestrator's answer on its way back to the origin.
+    pub answer: Option<String>,
+    pub created_at: i64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -722,6 +753,7 @@ pub struct WorkflowRun {
     pub transition_count: u16,
     pub steps: Vec<WorkflowStepRun>,
     pub error: Option<String>,
+    pub question: Option<WorkflowQuestion>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -741,6 +773,9 @@ pub enum WorkflowHistoryEventKind {
     StepSkipped,
     SessionReplaced,
     GuardrailPaused,
+    QuestionForPlanner,
+    QuestionForUser,
+    QuestionAnswered,
     Completed,
     Cancelled,
 }

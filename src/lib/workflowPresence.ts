@@ -228,6 +228,7 @@ function runTone(run: WorkflowRun | null): PresenceTone {
   switch (run?.status) {
     case "running": return "running";
     case "waiting_for_approval": return "approval";
+    case "waiting_for_user": return "approval";
     case "ready": return "ready";
     case "paused": return "paused";
     case "failed": return "failed";

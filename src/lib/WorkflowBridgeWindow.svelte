@@ -249,6 +249,7 @@
       ready: ["Ready for next step", "Pronto para a próxima etapa"],
       running: ["Running", "Executando"],
       waiting_for_approval: ["Waiting for approval", "Aguardando aprovação"],
+      waiting_for_user: ["The orchestrator has a question", "O orquestrador tem uma dúvida"],
       paused: ["Paused", "Pausado"],
       completed: ["Completed", "Concluído"],
       failed: ["Failed", "Falhou"],
@@ -261,6 +262,7 @@
     const labels: Record<WorkflowStepRunStatus, [string, string]> = {
       pending: ["Pending", "Pendente"],
       running: ["Running", "Executando"],
+      waiting: ["Waiting for an answer", "Aguardando resposta"],
       completed: ["Completed", "Concluído"],
       failed: ["Failed", "Falhou"],
       skipped: ["Skipped", "Ignorado"],

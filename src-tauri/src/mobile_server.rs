@@ -1185,6 +1185,7 @@ fn route_core(
             // Running, editing and steering workflows starts agents, as a prompt does.
             protocol::HubCommand::StartWorkflow { .. }
             | protocol::HubCommand::ApproveWorkflowHandoff { .. }
+            | protocol::HubCommand::AnswerWorkflowQuestion { .. }
             | protocol::HubCommand::AdvanceWorkflow { .. }
             | protocol::HubCommand::PauseWorkflow { .. }
             | protocol::HubCommand::ResumeWorkflow { .. }

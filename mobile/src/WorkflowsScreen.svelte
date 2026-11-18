@@ -32,7 +32,7 @@
   }
 
   function runStatus(status: WorkflowRun["status"]) {
-    return ({ draft: client.tr("Draft", "Rascunho"), ready: client.tr("Ready for next step", "Pronto para a próxima etapa"), running: client.tr("Running", "Executando"), waiting_for_approval: client.tr("Waiting for approval", "Aguardando aprovação"), paused: client.tr("Paused", "Pausado"), completed: client.tr("Completed", "Concluído"), failed: client.tr("Failed", "Falhou"), cancelled: client.tr("Cancelled", "Cancelado") } as Record<string, string>)[status] ?? status;
+    return ({ draft: client.tr("Draft", "Rascunho"), ready: client.tr("Ready for next step", "Pronto para a próxima etapa"), running: client.tr("Running", "Executando"), waiting_for_approval: client.tr("Waiting for approval", "Aguardando aprovação"), waiting_for_user: client.tr("The orchestrator has a question", "O orquestrador tem uma dúvida"), paused: client.tr("Paused", "Pausado"), completed: client.tr("Completed", "Concluído"), failed: client.tr("Failed", "Falhou"), cancelled: client.tr("Cancelled", "Cancelado") } as Record<string, string>)[status] ?? status;
   }
 
   function sessionFor(step: WorkflowStepDefinition) {
@@ -167,7 +167,7 @@
   .status { display: inline-flex; align-items: center; gap: 5px; }
   .status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .status-running { color: #6ea6d6; }
-  .status-waiting_for_approval, .status-paused, .status-ready { color: #d39a4c; }
+  .status-waiting_for_approval, .status-waiting_for_user, .status-paused, .status-ready { color: #d39a4c; }
   .status-completed { color: #57b380; }
   .status-failed, .status-cancelled { color: #d06e66; }
   .details { padding: 0 14px 14px; display: grid; gap: 12px; }

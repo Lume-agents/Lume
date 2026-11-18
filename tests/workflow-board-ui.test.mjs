@@ -107,7 +107,7 @@ function nativeFixture() {
           if (!fake.preferences.workflowGroups.some((saved) => JSON.stringify(saved) === JSON.stringify(args.group))) throw new Error("Execution began before saving the definition");
         }
       }
-      const actions = { pause_workflow_run: "paused", resume_workflow_run: "running", approve_workflow_handoff: "ready", advance_workflow_run: "running", retry_workflow_step: "running", skip_workflow_step: "ready", cancel_workflow_run: "cancelled" };
+      const actions = { pause_workflow_run: "paused", resume_workflow_run: "running", approve_workflow_handoff: "ready", answer_workflow_question: "running", advance_workflow_run: "running", retry_workflow_step: "running", skip_workflow_step: "ready", cancel_workflow_run: "cancelled" };
       if (actions[command]) return fake.status(actions[command]);
       if (command === "preview_workflow_context") return { markdown: "# Contexto do teste\n\nResposta e arquivos selecionados.", estimatedTokens: 42, files: [], checks: [], redactions: [] };
       if (command.includes("version")) return "0.15.3";
@@ -318,6 +318,17 @@ try {
   await wait("document.querySelector('.board-run').dataset.status === 'ready'");
   assert.equal(await evaluate("document.querySelector('.edge-approve')"), null, "nothing left to approve on the arrow");
   await click(".board-run .primary");
+  await wait("document.querySelector('.board-run').dataset.status === 'running'");
+  // A doubt the orchestrator cannot answer stops the run before the handoff and asks the person.
+  await evaluate("window.__fixture.status('waiting_for_user', { pendingConnectionId: null, question: { originStepId: 'step-fixture-1', stepId: 'step-fixture-0', route: 'to_user', text: 'Qual banco usar?', createdAt: Date.now() } })");
+  await wait("document.querySelector('.board-run .run-question')");
+  assert.match(await evaluate("document.querySelector('.run-question header').textContent"), /O orquestrador tem uma dúvida/, "the run says the orchestrator has a question");
+  assert.equal(await evaluate("document.querySelector('.run-question p').textContent"), "Qual banco usar?");
+  assert.equal(await evaluate("document.querySelector('.question-reply .primary').disabled"), true, "an empty answer cannot be sent");
+  await screenshot("question");
+  await evaluate("(() => { const field = document.querySelector('.question-reply textarea'); field.value = 'Postgres'; field.dispatchEvent(new Event('input', { bubbles: true })); })()");
+  await click(".question-reply .primary");
+  await wait("window.__fixture.calls.includes('answer_workflow_question')");
   await wait("document.querySelector('.board-run').dataset.status === 'running'");
   // The chat whose result goes out carries the same approval in its strip, and only that action.
   await evaluate("window.__fixture.status('waiting_for_approval', { pendingConnectionId: 'connection-fixture' })");

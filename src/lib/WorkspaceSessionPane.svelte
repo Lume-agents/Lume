@@ -962,7 +962,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         id: alert.id,
         message: alert.message,
         tone: alert.tone,
-        duration: alert.tone === "error" ? 7_600 : 6_000,
+        duration: alert.tone === "error" ? 12_000 : 6_000,
         onDismiss: () => archiveAgentAlert(alert.id),
       });
     }
@@ -3206,7 +3206,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       <SessionEnvironmentMenu sessionId={session.id} {language} shells={sessionShells(session)} />
     </div>
   {/if}
-  <form bind:this={composerElement} data-tour="composer" bind:clientHeight={composerHeight} class:fresh={composerInIntroPosition} class:crossfade-out={composerTransition === "out"} class:crossfade-in={composerTransition === "in"} class:unavailable={!canCompose} class="composer" onpaste={(event) => void pasteAttachments(event)} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
+  <form bind:this={composerElement} data-tour="composer" bind:clientHeight={composerHeight} class:fresh={composerInIntroPosition} class:controls-open={controlsOpen} class:crossfade-out={composerTransition === "out"} class:crossfade-in={composerTransition === "in"} class:unavailable={!canCompose} class="composer" onpaste={(event) => void pasteAttachments(event)} onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}>
     {#if composerInIntroPosition}
       <div class="composer-welcome"><LumeMascot status="idle" awake size={45} /><strong>{tr("Hello. What shall we work on?", "Olá. No que vamos trabalhar?")}</strong></div>
     {/if}
@@ -3734,7 +3734,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .text-zoom-popover button:disabled { opacity: .35; cursor: default; }
   .text-zoom-popover output { color: var(--workspace-muted); font-size: 10px; font-weight: 720; text-align: center; font-variant-numeric: tabular-nums; }
   .agent-controls { position: static; }
-  .agent-controls-popover { position: absolute; z-index: 12; bottom: calc(100% + 9px); left: 0; width: min(320px, calc(100cqw - 20px)); max-height: min(450px, calc(100vh - 115px)); padding: 15px; overflow: visible; border: 1px solid var(--workspace-line); border-radius: 16px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(8, 18, 13, .2); animation: controls-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
+  .agent-controls-popover { position: absolute; z-index: 12; bottom: calc(100% + 9px); left: 0; width: min(320px, calc(100cqw - 20px)); max-height: min(450px, calc(100vh - 115px)); padding: 15px; overflow: visible; border: 1px solid var(--workspace-line); border-radius: 16px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(8, 18, 13, .2); animation: controls-fade-in 180ms ease-out; }
   .controls-field { margin-top: 11px; display: grid; gap: 7px; }
   .agent-controls-popover .controls-field:first-child { margin-top: 0; }
   .controls-field > span { display: flex; align-items: center; justify-content: space-between; color: var(--workspace-muted); font-size: 10px; font-weight: 760; }
@@ -3988,6 +3988,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer:not(.fresh) > :global(*) { pointer-events: auto; }
   /* Stops short of the chat's 9px scrollbar so the thumb stays on top; the conversation paints the same fade under the scrollbar. */
   .composer:not(.fresh)::before { position: absolute; z-index: -1; top: -34px; right: 9px; bottom: 0; left: 0; background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--workspace-pane) 74%, transparent) 64%); content: ""; pointer-events: none; -webkit-backdrop-filter: blur(7px); backdrop-filter: blur(7px); -webkit-mask-image: linear-gradient(to bottom, transparent, #000 60%); mask-image: linear-gradient(to bottom, transparent, #000 60%); }
+  .composer.controls-open:not(.fresh)::before { -webkit-backdrop-filter: none; backdrop-filter: none; }
   .composer.fresh { position: absolute; top: 50%; right: 0; left: 0; z-index: 3; border-top: 0; background: transparent; transform: translateY(-50%); }
   .composer-welcome { max-width: 760px; margin: 0 auto 24px; display: flex; align-items: center; justify-content: center; gap: 13px; }
   .composer-welcome strong { color: var(--workspace-strong); font-size: clamp(15px, 2.2cqw, 22px); font-weight: 710; letter-spacing: -.025em; }
@@ -4151,6 +4152,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   @keyframes takeover-fade { from { opacity: 0; } }
   @keyframes takeover-arrive { from { opacity: 0; transform: translateY(7px) scale(.975); } }
   @keyframes controls-arrive { from { opacity: 0; transform: translateY(-5px) scale(.985); } }
+  @keyframes controls-fade-in { from { opacity: 0; } }
   @keyframes control-icon-arrive { from { opacity: .5; transform: scale(.74) translateY(2px); } }
   @keyframes max-thumb-pulse { to { box-shadow: 0 0 0 3px color-mix(in srgb, var(--effort-tone) 24%, transparent), 0 0 18px color-mix(in srgb, var(--effort-tone) 34%, transparent); } }
   @keyframes ultra-slider-flow { to { background-position: -220% 0; } }

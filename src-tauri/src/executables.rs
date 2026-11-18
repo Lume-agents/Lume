@@ -178,11 +178,22 @@ fn path_lookup(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// A command's bare name (`codex`, `claude-code`, `node.exe`): nothing a shell or `where` would read as more.
+fn is_plain_command_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
+}
+
 #[cfg(not(target_os = "windows"))]
 fn shell_lookup(name: &str) -> Option<PathBuf> {
+    if !is_plain_command_name(name) {
+        return None;
+    }
     let shell = env::var_os("SHELL").unwrap_or_else(|| "/bin/bash".into());
+    // The name goes in as an argument, never as part of the script.
     let output = Command::new(shell)
-        .args(["-ic", &format!("command -v -- {name}")])
+        .args(["-ic", r#"command -v -- "$1""#, "lume", name])
         .output()
         .ok()?;
     output.status.success().then(|| {
@@ -198,6 +209,9 @@ fn shell_lookup(name: &str) -> Option<PathBuf> {
 fn shell_lookup(name: &str) -> Option<PathBuf> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if !is_plain_command_name(name) {
+        return None;
+    }
     let output = Command::new("where.exe")
         .arg(name)
         .creation_flags(CREATE_NO_WINDOW)
@@ -304,6 +318,16 @@ fn prepend_parent_to_path(command: &mut Command, executable: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_bare_command_names_reach_the_shell() {
+        for name in ["codex", "claude", "node.exe", "gemini-cli", "omp_rpc"] {
+            assert!(is_plain_command_name(name), "{name}");
+        }
+        for name in ["", "-v", "codex; rm -rf ~", "$(id)", "a b", "../bin/x", "`id`", "x|y"] {
+            assert!(!is_plain_command_name(name), "{name}");
+        }
+    }
 
     #[test]
     fn executable_candidates_include_the_plain_unix_name() {

@@ -3468,6 +3468,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             <span>{["codex", "opencode", "grok", "antigravity", "omp"].includes(session.agent)
               ? (modelSettings?.models.find((option) => option.model === selectedModel)?.displayName || selectedModel || "Model")
               : (claudeModels.find((option) => option.model === claudeModel)?.displayName || claudeModel || tr("Model", "Modelo"))}</span>
+            {#if (session.agent === "codex" || session.agent === "claude_code") && currentEffort()}<span class="effort-indicator" style:color={effortTone(currentEffort())} title={tr("Reasoning effort", "Esforço de raciocínio")}>{effortLabel()}</span>{/if}
             {#if (session.agent === "codex" || session.agent === "claude_code") && fastMode}<span class="fast-indicator" title={tr("Fast mode is on", "Modo Fast ligado")}><WorkspaceChatIcon name="fast" size={13} active /></span>{/if}
             <LumeIcon name="chevron-down" size={12} />
           </button>
@@ -3779,11 +3780,12 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .outgoing-row.in-flight .user-message { visibility: hidden; }
   .outgoing-row.delivery-pending .user-message { border-style: dashed; opacity: .76; }
   .user-row.outgoing-replacement { display: none; }
-  .attached-notes { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 2px 6px; }
-  .note-chip { max-width: 220px; min-height: 24px; padding: 0 4px 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 11px; font-weight: 650; }
+  .attached-notes { max-width: 760px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 5px; }
+  .note-chip { max-width: 220px; min-height: 24px; padding: 0 3px 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 11px; font-weight: 650; }
   .note-chip small { min-width: 0; overflow: hidden; color: var(--workspace-strong); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-  .note-chip button { width: 18px; height: 18px; padding: 0; display: grid; flex: 0 0 auto; place-items: center; border: 0; border-radius: 50%; color: var(--workspace-muted); background: transparent; cursor: pointer; }
-  .note-chip button:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
+  .composer .note-chip button { width: 18px; height: 18px; padding: 0; box-shadow: none; display: grid; flex: 0 0 auto; place-items: center; border: 0; border-radius: 50%; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .composer .note-chip button:hover:not(:disabled) { color: var(--workspace-strong); background: color-mix(in srgb, var(--workspace-accent) 16%, transparent); border-radius: 50%; }
+  .composer .note-chip button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 1px; border-radius: 50%; }
   .user-message .attachments .note-chip { padding: 0 8px; }
   /* Shown with the row, like the response actions; the button stays reachable by keyboard. */
   .prompt-actions { margin-top: -5px; display: flex; justify-content: flex-end; opacity: 0; transition: opacity 140ms ease; }
@@ -4048,6 +4050,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .permission-menu button small { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 560; line-height: 1.35; }
   .permission-menu button > :global(.lume-icon) { flex: 0 0 auto; color: var(--workspace-accent); }
   .permission-note { margin: 2px 9px 4px; color: var(--workspace-faint); font-size: var(--workspace-chat-tiny-size); }
+  .composer-tools .model-trigger .effort-indicator { flex: 0 0 auto; font-weight: 720; text-transform: capitalize; }
   .model-trigger span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .composer-tools .model-trigger:hover:not(:disabled), .composer-tools .model-trigger.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .composer-tools .model-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }

@@ -1,4 +1,4 @@
-import { readable } from "svelte/store";
+import { readable, writable } from "svelte/store";
 import { invoke } from "@tauri-apps/api/core";
 
 export interface EnvironmentPort {
@@ -88,4 +88,28 @@ export function environmentElapsed(environment: SessionEnvironment, now = Date.n
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+const DISMISSED_KEY = "lume-dismissed-environments-v1";
+function loadDismissed(): string[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(DISMISSED_KEY) ?? "[]");
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  } catch { return []; }
+}
+
+/** The environments and shells the person hid from the list once they were no longer running. */
+export const dismissedEnvironments = writable<string[]>(typeof localStorage === "undefined" ? [] : loadDismissed());
+
+export function dismissEnvironments(ids: string[]) {
+  dismissedEnvironments.update((current) => {
+    const next = [...new Set([...current, ...ids])].slice(-300);
+    try { localStorage.setItem(DISMISSED_KEY, JSON.stringify(next)); } catch { /* hidden for this window only */ }
+    return next;
+  });
+}
+
+/** What the list still shows: a hidden one comes back if it runs again, and a running one cannot be hidden. */
+export function withoutDismissed<T extends { id: string; status: string }>(items: T[], dismissed: string[]): T[] {
+  return items.filter((item) => item.status === "running" || item.status === "stopping" || !dismissed.includes(item.id));
 }

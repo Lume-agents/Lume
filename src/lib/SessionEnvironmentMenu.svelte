@@ -8,7 +8,7 @@
   import { copyResolvedColorTokens } from "$lib/floatingTheme";
   import { SYSTEM_BANNER_CONTEXT, type SystemBannerReporter } from "$lib/systemBannerContext";
   import { sessionEnvironments, environmentsForSession, runningEnvironments, environmentElapsed,
-    stopSessionEnvironment, refreshSessionEnvironments, type SessionEnvironment } from "$lib/sessionEnvironments";
+    stopSessionEnvironment, refreshSessionEnvironments, dismissedEnvironments, dismissEnvironments, withoutDismissed, type SessionEnvironment } from "$lib/sessionEnvironments";
   import type { Language } from "$lib/i18n";
 
   let { sessionId, language = "en", variant = "fab", compact = false, shells = [] } = $props<{
@@ -17,13 +17,15 @@
     shells?: SessionShell[];
   }>();
   const report = getContext<SystemBannerReporter | undefined>(SYSTEM_BANNER_CONTEXT);
-  const environments = $derived(environmentsForSession($sessionEnvironments, sessionId));
+  const environments = $derived(withoutDismissed(environmentsForSession($sessionEnvironments, sessionId), $dismissedEnvironments));
   const running = $derived(runningEnvironments(environments));
-  const runningShells = $derived(shells.filter((shell: SessionShell) => shell.status === "running"));
+  const shownShells = $derived(withoutDismissed(shells as SessionShell[], $dismissedEnvironments));
+  const runningShells = $derived(shownShells.filter((shell: SessionShell) => shell.status === "running"));
+  const finished = $derived([...environments.filter((item) => item.status !== "running" && item.status !== "stopping"), ...shownShells.filter((shell) => shell.status !== "running")]);
   const busyCount = $derived(running.length + runningShells.length);
-  const visible = $derived(variant === "fab" ? environments.length + shells.length > 0 : busyCount > 0);
+  const visible = $derived(variant === "fab" ? environments.length + shownShells.length > 0 : busyCount > 0);
   const databaseOnly = $derived(running.length > 0 && !runningShells.length && running.every((item) => item.kind === "database"));
-  const shellsOnly = $derived(!environments.length && shells.length > 0);
+  const shellsOnly = $derived(!environments.length && shownShells.length > 0);
   let open = $state(false);
   let trigger = $state<HTMLButtonElement | null>(null);
   let menu = $state<HTMLElement | null>(null);
@@ -140,7 +142,7 @@
   <div use:floatMenu class="environment-menu" role="dialog" aria-label={tr("Session environments", "Ambientes da sessão")} tabindex="-1"
     style:left={`${left}px`} style:top={`${top}px`} style:max-height={`${maxHeight}px`}
     transition:fly={{ y: variant === "fab" ? 6 : 0, x: variant === "sidebar" ? -4 : 0, duration: reducedMotion ? 0 : 180, easing: cubicOut }}>
-    <header><strong>{tr("Environments", "Ambientes")}</strong><button type="button" aria-label={tr("Close environments", "Fechar ambientes")} onclick={() => close(true)}><LumeIcon name="close" size={15} /></button></header>
+    <header><strong>{tr("Environments", "Ambientes")}</strong>{#if finished.length}<button type="button" class="dismiss-finished" onclick={() => dismissEnvironments(finished.map((item) => item.id))}>{tr("Clear stopped", "Limpar parados")}</button>{/if}<button type="button" aria-label={tr("Close environments", "Fechar ambientes")} onclick={() => close(true)}><LumeIcon name="close" size={15} /></button></header>
     <div class="environment-list">
       {#each environments as environment (environment.id)}
         <article class="environment-row" class:stopped={environment.status === "stopped"}>
@@ -158,6 +160,9 @@
               {/each}
               <span class="environment-pid">{environment.id.startsWith("docker-") ? tr("Docker · read-only", "Docker · somente leitura") : `PID ${environment.processId}`}</span>
             </div>
+            {#if environment.status !== "running" && environment.status !== "stopping"}
+              <button class="dismiss-environment" type="button" aria-label={tr(`Hide ${environment.name}`, `Ocultar ${environment.name}`)} title={tr("Hide from this list", "Ocultar desta lista")} onclick={() => dismissEnvironments([environment.id])}><LumeIcon name="close" size={12} />{tr("Dismiss", "Dispensar")}</button>
+            {/if}
             {#if environment.status !== "stopped" && !environment.id.startsWith("docker-")}
               <button class="stop-environment" type="button" disabled={!environment.canStop || busy === environment.id}
                 aria-label={tr(`Stop ${environment.name}`, `Parar ${environment.name}`)} title={tr("Stop this process", "Parar este processo")}
@@ -169,15 +174,15 @@
         </article>
       {/each}
     </div>
-    {#if shells.length}
+    {#if shownShells.length}
       <strong class="shell-heading">{tr("Background shells", "Shells em segundo plano")}</strong>
       <div class="environment-list">
-        {#each shells as shell (shell.id)}
+        {#each shownShells as shell (shell.id)}
           <article class="environment-row shell-row" class:stopped={shell.status !== "running"}>
             <div class="environment-head">
               <span class="environment-mark"><LumeIcon name="terminal" size={18} /></span>
               <div class="environment-name"><strong title={shell.title}>{shell.title}</strong><div class="environment-state"><i class:live={shell.status === "running"} class:failed={shell.status === "failed"}></i><span>{shellStatus(shell)}</span></div></div>
-              {#if shell.status === "running"}<time>{shellElapsed(shell)}</time>{/if}
+              {#if shell.status === "running"}<time>{shellElapsed(shell)}</time>{:else}<button class="dismiss-environment" type="button" aria-label={tr(`Hide ${shell.title}`, `Ocultar ${shell.title}`)} title={tr("Hide from this list", "Ocultar desta lista")} onclick={() => dismissEnvironments([shell.id])}><LumeIcon name="close" size={12} /></button>{/if}
             </div>
             {#if shell.command !== shell.title}<code class="shell-command" title={shell.command}>{shell.command}</code>{/if}
           </article>
@@ -226,6 +231,12 @@
   .environment-pid { color: var(--workspace-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
   .environment-menu .port-link, .port-label { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 6px; color: var(--workspace-accent); background: var(--workspace-raised); border: 1px solid var(--workspace-line); font-size: 10px; font-variant-numeric: tabular-nums; }
   .port-label { color: var(--workspace-muted); }
+  .environment-menu header > button.dismiss-finished { width: auto; height: 24px; margin: 0 4px 0 auto; padding: 0 9px; border: 0; color: var(--workspace-muted); background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .environment-menu header > button.dismiss-finished:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
+  .environment-menu .dismiss-environment { height: 26px; min-width: 26px; padding: 0 9px 0 7px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex: 0 0 auto; border: 0; border-radius: 7px; color: var(--workspace-muted); background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .environment-menu .shell-row .dismiss-environment { padding: 0; width: 24px; height: 24px; min-width: 0; border-radius: 50%; }
+  .environment-menu .dismiss-environment:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
+  .environment-menu .dismiss-environment:focus-visible, .environment-menu header > button.dismiss-finished:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 1px; }
   .environment-menu .stop-environment { height: 26px; padding: 0 10px 0 8px; display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; border: 1px solid color-mix(in srgb, #c0554f 55%, transparent); border-radius: 7px; color: #c0554f; background: color-mix(in srgb, #c0554f 10%, transparent); font-size: 10px; font-weight: 750; transition: color 120ms ease, background 120ms ease; }
   .environment-menu .stop-environment:hover:not(:disabled) { color: #fff; background: #c0554f; }
   .environment-menu .stop-environment:disabled { opacity: .5; cursor: default; }

@@ -2296,7 +2296,7 @@ pub fn configure(kind: &IntegrationKind, executable: &str, enabled: bool) -> Res
     }
     let hooks = root
         .as_object_mut()
-        .expect("validado acima")
+        .ok_or_else(|| format!("A configuração {} não contém um objeto JSON", path.display()))?
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()));
     if !hooks.is_object() {
@@ -2385,7 +2385,7 @@ fn cleanup_legacy_gemini_hooks_at_path(path: &Path, executable: &str) -> Result<
     // Lume Gemini hook; unrelated hooks and tool/MCP settings stay untouched.
     let events = hooks
         .as_object()
-        .expect("hooks validado como objeto")
+        .ok_or("A configuração de hooks não é um objeto")?
         .keys()
         .cloned()
         .collect::<Vec<_>>();
@@ -2398,7 +2398,7 @@ fn cleanup_legacy_gemini_hooks_at_path(path: &Path, executable: &str) -> Result<
         {
             hooks
                 .as_object_mut()
-                .expect("hooks validado como objeto")
+                .ok_or("A configuração de hooks não é um objeto")?
                 .remove(&event);
         }
     }
@@ -2586,9 +2586,9 @@ fn apply_named_antigravity_hooks(
             "timeout": 5
         });
         let handlers = if matches!(event, "PreToolUse" | "PostToolUse") {
-            json!([{ "matcher": "*", "hooks": [handler] }])
+            vec![json!({ "matcher": "*", "hooks": [handler] })]
         } else {
-            Value::Array(vec![handler])
+            vec![handler]
         };
         match (
             event,
@@ -2596,9 +2596,9 @@ fn apply_named_antigravity_hooks(
                 .or_insert_with(|| Value::Array(Vec::new())),
         ) {
             ("PreToolUse" | "PostToolUse", Value::Array(groups)) => {
-                groups.extend(handlers.as_array().unwrap().clone())
+                groups.extend(handlers)
             }
-            (_, Value::Array(existing)) => existing.extend(handlers.as_array().unwrap().clone()),
+            (_, Value::Array(existing)) => existing.extend(handlers),
             (_, _) => {
                 return Err(format!(
                     "A configuração do evento Antigravity {event} não contém uma lista"
@@ -2729,7 +2729,7 @@ fn add_handler(
 ) -> Result<(), String> {
     let groups = hooks
         .as_object_mut()
-        .expect("hooks validado")
+        .ok_or("A configuração de hooks não é um objeto")?
         .entry(event)
         .or_insert_with(|| Value::Array(Vec::new()));
     let groups = groups

@@ -793,7 +793,7 @@ fn parse_windows_table(bytes: &[u8], ipv6: bool) -> Result<Vec<Listener>, String
             .get(..4)
             .ok_or("Tabela de portas incompleta.")?
             .try_into()
-            .unwrap(),
+            .map_err(|_| "Tabela de portas incompleta.")?,
     ) as usize;
     let row_size = if ipv6 { 56 } else { 24 };
     if count > bytes.len().saturating_sub(4) / row_size {
@@ -803,21 +803,21 @@ fn parse_windows_table(bytes: &[u8], ipv6: bool) -> Result<Vec<Listener>, String
     for row in bytes[4..].chunks_exact(row_size).take(count) {
         let (address, port_offset, pid_offset) = if ipv6 {
             (
-                std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&row[..16]).unwrap()).to_string(),
+                std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&row[..16]).map_err(|_| "Tabela de portas incompleta.")?).to_string(),
                 20,
                 52,
             )
         } else {
             (
-                std::net::Ipv4Addr::from(<[u8; 4]>::try_from(&row[4..8]).unwrap()).to_string(),
+                std::net::Ipv4Addr::from(<[u8; 4]>::try_from(&row[4..8]).map_err(|_| "Tabela de portas incompleta.")?).to_string(),
                 8,
                 20,
             )
         };
         result.push(Listener {
-            pid: u32::from_le_bytes(row[pid_offset..pid_offset + 4].try_into().unwrap()),
+            pid: u32::from_le_bytes(row[pid_offset..pid_offset + 4].try_into().map_err(|_| "Tabela de portas incompleta.")?),
             address,
-            port: u16::from_be_bytes(row[port_offset..port_offset + 2].try_into().unwrap()),
+            port: u16::from_be_bytes(row[port_offset..port_offset + 2].try_into().map_err(|_| "Tabela de portas incompleta.")?),
         });
     }
     Ok(result)

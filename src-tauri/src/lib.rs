@@ -1509,22 +1509,47 @@ async fn set_session_model_settings(
     .map_err(|error| error.to_string())?
 }
 #[tauri::command]
-fn compact_session(
+async fn compact_session(
     app: AppHandle,
     state: State<'_, AppState>,
+    bridge: State<'_, codex_bridge::CodexBridge>,
     session_id: String,
 ) -> Result<(), String> {
     let session = state.connected_session(&session_id)?;
-    if session.agent != domain::AgentKind::Omp
-        || session.control_origin != domain::SessionControlOrigin::Lume
-        || session.status != domain::SessionStatus::Completed
+    if session.control_origin != domain::SessionControlOrigin::Lume
+        || matches!(
+            session.status,
+            domain::SessionStatus::Running | domain::SessionStatus::PermissionRequired
+        )
+        || session.activities.iter().any(|activity| {
+            matches!(
+                activity.kind.as_str(),
+                "queued_prompt" | "codex_queued_prompt"
+            ) && activity.status == "waiting"
+        })
     {
         return Err("This session is not ready to compact".into());
     }
-    app.state::<omp_rpc::OmpRpc>()
-        .command(&session_id, "compact", serde_json::json!({}))?;
-    protocol::emit_sessions_changed(&app);
-    Ok(())
+    if session.agent == domain::AgentKind::Omp && session.status == domain::SessionStatus::Completed
+    {
+        app.state::<omp_rpc::OmpRpc>()
+            .command(&session_id, "compact", serde_json::json!({}))?;
+        protocol::emit_sessions_changed(&app);
+        return Ok(());
+    }
+    if session.agent != domain::AgentKind::Codex || session.source == domain::SessionSource::Web {
+        return Err("This session is not ready to compact".into());
+    }
+    let thread_id = session
+        .native_session_id
+        .ok_or("Codex session has no thread ID")?;
+    let bridge = bridge.inner().clone();
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        bridge.compact_thread(&thread_id, session.permission_profile, &state, &app)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

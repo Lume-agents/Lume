@@ -1366,6 +1366,10 @@ fn is_claude_headless_resume(command: &str) -> bool {
             // Windows launches `claude.exe` (or `claude.cmd`); without the extension every headless
             // resume Lume starts for a prompt would be listed as a new Claude Code session.
             matches!(file, "claude" | "claude.exe" | "claude.cmd" | "claude.bat")
+                // The npm shim on Windows ends in `node ...\@anthropic-ai\claude-code\cli.js`, the process that
+                // actually carries the arguments.
+                || (file == "cli.js" && token.contains("claude-code"))
+                || is_versioned_claude_executable(token)
         })
 }
 
@@ -2679,6 +2683,9 @@ mod tests {
         ));
         assert!(is_claude_headless_resume(
             "/home/user/.local/bin/claude --print --session-id session-id prompt"
+        ));
+        assert!(is_claude_headless_resume(
+            r#"node c:\users\dev\appdata\roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js --print --resume session-id --input-format stream-json"#
         ));
         assert!(!is_claude_headless_resume(
             "/home/user/.local/bin/claude --resume session-id"

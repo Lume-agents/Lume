@@ -48,6 +48,16 @@ const CODEX_PROMPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_PROXY_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_PROXY_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static SERVER_URL: OnceLock<String> = OnceLock::new();
+static ACTIVE_COMPACTIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+struct CompactionGuard(String);
+impl Drop for CompactionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_COMPACTIONS.get_or_init(Default::default).lock() {
+            active.remove(&self.0);
+        }
+    }
+}
 
 struct ManagedChild {
     child: Child,
@@ -615,6 +625,93 @@ impl CodexBridge {
     pub fn default_model_settings(&self) -> Result<CodexThreadModelSettings, String> {
         self.ensure_server()?;
         default_model_settings_connection()
+    }
+
+    pub fn compact_thread(
+        &self,
+        thread_id: &str,
+        profile: PermissionProfile,
+        state: &AppState,
+        app: &AppHandle,
+    ) -> Result<(), String> {
+        {
+            let mut active = ACTIVE_COMPACTIONS
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(|_| "Could not check active compactions")?;
+            if !active.insert(thread_id.to_string()) {
+                return Err("This session is already compacting".into());
+            }
+        }
+        let _guard = CompactionGuard(thread_id.to_string());
+        self.ensure_server()?;
+        if state.codex_active_turn(thread_id)?.is_some()
+            || self
+                .queued_prompts
+                .lock()
+                .map_err(|_| "Could not inspect the prompt queue")?
+                .get(thread_id)
+                .is_some_and(|queue| !queue.is_empty())
+        {
+            return Err("The Codex session has an active turn or queued prompts".into());
+        }
+        let mut server = connect_initialized_plain()?;
+        let profiles = HashMap::from([(thread_id.to_string(), profile)]);
+        send_json(
+            &mut server,
+            json!({"method":"thread/resume","id":2,"params":{"threadId":thread_id,"excludeTurns":true}}),
+        )?;
+        wait_for_response_until(&mut server, 2, state, app, &profiles, CODEX_RESUME_TIMEOUT)?;
+        send_json(&mut server, thread_compaction_request(thread_id, 3))?;
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let mut acknowledged = false;
+        let mut completed = false;
+        let mut failure = false;
+        let mut compacted = false;
+        let mut responses = HashMap::new();
+        while !acknowledged || !completed {
+            let message = read_rpc_message(
+                &mut server,
+                deadline,
+                "Codex compaction did not finish in time; check the session before retrying.",
+            )?;
+            if rpc_response_value(&message, 3)?.is_some() {
+                acknowledged = true;
+                continue;
+            }
+            if let Message::Text(text) = &message {
+                if let Ok(value) = serde_json::from_str::<Value>(text) {
+                    if value.get("method").and_then(Value::as_str) == Some("item/completed")
+                        && value.pointer("/params/threadId").and_then(Value::as_str)
+                            == Some(thread_id)
+                        && value.pointer("/params/item/type").and_then(Value::as_str)
+                            == Some("contextCompaction")
+                    {
+                        compacted = true;
+                    }
+                    if value.get("method").and_then(Value::as_str) == Some("turn/completed")
+                        && value.pointer("/params/threadId").and_then(Value::as_str)
+                            == Some(thread_id)
+                    {
+                        failure = !compacted
+                            || matches!(
+                                value.pointer("/params/turn/status").and_then(Value::as_str),
+                                Some("failed" | "interrupted")
+                            );
+                        completed = true;
+                    }
+                }
+            }
+            if let Some(response) =
+                intercept_server_message(&message, state, app, &profiles, &mut responses)?
+            {
+                server.send(response).map_err(|error| error.to_string())?;
+            }
+            if failure {
+                return Err("Codex could not complete context compaction".into());
+            }
+        }
+        Ok(())
     }
 
     pub fn set_thread_fast_mode(&self, thread_id: &str, enabled: bool) -> Result<bool, String> {
@@ -2321,6 +2418,15 @@ fn thread_fast_mode_request(thread_id: &str, enabled: bool) -> Value {
         "method": "thread/resume",
         "id": 2,
         "params": { "threadId": thread_id, "excludeTurns": true, "serviceTier": if enabled { "priority" } else { "default" } }
+    })
+}
+
+/// The response acknowledges the request; completion arrives as turn/item events.
+fn thread_compaction_request(thread_id: &str, id: i64) -> Value {
+    json!({
+        "method": "thread/compact/start",
+        "id": id,
+        "params": { "threadId": thread_id }
     })
 }
 
@@ -4404,6 +4510,15 @@ fn project_name(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_request_targets_the_existing_thread() {
+        assert_eq!(thread_compaction_request("thread-1", 3), json!({
+            "method": "thread/compact/start",
+            "id": 3,
+            "params": { "threadId": "thread-1" }
+        }));
+    }
 
     #[test]
     fn rpc_wait_retries_transient_socket_timeouts_without_resending_the_request() {

@@ -673,16 +673,36 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   const heavyContext = $derived(session.agent === "claude_code" && contextTokens >= HEAVY_CONTEXT && contextTokens >= (heavyDismissed[session.id] ?? 0) + 100_000);
   // Optionally compacts a heavy Claude chat by itself once it is idle and has no draft to clobber.
   let autoCompact = $state(typeof localStorage !== "undefined" && localStorage.getItem("lume-auto-compact-v1") === "1");
+  let nativeCompacting = $state(false);
+  let codexAutoCompact = $state(typeof localStorage !== "undefined" && localStorage.getItem("lume-codex-auto-compact") === "1");
+  let codexCompactThreshold = $state(typeof localStorage !== "undefined" ? Math.min(95, Math.max(50, Number(localStorage.getItem("lume-codex-compact-threshold")) || 85)) : 85);
+  function toggleCodexAutoCompact() {
+    codexAutoCompact = !codexAutoCompact;
+    try { localStorage.setItem("lume-codex-auto-compact", codexAutoCompact ? "1" : "0"); window.dispatchEvent(new Event("lume-codex-compact-settings")); } catch { /* keep the current choice */ }
+  }
+  function setCodexCompactThreshold(event: Event) {
+    codexCompactThreshold = Math.min(95, Math.max(50, Number((event.currentTarget as HTMLInputElement).value) || 85));
+    try { localStorage.setItem("lume-codex-compact-threshold", String(codexCompactThreshold)); window.dispatchEvent(new Event("lume-codex-compact-settings")); } catch { /* keep the current choice */ }
+  }
+  $effect(() => {
+    const sync = () => { codexAutoCompact = localStorage.getItem("lume-codex-auto-compact") === "1"; codexCompactThreshold = Math.min(95, Math.max(50, Number(localStorage.getItem("lume-codex-compact-threshold")) || 85)); };
+    window.addEventListener("storage", sync); window.addEventListener("lume-codex-compact-settings", sync);
+    return () => { window.removeEventListener("storage", sync); window.removeEventListener("lume-codex-compact-settings", sync); };
+  });
   function toggleAutoCompact() {
     autoCompact = !autoCompact;
     try { localStorage.setItem("lume-auto-compact-v1", autoCompact ? "1" : "0"); } catch { /* the choice lasts for this window */ }
   }
   const autoCompactAttempts = new Map<string, number>();
   $effect(() => {
-    if (!autoCompact || session.agent !== "claude_code" || contextTokens < HEAVY_CONTEXT || !canCompact || queuedPrompts.length || prompt.trim() || promptAttachments.length) return;
-    const last = autoCompactAttempts.get(session.id) ?? 0;
+    const eligible = session.agent === "claude_code" ? autoCompact && contextTokens >= HEAVY_CONTEXT : session.agent === "codex" && codexAutoCompact && contextWindow > 0 && contextPercent >= codexCompactThreshold;
+    if (!eligible || !canCompact || nativeCompacting || queuedPrompts.length || prompt.trim() || promptAttachments.length || attachedNotes.length) return;
+    const key = `lume-compact-attempt:${session.id}`;
+    let last = autoCompactAttempts.get(session.id) ?? 0;
+    try { last = Math.max(last, Number(localStorage.getItem(key)) || 0); } catch { /* use memory */ }
     if (Date.now() - last < 10 * 60_000) return;
     autoCompactAttempts.set(session.id, Date.now());
+    try { localStorage.setItem(key, String(Date.now())); } catch { /* use memory */ }
     void compactContext();
   });
   const contextLabel = $derived(contextUsage
@@ -705,7 +725,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   });
   $effect(() => { session.id; untrack(() => { plusMenuOpen = false; }); });
   const canSend = $derived(Boolean(
-    canCompose
+    canCompose && !nativeCompacting
     && (session.capabilities.canTakeControl || !promptIsRunning || canQueue)
   ));
   const queuedPrompts = $derived(
@@ -716,7 +736,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   const nextQueuedPrompt = $derived(queuedPrompts[0] ?? null);
   const canCompact = $derived(Boolean(
     session.controlOrigin === "lume"
-    && (session.agent === "omp" ? session.status === "completed" && session.capabilities.canPrompt && queuedPrompts.length === 0 : session.agent === "claude_code")
+    && !nativeCompacting && queuedPrompts.length === 0
+    && (session.agent === "omp" ? session.status === "completed" && session.capabilities.canPrompt : session.agent === "claude_code" || (session.agent === "codex" && session.source !== "web" && !session.remote))
     && (session.agent === "omp" || (canSend && !promptIsRunning && !sending && !takingControl)),
   ));
   const canSteer = $derived(Boolean(
@@ -1360,11 +1381,14 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   async function compactContext() {
     if (!canCompact) return;
     plusMenuOpen = false;
-    if (session.agent === "omp") {
+    if (session.agent === "omp" || session.agent === "codex") {
+      nativeCompacting = true;
       try {
         await compactSession(session.id);
       } catch (error) {
         sendError = String(error).replace(/^Error:\s*/, "");
+      } finally {
+        nativeCompacting = false;
       }
       return;
     }
@@ -3304,6 +3328,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         <button type="button" class="heavy-dismiss" aria-label={tr("Dismiss", "Dispensar")} title={tr("Dismiss", "Dispensar")} onclick={() => (heavyDismissed = { ...heavyDismissed, [session.id]: contextTokens })}><LumeIcon name="close" size={10} /></button>
       </div>
     {/if}
+    {#if nativeCompacting}<div class="controls-saving" role="status">{tr("Compacting context…", "Compactando contexto…")}</div>{/if}
     <div class:beam={composerInIntroPosition && canCompose} class="composer-field">
       <UsageBanner alerts={usageNotices} {language} attached onDismiss={archiveAgentAlert} />
       <div class="composer-input-row">
@@ -3333,11 +3358,17 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                 <LumeIcon name="note" size={15} />
                 <span><strong>{tr("Attach note", "Anexar nota")}</strong><small>@note:</small></span>
               </button>
-              {#if session.agent === "claude_code" || session.agent === "omp"}
+              {#if session.agent === "claude_code" || session.agent === "omp" || session.agent === "codex"}
                 <button type="button" role="menuitem" disabled={!canCompact} onclick={() => void compactContext()}>
                   <LumeIcon name="compact" size={15} />
-                  <span><strong>{tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
+                  <span><strong>{nativeCompacting ? tr("Compacting…", "Compactando…") : tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
                 </button>
+              {/if}
+              {#if session.agent === "codex" && session.controlOrigin === "lume"}
+                <button type="button" role="menuitemcheckbox" aria-checked={codexAutoCompact} class="auto-compact" onclick={toggleCodexAutoCompact}>
+                  <LumeIcon name="compact" size={15} /><span><strong>{tr("Compact early", "Compactar antecipadamente")}</strong><small>{tr(`When idle at ${codexCompactThreshold}% context`, `Quando parado com ${codexCompactThreshold}% do contexto`)}</small></span><i class="switch" class:on={codexAutoCompact} aria-hidden="true"></i>
+                </button>
+                {#if codexAutoCompact}<label class="codex-compact-threshold">{tr("Threshold (%)", "Limite (%)")}<input type="number" min="50" max="95" step="5" value={codexCompactThreshold} onchange={setCodexCompactThreshold} /></label>{/if}
               {/if}
               {#if session.agent === "claude_code"}
                 <button type="button" role="menuitemcheckbox" aria-checked={autoCompact} class="auto-compact" onclick={toggleAutoCompact}>
@@ -3818,6 +3849,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer .auto-compact .switch::after { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; content: ""; transition: transform 140ms ease; }
   .composer .auto-compact .switch.on { background: var(--workspace-accent); }
   .composer .auto-compact .switch.on::after { transform: translateX(12px); }
+  .codex-compact-threshold { padding: 6px 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--workspace-muted); font-size: 10px; }
+  .codex-compact-threshold input { width: 52px; padding: 4px; border: 1px solid var(--workspace-line); border-radius: 6px; color: var(--workspace-text); background: var(--workspace-raised); font: inherit; }
   .heavy-context { max-width: 760px; margin: 0 auto 8px; padding: 6px 6px 6px 12px; display: flex; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, #c9963d 45%, var(--workspace-line)); border-radius: 12px; color: var(--workspace-text); background: color-mix(in srgb, #c9963d 10%, var(--workspace-raised)); font-size: 11px; line-height: 1.4; }
   .heavy-context span { min-width: 0; flex: 1; }
   .composer .heavy-context button { width: auto; height: 26px; padding: 0 10px; border-radius: 8px; font-size: 11px; font-weight: 700; color: var(--workspace-strong); background: color-mix(in srgb, #c9963d 24%, transparent); }

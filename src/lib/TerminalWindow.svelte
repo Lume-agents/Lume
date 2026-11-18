@@ -1079,11 +1079,36 @@
   const contextLabel = $derived(contextUsage
     ? tr(`Context: ${compactTokens(contextTokens)} of ${compactTokens(contextWindow)} (${contextPercent}%)`, `Contexto: ${compactTokens(contextTokens)} de ${compactTokens(contextWindow)} (${contextPercent}%)`)
     : "");
+  let compacting = $state(false);
+  let codexAutoCompact = $state(typeof localStorage !== "undefined" && localStorage.getItem("lume-codex-auto-compact") === "1");
+  let codexCompactThreshold = $state(typeof localStorage !== "undefined" ? Math.min(95, Math.max(50, Number(localStorage.getItem("lume-codex-compact-threshold")) || 85)) : 85);
+  const autoCompactAttempts = new Map<string, number>();
+  function toggleCodexAutoCompact() {
+    codexAutoCompact = !codexAutoCompact;
+    try { localStorage.setItem("lume-codex-auto-compact", codexAutoCompact ? "1" : "0"); window.dispatchEvent(new Event("lume-codex-compact-settings")); } catch { /* keep the current choice */ }
+  }
+  function setCodexCompactThreshold(event: Event) {
+    codexCompactThreshold = Math.min(95, Math.max(50, Number((event.currentTarget as HTMLInputElement).value) || 85));
+    try { localStorage.setItem("lume-codex-compact-threshold", String(codexCompactThreshold)); window.dispatchEvent(new Event("lume-codex-compact-settings")); } catch { /* keep the current choice */ }
+  }
+  $effect(() => {
+    const sync = () => { codexAutoCompact = localStorage.getItem("lume-codex-auto-compact") === "1"; codexCompactThreshold = Math.min(95, Math.max(50, Number(localStorage.getItem("lume-codex-compact-threshold")) || 85)); };
+    window.addEventListener("storage", sync); window.addEventListener("lume-codex-compact-settings", sync);
+    return () => { window.removeEventListener("storage", sync); window.removeEventListener("lume-codex-compact-settings", sync); };
+  });
   const canCompact = $derived(Boolean(
     session?.controlOrigin === "lume"
-    && (session.agent === "omp" ? session.status === "completed" && canSubmit && queuedPrompts.length === 0 : session.agent === "claude_code")
+    && !compacting && queuedPrompts.length === 0
+    && (session.agent === "omp" ? session.status === "completed" && canSubmit : session.agent === "claude_code" || (session.agent === "codex" && session.source !== "web" && !session.remote))
     && (session.agent === "omp" || (canSubmit && !promptIsRunning && readyForPrompt && !sending)),
   ));
+  $effect(() => {
+    if (!session || session.agent !== "codex" || !codexAutoCompact || !canCompact || contextWindow <= 0 || contextPercent < codexCompactThreshold || prompt.trim() || promptAttachments.length || Date.now() - (autoCompactAttempts.get(session.id) ?? 0) < 600_000) return;
+    const key = `lume-compact-attempt:${session.id}`;
+    try { if (Date.now() - (Number(localStorage.getItem(key)) || 0) < 600_000) return; localStorage.setItem(key, String(Date.now())); } catch { /* use memory */ }
+    autoCompactAttempts.set(session.id, Date.now());
+    void compactContext();
+  });
 
   $effect(() => {
     session?.id;
@@ -2823,6 +2848,7 @@
       !session
       || (!prompt.trim() && promptAttachments.length === 0)
       || sending
+      || compacting
       || !canCompose
       || !readyForPrompt
     ) return;
@@ -3111,11 +3137,14 @@
   async function compactContext() {
     if (!canCompact || !session) return;
     composerToolsOpen = false;
-    if (session.agent === "omp") {
+    if (session.agent === "omp" || session.agent === "codex") {
+      compacting = true;
       try {
         await compactSession(session.id);
       } catch (error) {
         message = String(error).replace(/^Error:\s*/, "");
+      } finally {
+        compacting = false;
       }
       return;
     }
@@ -4170,11 +4199,17 @@
                       <span><strong>{tr("Attach file", "Anexar arquivo")}</strong><small>{promptAttachments.length}/4</small></span>
                     </button>
                   {/if}
-                  {#if session.agent === "claude_code" || session.agent === "omp"}
+                  {#if session.agent === "claude_code" || session.agent === "omp" || session.agent === "codex"}
                     <button disabled={!canCompact} type="button" role="menuitem" onclick={() => void compactContext()}>
                       <span class="tool-icon"><LumeIcon name="compact" size={15} /></span>
-                      <span><strong>{tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
+                      <span><strong>{compacting ? tr("Compacting…", "Compactando…") : tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
                     </button>
+                  {/if}
+                  {#if session.agent === "codex" && session.controlOrigin === "lume"}
+                    <button type="button" role="menuitemcheckbox" aria-checked={codexAutoCompact} onclick={toggleCodexAutoCompact}>
+                      <span class="tool-icon"><LumeIcon name="compact" size={15} /></span><span><strong>{tr("Compact early", "Compactar antecipadamente")}</strong><small>{codexAutoCompact ? tr(`On at ${codexCompactThreshold}%`, `Ativo em ${codexCompactThreshold}%`) : tr("Off", "Desativado")}</small></span>
+                    </button>
+                    {#if codexAutoCompact}<label style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;font-size:11px">{tr("Threshold (%)", "Limite (%)")}<input type="number" min="50" max="95" step="5" value={codexCompactThreshold} onchange={setCodexCompactThreshold} style="width:52px" /></label>{/if}
                   {/if}
                   {#if supportsMcp}
                     <button type="button" role="menuitem" onclick={() => { composerToolsOpen = false; openMcpPanel(); }}>
@@ -4264,8 +4299,8 @@
               {/if}
             </button>
           {:else if canCompose}
-            <button disabled={(!prompt.trim() && promptAttachments.length === 0) || !readyForPrompt || sending} type="submit" aria-label={sending ? tr("Sending prompt", "Enviando prompt") : tr("Send prompt", "Enviar prompt")}>
-              {#if sending}
+            <button disabled={(!prompt.trim() && promptAttachments.length === 0) || !readyForPrompt || sending || compacting} type="submit" aria-label={compacting ? tr("Compacting context", "Compactando contexto") : sending ? tr("Sending prompt", "Enviando prompt") : tr("Send prompt", "Enviar prompt")}>
+              {#if sending || compacting}
                 <span class="send-spinner" aria-hidden="true"></span>
               {:else}
                 <svg viewBox="0 0 20 20"><path d="m4 10 12-6-4 12-2-4zM10 12l2-2" /></svg>

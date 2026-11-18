@@ -88,8 +88,13 @@ function distinctCodexMessageItems(left: SessionActivity, right: SessionActivity
   return false;
 }
 
+/** `/compact`, with or without instructions after it. */
+export function isCompactCommand(text: string | null | undefined): boolean {
+  return /^\/compact(?:\s|$)/.test((text ?? "").trim());
+}
+
 function isCompactPrompt(activity: SessionActivity): boolean {
-  return activity.kind === "prompt" && /^\/compact(?:\s|$)/.test((activity.detail ?? "").trim());
+  return activity.kind === "prompt" && isCompactCommand(activity.detail);
 }
 
 /**

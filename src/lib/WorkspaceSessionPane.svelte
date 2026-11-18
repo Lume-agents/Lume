@@ -62,7 +62,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import { renderWorkspaceMarkdownWithFileBadges } from "$lib/workspaceFileReferences.js";
   import { parentWaitingForSubagents, subagentsForSession } from "$lib/workspaceAgents";
   import { BoundedRenderCache } from "$lib/boundedRenderCache";
-  import { buildConversationEntries, buildConversationFeed, fileChangesForFinalResponses } from "$lib/sessionConversation";
+  import { buildConversationEntries, buildConversationFeed, fileChangesForFinalResponses, isCompactCommand } from "$lib/sessionConversation";
   import { cleanPromptTransport } from "$lib/chatAttachments";
   import {
     clipboardHasFile,
@@ -1261,7 +1261,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     sendError = "";
     if (transitionFromFresh) composerTransition = reducedMotion ? "in" : "out";
     let outgoing: OutgoingPrompt | null = null;
-    if (delivery === "new_turn") {
+    // The chat hides a `/compact` turn, so its bubble would never meet the prompt it waits for.
+    if (delivery === "new_turn" && !isCompactCommand(value)) {
       outgoing = {
         id: ++outgoingSequence,
         text: value,

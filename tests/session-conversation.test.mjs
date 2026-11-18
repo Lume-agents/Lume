@@ -14,7 +14,7 @@ registerHooks({
   },
 });
 
-const { buildConversationEntries, buildConversationFeed, fileChangesForFinalResponses } =
+const { buildConversationEntries, buildConversationFeed, fileChangesForFinalResponses, isCompactCommand } =
   await import("../src/lib/sessionConversation.ts");
 
 const activity = (id, kind, createdAt, detail = id, overrides = {}) => ({
@@ -431,4 +431,11 @@ test("a /compact turn shows only its compacted notice, not the prompt or what th
     buildConversationFeed(entriesFor(activities)).map((item) => (item.kind === "trace" ? "trace" : item.entry.activity.id)),
     ["ask", "answer", "compacted", "next", "next-answer"],
   );
+});
+
+test("a /compact command is recognized with or without instructions, and nothing else is", () => {
+  assert.equal(isCompactCommand("/compact"), true);
+  assert.equal(isCompactCommand("  /compact keep the plan "), true);
+  assert.equal(isCompactCommand("/compacted"), false);
+  assert.equal(isCompactCommand("please /compact"), false);
 });

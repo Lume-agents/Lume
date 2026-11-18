@@ -767,6 +767,13 @@ fn finish_claude_prompt(
                 if let Some(recorded_response) = recorded_response {
                     event.event = HookEventKind::Completed;
                     event.last_response = Some(recorded_response);
+                } else if state
+                    .connected_session(session_id)
+                    .is_ok_and(|session| turn_was_compaction(&session.activities))
+                {
+                    // Compacting answers with a notice, not a message: nothing went wrong.
+                    event.event = HookEventKind::Completed;
+                    event.status_label = Some("Contexto compactado".into());
                 } else {
                     event.event = HookEventKind::Failed;
                     let detail = "Claude terminou sem enviar uma resposta";
@@ -918,6 +925,16 @@ fn apply_claude_permission_mode(arguments: &mut Vec<String>, mode: &str) {
     }
     flags.extend(["--permission-mode".into(), mode.to_string()]);
     arguments.splice(0..0, flags);
+}
+
+/// Whether the latest turn is a `/compact`: its prompt says so, or Claude already recorded the compaction.
+fn turn_was_compaction(activities: &[SessionActivity]) -> bool {
+    let Some(index) = activities.iter().rposition(|activity| activity.kind == "prompt") else {
+        return false;
+    };
+    let command = activities[index].detail.as_deref().unwrap_or_default().trim();
+    let is_compact_prompt = command == "/compact" || command.starts_with("/compact ");
+    is_compact_prompt || activities[index + 1..].iter().any(|activity| activity.kind == "compact")
 }
 
 fn current_claude_reply(activities: &[SessionActivity], response: Option<&str>) -> Option<String> {
@@ -1365,6 +1382,19 @@ fn command_available(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_compact_turn_with_no_reply_is_recognized() {
+        let activity = |kind: &str, detail: &str| SessionActivity {
+            id: kind.into(), kind: kind.into(), title: String::new(), detail: Some(detail.into()),
+            status: "completed".into(), created_at: 0, files: Vec::new(), attachments: Vec::new(), append_detail: false,
+        };
+        assert!(turn_was_compaction(&[activity("prompt", "oi"), activity("prompt", "/compact")]));
+        assert!(turn_was_compaction(&[activity("prompt", "/compact keep the plan")]));
+        assert!(turn_was_compaction(&[activity("prompt", "x"), activity("compact", "")]));
+        assert!(!turn_was_compaction(&[activity("prompt", "/compact"), activity("prompt", "fix it")]));
+        assert!(!turn_was_compaction(&[]));
+    }
+
     #[test]
     fn an_unexpected_exit_notice_names_the_exit_code() {
         let exit = |code, stderr: &str| crate::claude_session::Exit {

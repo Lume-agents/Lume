@@ -79,6 +79,8 @@ try {
   }
   async function screenshot(name) { await delay(200); const { data } = await call("Page.captureScreenshot", { format: "png" }); writeFileSync(join(output, `${name}.png`), Buffer.from(data, "base64")); }
   await call("Runtime.enable"); await call("Page.enable");
+  // The runners of some systems ask for reduced motion, and then an error banner never collapses.
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   await call("Emulation.setDeviceMetricsOverride", { width: 600, height: 500, deviceScaleFactor: 1, mobile: false });
   await call("Page.navigate", { url: `http://127.0.0.1:${server.address().port}` });
   const height = () => evaluate("document.querySelector('.system-banner p').getBoundingClientRect().height");

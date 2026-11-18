@@ -492,8 +492,9 @@ export async function readChangedImageDataUrl(path: string): Promise<string> {
   return invoke<string>("read_changed_image_data_url", { path });
 }
 
-export async function exportLocalFile(sourcePath: string, destinationPath: string): Promise<void> {
-  await invoke("export_local_file", { sourcePath, destinationPath });
+/** Asks where to save a response file and copies it there; false when the person cancels. */
+export async function saveResponseFile(sourcePath: string): Promise<boolean> {
+  return invoke<boolean>("save_response_file", { sourcePath });
 }
 
 export async function setTerminalFileDialogActive(

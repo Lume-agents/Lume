@@ -1,6 +1,5 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import type { PromptAttachment } from "$lib/domain";
   import type { Language } from "$lib/i18n";
   import {
@@ -9,7 +8,7 @@
     type ResponseFileCard,
   } from "$lib/chatAttachments";
   import ImageLightbox from "$lib/ImageLightbox.svelte";
-  import { exportLocalFile, openSessionFile, readLocalImageDataUrl, setTerminalFileDialogActive } from "$lib/lume";
+  import { openSessionFile, saveResponseFile, readLocalImageDataUrl, setTerminalFileDialogActive } from "$lib/lume";
 
   let {
     text = "",
@@ -76,10 +75,7 @@
       } catch {
         // Native save dialogs still work on window managers without layer control.
       }
-      const destination = await saveDialog({ defaultPath: resource.name });
-      if (typeof destination === "string" && destination) {
-        await exportLocalFile(resource.path, destination);
-      }
+      await saveResponseFile(resource.path);
     } catch (error) {
       onError(String(error).replace(/^Error:\s*/, ""));
     } finally {

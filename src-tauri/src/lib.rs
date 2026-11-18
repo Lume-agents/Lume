@@ -1098,19 +1098,27 @@ fn open_session_file(
         .map_err(|error| error.to_string())
 }
 
+/// Saves a file from an agent's response where the person chooses in the system's save dialog. The dialog is
+/// opened here, not by the page, so a page cannot pick the destination and overwrite a file by itself.
 #[tauri::command]
-fn export_local_file(source_path: String, destination_path: String) -> Result<(), String> {
+async fn save_response_file(app: AppHandle, source_path: String) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
     let source = std::fs::canonicalize(source_path)
         .map_err(|_| "The response file no longer exists".to_string())?;
     if !source.is_file() {
         return Err("The response attachment is not a file".into());
     }
-    let destination = std::path::PathBuf::from(destination_path);
+    let name = source.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let chosen = tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_file_name(name).blocking_save_file())
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(destination) = chosen else { return Ok(false) };
+    let destination = destination.into_path().map_err(|_| "Choose a valid destination for the file".to_string())?;
     if destination.as_os_str().is_empty() || destination.is_dir() {
         return Err("Choose a valid destination for the file".into());
     }
     std::fs::copy(source, destination)
-        .map(|_| ())
+        .map(|_| true)
         .map_err(|error| format!("Could not save the response file: {error}"))
 }
 
@@ -4050,7 +4058,7 @@ pub fn run() {
             read_local_image_data_url,
             read_changed_image_data_url,
             open_session_file,
-            export_local_file,
+            save_response_file,
             set_terminal_file_dialog_active,
             set_native_file_dialog_active,
             refresh_agent_rate_limits,

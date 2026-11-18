@@ -200,13 +200,13 @@
               <span class="unavailable">{tr("Install it yourself to use it", "Instale por conta própria para usar")}</span>
             {/if}
           {:else if entry.step === "installed" && entry.integration}
-            <button class="quiet icon-action" type="button" aria-label={tr("Test", "Testar")} data-tooltip={tr("Test", "Testar")} disabled={busy || diagnosing !== null} onclick={() => onTest(entry.integration!)}>{#if diagnosing === entry.integration.kind}…{:else}<LumeIcon name="check" size={16} />{/if}</button>
+            <button class="quiet icon-action" type="button" aria-label={tr("Test", "Testar")} data-tooltip={tr("Test", "Testar")} disabled={busy || diagnosing !== null} onclick={() => onTest(entry.integration!)}>{#if diagnosing === entry.integration.kind}…{:else}<LumeIcon name="flask" size={16} />{/if}</button>
             <button class="primary icon-action" type="button" aria-label={tr("Connect", "Conectar")} data-tooltip={tr("Connect", "Conectar")} disabled={busy || configuring !== null} onclick={() => onConnect(entry.integration!)}>{#if configuring === entry.integration.kind}…{:else}<LumeIcon name="plus" size={16} />{/if}</button>
           {:else if entry.step === "connected" && entry.integration}
-            <button class="quiet icon-action" type="button" aria-label={tr("Disconnect", "Desconectar")} data-tooltip={tr("Disconnect", "Desconectar")} disabled={busy || configuring !== null} onclick={() => onDisconnect(entry.integration!)}><LumeIcon name="unplug" size={16} /></button>
-            <button class="primary icon-action" type="button" aria-label={tr("Test", "Testar")} data-tooltip={tr("Test", "Testar")} disabled={busy || diagnosing !== null} onclick={() => onTest(entry.integration!)}>{#if diagnosing === entry.integration.kind}…{:else}<LumeIcon name="check" size={16} />{/if}</button>
+            <button class="quiet icon-action" type="button" aria-label={tr("Disconnect", "Desconectar")} data-tooltip={tr("Disconnect", "Desconectar")} disabled={busy || configuring !== null} onclick={() => onDisconnect(entry.integration!)}><LumeIcon name="plug" size={16} /></button>
+            <button class="primary icon-action" type="button" aria-label={tr("Test", "Testar")} data-tooltip={tr("Test", "Testar")} disabled={busy || diagnosing !== null} onclick={() => onTest(entry.integration!)}>{#if diagnosing === entry.integration.kind}…{:else}<LumeIcon name="flask" size={16} />{/if}</button>
           {:else if entry.integration}
-            <button class="primary icon-action" type="button" aria-label={tr("Test", "Testar")} data-tooltip={tr("Test", "Testar")} disabled={diagnosing !== null} onclick={() => onTest(entry.integration!)}>{#if diagnosing === entry.integration.kind}…{:else}<LumeIcon name="check" size={16} />{/if}</button>
+            <button class="primary icon-action" type="button" aria-label={tr("Test", "Testar")} data-tooltip={tr("Test", "Testar")} disabled={diagnosing !== null} onclick={() => onTest(entry.integration!)}>{#if diagnosing === entry.integration.kind}…{:else}<LumeIcon name="flask" size={16} />{/if}</button>
           {:else if entry.plan}
             <button class="quiet icon-action" type="button" onclick={() => void copyLogin(entry)} aria-label={copied === entry.kind ? tr("Copied", "Copiado") : tr("Copy sign-in command", "Copiar comando de login")} data-tooltip={copied === entry.kind ? tr("Copied", "Copiado") : tr("Copy sign-in command", "Copiar comando de login")}><LumeIcon name={copied === entry.kind ? "check" : "copy"} size={16} /></button>
           {/if}

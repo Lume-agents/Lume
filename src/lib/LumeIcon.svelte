@@ -35,6 +35,8 @@
     | "split"
     | "stop"
     | "unplug"
+    | "plug"
+    | "flask"
     | "terminal"
     | "take-control"
     | "steer"
@@ -223,6 +225,13 @@
   {:else if name === "terminal"}
     <rect x="3" y="4.5" width="18" height="15" rx="3" />
     <path d="m7 9.5 3 2.5-3 2.5M12.5 15H17" />
+  {:else if name === "plug"}
+    <path d="M9 3v4M15 3v4" />
+    <path d="M6.5 7h11v3.5a5.5 5.5 0 0 1-11 0V7Z" />
+    <path d="M12 16v1.5a3 3 0 0 0 3 3h2.5" />
+  {:else if name === "flask"}
+    <path d="M9.5 3.5h5M10.5 3.5v5.8L5.2 18a2 2 0 0 0 1.7 3h10.2a2 2 0 0 0 1.7-3l-5.3-8.7V3.5" />
+    <path d="M7.7 15h8.6" />
   {:else if name === "unplug"}
     <path d="m19 5-3 3M9 15l-4 4M7.5 12.5 11.5 16.5M10.5 9.5l4 4" />
     <path d="M7.5 12.5 6 14a3.5 3.5 0 0 0 5 5l1.5-1.5M16.5 11.5 18 10a3.5 3.5 0 0 0-5-5l-1.5 1.5" />

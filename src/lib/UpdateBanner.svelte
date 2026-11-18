@@ -1,5 +1,6 @@
 <script lang="ts">
   import LumeLogo from "$lib/LumeLogo.svelte";
+  import ReleaseHistory from "$lib/ReleaseHistory.svelte";
   import { appUpdateAction } from "$lib/appUpdateRuntime";
   import type { AppUpdateState } from "$lib/appUpdates";
   import type { Language } from "$lib/i18n";
@@ -10,6 +11,7 @@
   const pt = $derived(language === "pt-BR");
   const busy = $derived(["checking", "downloading"].includes(update.status) || (update.status === "ready" && !update.error && !update.blockedByActiveTasks));
   let actionError = $state("");
+  let historyOpen = $state(false);
   const reportedError = $derived(actionError || update.error);
   // The line under the card says what is happening; the header always shows the version in use.
   const note = $derived(update.blockedByActiveTasks
@@ -49,11 +51,13 @@
     </div>
   </div>
   <p class="update-note" aria-live="polite">{note}</p>
+  {#if !notice}<button class="history" type="button" onclick={() => (historyOpen = true)}>{pt ? "Notas das versões" : "Release notes"}</button>{/if}
   {#if update.status === "downloading" || update.status === "ready"}
     <div class="update-download" class:indeterminate={update.progress === null} role="progressbar" aria-label={pt ? "Progresso da atualização" : "Update progress"} aria-valuemin="0" aria-valuemax="100" aria-valuenow={update.progress ?? undefined} aria-valuetext={update.progress === null ? (pt ? "Baixando" : "Downloading") : `${update.progress}%`}><span style:transform={`scaleX(${update.progress === null ? 1 : update.progress / 100})`}></span></div>
   {/if}
   {#if update.error || actionError}<details class="update-error"><summary>{pt ? "Detalhes do erro" : "Error details"}</summary><pre>{actionError || update.error}</pre></details>{/if}
 </section>
+{#if historyOpen}<ReleaseHistory {language} {dark} currentVersion={update.currentVersion} onClose={() => (historyOpen = false)} />{/if}
 
 <style>
   .update-banner { --update-surface: var(--workspace-pane, var(--lume-surface-light, #e8eee7)); --update-text: var(--workspace-text, var(--lume-ink-light, #243a30)); --update-muted: var(--workspace-muted, var(--lume-ink-muted-light, #63746b)); --update-line: var(--workspace-line, var(--lume-line-light, #c4d2c7)); --update-accent: var(--workspace-accent, var(--lume-accent-strong, #397b5c)); box-sizing: border-box; min-width: 0; margin-top: 18px; padding: 14px 14px 12px; border: 1px solid color-mix(in srgb, var(--update-line) 70%, transparent); border-radius: 16px; background: var(--update-surface); color: var(--update-text); }
@@ -70,6 +74,7 @@
   button { display: inline-flex; align-items: center; justify-content: center; min-height: 30px; padding: 6px 14px; border: 0; border-radius: 999px; color: var(--update-text); background: transparent; font: inherit; font-size: 12px; font-weight: 650; white-space: nowrap; cursor: pointer; transition: background 160ms ease, color 160ms ease, opacity 160ms ease; }
   button:hover:not(:disabled) { background: color-mix(in srgb, var(--update-accent) 12%, transparent); }
   button.dismiss { color: var(--update-muted); }
+  button.history { min-height: 24px; margin: 6px 0 0 -8px; padding: 3px 8px; color: var(--update-accent); font-size: 11.5px; font-weight: 650; }
   button.primary { color: #fff; background: var(--update-accent); border-radius: 10px; padding: 9px 16px; }
   button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--update-accent) 86%, #000); }
   button:disabled { opacity: .6; cursor: default; }

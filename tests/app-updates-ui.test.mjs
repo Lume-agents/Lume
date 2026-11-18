@@ -41,7 +41,14 @@ const fixture = `<script>
     }
     return null;
   }, { shouldMockEvents: true });
-  window.fetch = async url => { window.__releaseUrl = String(url); return new Response(JSON.stringify({ tag_name: 'v0.18.2', body: window.__releaseBody }), { status: 200 }); };
+  window.fetch = async url => {
+    if (String(url).includes('/releases?')) return new Response(JSON.stringify([
+      { tag_name: 'v0.18.3', body: '## Novidades\\n\\n- Versão nova', published_at: '2026-11-17T00:00:00Z', html_url: 'https://github.com/Lume-agents/Lume/releases/tag/v0.18.3' },
+      { tag_name: 'v0.18.2-beta', prerelease: true, body: 'beta' },
+      { tag_name: 'v0.18.2', body: 'Notas da instalada', published_at: '2026-11-10T00:00:00Z', html_url: 'javascript:alert(1)' },
+    ]), { status: 200 });
+    window.__releaseUrl = String(url); return new Response(JSON.stringify({ tag_name: 'v0.18.2', body: window.__releaseBody }), { status: 200 });
+  };
   window.__start = async () => { window.__stop = await startAppUpdatesOwner(); window.__stopPeer = await startAppUpdatesPeer(); };
 </script>
 <main class:dark data-appearance="lume">
@@ -158,6 +165,14 @@ try {
   await wait("window.__calls.some(([command]) => command === 'plugin:updater|check')");
   await delay(200);
   assert.equal(await evaluate("document.querySelector('[role=dialog]')"), null, "the same release notes must not reopen after restart");
+  // Every published version's notes, from the update card in Settings.
+  await evaluate("document.querySelector('.settings .update-banner button.history').click()");
+  await wait("document.querySelectorAll('.release-history .release').length === 2");
+  assert.deepEqual(await evaluate("Array.from(document.querySelectorAll('.release-history .release summary strong')).map(item => item.textContent)"), ["0.18.3", "0.18.2"], "newest first, no pre-releases");
+  assert.equal(await evaluate("document.querySelector('.release-history .release[open] summary strong').textContent"), "0.18.2", "the installed version starts open");
+  assert.equal(await evaluate("document.querySelectorAll('.release-history a')[1].getAttribute('href')"), "https://github.com/Lume-agents/Lume/releases/tag/v0.18.2", "a link outside GitHub is replaced");
+  await evaluate("document.querySelector('.release-history button.close').click()");
+  await wait("!document.querySelector('.release-history')");
   assert.deepEqual(errors, []);
   console.log(`App updater browser checks passed (Orb/Workspace, dark/light, consent, progress, dismissal, safe Markdown). Screenshots: ${output}`);
 } finally { socket?.close(); browser.kill("SIGTERM"); server.closeAllConnections(); server.close(); }

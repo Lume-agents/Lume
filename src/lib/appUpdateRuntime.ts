@@ -28,6 +28,30 @@ export async function loadReleaseBody(installedVersion: string): Promise<string>
   } finally { clearTimeout(timer); }
 }
 
+export type PublishedRelease = { version: string; body: string; publishedAt: string | null; url: string };
+
+/** The published releases, newest first, with their notes (drafts and pre-releases left out). */
+export async function loadReleaseHistory(): Promise<PublishedRelease[]> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 12_000);
+  try {
+    const response = await fetch("https://api.github.com/repos/Lume-agents/Lume/releases?per_page=40", {
+      headers: { Accept: "application/vnd.github+json" }, signal: abort.signal,
+    });
+    if (!response.ok) throw new Error(`GitHub: ${response.status}`);
+    const releases: unknown = await response.json();
+    if (!Array.isArray(releases)) throw new Error("Invalid release list");
+    return releases
+      .filter((release) => release && !release.draft && !release.prerelease && typeof release.tag_name === "string" && /^v\d/.test(release.tag_name))
+      .map((release) => ({
+        version: release.tag_name.slice(1),
+        body: typeof release.body === "string" ? release.body : "",
+        publishedAt: typeof release.published_at === "string" ? release.published_at : null,
+        url: typeof release.html_url === "string" && release.html_url.startsWith("https://github.com/") ? release.html_url : `https://github.com/Lume-agents/Lume/releases/tag/${release.tag_name}`,
+      }));
+  } finally { clearTimeout(timer); }
+}
+
 /** Only the main/Orb window checks, downloads and installs. Workspace is a peer. */
 export async function startAppUpdatesOwner(): Promise<() => void> {
   if (!native()) return () => {};

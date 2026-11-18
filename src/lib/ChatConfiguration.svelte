@@ -22,6 +22,22 @@
   let expanded = $state<Record<string, boolean>>({});
   const LIMIT = 6;
 
+  let copiedThreadId = $state("");
+  let threadCopyFailed = $state(false);
+  async function copyThreadId(id: string) {
+    const owner = session.id;
+    try {
+      await navigator.clipboard.writeText(id);
+      if (session.id !== owner || session.nativeSessionId !== id) return;
+      copiedThreadId = id;
+      threadCopyFailed = false;
+    } catch {
+      if (session.id !== owner) return;
+      copiedThreadId = "";
+      threadCopyFailed = true;
+    }
+  }
+
   const agentId = $derived(({ claude_code: "claude" } as Record<string, string>)[session.agent] ?? session.agent);
   const kinds: Array<{ kind: ExtensionKind; icon: LumeIconName; label: [string, string] }> = [
     { kind: "plugin", icon: "layout", label: ["Plugins", "Plugins"] },
@@ -87,7 +103,7 @@
     const current = key;
     if (loadedKey === current) return;
     loadedKey = current;
-    settings = []; items = []; expanded = {};
+    settings = []; items = []; expanded = {}; copiedThreadId = ""; threadCopyFailed = false;
     if (session.remote) { settings = [{ label: tr("Agent", "Agente"), value: session.agentLabel }, { label: tr("Computer", "Computador"), value: session.remote.computer }]; loading = false; return; }
     loading = true;
     void load(session.id, session.agent, session.workingDirectory ?? undefined);
@@ -102,11 +118,19 @@
     <div class="bar head"></div>
   </section>
 {:else if settings.length}
-  <details class="inspector-section config-section">
-    <summary><LumeIcon name="settings" size={14} /><span>{tr("Settings", "Ajustes")}</span><em>{settings.length}</em></summary>
+  <details class="inspector-section config-section session-information">
+    <summary><LumeIcon name="note" size={14} /><span>{tr("Information", "Informações")}</span><em>{settings.length + 1}</em></summary>
     <dl class="config-rows">
+      <dt>{tr("Thread ID", "ID da thread")}</dt>
+      <dd class="thread-id">
+        {#if session.nativeSessionId}
+          <code title={session.nativeSessionId}>{session.nativeSessionId}</code>
+          <button type="button" aria-label={tr("Copy thread ID", "Copiar ID da thread")} title={tr("Copy thread ID", "Copiar ID da thread")} onclick={() => void copyThreadId(session.nativeSessionId!)}><LumeIcon name={copiedThreadId === session.nativeSessionId ? "check" : "copy"} size={13} /></button>
+        {:else}<span>{tr("Not available yet", "Ainda não disponível")}</span>{/if}
+      </dd>
       {#each settings as row (row.label)}<dt>{row.label}</dt><dd title={row.title ?? row.value}>{row.value}</dd>{/each}
     </dl>
+    {#if threadCopyFailed}<p class="information-error" role="alert">{tr("Could not copy the thread ID.", "Não foi possível copiar o ID da thread.")}</p>{/if}
   </details>
 {/if}
 
@@ -140,6 +164,12 @@
   .config-rows { margin: 0 0 8px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; font-size: 10.5px; }
   .config-rows dt { color: var(--workspace-muted); }
   .config-rows dd { min-width: 0; margin: 0; overflow: hidden; color: var(--workspace-strong); font-weight: 560; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+  .config-rows dd.thread-id { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+  .thread-id code { min-width: 0; overflow: hidden; font: inherit; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+  .thread-id button { width: 20px; height: 20px; margin: -4px 0; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 5px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .thread-id button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .thread-id button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+  .information-error { margin: 0 0 8px; color: var(--workspace-danger, #b96862); font-size: 10px; }
   .config-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 1px; }
   .config-list li { min-width: 0; padding: 5px 0; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
   .config-list li + li { border-top: 1px solid var(--workspace-line); }

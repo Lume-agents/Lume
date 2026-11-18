@@ -62,26 +62,6 @@
   }>();
 
   let mcpServers = $state<McpServer[]>([]);
-  let copiedThreadId = $state("");
-  let threadCopyFailed = $state(false);
-  let copySessionId = "";
-  $effect(() => {
-    const id = session?.id ?? "";
-    if (id !== copySessionId) { copySessionId = id; copiedThreadId = ""; threadCopyFailed = false; }
-  });
-  async function copyThreadId(id: string) {
-    const owner = session?.id;
-    try {
-      await navigator.clipboard.writeText(id);
-      if (session?.id !== owner || session?.nativeSessionId !== id) return;
-      copiedThreadId = id;
-      threadCopyFailed = false;
-    } catch {
-      if (session?.id !== owner) return;
-      copiedThreadId = "";
-      threadCopyFailed = true;
-    }
-  }
   let mcpProbing = $state(false);
   let mcpLoading = $state(false);
   let mcpKey = "";
@@ -301,20 +281,6 @@
       <div class="inspector-scroll" use:transientScrollbar in:fly={{ y: 8, duration: 200, easing: cubicOut }}><RepositoryPanel {session} {language} compact {onOpenCommitFile} {onOpenWorkingFile} /></div>
     {:else}
     <div class="inspector-scroll" use:transientScrollbar in:fly={{ y: 8, duration: 200, easing: cubicOut }}>
-      <details class="inspector-section session-information">
-        <summary><LumeIcon name="note" size={14} /><span>{tr("Information", "Informações")}</span></summary>
-        <dl>
-          <div><dt>{tr("Thread ID", "ID da thread")}</dt><dd>
-            {#if session.nativeSessionId}
-              <code>{session.nativeSessionId}</code>
-              <button type="button" aria-label={tr("Copy thread ID", "Copiar ID da thread")} title={tr("Copy thread ID", "Copiar ID da thread")} onclick={() => void copyThreadId(session!.nativeSessionId!)}><LumeIcon name={copiedThreadId === session.nativeSessionId ? "check" : "copy"} size={14} /></button>
-            {:else}<span>{tr("Not available yet", "Ainda não disponível")}</span>{/if}
-          </dd></div>
-          <div><dt>{tr("Agent", "Agente")}</dt><dd><span>{session.agentLabel}</span></dd></div>
-          {#if session.workingDirectory}<div><dt>{tr("Directory", "Diretório")}</dt><dd><code>{session.workingDirectory}</code></dd></div>{/if}
-        </dl>
-        {#if threadCopyFailed}<p class="information-error" role="alert">{tr("Could not copy the thread ID.", "Não foi possível copiar o ID da thread.")}</p>{/if}
-      </details>
       {#if hasUsage(session.agent)}
         <section class="usage-section" class:stacked={usageStacked} aria-label={tr(`${session.agentLabel} usage`, `Uso do ${session.agentLabel}`)}>
           <div class="usage-gauges" class:loading={usageRefreshing && !usageGroups.length} aria-busy={usageLoading}>
@@ -461,15 +427,6 @@
   .inspector-scroll::-webkit-scrollbar { width: 5px; }
   .inspector-scroll::-webkit-scrollbar-thumb { border-radius: 5px; background: transparent; }
   .inspector-scroll:global(.is-scrolling)::-webkit-scrollbar-thumb { background: var(--workspace-scroll-thumb); }
-  .session-information dl { margin: 0; display: grid; gap: 9px; }
-  .session-information dl > div { min-width: 0; display: grid; gap: 4px; }
-  .session-information dt { color: var(--workspace-muted); font-size: 10px; }
-  .session-information dd { min-width: 0; margin: 0; display: flex; align-items: flex-start; gap: 6px; color: var(--workspace-text); font-size: 11px; }
-  .session-information dd code { min-width: 0; flex: 1; font: inherit; line-height: 1.4; overflow-wrap: anywhere; user-select: text; }
-  .session-information dd button { width: 23px; height: 23px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
-  .session-information dd button:hover { color: var(--workspace-accent); background: var(--workspace-subtle); }
-  .session-information dd button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
-  .information-error { margin: 8px 0 0; color: var(--workspace-danger, #b96862); font-size: 10px; }
   .usage-section { min-height: 72px; margin: 13px 0 3px; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; gap: 12px; }.usage-section.stacked { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .usage-gauges { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 5px; }
   .usage-section.stacked .usage-gauges { justify-content: space-evenly; gap: 10px; }

@@ -669,6 +669,20 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   const HEAVY_CONTEXT = 150_000;
   let heavyDismissed = $state<Record<string, number>>({});
   const heavyContext = $derived(session.agent === "claude_code" && contextTokens >= HEAVY_CONTEXT && contextTokens >= (heavyDismissed[session.id] ?? 0) + 100_000);
+  // Optionally compacts a heavy Claude chat by itself once it is idle and has no draft to clobber.
+  let autoCompact = $state(typeof localStorage !== "undefined" && localStorage.getItem("lume-auto-compact-v1") === "1");
+  function toggleAutoCompact() {
+    autoCompact = !autoCompact;
+    try { localStorage.setItem("lume-auto-compact-v1", autoCompact ? "1" : "0"); } catch { /* the choice lasts for this window */ }
+  }
+  const autoCompactAttempts = new Map<string, number>();
+  $effect(() => {
+    if (!autoCompact || session.agent !== "claude_code" || contextTokens < HEAVY_CONTEXT || !canCompact || queuedPrompts.length || prompt.trim() || promptAttachments.length) return;
+    const last = autoCompactAttempts.get(session.id) ?? 0;
+    if (Date.now() - last < 10 * 60_000) return;
+    autoCompactAttempts.set(session.id, Date.now());
+    void compactContext();
+  });
   const contextLabel = $derived(contextUsage
     ? tr(`Context: ${compactTokens(contextTokens)} of ${compactTokens(contextWindow)} (${contextPercent}%)`, `Contexto: ${compactTokens(contextTokens)} de ${compactTokens(contextWindow)} (${contextPercent}%)`)
     : "");
@@ -3323,6 +3337,13 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                   <span><strong>{tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
                 </button>
               {/if}
+              {#if session.agent === "claude_code"}
+                <button type="button" role="menuitemcheckbox" aria-checked={autoCompact} class="auto-compact" onclick={toggleAutoCompact}>
+                  <LumeIcon name="compact" size={15} />
+                  <span><strong>{tr("Compact heavy chats", "Compactar chats pesados")}</strong><small>{tr(`Automatically, above ${compactTokens(HEAVY_CONTEXT)} tokens, when idle`, `Sozinho, acima de ${compactTokens(HEAVY_CONTEXT)} tokens, quando parado`)}</small></span>
+                  <i class="switch" class:on={autoCompact} aria-hidden="true"></i>
+                </button>
+              {/if}
               {#if supportsMcp}
                 <button type="button" role="menuitem" onclick={() => { plusMenuOpen = false; openMcpPanel(); }}>
                   <LumeIcon name="server" size={15} />
@@ -3791,6 +3812,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .outgoing-row.in-flight .user-message { visibility: hidden; }
   .outgoing-row.delivery-pending .user-message { border-style: dashed; opacity: .76; }
   .user-row.outgoing-replacement { display: none; }
+  .composer .auto-compact .switch { position: relative; width: 28px; height: 16px; margin-left: auto; flex: 0 0 auto; border-radius: 999px; background: var(--workspace-line); transition: background 140ms ease; }
+  .composer .auto-compact .switch::after { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; content: ""; transition: transform 140ms ease; }
+  .composer .auto-compact .switch.on { background: var(--workspace-accent); }
+  .composer .auto-compact .switch.on::after { transform: translateX(12px); }
   .heavy-context { max-width: 760px; margin: 0 auto 8px; padding: 6px 6px 6px 12px; display: flex; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, #c9963d 45%, var(--workspace-line)); border-radius: 12px; color: var(--workspace-text); background: color-mix(in srgb, #c9963d 10%, var(--workspace-raised)); font-size: 11px; line-height: 1.4; }
   .heavy-context span { min-width: 0; flex: 1; }
   .composer .heavy-context button { width: auto; height: 26px; padding: 0 10px; border-radius: 8px; font-size: 11px; font-weight: 700; color: var(--workspace-strong); background: color-mix(in srgb, #c9963d 24%, transparent); }

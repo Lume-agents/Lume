@@ -402,7 +402,7 @@ fn start_plain_listener(
                             .name("lume-mobile-network-client".into())
                             .spawn(move || {
                                 let _place = place;
-                                handle_stream(stream, state, gateway, app, connection_running)
+                                handle_stream(stream, state, gateway, app, connection_running, Channel::Plain)
                             });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -679,7 +679,28 @@ fn handle_tls(
         gateway,
         app,
         running,
+        Channel::Tls,
     );
+}
+
+/// How a connection reached the gateway: over TLS, or in plain HTTP on the local network.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    Tls,
+    Plain,
+}
+
+/// On the plain local-network listener anyone on the Wi-Fi can read the traffic, so only what is safe in the
+/// clear is answered there: the phone app's files, the health check, and the encrypted pairing and requests.
+/// Pairing with a bare code and requests that carry a token are refused (the realtime socket is encrypted).
+fn allowed_in_plain(request: &HttpRequest) -> bool {
+    let path = request.path.split('?').next().unwrap_or(&request.path);
+    match request.method.as_str() {
+        "OPTIONS" => true,
+        "GET" => !path.starts_with("/api/") || path == "/api/v1/health" || path == REALTIME_PATH,
+        "POST" => matches!(path, "/api/v1/pair-secure" | "/api/v1/secure"),
+        _ => false,
+    }
 }
 
 fn handle_stream<S: MobileStream>(
@@ -688,6 +709,7 @@ fn handle_stream<S: MobileStream>(
     gateway: MobileGateway,
     app: AppHandle,
     running: Arc<AtomicBool>,
+    channel: Channel,
 ) {
     // A large body keeps its place until it has been answered.
     let (request, _large_body) = match read_request_guarded(&mut stream) {
@@ -695,6 +717,11 @@ fn handle_stream<S: MobileStream>(
         Err(message) => (Err(message), None),
     };
     match request {
+        Ok(request) if channel == Channel::Plain && !allowed_in_plain(&request) => {
+            let response = json_error(403, "encrypted_channel_required", "Use the encrypted channel on the local network");
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
         Ok(request) if request.path.split('?').next() == Some(REALTIME_PATH) => {
             handle_realtime_stream(stream, request, state, gateway, running);
         }
@@ -1644,6 +1671,17 @@ mod tests {
             path: path.into(),
             headers,
             body: serde_json::to_vec(&body).expect("body"),
+        }
+    }
+
+    #[test]
+    fn the_plain_network_listener_answers_only_what_is_safe_in_the_clear() {
+        let null = serde_json::Value::Null;
+        for (method, path) in [("GET", "/"), ("GET", "/app.js"), ("GET", "/api/v1/health"), ("GET", REALTIME_PATH), ("OPTIONS", "/api/v1/pair"), ("POST", "/api/v1/pair-secure"), ("POST", "/api/v1/secure")] {
+            assert!(allowed_in_plain(&request(method, path, None, null.clone())), "{method} {path}");
+        }
+        for (method, path) in [("POST", "/api/v1/pair"), ("GET", "/api/v1/me"), ("GET", "/api/v1/snapshot?x=1"), ("POST", "/api/v1/commands"), ("GET", "/api/v1/events"), ("DELETE", "/api/v1/secure")] {
+            assert!(!allowed_in_plain(&request(method, path, Some("token"), null.clone())), "{method} {path}");
         }
     }
 

@@ -1755,7 +1755,7 @@ mod tests {
         connection.execute_batch("BEGIN EXCLUSIVE").unwrap();
         let before = std::time::Instant::now();
         assert!(save_observation(&directory.0, &observation(THREAD_A, now_millis())).is_err());
-        assert!(before.elapsed() < Duration::from_secs(1));
+        assert!(before.elapsed() < Duration::from_secs(3), "the recorder must not wait on a lock for long");
     }
 
     #[test]

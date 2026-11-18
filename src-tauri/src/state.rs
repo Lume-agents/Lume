@@ -4198,6 +4198,21 @@ impl AppState {
             missing_process_scans.remove(session_id);
         }
 
+        // A chat Lume runs outlives its process: Lume closes an idle one and starts another for the next
+        // message, so a missing process only unbinds the chat instead of ending it.
+        for session in sessions.iter_mut().filter(|session| {
+            session.control_origin == SessionControlOrigin::Lume
+                && !matches!(session.source, SessionSource::Web | SessionSource::Vscode)
+                && session.native_session_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+                && session.process_id.is_some()
+                && !process_is_present(session)
+        }) {
+            session.process_id = None;
+            missing_process_scans.remove(&session.id);
+            snapshots.push(session.clone());
+            changed = true;
+        }
+
         let mut closed_session_ids = Vec::new();
         for session in sessions.iter().filter(|session| {
             session.process_id.is_some()
@@ -9494,6 +9509,25 @@ mod tests {
         state.ingest(ended).expect("fim da sessão");
 
         assert!(state.sessions().expect("sessões").is_empty());
+    }
+
+    #[test]
+    fn managed_chat_survives_its_idle_process_closing() {
+        let state = AppState::new(Path::new(":memory:")).expect("state");
+        let mut event = started_event("claude:idle-managed", 4_000_001);
+        event.native_session_id = Some("idle-thread".into());
+        state.ingest(event.clone()).expect("start");
+        state.mark_session_lume_controlled("claude:idle-managed", SessionSource::Desktop, None).expect("managed");
+        // A hook from the Lume-started process carries its pid.
+        event.event = HookEventKind::Completed;
+        event.source = Some(SessionSource::Desktop);
+        event.control_origin = SessionControlOrigin::Lume;
+        state.ingest(event).expect("completed");
+        for _ in 0..4 {
+            state.reconcile_process_snapshot(Vec::new(), HashSet::new()).expect("scan");
+        }
+        assert_eq!(state.sessions().expect("sessions").len(), 1, "the chat stays open");
+        assert_eq!(state.store.lock().unwrap().load_sessions().unwrap().len(), 1, "and comes back after a restart");
     }
 
     #[test]

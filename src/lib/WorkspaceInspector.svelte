@@ -321,7 +321,7 @@
         <section class="mcp-loading" role="status" aria-label={tr("Loading MCP servers", "Carregando servidores MCP")}><div class="loading-rows" aria-hidden="true"><i></i><i></i><i></i></div></section>
       {:else if mcpAgents.includes(session.agent) && (mcpServers.length || mcpProbing)}
         <details class="inspector-section mcp-section">
-          <summary><LumeIcon name="sources" size={14} /><span>MCP</span><em>{mcpServers.length}</em></summary>
+          <summary><LumeIcon name="server" size={14} /><span>MCP</span><em>{mcpServers.length}</em></summary>
           <p class="section-description">{mcpProbing ? tr("Checking connections…", "Verificando conexões…") : tr("Tool servers this agent can use", "Servidores de ferramentas que este agente pode usar")}</p>
           <ul class="mcp-list">
             {#each sortedMcp as item (`${item.scope}:${item.name}`)}
@@ -337,7 +337,7 @@
 
       {#if session.nativeSessionId}
         <details class="inspector-section notes-section">
-          <summary><LumeIcon name="note" size={14} /><span>{tr("Notes", "Notas")}</span>{#if noteCount}<em>{noteCount}</em>{/if}</summary>
+          <summary><LumeIcon name="bookmark" size={14} /><span>{tr("Notes", "Notas")}</span>{#if noteCount}<em>{noteCount}</em>{/if}</summary>
           <InspectorNotes sessionId={session.id} {language} onJump={onJumpToPrompt} onCount={(count) => (noteCount = count)} />
         </details>
       {/if}

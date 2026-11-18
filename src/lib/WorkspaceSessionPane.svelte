@@ -665,6 +665,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   function compactTokens(value: number) {
     return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value >= 1_000 ? `${Math.round(value / 1_000)}k` : String(value);
   }
+  // Every request re-reads the whole context, so a long Claude chat costs more with each message.
+  const HEAVY_CONTEXT = 150_000;
+  let heavyDismissed = $state<Record<string, number>>({});
+  const heavyContext = $derived(session.agent === "claude_code" && contextTokens >= HEAVY_CONTEXT && contextTokens >= (heavyDismissed[session.id] ?? 0) + 100_000);
   const contextLabel = $derived(contextUsage
     ? tr(`Context: ${compactTokens(contextTokens)} of ${compactTokens(contextWindow)} (${contextPercent}%)`, `Contexto: ${compactTokens(contextTokens)} de ${compactTokens(contextWindow)} (${contextPercent}%)`)
     : "");
@@ -3277,6 +3281,13 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         {/if}
       </section>
     {/if}
+    {#if heavyContext && !composerInIntroPosition}
+      <div class="heavy-context" role="status">
+        <span>{tr(`This chat holds ${compactTokens(contextTokens)} tokens, and every message re-reads all of them. Compacting makes each one cheaper.`, `Este chat tem ${compactTokens(contextTokens)} tokens e cada mensagem lê todos de novo. Compactar deixa cada uma mais barata.`)}</span>
+        <button type="button" class="heavy-compact" disabled={!canCompact || sending} onclick={() => void compactContext()}>{tr("Compact now", "Compactar agora")}</button>
+        <button type="button" class="heavy-dismiss" aria-label={tr("Dismiss", "Dispensar")} title={tr("Dismiss", "Dispensar")} onclick={() => (heavyDismissed = { ...heavyDismissed, [session.id]: contextTokens })}><LumeIcon name="close" size={10} /></button>
+      </div>
+    {/if}
     <div class:beam={composerInIntroPosition && canCompose} class="composer-field">
       <UsageBanner alerts={usageNotices} {language} attached onDismiss={archiveAgentAlert} />
       <div class="composer-input-row">
@@ -3780,6 +3791,11 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .outgoing-row.in-flight .user-message { visibility: hidden; }
   .outgoing-row.delivery-pending .user-message { border-style: dashed; opacity: .76; }
   .user-row.outgoing-replacement { display: none; }
+  .heavy-context { max-width: 760px; margin: 0 auto 8px; padding: 6px 6px 6px 12px; display: flex; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, #c9963d 45%, var(--workspace-line)); border-radius: 12px; color: var(--workspace-text); background: color-mix(in srgb, #c9963d 10%, var(--workspace-raised)); font-size: 11px; line-height: 1.4; }
+  .heavy-context span { min-width: 0; flex: 1; }
+  .composer .heavy-context button { width: auto; height: 26px; padding: 0 10px; border-radius: 8px; font-size: 11px; font-weight: 700; color: var(--workspace-strong); background: color-mix(in srgb, #c9963d 24%, transparent); }
+  .composer .heavy-context button.heavy-dismiss { width: 22px; height: 22px; padding: 0; border-radius: 50%; color: var(--workspace-muted); background: transparent; }
+  .composer .heavy-context button:hover:not(:disabled) { background: color-mix(in srgb, #c9963d 36%, transparent); }
   .attached-notes { max-width: 760px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 5px; }
   .note-chip { max-width: 220px; min-height: 24px; padding: 0 3px 0 8px; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); border-radius: 999px; color: var(--workspace-accent); background: var(--workspace-accent-soft); font-size: 11px; font-weight: 650; }
   .note-chip small { min-width: 0; overflow: hidden; color: var(--workspace-strong); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }

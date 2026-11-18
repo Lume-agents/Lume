@@ -826,6 +826,15 @@ impl AppState {
                 .saturating_sub(activity_limit.max(1));
             if start > 0 {
                 let mut recent = session.activities.split_off(start);
+                // A long turn fills the window with its tools: the prompt that opened it stays, or the chat
+                // shows the answer without what the person asked.
+                let opening_prompt = session
+                    .activities
+                    .iter()
+                    .rposition(|activity| activity.kind == "prompt");
+                if let Some(index) = opening_prompt {
+                    recent.push(session.activities.swap_remove(index));
+                }
                 recent.extend(session.activities.drain(..).filter(|activity| {
                     activity.kind == "plan_document"
                         || (activity.kind == "queued_prompt" && activity.status == "waiting")
@@ -8225,6 +8234,31 @@ mod tests {
             .unwrap()
             .iter()
             .any(|session| session.id == id));
+    }
+
+    #[test]
+    fn a_long_turn_keeps_the_prompt_that_opened_it_in_the_window() {
+        let state = AppState::new(Path::new(":memory:")).unwrap();
+        let mut session = session_from_event(&started_event("claude:long-turn", 0), now_millis());
+        let item = |id: String, kind: &str, at: i64| SessionActivity {
+            id,
+            kind: kind.into(),
+            title: kind.into(),
+            detail: Some(kind.into()),
+            status: "completed".into(),
+            created_at: at,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        };
+        session.activities = vec![item("old".into(), "prompt", 1), item("asked".into(), "prompt", 2)];
+        session.activities.extend((0..80).map(|n| item(format!("tool-{n}"), "tool", 10 + n)));
+        state.sessions.lock().unwrap().push(session);
+        let shown = state.bounded_sessions(60).unwrap();
+        let activities = &shown.iter().find(|session| session.id == "claude:long-turn").unwrap().activities;
+        assert_eq!(activities.first().map(|activity| activity.id.as_str()), Some("asked"));
+        assert!(!activities.iter().any(|activity| activity.id == "old"));
+        assert_eq!(activities.len(), 61);
     }
 
     #[test]

@@ -73,6 +73,13 @@ assert.equal(codexContext([
   { contextTokens: 0, contextWindow: 100_000 },
 ]).percent, 0, "after compaction, a zero footprint is not replaced by the old full context");
 assert.equal(sessionContextUsage({ agent: "claude_code", promptTokenUsage: [{ contextTokens: 100_000 }] }).percent, 50);
+{
+  const heavy = { agent: "claude_code", promptTokenUsage: [{ contextTokens: 180_000, createdAt: 1_000 }] };
+  assert.equal(sessionContextUsage({ ...heavy, activities: [{ kind: "compact", createdAt: 2_000 }] }), null,
+    "a compaction after the last answer leaves the context unknown, so auto-compact does not fire again");
+  assert.equal(sessionContextUsage({ ...heavy, activities: [{ kind: "compact", createdAt: 500 }] }).tokens, 180_000,
+    "an answer after the compaction counts again");
+}
 assert.equal(sessionContextUsage({ agent: "claude_code", promptTokenUsage: [{ contextTokens: 500_000 }] }).window, 1_000_000);
 assert.equal(codexContext([{ contextTokens: 150_000, contextWindow: 100_000 }]).percent, 100);
 assert.equal(sessionContextUsage(null), null);

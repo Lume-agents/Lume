@@ -17,6 +17,11 @@ pub const EVENT_SERVER_ADDRESS: &str = "127.0.0.1:43119";
 const HOOK_EVENT_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const OBSERVATION_HOOK_IO_TIMEOUT: Duration = Duration::from_millis(300);
 const MAX_HOOK_EVENT_BYTES: u64 = 2 * 1024 * 1024;
+/// The whole event must arrive within this, however slowly its bytes come.
+const HOOK_EVENT_DEADLINE: Duration = Duration::from_secs(10);
+/// Hooks waiting on a permission keep their connection open, so the cap is generous; it only stops a local
+/// process from opening threads without end.
+const MAX_CONNECTIONS: usize = 256;
 
 pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
     let listener = TcpListener::bind(EVENT_SERVER_ADDRESS)
@@ -24,12 +29,19 @@ pub fn start(state: AppState, app: AppHandle) -> Result<(), String> {
     thread::Builder::new()
         .name("lume-event-server".into())
         .spawn(move || {
+            let connections = crate::http_limits::ConnectionLimit::new(MAX_CONNECTIONS, MAX_CONNECTIONS);
             for stream in listener.incoming().flatten() {
+                let Some(place) = stream.peer_addr().ok().and_then(|peer| connections.admit(peer.ip())) else {
+                    continue;
+                };
                 let state = state.clone();
                 let app = app.clone();
                 let _ = thread::Builder::new()
                     .name("lume-event-client".into())
-                    .spawn(move || handle_connection(stream, state, app));
+                    .spawn(move || {
+                        let _place = place;
+                        handle_connection(stream, state, app)
+                    });
             }
         })
         .map_err(|error| error.to_string())?;
@@ -44,7 +56,7 @@ fn handle_connection(mut stream: TcpStream, state: AppState, app: AppHandle) {
     {
         return;
     }
-    let response = read_event(&stream).and_then(|mut event| {
+    let response = read_event(crate::http_limits::DeadlineReader::new(&stream, HOOK_EVENT_DEADLINE)).and_then(|mut event| {
         let automatically_approved = permission_is_automatically_approved(&state, &event)?;
         let wait_for_decision = event.wait_for_decision;
         let question_id = event.question.as_ref().map(|question| question.id.clone());

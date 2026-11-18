@@ -640,6 +640,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     return activity ? activityThinkingState(activity) : "breathing";
   });
   const promptIsRunning = $derived(session.status === "running");
+  // The turn in progress is a /compact: the label squeezes instead of shimmering.
+  const compacting = $derived(promptIsRunning && isCompactCommand(chatActivities.findLast((activity) => activity.kind === "prompt")?.detail));
   const activePromptStartedAt = $derived.by(() => {
     const latestResultAt = session.results.reduce((latest: number, result: SessionResult) => Math.max(latest, result.createdAt), 0);
     const latestFinalAt = entries.reduce((latest, entry) => entry.isFinalResponse ? Math.max(latest, entry.activity.createdAt) : latest, latestResultAt);
@@ -3044,7 +3046,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
           speed={0.92}
           label={tr(`${sessionName()} is working`, `${sessionName()} está trabalhando`)}
         />
-        <span class="typing-label">{activityThinkingLabel(activeThinkingState, language)}</span>
+        <span class="typing-label" class:compacting>{compacting ? tr("Compacting context…", "Compactando contexto…") : activityThinkingLabel(activeThinkingState, language)}</span>
         <span class="typing-elapsed" aria-label={tr("Elapsed time", "Tempo decorrido")}>{formatAgentDuration(Math.max(0, typingClock - (activePromptStartedAt ?? observedRunningSince ?? typingClock)))}</span>
       </div>
     {/if}
@@ -4148,6 +4150,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes plane-takeoff { 0% { opacity: 1; transform: translate(0, 0) rotate(0); } 20% { opacity: 1; transform: translate(-2px, 2px) rotate(-5deg); } 68% { opacity: 1; transform: translate(12px, -12px) rotate(3deg); } 100% { opacity: 0; transform: translate(26px, -26px) rotate(7deg); } }
   @keyframes status-pulse { 0%, 45% { box-shadow: 0 0 0 0 rgba(78, 152, 202, .28); } 80%, 100% { box-shadow: 0 0 0 4px rgba(78, 152, 202, 0); } }
+  .agent-typing .typing-label.compacting { background: linear-gradient(90deg, #8a7a4e 10%, #d3a24a 44%, #f2d9a0 53%, #d3a24a 62%, #8a7a4e 90%); background-size: 240% 100%; background-clip: text; animation: thinking-label-shimmer 2.4s linear infinite, compact-label-squeeze 2.4s ease-in-out infinite; transform-origin: left center; }
+  @keyframes compact-label-squeeze { 0%, 100% { letter-spacing: .08em; transform: scaleX(1); } 50% { letter-spacing: -.045em; transform: scaleX(.94); } }
   @keyframes thinking-label-shimmer { to { background-position: -240% 0; } }
   @keyframes takeover-fade { from { opacity: 0; } }
   @keyframes takeover-arrive { from { opacity: 0; transform: translateY(7px) scale(.975); } }
@@ -4166,6 +4170,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     .conversation { --chat-edge-gutter: 28px; }.message { width: 94%; }.user-message { width: fit-content; max-width: 94%; }.composer { padding-right: 10px; padding-left: 10px; }
   }
   @media (max-height: 640px) { .conversation { padding-top: 17px; padding-bottom: 18px; }.pane-header { min-height: 56px; }.composer { padding-top: 9px; padding-bottom: 10px; } }
-  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .writer-conflict-backdrop, .writer-conflict-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .writer-conflict-dialog footer button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer, .composer.crossfade-out, .composer.crossfade-in, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .writer-conflict-backdrop, .writer-conflict-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .agent-typing .typing-label.compacting, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .writer-conflict-dialog footer button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer, .composer.crossfade-out, .composer.crossfade-in, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
   @media (prefers-reduced-motion: reduce) { .effort-field.max .effort-thumb, .effort-field.ultra .effort-track::before, .effort-field.ultra .effort-progress { animation: none; }.effort-thumb, .effort-thumb::before, .effort-progress { transition: none; } }
 </style>

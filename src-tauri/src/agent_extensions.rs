@@ -335,6 +335,7 @@ fn antigravity(home: &Path, project: Option<&Path>, agent: &mut AgentExtensions)
         skills_in(&directory.join("skills"), "plugin", agent);
     }
     skills_in(&user.join("skills"), "user", agent);
+    mcp(agent_mcp::antigravity_configured(), agent);
     instruction(&user.join("GEMINI.md"), "user", agent);
     markdown_items(&user.join("agents"), "subagent", "user", agent);
     markdown_items(&user.join("rules"), "instruction", "user", agent);

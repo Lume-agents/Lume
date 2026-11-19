@@ -36,11 +36,12 @@ test("the menu lists what the agent reported, with /model owned by Lume", () => 
   assert.equal(findSlashCommand(commands, "/model").action, "model");
   assert.equal(findSlashCommand(commands, "/code-review").argumentHint, "[low|high]");
   const antigravity = agentSlashCommands([], "antigravity");
-  assert.deepEqual(antigravity.map((command) => [command.source, command.name]), [["lume", "model"], ["lume", "clear"]]);
+  assert.deepEqual(antigravity.map((command) => [command.source, command.name]), [["lume", "model"], ["lume", "mcp"], ["lume", "clear"]]);
   assert.equal(antigravity[0].description, "Choose the model and permissions");
   const reportedByAntigravity = agentSlashCommands(claudeReported, "antigravity");
   assert.deepEqual(reportedByAntigravity.map((command) => [command.source, command.name]), [
     ["lume", "model"],
+    ["lume", "mcp"],
     ["lume", "clear"],
     ["agent", "compact"],
     ["agent", "code-review"],

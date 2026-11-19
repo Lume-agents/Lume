@@ -658,7 +658,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   // The "+" menu: attach a file, compact the context, MCP servers (plugins to come).
   let plusMenuOpen = $state(false);
   let plusMenuElement = $state<HTMLElement | null>(null);
-  const supportsMcp = $derived(["codex", "claude_code", "opencode"].includes(session.agent) && session.source !== "web");
+  const supportsMcp = $derived(["codex", "claude_code", "opencode", "antigravity"].includes(session.agent) && session.source !== "web");
   const contextUsage = $derived(sessionContextUsage(session));
   const contextTokens = $derived(contextUsage?.tokens ?? 0);
   const contextWindow = $derived(contextUsage?.window ?? 0);

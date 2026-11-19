@@ -115,7 +115,11 @@ pub fn parse_claude_live(entries: &[Value]) -> Vec<McpServer> {
 }
 
 fn from_json_entry(name: &str, entry: &Value, scope: &str) -> McpServer {
-    let url = entry.get("url").and_then(Value::as_str);
+    // Antigravity still writes the legacy `serverUrl` key.
+    let url = entry
+        .get("url")
+        .or_else(|| entry.get("serverUrl"))
+        .and_then(Value::as_str);
     let transport = entry
         .get("type")
         .and_then(Value::as_str)
@@ -274,6 +278,26 @@ pub fn gemini_configured(cwd: Option<&str>) -> Vec<McpServer> {
         cwd.and_then(|cwd| read_json(&Path::new(cwd).join(".gemini/settings.json")))
     {
         servers.extend(json_servers(&project, "mcpServers", "project"));
+    }
+    servers
+}
+
+/// Antigravity's global `mcp_config.json`, and the one each installed plugin may ship.
+pub fn antigravity_configured() -> Vec<McpServer> {
+    let Some(home) = home() else {
+        return Vec::new();
+    };
+    let mut servers = read_json(&home.join(".gemini/config/mcp_config.json"))
+        .map(|config| json_servers(&config, "mcpServers", "user"))
+        .unwrap_or_default();
+    if let Ok(entries) = fs::read_dir(home.join(".gemini/antigravity-cli/plugins")) {
+        let mut plugins: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        plugins.sort();
+        for plugin in plugins {
+            if let Some(config) = read_json(&plugin.join("mcp_config.json")) {
+                servers.extend(json_servers(&config, "mcpServers", "plugin"));
+            }
+        }
     }
     servers
 }
@@ -450,6 +474,7 @@ pub fn servers_for(
         AgentKind::ClaudeCode => claude_configured(cwd),
         AgentKind::Codex => codex_configured(cwd),
         AgentKind::OpenCode => opencode_configured(cwd),
+        AgentKind::Antigravity => antigravity_configured(),
         _ => Vec::new(),
     };
     if probe && *agent == AgentKind::ClaudeCode {
@@ -557,5 +582,33 @@ mod tests {
             ["connected", "failed", "needs_auth"]
         );
         assert_eq!(health[0].0, "claude.ai Claude Docs");
+    }
+
+    #[test]
+    fn antigravity_entries_written_by_agy_mcp_add_are_understood() {
+        let config = json!({ "mcpServers": {
+            "demo": { "command": "npx", "args": ["-y", "some-mcp"], "disabled": false },
+            "web": { "serverUrl": "https://example.com/mcp", "disabled": true,
+                     "headers": { "Authorization": "Bearer secret" } }
+        }});
+        let servers = json_servers(&config, "mcpServers", "user");
+        let shown: Vec<_> = servers
+            .iter()
+            .map(|item| {
+                (
+                    item.name.as_str(),
+                    item.transport.as_str(),
+                    item.target.as_str(),
+                    item.status.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("demo", "stdio", "npx -y some-mcp", "unknown"),
+                ("web", "http", "https://example.com/mcp", "disabled"),
+            ]
+        );
     }
 }

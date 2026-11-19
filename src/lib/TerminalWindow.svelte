@@ -1038,7 +1038,7 @@
   let mcpRequest = 0;
   const mcpStatusOrder = ["connected", "needs_auth", "failed", "unknown", "disabled"];
   const sortedMcpServers = $derived([...mcpServers].sort((a, b) => mcpStatusOrder.indexOf(a.status) - mcpStatusOrder.indexOf(b.status)));
-  const supportsMcp = $derived(Boolean(session && ["codex", "claude_code", "opencode"].includes(session.agent) && session.source !== "web"));
+  const supportsMcp = $derived(Boolean(session && ["codex", "claude_code", "opencode", "antigravity"].includes(session.agent) && session.source !== "web"));
   async function loadMcpPanel() {
     if (!session) return;
     const request = ++mcpRequest;

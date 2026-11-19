@@ -65,7 +65,7 @@
   let mcpProbing = $state(false);
   let mcpLoading = $state(false);
   let mcpKey = "";
-  const mcpAgents = ["codex", "claude_code", "opencode"];
+  const mcpAgents = ["codex", "claude_code", "opencode", "antigravity"];
   const mcpOrder = ["connected", "needs_auth", "failed", "unknown", "disabled"];
   $effect(() => {
     const id = session?.id;

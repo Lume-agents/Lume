@@ -8,7 +8,7 @@ use std::{
         mpsc, Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -32,6 +32,7 @@ const MAX_ACP_LINE: usize = 8 * 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TURN_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const UNAVAILABLE_RETRY: Duration = Duration::from_secs(10 * 60);
 /// Set on every ACP agent Lume starts, so hooks running inside it know Lume already follows it.
 pub const MANAGED_ACP_ENV: &str = "LUME_MANAGED_ACP";
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
@@ -77,8 +78,12 @@ pub struct AcpAgent {
     args: &'static [&'static str],
     /// Environment variable that carries a random loopback password, when the agent opens one.
     loopback_secret_env: Option<&'static str>,
-    /// Lume session IDs are `<prefix>-acp:<native ID>` and activity IDs start with `<prefix>-`.
+    /// Activity IDs start with `<prefix>-`.
     prefix: &'static str,
+    /// Lume session IDs are `<session_scheme>:<native ID>`.
+    session_scheme: &'static str,
+    /// Set on the agent process, for hooks that run inside it.
+    extra_env: &'static [(&'static str, &'static str)],
     pub agent: fn() -> AgentKind,
     pub integration: fn() -> crate::integrations::IntegrationKind,
 }
@@ -89,6 +94,8 @@ pub const OPENCODE: AcpAgent = AcpAgent {
     args: &["acp", "--hostname", "127.0.0.1", "--port", "0"],
     loopback_secret_env: Some("OPENCODE_SERVER_PASSWORD"),
     prefix: "opencode",
+    session_scheme: "opencode-acp",
+    extra_env: &[],
     agent: || AgentKind::OpenCode,
     integration: || crate::integrations::IntegrationKind::OpenCode,
 };
@@ -100,13 +107,36 @@ pub const GROK: AcpAgent = AcpAgent {
     args: &["agent", "stdio"],
     loopback_secret_env: None,
     prefix: "grok",
+    session_scheme: "grok-acp",
+    extra_env: &[],
     agent: || AgentKind::Grok,
     integration: || crate::integrations::IntegrationKind::Grok,
 };
 
+/// `agy acp`. Its sessions keep the IDs of the stream sessions they replace, and its hooks are
+/// told they run inside a Lume-driven conversation, as they were for the stream.
+pub const ANTIGRAVITY: AcpAgent = AcpAgent {
+    label: "Antigravity",
+    executable: "agy",
+    args: &["acp"],
+    loopback_secret_env: None,
+    prefix: "agy",
+    session_scheme: "antigravity-stream",
+    extra_env: &[
+        ("LUME_ANTIGRAVITY_STREAM", "1"),
+        ("LUME_MANAGED_SESSION", "1"),
+    ],
+    agent: || AgentKind::Antigravity,
+    integration: || crate::integrations::IntegrationKind::Antigravity,
+};
+
 impl AcpAgent {
     pub fn session_id(&self, native_id: &str) -> String {
-        format!("{}-acp:{native_id}", self.prefix)
+        format!("{}:{native_id}", self.session_scheme)
+    }
+
+    fn is_antigravity(&self) -> bool {
+        self.session_scheme == ANTIGRAVITY.session_scheme
     }
 }
 
@@ -114,13 +144,15 @@ impl AcpAgent {
 pub struct AcpBridges {
     pub opencode: AcpBridge,
     pub grok: AcpBridge,
+    pub antigravity: AcpBridge,
 }
 
 impl AcpBridges {
     pub fn new(state: AppState, app: AppHandle) -> Self {
         Self {
             opencode: AcpBridge::new(&OPENCODE, state.clone(), app.clone()),
-            grok: AcpBridge::new(&GROK, state, app),
+            grok: AcpBridge::new(&GROK, state.clone(), app.clone()),
+            antigravity: AcpBridge::new(&ANTIGRAVITY, state, app),
         }
     }
 
@@ -155,11 +187,27 @@ pub struct AcpBridge {
     turn_sequence: Arc<Mutex<HashMap<String, u64>>>,
     session_configs: SessionConfigs,
     reader_generation: Arc<AtomicU64>,
+    /// When starting the agent last failed, so a CLI without ACP is not retried on every call.
+    unavailable_since: Arc<Mutex<Option<Instant>>>,
     state: AppState,
     app: AppHandle,
 }
 
 impl AcpBridge {
+    /// Whether the agent speaks ACP; a failure is remembered for a few minutes.
+    pub fn available(&self) -> bool {
+        if let Ok(since) = self.unavailable_since.lock() {
+            if since.is_some_and(|since| since.elapsed() < UNAVAILABLE_RETRY) {
+                return false;
+            }
+        }
+        let started = self.ensure_started().is_ok();
+        if let Ok(mut since) = self.unavailable_since.lock() {
+            *since = (!started).then(Instant::now);
+        }
+        started
+    }
+
     pub fn agent(&self) -> &'static AcpAgent {
         self.agent
     }
@@ -194,6 +242,7 @@ impl AcpBridge {
             turn_sequence: Arc::new(Mutex::new(HashMap::new())),
             session_configs: Arc::new(Mutex::new(HashMap::new())),
             reader_generation: Arc::new(AtomicU64::new(0)),
+            unavailable_since: Arc::new(Mutex::new(None)),
             state,
             app,
         }
@@ -246,6 +295,7 @@ impl AcpBridge {
             command.args(self.agent.args);
             // Tells Lume's own hooks, which Grok also runs, that this session is already driven here.
             command.env(MANAGED_ACP_ENV, "1");
+            command.envs(self.agent.extra_env.iter().copied());
             if let Some(name) = self.agent.loopback_secret_env {
                 let mut password = [0u8; 24];
                 getrandom::getrandom(&mut password)
@@ -438,13 +488,91 @@ impl AcpBridge {
             .map(str::to_string);
         let mut event = base_event(self.agent, &id, HookEventKind::SessionStarted);
         event.project = project;
-        event.working_directory = Some(cwd);
-        event.permission_profile = Some(permission_profile(self.agent));
+        event.working_directory = Some(cwd.clone());
+        event.permission_profile = Some(if self.agent.is_antigravity() {
+            crate::antigravity_acp::permission_profile(&crate::antigravity_acp::permission_mode(
+                &self.state,
+                &id,
+            ))
+        } else {
+            permission_profile(self.agent)
+        });
         if let Err(error) = event_server::publish_event(&self.state, &self.app, event) {
             let _ = self.close(&id);
             return Err(error);
         }
+        if self.agent.is_antigravity() {
+            self.apply_antigravity_choices(&id, &cwd);
+        }
         Ok(id)
+    }
+
+    /// The model, effort and permission mode Lume stored for the conversation, so a restarted
+    /// agent runs it as the user left it. A stored choice the agent no longer offers is skipped.
+    fn apply_antigravity_choices(&self, id: &str, cwd: &str) {
+        let Ok(mut config) = self.config_options(id, cwd) else {
+            return;
+        };
+        let choice = self
+            .state
+            .session_model_override_for_native_id(AgentKind::Antigravity, id)
+            .unwrap_or_default();
+        let wanted = [
+            ("model", choice.model),
+            ("thought_level", choice.reasoning_effort),
+            (
+                "mode",
+                Some(
+                    crate::antigravity_acp::acp_mode_for_permission(
+                        &crate::antigravity_acp::permission_mode(&self.state, id),
+                    )
+                    .to_string(),
+                ),
+            ),
+        ];
+        for (category, value) in wanted {
+            let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+            let Some(option) = config_option(&config, category).cloned() else {
+                continue;
+            };
+            if option["currentValue"].as_str() == Some(value.as_str())
+                || validate_config_value(&option, &value).is_err()
+            {
+                continue;
+            }
+            if let Ok(updated) = self.set_config_option(id, &option, &value) {
+                config = updated;
+            }
+        }
+    }
+
+    /// Sends `prompt` once the running turn ends: an answer to an agent's question arrives
+    /// while that turn may still be closing.
+    pub fn prompt_when_idle(&self, session_id: &str, cwd: &str, prompt: String) {
+        let bridge = self.clone();
+        let id = session_id.to_string();
+        let cwd = cwd.to_string();
+        let _ = thread::Builder::new()
+            .name(format!("lume-{}-answer", self.agent.prefix))
+            .spawn(move || {
+                for _ in 0..600 {
+                    let busy = bridge
+                        .runtime
+                        .lock()
+                        .is_ok_and(|runtime| runtime.active.contains(&id));
+                    if !busy {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                if let Err(error) = bridge.prompt(&id, &cwd, prompt, Vec::new()) {
+                    let mut event = base_event(bridge.agent, &id, HookEventKind::Failed);
+                    event.status_label = Some(error.chars().take(160).collect());
+                    let _ = event_server::publish_event(&bridge.state, &bridge.app, event);
+                }
+            });
     }
 
     pub fn resumable_sessions(&self) -> Result<Vec<crate::integrations::ResumableSession>, String> {
@@ -584,6 +712,7 @@ impl AcpBridge {
         let bridge = self.clone();
         let id = session_id.to_string();
         let generation = self.reader_generation.load(Ordering::SeqCst);
+        let prompt_at = now_millis();
         thread::Builder::new()
             .name(format!("lume-{}-prompt", self.agent.prefix))
             .spawn(move || {
@@ -628,8 +757,23 @@ impl AcpBridge {
                 } else {
                     HookEventKind::Failed
                 };
+                let waiting_question = bridge.agent.is_antigravity()
+                    && crate::antigravity_acp::take_waiting_question(&id)
+                    && event_kind == HookEventKind::Completed;
+                let event_kind = if waiting_question {
+                    HookEventKind::WaitingForInput
+                } else {
+                    event_kind
+                };
                 let mut event = base_event(bridge.agent, &id, event_kind);
                 event.last_response = response;
+                if bridge.agent.is_antigravity() {
+                    if let Some(usage) = result.as_ref().ok().and_then(|result| {
+                        crate::antigravity_acp::turn_usage_activity(&id, result, Some(prompt_at))
+                    }) {
+                        event.activities.push(usage);
+                    }
+                }
                 if cancelled || stop_reason == Some("cancelled") {
                     event.status_label = Some("Interrompido".into());
                 } else if let Err(error) = result {
@@ -1074,6 +1218,27 @@ fn handle_update(
         }
         return;
     }
+    if kind == "usage_update" {
+        if agent.is_antigravity() {
+            crate::antigravity_acp::record_context(id, update);
+        }
+        return;
+    }
+    if agent.is_antigravity() && matches!(kind, "tool_call" | "tool_call_update") {
+        if let Some(tool) = crate::antigravity_acp::tool_update(id, update) {
+            if let Some(question) = tool.question {
+                let mut event = base_event(agent, id, HookEventKind::QuestionRequest);
+                event.question = Some(question);
+                let _ = event_server::publish_event(state, app, event);
+            }
+            if let Some(activity) = tool.activity {
+                let mut event = base_event(agent, id, HookEventKind::Activity);
+                event.activity = Some(activity);
+                let _ = event_server::publish_event(state, app, event);
+            }
+            return;
+        }
+    }
     if kind == "session_info_update" {
         if let Some(title) = update["title"]
             .as_str()
@@ -1456,9 +1621,31 @@ fn answer_agent_request(
         .unwrap_or_default();
     let tool = &message["params"]["toolCall"];
     let tool_id = tool["toolCallId"].as_str().unwrap_or("tool");
+    if agent.is_antigravity() && crate::antigravity_acp::approves_everything(state, session_id) {
+        let selected = ["allow_always", "allow_once"].into_iter().find_map(|kind| {
+            options
+                .iter()
+                .find(|option| option["kind"].as_str() == Some(kind))
+                .and_then(|option| option["optionId"].as_str())
+        });
+        let outcome = selected
+            .map(|option_id| json!({"outcome":"selected","optionId":option_id}))
+            .unwrap_or_else(|| json!({"outcome":"cancelled"}));
+        let _ = send_json(
+            writer,
+            json!({"jsonrpc":"2.0","id":id,"result":{"outcome":outcome}}),
+        );
+        return;
+    }
     let permission_id = format!("{}:{session_id}:{id}:{tool_id}", agent.prefix);
     let mut event = base_event(agent, session_id, HookEventKind::PermissionRequest);
-    let mut profile = permission_profile(agent);
+    let mut profile = if agent.is_antigravity() {
+        crate::antigravity_acp::permission_profile(&crate::antigravity_acp::permission_mode(
+            state, session_id,
+        ))
+    } else {
+        permission_profile(agent)
+    };
     profile.available_actions = vec![PermissionAction::Deny];
     if options
         .iter()

@@ -1906,7 +1906,7 @@ fn unwrap_antigravity_transcript_args(args: Option<&Value>) -> Value {
     Value::Object(normalized)
 }
 
-fn clean_antigravity_generic_output(content: &str) -> String {
+pub(crate) fn clean_antigravity_generic_output(content: &str) -> String {
     content
         .lines()
         .skip_while(|line| {
@@ -2240,7 +2240,7 @@ fn parse_antigravity_transcript_activities(
     (activities, last_response)
 }
 
-fn extract_uuid_token(text: &str) -> Option<String> {
+pub(crate) fn extract_uuid_token(text: &str) -> Option<String> {
     text.split(|ch: char| !ch.is_ascii_hexdigit() && ch != '-')
         .find(|token| {
             let parts = token.split('-').collect::<Vec<_>>();
@@ -2275,10 +2275,12 @@ fn antigravity_subagent_timeline_from_root(
         .rsplit_once(":subagent:")
         .map(|(_, key)| key)
         .ok_or("This is not an Antigravity subagent")?;
-    let child_id = step_key
-        .parse::<u64>()
-        .ok()
-        .and_then(|step| crate::antigravity_stream::subagent_conversation_id(parent_session_id, step))
+    let child_id = crate::antigravity_acp::subagent_conversation_id(parent_session_id, step_key)
+        .or_else(|| {
+            step_key.parse::<u64>().ok().and_then(|step| {
+                crate::antigravity_stream::subagent_conversation_id(parent_session_id, step)
+            })
+        })
         .or_else(|| {
             if is_safe_conversation_id(step_key)
                 && antigravity_full_transcript_path(root, step_key).is_some()

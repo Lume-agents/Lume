@@ -10,7 +10,7 @@ export function contextWindowFor(agent: AgentSession["agent"], sample: Pick<Prom
 
 /** How full the context was after one prompt, 0–100, or null when the agent does not say. */
 export function sampleContextPercent(agent: AgentSession["agent"], sample: PromptTokenUsage): number | null {
-  if (!["claude_code", "codex"].includes(agent) || !sample.contextTokens) return null;
+  if (!["claude_code", "codex", "antigravity"].includes(agent) || !sample.contextTokens) return null;
   const window = contextWindowFor(agent, sample);
   if (!window || !Number.isFinite(sample.contextTokens)) return null;
   return Math.max(0, Math.min(100, Math.round(sample.contextTokens / window * 100)));
@@ -23,7 +23,7 @@ export function sampleContextPercent(agent: AgentSession["agent"], sample: Promp
 export function sessionContextUsage(
   session: Pick<AgentSession, "agent" | "promptTokenUsage"> & { activities?: Pick<SessionActivity, "kind" | "createdAt">[] } | null | undefined,
 ) {
-  if (!session || !["claude_code", "codex"].includes(session.agent)) return null;
+  if (!session || !["claude_code", "codex", "antigravity"].includes(session.agent)) return null;
   const usage = session.promptTokenUsage?.findLast((sample) =>
     (sample.contextWindow ?? 0) > 0 || (sample.contextTokens ?? 0) > 0,
   );

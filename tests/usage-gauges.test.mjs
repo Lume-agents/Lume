@@ -94,3 +94,9 @@ const withModel = usageGaugeGroups([
 assert.deepEqual(withModel.map((group) => group.label), ["", "Fable 5.2"]);
 assert.deepEqual(withModel[1].gauges.map((gauge) => gauge.window), ["7d"]);
 console.log("Model usage gauge tests passed");
+{
+  const antigravity = (samples) => sessionContextUsage({ agent: "antigravity", promptTokenUsage: samples });
+  assert.equal(antigravity([{ contextTokens: 524_288, contextWindow: 1_048_576 }]).percent, 50,
+    "Antigravity's ACP reports the window, so its context is shown");
+  assert.equal(antigravity([{ contextTokens: 9_000 }]), null, "without a reported window nothing is guessed");
+}

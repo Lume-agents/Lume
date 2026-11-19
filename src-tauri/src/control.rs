@@ -320,7 +320,7 @@ pub fn submit_prompt(
         }
         browser.request_prompt(session.id.clone(), prompt.to_string())?;
         browser.request_focus(session.id.clone())
-    } else if is_acp_agent(&session.agent) {
+    } else if let Some(acp) = acp_for(app, &session) {
         if session.control_origin != SessionControlOrigin::Lume {
             return Err("Esta sessão externa não está sob controle do Lume".into());
         }
@@ -332,7 +332,7 @@ pub fn submit_prompt(
             .working_directory
             .as_deref()
             .ok_or("Sessão sem pasta de projeto")?;
-        acp_bridge(app, &session.agent)?.prompt(
+        acp.prompt(
             native_id,
             cwd,
             prompt.to_string(),
@@ -574,12 +574,12 @@ pub fn interrupt_prompt(
             "abort",
             serde_json::json!({}),
         )?;
-    } else if is_acp_agent(&session.agent) {
+    } else if let Some(acp) = acp_for(app, &session) {
         let native_id = session
             .native_session_id
             .as_deref()
             .ok_or("ACP session ID missing")?;
-        acp_bridge(app, &session.agent)?.cancel(native_id)?;
+        acp.cancel(native_id)?;
     } else if session.agent == AgentKind::Antigravity && session.source == SessionSource::Desktop {
         let native_id = session
             .native_session_id
@@ -702,7 +702,19 @@ pub fn session_slash_commands(
             Some(native_id) => acp_bridge(app, &session.agent)?.slash_commands(native_id, cwd),
             None => Ok(Vec::new()),
         },
-        AgentKind::Antigravity => crate::agent_commands::antigravity_commands(cwd),
+        AgentKind::Antigravity => {
+            let mut commands = match (acp_for(app, &session), session.native_session_id.as_deref()) {
+                (Some(acp), Some(native_id)) => acp.slash_commands(native_id, cwd).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            // The agent announces its own commands; skills and workflows in the project add to them.
+            for command in crate::agent_commands::antigravity_commands(cwd)? {
+                if !commands.iter().any(|known| known.name == command.name) {
+                    commands.push(command);
+                }
+            }
+            Ok(commands)
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -728,11 +740,11 @@ pub fn session_model_settings(
         )?;
         return omp_model_settings(&state_data, &catalog, &levels);
     }
-    if is_acp_agent(&session.agent) {
+    if let Some(acp) = acp_for(app, &session) {
         if session.control_origin != SessionControlOrigin::Lume {
             return Err("Retome esta sessão pelo Lume antes de alterar o modelo".into());
         }
-        return acp_bridge(app, &session.agent)?.model_settings(
+        return acp.model_settings(
             session
                 .native_session_id
                 .as_deref()
@@ -900,11 +912,11 @@ pub fn set_session_model_settings(
         protocol::emit_sessions_changed(app);
         return session_model_settings(app, state, bridge, session_id);
     }
-    if is_acp_agent(&session.agent) {
+    if let Some(acp) = acp_for(app, &session) {
         if session.control_origin != SessionControlOrigin::Lume {
             return Err("Retome esta sessão pelo Lume antes de alterar o modelo".into());
         }
-        return acp_bridge(app, &session.agent)?.set_model_settings(
+        let settings = acp.set_model_settings(
             session
                 .native_session_id
                 .as_deref()
@@ -915,7 +927,19 @@ pub fn set_session_model_settings(
                 .ok_or("Sessão sem pasta de projeto")?,
             model,
             effort,
-        );
+        )?;
+        if session.agent == AgentKind::Antigravity {
+            // Kept so a restarted agent resumes the conversation with the same choice.
+            state.set_session_model_override(
+                session_id,
+                SessionModelOverride {
+                    model: Some(settings.model.clone()),
+                    reasoning_effort: settings.reasoning_effort.clone(),
+                },
+            )?;
+            protocol::emit_sessions_changed(app);
+        }
+        return Ok(settings);
     }
     if session.agent == AgentKind::Antigravity {
         if session.control_origin != SessionControlOrigin::Lume
@@ -986,6 +1010,31 @@ fn is_acp_agent(agent: &AgentKind) -> bool {
     matches!(agent, AgentKind::OpenCode | AgentKind::Grok)
 }
 
+/// The ACP bridge that drives `session`: OpenCode and Grok always, and a Lume-driven Antigravity
+/// conversation when its CLI speaks ACP. An older Antigravity CLI keeps the stream.
+fn acp_for<'a>(
+    app: &'a AppHandle,
+    session: &AgentSession,
+) -> Option<&'a crate::acp_bridge::AcpBridge> {
+    let bridges = app.state::<crate::acp_bridge::AcpBridges>().inner();
+    if is_acp_agent(&session.agent) {
+        return bridges.for_agent(&session.agent);
+    }
+    if session.agent != AgentKind::Antigravity
+        || session.source != SessionSource::Desktop
+        || !bridges.antigravity.available()
+    {
+        return None;
+    }
+    // A conversation the stream still runs moves to ACP: the two must not drive it at once.
+    if let Some(native_id) = session.native_session_id.as_deref() {
+        let _ = app
+            .state::<crate::antigravity_stream::AntigravityStream>()
+            .stop(native_id);
+    }
+    Some(&bridges.antigravity)
+}
+
 fn acp_bridge<'a>(
     app: &'a AppHandle,
     agent: &AgentKind,
@@ -1007,10 +1056,10 @@ pub fn set_session_agent_mode(
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or("Sessão não encontrada")?;
-    if !is_acp_agent(&session.agent) || session.control_origin != SessionControlOrigin::Lume {
-        return Err("Este seletor de modo requer uma sessão ACP controlada pelo Lume".into());
-    }
-    acp_bridge(app, &session.agent)?.set_mode(
+    let acp = acp_for(app, &session)
+        .filter(|_| session.control_origin == SessionControlOrigin::Lume)
+        .ok_or("Este seletor de modo requer uma sessão ACP controlada pelo Lume")?;
+    acp.set_mode(
         session
             .native_session_id
             .as_deref()
@@ -1282,6 +1331,7 @@ pub fn session_permission_settings(
                 .unwrap_or_else(
                     || match session.permission_profile.approval_policy.as_str() {
                         crate::antigravity_stream::PERMISSION_ACCEPT_EDITS
+                        | crate::antigravity_stream::PERMISSION_AUTO
                         | crate::antigravity_stream::PERMISSION_PLAN
                         | crate::antigravity_stream::PERMISSION_ALLOW_ALL => {
                             session.permission_profile.approval_policy.clone()
@@ -1294,6 +1344,7 @@ pub fn session_permission_settings(
                 modes: vec![
                     crate::antigravity_stream::PERMISSION_DEFAULT.into(),
                     crate::antigravity_stream::PERMISSION_ACCEPT_EDITS.into(),
+                    crate::antigravity_stream::PERMISSION_AUTO.into(),
                     crate::antigravity_stream::PERMISSION_PLAN.into(),
                     crate::antigravity_stream::PERMISSION_ALLOW_ALL.into(),
                 ],
@@ -1386,10 +1437,28 @@ pub fn set_session_permission_mode(
         state.set_permission_scope(session_id, scope)?;
     }
     if session.agent == AgentKind::Antigravity {
-        state.set_permission_scope(
-            session_id,
-            crate::antigravity_stream::permission_profile_for_mode(mode),
-        )?;
+        match acp_for(app, &session) {
+            Some(acp) => {
+                state.set_permission_scope(
+                    session_id,
+                    crate::antigravity_acp::permission_profile(mode),
+                )?;
+                if let (Some(native_id), Some(cwd)) = (
+                    session.native_session_id.as_deref(),
+                    session.working_directory.as_deref(),
+                ) {
+                    acp.set_mode(
+                        native_id,
+                        cwd,
+                        crate::antigravity_acp::acp_mode_for_permission(mode),
+                    )?;
+                }
+            }
+            None => state.set_permission_scope(
+                session_id,
+                crate::antigravity_stream::permission_profile_for_mode(mode),
+            )?,
+        }
     }
     protocol::emit_sessions_changed(app);
     session_permission_settings(state, session_id)
@@ -1925,12 +1994,12 @@ pub fn terminate_session(
         protocol::emit_sessions_changed(app);
         return Ok(());
     }
-    if is_acp_agent(&session.agent) && is_managed_native_session(&session) {
+    if let Some(acp) = acp_for(app, &session).filter(|_| is_managed_native_session(&session)) {
         let native_id = session
             .native_session_id
             .as_deref()
             .ok_or("ACP session ID missing")?;
-        acp_bridge(app, &session.agent)?.close(native_id)?;
+        acp.close(native_id)?;
         state.mark_session_terminated(session_id)?;
         protocol::emit_sessions_changed(app);
         return Ok(());

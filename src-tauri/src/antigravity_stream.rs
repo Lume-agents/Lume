@@ -28,6 +28,7 @@ use crate::{
 pub const PERMISSION_DEFAULT: &str = "agy_default";
 pub const PERMISSION_ACCEPT_EDITS: &str = "agy_accept_edits";
 pub const PERMISSION_PLAN: &str = "agy_plan";
+pub const PERMISSION_AUTO: &str = "agy_auto";
 pub const PERMISSION_ALLOW_ALL: &str = "agy_allow_all";
 pub const PROBE_ENV: &str = "LUME_ANTIGRAVITY_PROBE";
 
@@ -130,6 +131,9 @@ impl AntigravityStream {
             }
             PERMISSION_PLAN => {
                 command.args(["--mode", "plan"]);
+            }
+            PERMISSION_AUTO => {
+                command.args(["--mode", "auto"]);
             }
             PERMISSION_ALLOW_ALL => {
                 command.arg("--dangerously-skip-permissions");
@@ -1082,7 +1086,11 @@ pub fn is_effort(effort: &str) -> bool {
 pub fn is_permission_mode(mode: &str) -> bool {
     matches!(
         mode,
-        PERMISSION_DEFAULT | PERMISSION_ACCEPT_EDITS | PERMISSION_PLAN | PERMISSION_ALLOW_ALL
+        PERMISSION_DEFAULT
+            | PERMISSION_ACCEPT_EDITS
+            | PERMISSION_AUTO
+            | PERMISSION_PLAN
+            | PERMISSION_ALLOW_ALL
     )
 }
 
@@ -1099,7 +1107,7 @@ pub fn permission_profile_for_mode(mode: &str) -> PermissionProfile {
 
 fn access_mode_for_permission(mode: &str) -> AccessMode {
     match mode {
-        PERMISSION_ACCEPT_EDITS => AccessMode::WorkspaceWrite,
+        PERMISSION_ACCEPT_EDITS | PERMISSION_AUTO => AccessMode::WorkspaceWrite,
         PERMISSION_PLAN => AccessMode::Plan,
         PERMISSION_ALLOW_ALL => AccessMode::FullAccess,
         _ => AccessMode::Custom,
@@ -1109,6 +1117,7 @@ fn access_mode_for_permission(mode: &str) -> AccessMode {
 fn permission_label_for_mode(mode: &str) -> &'static str {
     match mode {
         PERMISSION_ACCEPT_EDITS => "Antigravity · Accept edits",
+        PERMISSION_AUTO => "Antigravity · Auto",
         PERMISSION_PLAN => "Antigravity · Plan",
         PERMISSION_ALLOW_ALL => "Antigravity · Allow all tools",
         _ => "Antigravity · Native defaults",
@@ -1118,6 +1127,7 @@ fn permission_label_for_mode(mode: &str) -> &'static str {
 fn approval_policy_for_mode(mode: &str) -> &'static str {
     match mode {
         PERMISSION_ACCEPT_EDITS => PERMISSION_ACCEPT_EDITS,
+        PERMISSION_AUTO => PERMISSION_AUTO,
         PERMISSION_PLAN => PERMISSION_PLAN,
         PERMISSION_ALLOW_ALL => PERMISSION_ALLOW_ALL,
         _ => "on-request",

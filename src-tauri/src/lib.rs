@@ -8,6 +8,7 @@ mod extension_github;
 mod agent_commands;
 mod agent_mcp;
 mod agent_plugins;
+mod antigravity_acp;
 mod antigravity_stream;
 mod command_file_changes;
 mod browser_server;
@@ -449,10 +450,11 @@ async fn get_session_environments(
 ) -> Result<session_environments::EnvironmentSnapshot, String> {
     let mut owners = state.environment_owners()?;
     tauri::async_runtime::spawn_blocking(move || {
-        let agy = app
+        let bridges = app.state::<acp_bridge::AcpBridges>();
+        let mut agy = app
             .state::<antigravity_stream::AntigravityStream>()
             .environment_roots();
-        let bridges = app.state::<acp_bridge::AcpBridges>();
+        agy.extend(bridges.antigravity.environment_roots());
         let opencode = bridges.opencode.environment_roots();
         let grok = bridges.grok.environment_roots();
         for owner in &mut owners {
@@ -1053,7 +1055,31 @@ fn resolve_question(
         app.state::<omp_rpc::OmpRpc>()
             .answer_question(&session_id, &question_id, &answers)?;
     }
-    control::resolve_question(state.inner(), &session_id, &question_id, answers)
+    // Antigravity reads the reply to its question from the next message.
+    let antigravity_answer = (session.agent == AgentKind::Antigravity
+        && session.control_origin == domain::SessionControlOrigin::Lume
+        && question_id.starts_with("agy-question:"))
+    .then(|| {
+        session
+            .pending_question
+            .as_ref()
+            .filter(|question| question.id == question_id)
+            .map(|question| antigravity_acp::answer_prompt(question, &answers))
+    })
+    .flatten()
+    .filter(|answer| !answer.trim().is_empty());
+    control::resolve_question(state.inner(), &session_id, &question_id, answers)?;
+    if let (Some(answer), Some(native_id), Some(cwd)) = (
+        antigravity_answer,
+        session.native_session_id.as_deref(),
+        session.working_directory.as_deref(),
+    ) {
+        state.record_prompt_activity(&session_id, &answer, Vec::new())?;
+        app.state::<acp_bridge::AcpBridges>()
+            .antigravity
+            .prompt_when_idle(native_id, cwd, answer);
+    }
+    Ok(())
 }
 #[tauri::command]
 fn open_session_source(
@@ -3208,6 +3234,13 @@ fn list_resumable_sessions(
         app.state::<acp_bridge::AcpBridges>()
             .opencode
             .resumable_sessions()?
+    } else if kind == IntegrationKind::Antigravity {
+        // ACP lists every conversation with its title; the CLI's cache keeps one per folder.
+        let acp = &app.state::<acp_bridge::AcpBridges>().inner().antigravity;
+        match acp.available().then(|| acp.resumable_sessions()) {
+            Some(Ok(sessions)) => sessions,
+            _ => integrations::resumable_sessions(&kind)?,
+        }
     } else {
         integrations::resumable_sessions(&kind)?
     };
@@ -3510,6 +3543,54 @@ fn launch_session_impl(
                 &domain::AgentKind::Antigravity,
                 request.resume_id.as_deref(),
             )?;
+        }
+        let resume_id = request
+            .resume
+            .then_some(request.resume_id.as_deref())
+            .flatten();
+        let acp = &app.state::<acp_bridge::AcpBridges>().inner().antigravity;
+        if acp.available() {
+            if let Some(resume_id) = resume_id {
+                let _ = app
+                    .state::<antigravity_stream::AntigravityStream>()
+                    .stop(resume_id);
+            }
+            let id = acp.launch(&request.working_directory, resume_id)?;
+            let session_id = acp.agent().session_id(&id);
+            if let Some(model) = request
+                .model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+            {
+                if let Ok(settings) = acp.set_model_settings(
+                    &id,
+                    &request.working_directory,
+                    model,
+                    request.reasoning_effort.as_deref().unwrap_or_default(),
+                ) {
+                    state.set_session_model_override(
+                        &session_id,
+                        domain::SessionModelOverride {
+                            model: Some(settings.model),
+                            reasoning_effort: settings.reasoning_effort,
+                        },
+                    )?;
+                }
+            }
+            if let Some(prompt) = request
+                .initial_prompt
+                .as_deref()
+                .filter(|prompt| !prompt.trim().is_empty())
+            {
+                acp.prompt(
+                    &id,
+                    &request.working_directory,
+                    prompt.to_string(),
+                    Vec::new(),
+                )?;
+                state.record_prompt_activity(&session_id, prompt, Vec::new())?;
+            }
+            return Ok(());
         }
         let bridge = app.state::<antigravity_stream::AntigravityStream>();
         let id = bridge.launch(

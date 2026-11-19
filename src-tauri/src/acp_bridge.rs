@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io::{BufRead, BufReader, Read, Write},
     path::Path,
     process::{Child, ChildStdin, Stdio},
@@ -37,6 +37,54 @@ const UNAVAILABLE_RETRY: Duration = Duration::from_secs(10 * 60);
 pub const MANAGED_ACP_ENV: &str = "LUME_MANAGED_ACP";
 type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>>;
 type InboundPermissions = Arc<Mutex<HashMap<String, Vec<(Value, Arc<AtomicBool>)>>>>;
+type PromptQueues = Arc<Mutex<HashMap<String, PromptQueue>>>;
+
+/// A message sent while the agent was busy, waiting for the running turn to end.
+struct QueuedPrompt {
+    activity_id: String,
+    cwd: String,
+    prompt: String,
+    files: Vec<PromptFile>,
+}
+
+#[derive(Default)]
+struct PromptQueue {
+    prompts: VecDeque<QueuedPrompt>,
+    /// A cancel or a failure holds the queue until you send the next message yourself.
+    paused: bool,
+    /// The running turn was stopped so the next queued message takes its place.
+    steer: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TurnEnd {
+    Completed,
+    /// The agent asked a question; the next message you send is the answer.
+    Question,
+    Cancelled,
+    Failed,
+}
+
+/// The queued message that follows a turn that ended this way, if any.
+fn next_after_turn(
+    queues: &mut HashMap<String, PromptQueue>,
+    session_id: &str,
+    end: TurnEnd,
+) -> Option<QueuedPrompt> {
+    let queue = queues.get_mut(session_id)?;
+    if std::mem::take(&mut queue.steer) {
+        queue.paused = false;
+        return queue.prompts.pop_front();
+    }
+    match end {
+        TurnEnd::Completed if !queue.paused => queue.prompts.pop_front(),
+        TurnEnd::Completed | TurnEnd::Question => None,
+        TurnEnd::Cancelled | TurnEnd::Failed => {
+            queue.paused = true;
+            None
+        }
+    }
+}
 type SessionConfigs = Arc<Mutex<HashMap<String, Value>>>;
 
 pub struct PromptFile {
@@ -189,6 +237,7 @@ pub struct AcpBridge {
     reader_generation: Arc<AtomicU64>,
     /// When starting the agent last failed, so a CLI without ACP is not retried on every call.
     unavailable_since: Arc<Mutex<Option<Instant>>>,
+    queues: PromptQueues,
     state: AppState,
     app: AppHandle,
 }
@@ -243,6 +292,7 @@ impl AcpBridge {
             session_configs: Arc::new(Mutex::new(HashMap::new())),
             reader_generation: Arc::new(AtomicU64::new(0)),
             unavailable_since: Arc::new(Mutex::new(None)),
+            queues: Arc::new(Mutex::new(HashMap::new())),
             state,
             app,
         }
@@ -548,6 +598,92 @@ impl AcpBridge {
         }
     }
 
+    /// Whether a turn of this conversation is still running, even if it is closing.
+    pub fn is_busy(&self, session_id: &str) -> bool {
+        self.runtime
+            .lock()
+            .is_ok_and(|runtime| runtime.active.contains(session_id))
+    }
+
+    /// Keeps a message for when the running turn ends; its activity is already recorded.
+    pub fn queue_prompt(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        activity_id: String,
+        prompt: String,
+        files: Vec<PromptFile>,
+    ) -> Result<(), String> {
+        self.queues
+            .lock()
+            .map_err(|_| "ACP queue lock failed")?
+            .entry(session_id.into())
+            .or_default()
+            .prompts
+            .push_back(QueuedPrompt {
+                activity_id,
+                cwd: cwd.into(),
+                prompt,
+                files,
+            });
+        Ok(())
+    }
+
+    pub fn queued_count(&self, session_id: &str) -> usize {
+        self.queues
+            .lock()
+            .ok()
+            .and_then(|queues| queues.get(session_id).map(|queue| queue.prompts.len()))
+            .unwrap_or(0)
+    }
+
+    /// Sends the next queued message now: a running turn is stopped so it takes its place.
+    pub fn send_queued_now(&self, session_id: &str) -> Result<(), String> {
+        if self.queued_count(session_id) == 0 {
+            return Err("There is no queued message to send".into());
+        }
+        if self.is_busy(session_id) {
+            if let Some(queue) = self
+                .queues
+                .lock()
+                .map_err(|_| "ACP queue lock failed")?
+                .get_mut(session_id)
+            {
+                queue.steer = true;
+            }
+            return self.cancel(session_id);
+        }
+        let next = self
+            .queues
+            .lock()
+            .map_err(|_| "ACP queue lock failed")?
+            .get_mut(session_id)
+            .and_then(|queue| {
+                queue.paused = false;
+                queue.prompts.pop_front()
+            });
+        if let Some(next) = next {
+            self.start_queued(session_id, next);
+        }
+        Ok(())
+    }
+
+    fn start_queued(&self, session_id: &str, next: QueuedPrompt) {
+        let lume_id = self.agent.session_id(session_id);
+        let _ = self
+            .state
+            .promote_queued_prompt_activity(&lume_id, &next.activity_id);
+        if let Err(error) = self.prompt(session_id, &next.cwd, next.prompt, next.files) {
+            let _ = self
+                .state
+                .mark_queued_prompt_needs_attention(&lume_id, &next.activity_id);
+            let mut event = base_event(self.agent, session_id, HookEventKind::Failed);
+            event.status_label = Some(error.chars().take(160).collect());
+            let _ = event_server::publish_event(&self.state, &self.app, event);
+        }
+        crate::protocol::emit_sessions_changed(&self.app);
+    }
+
     /// Sends `prompt` once the running turn ends: an answer to an agent's question arrives
     /// while that turn may still be closing.
     pub fn prompt_when_idle(&self, session_id: &str, cwd: &str, prompt: String) {
@@ -765,6 +901,15 @@ impl AcpBridge {
                 } else {
                     event_kind
                 };
+                let end = if cancelled || stop_reason == Some("cancelled") {
+                    TurnEnd::Cancelled
+                } else if waiting_question {
+                    TurnEnd::Question
+                } else if result.is_ok() {
+                    TurnEnd::Completed
+                } else {
+                    TurnEnd::Failed
+                };
                 let mut event = base_event(bridge.agent, &id, event_kind);
                 event.last_response = response;
                 if bridge.agent.is_antigravity() {
@@ -787,6 +932,14 @@ impl AcpBridge {
                 if let Ok(mut runtime) = bridge.runtime.lock() {
                     runtime.active.remove(&id);
                     runtime.cancelled.remove(&id);
+                }
+                let next = bridge
+                    .queues
+                    .lock()
+                    .ok()
+                    .and_then(|mut queues| next_after_turn(&mut queues, &id, end));
+                if let Some(next) = next {
+                    bridge.start_queued(&id, next);
                 }
             })
             .map_err(|error| {
@@ -977,6 +1130,10 @@ impl AcpBridge {
     }
 
     pub fn close(&self, session_id: &str) -> Result<(), String> {
+        // Drop the waiting messages first so ending the turn cannot start the next one.
+        if let Ok(mut queues) = self.queues.lock() {
+            queues.remove(session_id);
+        }
         let mut runtime = self.runtime.lock().map_err(|_| "ACP state lock failed")?;
         if !runtime.loaded.contains(session_id) {
             return Ok(());
@@ -1954,6 +2111,38 @@ mod tests {
         let event = base_event(&GROK, "abc", HookEventKind::Running);
         assert_eq!(event.agent, AgentKind::Grok);
         assert_eq!(event.agent_label.as_deref(), Some("Grok"));
+    }
+
+    #[test]
+    fn queue_follows_a_completed_turn_and_holds_after_cancel_or_question() {
+        let queued = |id: &str| QueuedPrompt {
+            activity_id: id.into(),
+            cwd: "/tmp".into(),
+            prompt: id.into(),
+            files: Vec::new(),
+        };
+        let mut queues = HashMap::new();
+        assert!(next_after_turn(&mut queues, "s", TurnEnd::Completed).is_none());
+        let queue: &mut PromptQueue = queues.entry("s".into()).or_default();
+        queue.prompts.extend([queued("a"), queued("b"), queued("c")]);
+
+        let next = next_after_turn(&mut queues, "s", TurnEnd::Completed).unwrap();
+        assert_eq!(next.activity_id, "a");
+        // A question waits for your answer; nothing is sent in its place.
+        assert!(next_after_turn(&mut queues, "s", TurnEnd::Question).is_none());
+        assert!(next_after_turn(&mut queues, "s", TurnEnd::Cancelled).is_none());
+        assert!(
+            next_after_turn(&mut queues, "s", TurnEnd::Completed).is_none(),
+            "a cancel holds the queue"
+        );
+        // "Send now" stops the turn; the stop is not a cancel of the queue.
+        queues.get_mut("s").unwrap().steer = true;
+        let next = next_after_turn(&mut queues, "s", TurnEnd::Cancelled).unwrap();
+        assert_eq!(next.activity_id, "b");
+        let next = next_after_turn(&mut queues, "s", TurnEnd::Completed).unwrap();
+        assert_eq!(next.activity_id, "c");
+        assert!(next_after_turn(&mut queues, "s", TurnEnd::Failed).is_none());
+        assert!(queues["s"].paused);
     }
 
     #[test]

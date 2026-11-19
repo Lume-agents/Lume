@@ -271,6 +271,9 @@ pub fn submit_prompt(
             protocol::emit_sessions_changed(app);
             return Ok(());
         }
+        if let Some(acp) = acp_for(app, &session) {
+            return queue_acp_prompt(app, state, acp, &session, prompt, &attachments, delivery);
+        }
         if session.agent != AgentKind::Codex {
             return Err(
                 "This running agent cannot receive queued or side prompts through Lume yet".into(),
@@ -323,6 +326,22 @@ pub fn submit_prompt(
     } else if let Some(acp) = acp_for(app, &session) {
         if session.control_origin != SessionControlOrigin::Lume {
             return Err("Esta sessão externa não está sob controle do Lume".into());
+        }
+        // The last turn may still be closing: the message waits for it instead of failing.
+        if session
+            .native_session_id
+            .as_deref()
+            .is_some_and(|native_id| acp.is_busy(native_id))
+        {
+            return queue_acp_prompt(
+                app,
+                state,
+                acp,
+                &session,
+                prompt,
+                &attachments,
+                PromptDelivery::Queue,
+            );
         }
         let native_id = session
             .native_session_id
@@ -1658,6 +1677,15 @@ pub fn steer_queued_prompt(
     {
         return send_queued_claude_prompt_now(app, state, &session);
     }
+    if let Some(acp) = acp_for(app, &session) {
+        let native_id = session
+            .native_session_id
+            .as_deref()
+            .ok_or("Sessão sem ID nativo")?;
+        acp.send_queued_now(native_id)?;
+        protocol::emit_sessions_changed(app);
+        return Ok(());
+    }
     if session.status != SessionStatus::Running || session.agent != AgentKind::Codex {
         return Err("This session cannot steer a queued prompt right now".into());
     }
@@ -1666,6 +1694,60 @@ pub fn steer_queued_prompt(
         .as_deref()
         .ok_or_else(|| "The Codex session did not provide its thread id".to_string())?;
     bridge.steer_queued_prompt(session_id, activity_id, thread_id, state, app)?;
+    protocol::emit_sessions_changed(app);
+    Ok(())
+}
+
+/// A message to a busy ACP agent waits for the running turn; "steer" stops that turn
+/// so the message runs now.
+fn queue_acp_prompt(
+    app: &AppHandle,
+    state: &AppState,
+    acp: &crate::acp_bridge::AcpBridge,
+    session: &AgentSession,
+    prompt: &str,
+    attachments: &[PreparedPromptAttachment],
+    delivery: PromptDelivery,
+) -> Result<(), String> {
+    if session.control_origin != SessionControlOrigin::Lume {
+        return Err("Esta sessão externa não está sob controle do Lume".into());
+    }
+    let native_id = session
+        .native_session_id
+        .as_deref()
+        .ok_or("Sessão sem ID nativo")?;
+    let cwd = session
+        .working_directory
+        .as_deref()
+        .ok_or("Sessão sem pasta de projeto")?;
+    let activity_id = format!("local:{}:queued:{}", session.id, crate::state::now_millis());
+    state.record_queued_prompt_activity(
+        &session.id,
+        &activity_id,
+        prompt,
+        attachments
+            .iter()
+            .map(|attachment| attachment.display.clone())
+            .collect(),
+    )?;
+    acp.queue_prompt(
+        native_id,
+        cwd,
+        activity_id,
+        prompt.to_string(),
+        attachments
+            .iter()
+            .map(|file| crate::acp_bridge::PromptFile {
+                path: file.path.clone(),
+                mime_type: file.display.mime_type.clone(),
+                is_image: file.is_image,
+            })
+            .collect(),
+    )?;
+    // Nothing to wait for (the turn just ended, or it ran outside ACP): it goes now.
+    if delivery == PromptDelivery::Steer || !acp.is_busy(native_id) {
+        acp.send_queued_now(native_id)?;
+    }
     protocol::emit_sessions_changed(app);
     Ok(())
 }

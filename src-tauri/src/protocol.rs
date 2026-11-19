@@ -181,7 +181,7 @@ impl SessionCapabilities {
                     PromptDelivery::Steer,
                     PromptDelivery::Queue,
                 ]
-            } else if claude_queues_in_lume(session) {
+            } else if claude_queues_in_lume(session) || acp_queues_in_lume(session) {
                 // Each message to a Lume-owned Claude conversation is its own run, so they queue; "steer"
                 // means send now: stop the running message and run the queued one.
                 vec![
@@ -211,6 +211,14 @@ fn can_interrupt_session(session: &AgentSession) -> bool {
             AgentKind::Codex | AgentKind::OpenCode | AgentKind::Grok | AgentKind::Antigravity
         ) || claude_queues_in_lume(session))
         && has_nonempty_value(session.native_session_id.as_deref())
+}
+
+/// An ACP conversation Lume owns keeps messages sent while it works for the next turn.
+fn acp_queues_in_lume(session: &AgentSession) -> bool {
+    session.control_origin == SessionControlOrigin::Lume
+        && has_nonempty_value(session.native_session_id.as_deref())
+        && (matches!(session.agent, AgentKind::OpenCode | AgentKind::Grok)
+            || (session.agent == AgentKind::Antigravity && session.source == SessionSource::Desktop))
 }
 
 /// A Claude Code conversation Lume owns runs each message as its own `claude --print` process.
@@ -2066,9 +2074,14 @@ mod tests {
         assert!(capabilities.can_terminate);
         assert!(capabilities.can_interrupt);
         assert!(!capabilities.can_take_control);
+        // A message sent while it works waits for the turn, or stops it to go now.
         assert_eq!(
             capabilities.prompt_deliveries,
-            vec![PromptDelivery::NewTurn]
+            vec![
+                PromptDelivery::NewTurn,
+                PromptDelivery::Queue,
+                PromptDelivery::Steer
+            ]
         );
         managed.control_origin = SessionControlOrigin::External;
         assert!(!SessionCapabilities::for_session(&managed).can_prompt);

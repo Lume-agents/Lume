@@ -456,19 +456,18 @@ fn scan(
         .keys()
         .map(|pid| pid.as_u32())
         .collect::<HashSet<_>>();
-    let ignored_codex_pids = system
+    let ignored_infrastructure_pids = system
         .processes()
         .iter()
         .filter_map(|(pid, process)| {
+            let name = process.name().to_string_lossy().to_lowercase();
             let arguments = process
                 .cmd()
                 .iter()
                 .map(|part| part.to_string_lossy().to_lowercase())
                 .collect::<Vec<_>>();
-            is_codex_infrastructure_arguments(
-                &process.name().to_string_lossy().to_lowercase(),
-                &arguments,
-            )
+            (is_codex_infrastructure_arguments(&name, &arguments)
+                || is_antigravity_infrastructure_arguments(&name, &arguments))
             .then_some(*pid)
         })
         .collect::<Vec<_>>();
@@ -487,6 +486,7 @@ fn scan(
             let command = arguments.join(" ");
             let name = process.name().to_string_lossy().to_lowercase();
             if is_codex_infrastructure_arguments(&name, &arguments)
+                || is_antigravity_infrastructure_arguments(&name, &arguments)
                 || is_omp_helper_arguments(&arguments)
             {
                 return None;
@@ -496,7 +496,7 @@ fn scan(
             {
                 return None;
             }
-            if ignored_codex_pids
+            if ignored_infrastructure_pids
                 .iter()
                 .any(|root| process_descends_from(system, *pid, *root))
             {
@@ -814,6 +814,112 @@ pub(crate) fn is_codex_infrastructure_arguments(name: &str, arguments: &[String]
             options.next();
         } else if !argument.starts_with('-') {
             return matches!(argument.as_str(), "app-server" | "exec-server");
+        }
+    }
+    false
+}
+
+/// Antigravity worker pools (`--worker`), JetSki language-server/hub/updater processes,
+/// headless `stream-json`/`--print` probes and utility subcommands (`models`, `plugin`, `mcp`...)
+/// are infrastructure or one-shot commands, never an interactive CLI conversation.
+pub(crate) fn is_antigravity_infrastructure_arguments(name: &str, arguments: &[String]) -> bool {
+    let is_agy_executable = |value: &str| {
+        let base = value
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(value)
+            .trim_matches(['\'', '"']);
+        matches!(base, "agy" | "agy.exe" | "agy.cmd" | "agy.bat")
+    };
+    let tokens = launch_tokens(name, arguments);
+    if !is_agy_executable(name) && !tokens.iter().any(|token| is_agy_executable(token)) {
+        return false;
+    }
+    let Some(index) = arguments
+        .iter()
+        .position(|argument| is_agy_executable(argument))
+    else {
+        return false;
+    };
+    let mut options = arguments.iter().skip(index + 1);
+    while let Some(raw_argument) = options.next() {
+        let argument = raw_argument.trim_matches(['\'', '"']);
+        if argument == "--" {
+            return false;
+        }
+        if argument.starts_with('-') {
+            let stripped = argument
+                .strip_prefix("--")
+                .or_else(|| argument.strip_prefix('-'))
+                .unwrap_or_default();
+            let (flag, has_inline_value) = match stripped.split_once('=') {
+                Some((flag, _)) => (flag, true),
+                None => (stripped, false),
+            };
+            if matches!(
+                flag,
+                "worker"
+                    | "bg-updater"
+                    | "csrf_token"
+                    | "gemini_dir"
+                    | "http_server_port"
+                    | "ide-mcp-port"
+                    | "hub"
+                    | "hub-port"
+                    | "standalone"
+                    | "input-format"
+                    | "output-format"
+                    | "p"
+                    | "print"
+                    | "prompt"
+                    | "h"
+                    | "help"
+                    | "v"
+                    | "version"
+            ) {
+                return true;
+            }
+            if !has_inline_value
+                && matches!(
+                    flag,
+                    "add-dir"
+                        | "agent"
+                        | "conversation"
+                        | "effort"
+                        | "i"
+                        | "prompt-interactive"
+                        | "json-schema"
+                        | "log-file"
+                        | "mode"
+                        | "model"
+                        | "print-timeout"
+                        | "project"
+                        | "settings"
+                )
+            {
+                options.next();
+            }
+        } else {
+            return matches!(
+                argument,
+                "acp"
+                    | "agent"
+                    | "agents"
+                    | "bg-updater"
+                    | "changelog"
+                    | "daemon"
+                    | "help"
+                    | "install"
+                    | "mcp"
+                    | "mic-serve"
+                    | "models"
+                    | "plugin"
+                    | "plugins"
+                    | "remote-control"
+                    | "update"
+                    | "version"
+                    | "worker"
+            );
         }
     }
     false
@@ -1654,16 +1760,9 @@ pub(crate) fn detect_agent_arguments(name: &str, arguments: &[String]) -> Option
             .is_some_and(|executable| is_versioned_claude_executable(executable))
     {
         Some(AgentKind::ClaudeCode)
-    } else if matches!(name, "agy" | "agy.exe")
-        || tokens
-            .iter()
-            .any(|token| matches!(*token, "agy" | "agy.exe"))
-    {
-        (!arguments
-            .iter()
-            .any(|argument| argument == "--input-format")
-            || !arguments.iter().any(|argument| argument == "stream-json"))
-        .then_some(AgentKind::Antigravity)
+    } else if executable_matches("agy") {
+        (!is_antigravity_infrastructure_arguments(name, arguments))
+            .then_some(AgentKind::Antigravity)
     } else if executable_matches("opencode") && !arguments.iter().any(|argument| argument == "acp")
     {
         Some(AgentKind::OpenCode)
@@ -2970,6 +3069,63 @@ mod tests {
             &["claude", "fix the mcp list"],
         ] {
             assert_eq!(detect_agent_arguments("claude", &argv(command)), Some(AgentKind::ClaudeCode), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn antigravity_workers_servers_and_utility_commands_are_not_sessions() {
+        let argv = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<Vec<_>>();
+        for command in [
+            &["agy", "models"][..],
+            &[r"c:\users\dev\appdata\local\agy\bin\agy.exe", "models"],
+            &["agy.exe", "plugin", "list", "--json"],
+            &["agy", "plugins"],
+            &["agy", "mcp", "list"],
+            &["agy", "acp"],
+            &["agy", "agents"],
+            &["agy", "update"],
+            &["agy", "remote-control", "start"],
+            &["agy", "-p", "/usage", "--output-format", "stream-json"],
+            &["agy", "--print=/usage"],
+            &["agy", "--input-format", "stream-json", "--output-format", "stream-json"],
+            &["agy.exe", "--worker", "--agent=default"],
+            &["agy.exe", "-csrf_token", "secret", "-gemini_dir", r"c:\users\dev\.gemini"],
+            &["agy.exe", "--csrf_token=secret"],
+            &["agy.exe", "--bg-updater"],
+            &["agy.exe", "--hub-port", "43199"],
+            &["agy.exe", "--ide-mcp-port=43200"],
+        ] {
+            assert!(
+                is_antigravity_infrastructure_arguments("agy.exe", &argv(command)),
+                "{command:?}"
+            );
+            assert_eq!(
+                detect_agent_arguments("agy.exe", &argv(command)),
+                None,
+                "{command:?}"
+            );
+        }
+
+        for command in [
+            &["agy"][..],
+            &[r"c:\users\dev\appdata\local\agy\bin\agy.exe"],
+            &["agy", "--continue"],
+            &["agy", "-c"],
+            &["agy", "--conversation", "conv_123"],
+            &["agy", "--model", "gemini-4-carbon-high", "--mode", "accept-edits"],
+            &["agy", "--remote-control"],
+            &["agy", "-i", "models"],
+            &["agy", "--prompt-interactive", "plugin list"],
+        ] {
+            assert!(
+                !is_antigravity_infrastructure_arguments("agy.exe", &argv(command)),
+                "{command:?}"
+            );
+            assert_eq!(
+                detect_agent_arguments("agy.exe", &argv(command)),
+                Some(AgentKind::Antigravity),
+                "{command:?}"
+            );
         }
     }
 }

@@ -24,7 +24,7 @@ function normalizedToolTitle(value: string): string {
     .trim();
 }
 
-const instructionFile = /(?:^|[\\/\s"'`])(CLAUDE(?:\.local)?\.md|AGENTS(?:\.override)?\.md|GEMINI\.md|\.cursorrules|copilot-instructions\.md|\.claude[\\/]rules[\\/][^\s"'`]+\.md)(?=$|[\s"'`;|&)])/i;
+const instructionFile = /(?:^|[\\/\s"'`])(CLAUDE(?:\.local)?\.md|AGENTS(?:\.override)?\.md|GEMINI\.md|\.cursorrules|copilot-instructions\.md|(?:\.claude|\.agents?)[\\/]rules[\\/][^\s"'`]+\.md)(?=$|[\s"'`;|&)])/i;
 const skillFile = /([^\\/\s"'`]+)[\\/]SKILL\.md(?=$|[\s"'`;|&)])/i;
 
 /** A skill the agent used: Claude's Skill tool names it; other agents read the skill's SKILL.md. */
@@ -215,6 +215,8 @@ function readCommandFiles(activity: SessionActivity): string[] {
       ? firstLine(activity.detail)
       : "";
   if (!command) {
+    const titledPath = /^(?:read|open file)\s*[·:]\s*(.+)$/i.exec(title)?.[1]?.trim() ?? "";
+    if (titledPath && looksLikeFilePath(titledPath)) return [titledPath];
     const detail = activity.detail?.trim() ?? "";
     return /^(?:read|open file)$/i.test(title) && /^[^\r\n{}<>|]+\.[\w-]+$/.test(detail)
       ? [detail]

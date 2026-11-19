@@ -387,6 +387,32 @@ test("two Claude edits with the same size are both kept", () => {
   assert.equal(entries.filter((entry) => entry.activity.kind === "file").length, 2);
 });
 
+test("separate Antigravity edits and step-indexed messages behave like Claude Code", () => {
+  const edit = (step, createdAt) =>
+    activity(`agy-tool:conv:${step}`, "file", createdAt, `edit ${step}`, { files: ["/work/src/a.ts"] });
+  const counts = { "edit 2": [4, 1], "edit 3": [2, 2] };
+  const changes = (item) => (counts[item.detail] ? [{ path: "src/a.ts", added: counts[item.detail][0], removed: counts[item.detail][1] }] : []);
+  const activities = [
+    activity("local:conv:1", "prompt", 10, "Atualize src/a.ts"),
+    activity("agy-response:conv:1:1", "message", 20, "Verificando..."),
+    edit(2, 30),
+    edit(3, 40),
+    activity("agy-response:conv:1:4", "message", 50, "Verificando..."),
+  ];
+  const entries = entriesFor(
+    activities,
+    { agent: "antigravity", results: [{ id: "r", response: "Verificando...", createdAt: 55, files: [], tests: [] }] },
+    changes,
+  );
+  const feed = buildConversationFeed(entries, { workingDirectory: "/work" });
+  assert.deepEqual(
+    feed.map((item) => (item.kind === "trace" ? "trace" : item.entry.activity.id)),
+    ["local:conv:1", "agy-response:conv:1:1", "trace", "agy-response:conv:1:4"],
+  );
+  const files = fileChangesForFinalResponses(feed, "/work").get("activity:agy-response:conv:1:4");
+  assert.deepEqual(files, [{ path: "src/a.ts", added: 6, removed: 3 }]);
+});
+
 test("a file the final response names without its folder is not listed twice", async () => {
   const { mergeFileChanges, addFileChanges } = await import("../src/lib/fileChanges.ts");
   const files = [{ path: "src/lib/ActivityTraceGroup.svelte", added: 3, removed: 13 }, { path: "tests/a.test.mjs", added: 1, removed: 0 }];

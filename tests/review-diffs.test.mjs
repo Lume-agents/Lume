@@ -180,3 +180,31 @@ for (const detail of [
 
 const completedPatch = "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch\n\nSuccess. Updated the following files:\nM src/a.ts";
 assert.doesNotMatch(fileDiffChunk(completedPatch, "src/a.ts"), /Success|Updated the following/);
+
+// Antigravity per-tool edits combine hunks and match Windows canonical paths.
+{
+  const agyFirst = {
+    id: "agy-tool:c1:3",
+    kind: "file",
+    title: "G:\\Projetos\\App\\src\\main.ts",
+    status: "completed",
+    createdAt: 40,
+    files: ["G:\\Projetos\\App\\src\\main.ts"],
+    detail: "diff --git a/G:/Projetos/App/src/main.ts b/G:/Projetos/App/src/main.ts\n--- a/G:/Projetos/App/src/main.ts\n+++ b/G:/Projetos/App/src/main.ts\n@@ -1,1 +1,2 @@\n-oldA\n+newA\n+extraA\n",
+  };
+  const agySecond = {
+    id: "agy-tool:c1:5",
+    kind: "file",
+    title: "G:\\Projetos\\App\\src\\main.ts",
+    status: "completed",
+    createdAt: 45,
+    files: ["G:\\Projetos\\App\\src\\main.ts"],
+    detail: "diff --git a/G:/Projetos/App/src/main.ts b/G:/Projetos/App/src/main.ts\n--- a/G:/Projetos/App/src/main.ts\n+++ b/G:/Projetos/App/src/main.ts\n@@ -10,1 +11,1 @@\n-oldB\n+newB\n",
+  };
+  const combinedAgy = collectReviewFiles([agyFirst, agySecond], "\\\\?\\g:\\projetos\\app");
+  assert.deepEqual(
+    combinedAgy.map(({ path, added, removed }) => ({ path, added, removed })),
+    [{ path: "src/main.ts", added: 3, removed: 2 }],
+  );
+  assert.match(fileDiffChunk(combinedAgy[0].diff, "\\\\?\\g:\\projetos\\app\\src\\main.ts"), /\+newA[\s\S]*\+newB/);
+}

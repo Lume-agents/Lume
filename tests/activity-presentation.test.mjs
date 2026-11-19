@@ -191,5 +191,24 @@ await import("./git-events.test.mjs");
   if (detailFor(single, "src/d.svelte") !== "rewrote it") throw new Error("an event about one file still shows its detail");
   const read = { id: "rd", category: "read", activities: [ev("rd", "file text", ["src/e.ts", "src/f.ts"])] };
   if (detailFor(read, "src/f.ts") !== "file text") throw new Error("reads keep what was read");
+
+  // Antigravity read_file, skills and .agents/rules instructions render like Claude Code without polluting activity.files.
+  const agyReads = groupConsecutiveTraceActivities([
+    { ...activity("tool", "Read · G:\\Projetos\\Lume\\README.md", "1: # Lume"), id: "agy-tool:c:1" },
+    { ...activity("tool", "Read · G:\\Projetos\\Lume\\package.json", "1: {}"), id: "agy-tool:c:2" },
+  ]);
+  assert.equal(agyReads.length, 1);
+  assert.equal(agyReads[0].category, "read");
+  assert.deepEqual(activityRunFiles(agyReads[0]), ["G:\\Projetos\\Lume\\README.md", "G:\\Projetos\\Lume\\package.json"]);
+  assert.equal(activityRunTitle(agyReads[0], "pt-BR"), "2 arquivos lidos");
+  assert.equal(detailFor(agyReads[0], "G:\\Projetos\\Lume\\README.md"), "1: # Lume");
+
+  const agySkill = activity("tool", "Read · C:\\Users\\Dev\\.gemini\\antigravity-cli\\builtin\\skills\\agy-customizations\\SKILL.md", "---");
+  assert.equal(activityCategory(agySkill), "skill");
+  assert.equal(activityDisplayTitle(agySkill, "pt-BR"), "Usou a skill agy-customizations");
+
+  const agyRule = activity("tool", "Read · G:\\Projetos\\Lume\\.agents\\rules\\rust-style.md", "# Rust");
+  assert.equal(activityCategory(agyRule), "instruction");
+  assert.equal(activityDisplayTitle(agyRule, "pt-BR"), "Leu as instruções de rust-style.md");
   console.log("run file detail test passed");
 }

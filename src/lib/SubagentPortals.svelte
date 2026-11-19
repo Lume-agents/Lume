@@ -19,7 +19,7 @@
   let rail: HTMLDivElement;
   let timelineElement = $state<HTMLDivElement | null>(null);
   // Providers that can read a subagent's own transcript; a Claude subagent's activity id starts with `claude:`.
-  const timelineAgents = ["codex", "omp", "claude_code"];
+  const timelineAgents = ["codex", "omp", "claude_code", "antigravity"];
   const childIdPrefix = $derived(session.agent === "claude_code" ? "claude" : session.agent);
   let portalOrigin = $state(32);
   let showLeftOverflow = $state(false);
@@ -196,7 +196,7 @@
     const now = Date.now();
     for (const child of children) {
       if (inFlight.size >= 2) break;
-      if (!child.id.startsWith(`${session.agent}:`)) continue;
+      if (!child.id.startsWith(`${childIdPrefix}:`)) continue;
       if (inFlight.has(`${session.id}:${child.id}`)) continue;
       const fetched = lastFetched.get(child.id) ?? 0;
       if (fetched && child.status !== "running" && child.id !== selectedId) continue;

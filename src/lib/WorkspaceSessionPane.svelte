@@ -647,7 +647,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     const latestFinalAt = entries.reduce((latest, entry) => entry.isFinalResponse ? Math.max(latest, entry.activity.createdAt) : latest, latestResultAt);
     return chatActivities.findLast((activity) => activity.kind === "prompt" && activity.createdAt > latestFinalAt)?.createdAt ?? null;
   });
-  const freshChat = $derived(!hasConversationMessage && !promptIsRunning && !introDismissed);
+  const freshChat = $derived(!hasConversationMessage && feed.length === 0 && !canLoadEarlier && !promptIsRunning && !introDismissed);
   const composerInIntroPosition = $derived(freshChat || composerTransition === "out");
   const canQueue = $derived(session.capabilities.promptDeliveries.includes("queue"));
   const canCompose = $derived(Boolean(

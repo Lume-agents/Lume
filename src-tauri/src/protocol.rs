@@ -155,9 +155,7 @@ impl SessionCapabilities {
             can_read_results: !session.results.is_empty() || session.last_response.is_some(),
             can_attach_images: session.source != SessionSource::Web
                 && session.agent != AgentKind::Unknown
-                && !monitor_only
-                && !(session.agent == AgentKind::Antigravity
-                    && session.source == SessionSource::Desktop),
+                && !monitor_only,
             can_interrupt: matches!(
                 session.status,
                 SessionStatus::Running | SessionStatus::PermissionRequired
@@ -2074,6 +2072,19 @@ mod tests {
         );
         managed.control_origin = SessionControlOrigin::External;
         assert!(!SessionCapabilities::for_session(&managed).can_prompt);
+
+        let mut antigravity = session();
+        antigravity.agent = AgentKind::Antigravity;
+        antigravity.source = SessionSource::Desktop;
+        antigravity.process_id = None;
+        antigravity.control_origin = SessionControlOrigin::Lume;
+        antigravity.status = SessionStatus::Completed;
+        let agy_caps = SessionCapabilities::for_session(&antigravity);
+        assert!(agy_caps.can_prompt);
+        assert!(
+            agy_caps.can_attach_images,
+            "managed Antigravity sessions accept image and file attachments"
+        );
     }
 
     #[test]

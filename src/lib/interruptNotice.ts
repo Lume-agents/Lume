@@ -18,7 +18,8 @@ export function connectionNoticeText(detail: string | undefined, translate: Tran
 }
 
 const effortNames: Record<string, [string, string]> = {
-  none: ["None", "Nenhum"], minimal: ["Minimal", "Mínimo"], low: ["Low", "Baixo"], medium: ["Medium", "Médio"],
+  none: ["None", "Nenhum"], minimal: ["Minimal", "Mínimo"], "extra-low": ["Extra low", "Muito baixo"],
+  low: ["Low", "Baixo"], medium: ["Medium", "Médio"],
   high: ["High", "Alto"], xhigh: ["Extra high", "Muito alto"], max: ["Max", "Máximo"],
 };
 

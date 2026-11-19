@@ -441,8 +441,8 @@ pub fn resume_preview(kind: &IntegrationKind, session_id: &str) -> Option<Resume
     let response = match kind {
         IntegrationKind::Codex => codex_last_response(std::io::Cursor::new(recent)),
         IntegrationKind::Claude => claude_last_response(std::io::Cursor::new(recent)),
-        IntegrationKind::Antigravity
-        | IntegrationKind::OpenCode
+        IntegrationKind::Antigravity => antigravity_last_response(std::io::Cursor::new(recent)),
+        IntegrationKind::OpenCode
         | IntegrationKind::Grok
         | IntegrationKind::DeepSeek
         | IntegrationKind::Gemini => None,
@@ -1852,6 +1852,493 @@ fn claude_subagent_activities(bytes: &[u8], session_id: &str, agent_id: &str) ->
         }
     }
     activities
+}
+
+fn antigravity_full_transcript_path(root: &Path, conversation_id: &str) -> Option<PathBuf> {
+    if !is_safe_conversation_id(conversation_id) {
+        return None;
+    }
+    let logs = root
+        .join("brain")
+        .join(conversation_id)
+        .join(".system_generated/logs");
+    ["transcript_full.jsonl", "transcript.jsonl"]
+        .into_iter()
+        .map(|name| logs.join(name))
+        .find(|path| path.is_file())
+}
+
+fn unwrap_antigravity_user_request(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let extracted = if let Some((_, after_open)) = trimmed.split_once("<USER_REQUEST>") {
+        after_open
+            .split_once("</USER_REQUEST>")
+            .map_or(after_open, |(inner, _)| inner)
+            .trim()
+    } else if trimmed.starts_with("<SYSTEM_MESSAGE>")
+        || trimmed.starts_with("The following is a <SYSTEM_MESSAGE>")
+        || trimmed.starts_with("<CONTEXT_SUMMARY>")
+    {
+        return None;
+    } else {
+        trimmed
+    };
+    (!extracted.is_empty()).then(|| extracted.to_string())
+}
+
+fn unwrap_antigravity_transcript_args(args: Option<&Value>) -> Value {
+    let Some(map) = args.and_then(Value::as_object) else {
+        return Value::Object(Map::new());
+    };
+    let mut normalized = Map::with_capacity(map.len());
+    for (key, value) in map {
+        let parsed = match value {
+            Value::String(raw) => {
+                serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.clone()))
+            }
+            other => other.clone(),
+        };
+        normalized.insert(key.clone(), parsed);
+    }
+    Value::Object(normalized)
+}
+
+fn clean_antigravity_generic_output(content: &str) -> String {
+    content
+        .lines()
+        .skip_while(|line| {
+            let trimmed = line.trim();
+            trimmed.is_empty()
+                || trimmed.starts_with("Created At:")
+                || trimmed.starts_with("Completed At:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn antigravity_entry_timestamp(entry: &Value) -> Option<i64> {
+    entry
+        .get("created_at")
+        .and_then(Value::as_str)
+        .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+        .map(|timestamp| timestamp.timestamp_millis())
+        .or_else(|| record_timestamp(entry))
+}
+
+fn antigravity_last_response(reader: impl BufRead) -> Option<String> {
+    let mut last = None;
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("PLANNER_RESPONSE") {
+            continue;
+        }
+        if let Some(content) = entry
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            last = Some(content.to_string());
+        }
+    }
+    last
+}
+
+/// Observable conversation items read from an Antigravity CLI transcript when Lume resumes a session.
+/// Private `thinking` fields are never read.
+pub fn antigravity_resume_activities(
+    conversation_id: &str,
+) -> (Vec<SessionActivity>, Option<String>) {
+    let Some(home) = antigravity_user_home() else {
+        return (Vec::new(), None);
+    };
+    antigravity_resume_activities_from_root(&home.join(".gemini/antigravity-cli"), conversation_id)
+}
+
+fn antigravity_resume_activities_from_root(
+    root: &Path,
+    conversation_id: &str,
+) -> (Vec<SessionActivity>, Option<String>) {
+    let Some(path) = antigravity_full_transcript_path(root, conversation_id) else {
+        return (Vec::new(), None);
+    };
+    let Some(bytes) = read_file_tail(&path, 8 * 1024 * 1024) else {
+        return (Vec::new(), None);
+    };
+    parse_antigravity_transcript_activities(&bytes, conversation_id, false)
+}
+
+fn parse_antigravity_transcript_activities(
+    bytes: &[u8],
+    conversation_id: &str,
+    subagent_mode: bool,
+) -> (Vec<SessionActivity>, Option<String>) {
+    let entries = bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    let mut activities = Vec::new();
+    let mut last_response = None;
+    let mut turn_index = 0usize;
+    let mut turn_prompt_at: Option<i64> = None;
+    let mut turn_last_at: i64 = 0;
+    let mut turn_input = 0u64;
+    let mut turn_output = 0u64;
+    let mut turn_cache_read = 0u64;
+    let mut turn_context = 0u64;
+    let mut turn_model: Option<String> = None;
+
+    let flush_turn_tokens = |activities: &mut Vec<SessionActivity>,
+                             turn_index: usize,
+                             input: u64,
+                             output: u64,
+                             cache_read: u64,
+                             context: u64,
+                             prompt_at: Option<i64>,
+                             last_at: i64,
+                             model: Option<String>| {
+        if subagent_mode || input + output == 0 {
+            return;
+        }
+        let created_at = if last_at > 0 {
+            last_at
+        } else {
+            prompt_at.unwrap_or(turn_index as i64)
+        };
+        let mut detail = json!({
+            "turnId": format!("agy-turn-{turn_index}"),
+            "totalTokens": input + output,
+            "inputTokens": input,
+            "outputTokens": output,
+            "contextTokens": context,
+            "createdAt": created_at,
+            "cacheReadTokens": cache_read,
+        });
+        if let Some(prompt_at) = prompt_at {
+            detail["promptAt"] = json!(prompt_at);
+        }
+        if let Some(model) = model {
+            detail["model"] = json!(model);
+        }
+        activities.push(SessionActivity {
+            id: format!("agy-token:{conversation_id}:{turn_index}"),
+            kind: "token_usage".into(),
+            title: "Uso de tokens".into(),
+            detail: Some(detail.to_string()),
+            status: "completed".into(),
+            created_at,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        });
+    };
+
+    for (index, entry) in entries.iter().enumerate() {
+        let step_index = entry
+            .get("step_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(index as u64);
+        let base_time = antigravity_entry_timestamp(entry).unwrap_or((index as i64) * 10);
+        match entry.get("type").and_then(Value::as_str) {
+            Some("USER_INPUT") if !subagent_mode => {
+                if entry.get("source").and_then(Value::as_str) != Some("USER_EXPLICIT") {
+                    continue;
+                }
+                let Some(prompt) = entry
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .and_then(unwrap_antigravity_user_request)
+                else {
+                    continue;
+                };
+                if turn_index > 0 {
+                    flush_turn_tokens(
+                        &mut activities,
+                        turn_index,
+                        turn_input,
+                        turn_output,
+                        turn_cache_read,
+                        turn_context,
+                        turn_prompt_at,
+                        turn_last_at,
+                        turn_model.take(),
+                    );
+                }
+                turn_index += 1;
+                turn_prompt_at = Some(base_time);
+                turn_last_at = base_time;
+                turn_input = 0;
+                turn_output = 0;
+                turn_cache_read = 0;
+                turn_context = 0;
+                activities.push(SessionActivity {
+                    id: format!("agy-prompt:{conversation_id}:{step_index}"),
+                    kind: "prompt".into(),
+                    title: "Prompt enviado".into(),
+                    detail: Some(prompt.chars().take(16 * 1024).collect()),
+                    status: "completed".into(),
+                    created_at: base_time,
+                    files: Vec::new(),
+                    attachments: Vec::new(),
+                    append_detail: false,
+                });
+            }
+            Some("PLANNER_RESPONSE") => {
+                if !subagent_mode && turn_index == 0 {
+                    turn_index = 1;
+                }
+                let in_tok = entry.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let out_tok = entry.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let cache_tok = entry
+                    .get("cache_read_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if in_tok + out_tok > 0 {
+                    turn_input += in_tok;
+                    turn_output += out_tok;
+                    turn_cache_read += cache_tok;
+                    turn_context = in_tok + cache_tok + out_tok;
+                    turn_last_at = turn_last_at.max(base_time);
+                }
+                if let Some(model) = entry
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|model| !model.trim().is_empty())
+                {
+                    turn_model = Some(model.to_string());
+                }
+
+                if let Some(content) = entry
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    last_response = Some(content.to_string());
+                    turn_last_at = turn_last_at.max(base_time);
+                    activities.push(SessionActivity {
+                        id: if subagent_mode {
+                            format!(
+                                "antigravity:{conversation_id}:subagent-timeline:msg:{step_index}"
+                            )
+                        } else {
+                            format!("agy-response:{conversation_id}:{turn_index}:{step_index}")
+                        },
+                        kind: "message".into(),
+                        title: if subagent_mode {
+                            "Response".into()
+                        } else {
+                            "Antigravity".into()
+                        },
+                        detail: Some(content.chars().take(32 * 1024).collect()),
+                        status: "completed".into(),
+                        created_at: base_time,
+                        files: Vec::new(),
+                        attachments: Vec::new(),
+                        append_detail: false,
+                    });
+                }
+
+                if let Some(calls) = entry.get("tool_calls").and_then(Value::as_array) {
+                    let mut generic_outputs = entries[index + 1..]
+                        .iter()
+                        .take_while(|next| {
+                            next.get("type").and_then(Value::as_str) == Some("GENERIC")
+                        })
+                        .collect::<Vec<_>>();
+                    generic_outputs.truncate(calls.len());
+                    for (call_idx, call) in calls.iter().enumerate() {
+                        let tool_name = call
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Ferramenta");
+                        let params = unwrap_antigravity_transcript_args(call.get("args"));
+                        if crate::adapters::is_antigravity_internal_tool(tool_name, Some(&params)) {
+                            continue;
+                        }
+                        let generic = generic_outputs.get(call_idx).copied();
+                        let output = generic
+                            .and_then(|item| item.get("content"))
+                            .and_then(Value::as_str)
+                            .map(clean_antigravity_generic_output)
+                            .filter(|text| !text.is_empty());
+                        let failed = generic
+                            .and_then(|item| item.get("status"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|status| matches!(status, "ERROR" | "FAILED"));
+                        let presentation = crate::adapters::antigravity_tool_presentation(
+                            tool_name,
+                            Some(&params),
+                            None,
+                            output.as_deref(),
+                            None,
+                            None,
+                            true,
+                        );
+                        let tool_time = generic
+                            .and_then(antigravity_entry_timestamp)
+                            .unwrap_or(base_time + 1 + call_idx as i64);
+                        turn_last_at = turn_last_at.max(tool_time);
+                        let id = if subagent_mode {
+                            format!(
+                                "antigravity:{conversation_id}:subagent-timeline:tool:{step_index}:{call_idx}"
+                            )
+                        } else if presentation.kind == "subagent" {
+                            if calls.len() == 1 {
+                                format!("antigravity:{conversation_id}:subagent:{step_index}")
+                            } else {
+                                format!(
+                                    "antigravity:{conversation_id}:subagent:{step_index}-{call_idx}"
+                                )
+                            }
+                        } else if calls.len() == 1 {
+                            format!("agy-tool:{conversation_id}:{step_index}")
+                        } else {
+                            format!("agy-tool:{conversation_id}:{step_index}:{call_idx}")
+                        };
+                        activities.push(SessionActivity {
+                            id,
+                            kind: presentation.kind.into(),
+                            title: presentation.title.chars().take(180).collect(),
+                            detail: presentation.detail.map(|detail| {
+                                detail.chars().take(presentation.detail_limit).collect()
+                            }),
+                            status: if failed { "failed" } else { "completed" }.into(),
+                            created_at: tool_time,
+                            files: presentation.files,
+                            attachments: Vec::new(),
+                            append_detail: false,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if turn_index > 0 {
+        flush_turn_tokens(
+            &mut activities,
+            turn_index,
+            turn_input,
+            turn_output,
+            turn_cache_read,
+            turn_context,
+            turn_prompt_at,
+            turn_last_at,
+            turn_model,
+        );
+    }
+
+    (activities, last_response)
+}
+
+fn extract_uuid_token(text: &str) -> Option<String> {
+    text.split(|ch: char| !ch.is_ascii_hexdigit() && ch != '-')
+        .find(|token| {
+            let parts = token.split('-').collect::<Vec<_>>();
+            token.len() == 36
+                && parts.len() == 5
+                && [8, 4, 4, 4, 12]
+                    .into_iter()
+                    .zip(&parts)
+                    .all(|(len, part)| part.len() == len && part.bytes().all(|b| b.is_ascii_hexdigit()))
+        })
+        .map(str::to_string)
+}
+
+pub fn antigravity_subagent_timeline(
+    parent_session_id: &str,
+    activity_id: &str,
+) -> Result<Vec<SessionActivity>, String> {
+    if !is_safe_conversation_id(parent_session_id) {
+        return Err("Invalid Antigravity conversation identifier".into());
+    }
+    let home = antigravity_user_home().ok_or("The Antigravity folder is unavailable")?;
+    let root = home.join(".gemini/antigravity-cli");
+    antigravity_subagent_timeline_from_root(&root, parent_session_id, activity_id)
+}
+
+fn antigravity_subagent_timeline_from_root(
+    root: &Path,
+    parent_session_id: &str,
+    activity_id: &str,
+) -> Result<Vec<SessionActivity>, String> {
+    let step_key = activity_id
+        .rsplit_once(":subagent:")
+        .map(|(_, key)| key)
+        .ok_or("This is not an Antigravity subagent")?;
+    let child_id = step_key
+        .parse::<u64>()
+        .ok()
+        .and_then(|step| crate::antigravity_stream::subagent_conversation_id(parent_session_id, step))
+        .or_else(|| {
+            if is_safe_conversation_id(step_key)
+                && antigravity_full_transcript_path(root, step_key).is_some()
+            {
+                Some(step_key.to_string())
+            } else {
+                find_antigravity_subagent_in_parent_transcript(root, parent_session_id, step_key)
+            }
+        });
+    let Some(child_id) = child_id.filter(|id| is_safe_conversation_id(id)) else {
+        return Ok(Vec::new());
+    };
+    let Some(transcript) = antigravity_full_transcript_path(root, &child_id) else {
+        return Ok(Vec::new());
+    };
+    let Some(bytes) = read_file_tail(&transcript, 4 * 1024 * 1024) else {
+        return Ok(Vec::new());
+    };
+    let (mut activities, _) = parse_antigravity_transcript_activities(&bytes, &child_id, true);
+    if let Some(last_msg) = activities
+        .iter_mut()
+        .rev()
+        .find(|activity| activity.kind == "message")
+    {
+        last_msg.title = "Resposta final".into();
+    }
+    Ok(activities)
+}
+
+fn find_antigravity_subagent_in_parent_transcript(
+    root: &Path,
+    parent_session_id: &str,
+    step_key: &str,
+) -> Option<String> {
+    let (target_step, target_call_idx) = match step_key.split_once('-') {
+        Some((step, idx)) => (step.parse::<u64>().ok()?, idx.parse::<usize>().ok()?),
+        None => (step_key.parse::<u64>().ok()?, 0usize),
+    };
+    let path = antigravity_full_transcript_path(root, parent_session_id)?;
+    let bytes = read_file_tail(&path, 4 * 1024 * 1024)?;
+    let entries = bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    for (index, entry) in entries.iter().enumerate() {
+        let step_index = entry
+            .get("step_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(index as u64);
+        if step_index != target_step {
+            continue;
+        }
+        let output = entries
+            .get(index + 1 + target_call_idx)
+            .filter(|next| next.get("type").and_then(Value::as_str) == Some("GENERIC"))
+            .and_then(|next| next.get("content"))
+            .and_then(Value::as_str)?;
+        return extract_uuid_token(output);
+    }
+    None
 }
 
 fn work_activity(
@@ -3405,6 +3892,50 @@ mod tests {
 
     #[test]
     fn codex_resume_metadata_excludes_subagents_and_keeps_project_context() {
+        let temp = std::env::temp_dir().join(format!("lume-agy-transcript-{}", crate::state::now_millis()));
+        let logs = temp.join("brain/conv-resume/.system_generated/logs");
+        let child_logs = temp.join("brain/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/.system_generated/logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::create_dir_all(&child_logs).unwrap();
+        let parent_jsonl = concat!(
+            r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-18T00:10:00Z","content":"<USER_REQUEST>\ncorrija o arquivo\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\ntime\n</ADDITIONAL_METADATA>"}"#, "\n",
+            r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-18T00:10:05Z","model":"gemini-4-carbon-high","input_tokens":500,"cache_read_tokens":2000,"output_tokens":120,"thinking":"private thought","tool_calls":[{"name":"edit_file","args":{"Path":"\"/work/src/a.ts\"","Target":"\"old\"","Replacement":"\"new\""}},{"name":"invoke_subagent","args":{"TypeName":"\"research\"","Role":"\"Auditor\"","Prompt":"\"Verify\""}}]}"#, "\n",
+            r#"{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-18T00:10:06Z","content":"Created At: t\nCompleted At: t\nMade 1 replacement."}"#, "\n",
+            r#"{"step_index":3,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-18T00:10:07Z","content":"conversationId: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}"#, "\n",
+            r#"{"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-18T00:10:10Z","model":"gemini-4-carbon-high","input_tokens":300,"cache_read_tokens":2500,"output_tokens":80,"thinking":"more private thought","content":"Pronto, corrigido!"}"#, "\n"
+        );
+        std::fs::write(logs.join("transcript_full.jsonl"), parent_jsonl).unwrap();
+        let child_jsonl = concat!(
+            r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-18T00:10:08Z","thinking":"child secret","tool_calls":[{"name":"read_file","args":{"Path":"\"/work/src/a.ts\""}}]}"#, "\n",
+            r#"{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-18T00:10:09Z","content":"1: new"}"#, "\n",
+            r#"{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-18T00:10:09Z","thinking":"child secret 2","content":"Audit complete."}"#, "\n"
+        );
+        std::fs::write(child_logs.join("transcript_full.jsonl"), child_jsonl).unwrap();
+
+        let (resumed, last) = antigravity_resume_activities_from_root(&temp, "conv-resume");
+        assert_eq!(last.as_deref(), Some("Pronto, corrigido!"));
+        assert_eq!(resumed[0].kind, "prompt");
+        assert_eq!(resumed[0].detail.as_deref(), Some("corrija o arquivo"));
+        assert!(
+            resumed.iter().all(|a| !a.detail.as_deref().unwrap_or_default().contains("private thought")),
+            "private thinking must never be exposed"
+        );
+        assert!(resumed.iter().any(|a| a.kind == "file" && a.files == ["/work/src/a.ts"]));
+        assert!(resumed.iter().any(|a| a.kind == "subagent" && a.title == "Auditor"));
+        assert!(resumed.iter().any(|a| a.kind == "message" && a.detail.as_deref() == Some("Pronto, corrigido!")));
+        assert!(resumed.iter().any(|a| a.kind == "token_usage"));
+
+        let child_timeline = antigravity_subagent_timeline_from_root(
+            &temp,
+            "conv-resume",
+            "antigravity:conv-resume:subagent:1-1",
+        )
+        .unwrap();
+        assert!(child_timeline.iter().any(|a| a.title == "Read · /work/src/a.ts"));
+        assert!(child_timeline.iter().any(|a| a.title == "Resposta final" && a.detail.as_deref() == Some("Audit complete.")));
+        assert!(child_timeline.iter().all(|a| !a.detail.as_deref().unwrap_or_default().contains("child secret")));
+        let _ = std::fs::remove_dir_all(&temp);
+
         let session = codex_resume_metadata(
             &json!({
                 "type": "session_meta",

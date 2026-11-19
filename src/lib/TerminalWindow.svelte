@@ -2657,7 +2657,11 @@
         sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
         modelSettings = await getSessionModelSettings(session.id);
         selectedModel = modelSettings.model;
-        selectedEffort = modelSettings.reasoningEffort ?? "";
+        const option = currentModelOption();
+        selectedEffort = modelSettings.reasoningEffort
+          ?? option?.defaultReasoningEffort
+          ?? option?.supportedReasoningEfforts[0]?.value
+          ?? "";
       } else if (["codex", "opencode", "grok", "omp"].includes(session.agent)) {
         modelSettings = await getSessionModelSettings(session.id);
         if (["codex", "omp"].includes(session.agent)) sessionPermission = await getSessionPermissionMode(session.id).catch(() => null);
@@ -3881,7 +3885,7 @@
                 <svg viewBox="0 0 24 24"><path d="M7 7.5 12 4l5 3.5v9L12 20l-5-3.5zM12 4v16m-5-3.5 5-3.5 5 3.5M7 7.5l5 3.5 5-3.5" /></svg>
               </span>
               <div>
-                <strong id="model-settings-title">{session.agent === "antigravity" ? tr("Model and permissions", "Modelo e permissões") : tr("Model and reasoning", "Modelo e raciocínio")}</strong>
+                <strong id="model-settings-title">{tr("Model and reasoning", "Modelo e raciocínio")}</strong>
                 <p>{tr("Next prompt", "Próximo prompt")}</p>
               </div>
             </header>
@@ -3962,25 +3966,10 @@
                 </div>
               </section>
               {/if}
-            {:else if session.agent === "antigravity"}
-              {#if modelSettings}
-                <section class="model-settings-section">
-                  <span class="model-settings-label">{tr("Model", "Modelo")}</span>
-                  <div class="model-options">
-                    {#each modelSettings.models as option (option.model)}
-                      <button class:active={selectedModel === option.model} type="button" onclick={() => chooseModel(option.model)} title={option.description}>
-                        <span><strong>{option.displayName}</strong>{#if option.isDefault}<small>{tr("Default", "Padrão")}</small>{/if}</span>
-                      </button>
-                    {/each}
-                  </div>
-                </section>
-                {#if promptIsRunning}
-                  <p class="model-pending-note">{tr("Changes will be applied when this prompt finishes.", "As mudanças serão aplicadas ao final deste prompt.")}</p>
-                {/if}
-              {/if}
+            {:else if session.agent === "antigravity" && !modelSettings}
               {@render permissionSection()}
             {:else if modelSettings}
-              {#if promptIsRunning && session.agent === "codex"}
+              {#if promptIsRunning && (session.agent === "codex" || session.agent === "antigravity")}
                 <p class="model-pending-note">{tr("Changes will be applied when this prompt finishes.", "As mudanças serão aplicadas quando este prompt terminar.")}</p>
               {/if}
               <section class="model-settings-section">
@@ -3993,7 +3982,7 @@
                   {/each}
                 </div>
               </section>
-              {#if session.agent === "codex" || session.agent === "omp"}{@render permissionSection()}{/if}
+              {#if session.agent === "codex" || session.agent === "omp" || session.agent === "antigravity"}{@render permissionSection()}{/if}
               {#if session.agent === "codex"}{@render fastModeSection()}{/if}
 
               {#if (session.agent === "opencode" || session.agent === "grok") && modelSettings?.sessionModes?.options.length}
@@ -4009,8 +3998,8 @@
                   <div class="effort-slider">
                     <input aria-label={tr("Reasoning effort", "Nível de raciocínio")} type="range" min="0" max={Math.max(0, effortValues().length - 1)} step="1" value={currentEffortIndex()} oninput={chooseEffortIndex} />
                     <div class="effort-scale" aria-hidden="true">
-                      {#each effortValues() as effort (effort)}
-                        <span class:active={currentEffort() === effort}>{effort}</span>
+                      {#each effortValues() as effort (effort || "default")}
+                        <span class:active={currentEffort() === effort}>{effortLabel(effort)}</span>
                       {/each}
                     </div>
                   </div>

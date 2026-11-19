@@ -148,9 +148,15 @@ export function summarizeFileChanges(
   );
 }
 
-/** Claude Code edits a file one tool call at a time: every call is its own change to the same file. */
+/** Claude Code and Antigravity edit a file one tool call at a time: every call is its own change to the same file. */
 export function isSeparateEdit(activity: { id: string; kind: string }): boolean {
-  return activity.kind === "file" && activity.id.startsWith("claude:");
+  return (
+    activity.kind === "file" &&
+    (activity.id.startsWith("claude:") ||
+      activity.id.startsWith("agy-tool:") ||
+      activity.id.startsWith("antigravity:") ||
+      activity.id.startsWith("antigravity-stream:"))
+  );
 }
 
 /**

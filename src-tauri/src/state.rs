@@ -4506,6 +4506,9 @@ fn distinct_codex_message_items(left: &str, right: &str) -> bool {
     if left.starts_with("codex-rollout:") && right.starts_with("codex-rollout:") {
         return true;
     }
+    if left.starts_with("agy-response:") && right.starts_with("agy-response:") {
+        return true;
+    }
     left.starts_with("codex:")
         && right.starts_with("codex:")
         && left.rsplit(':').next() != right.rsplit(':').next()

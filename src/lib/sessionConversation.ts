@@ -81,6 +81,7 @@ function distinctCodexMessageItems(left: SessionActivity, right: SessionActivity
   // The bridge's completion summary repeats the native item; it is not another item ID.
   if ([left.id, right.id].some((id) => id.startsWith("codex:") && id.split(":")[2] === "response")) return false;
   if (left.id.startsWith("codex-rollout:") && right.id.startsWith("codex-rollout:")) return true;
+  if (left.id.startsWith("agy-response:") && right.id.startsWith("agy-response:")) return true;
   if (left.id.startsWith("codex:") && right.id.startsWith("codex:")) {
     // Legacy and turn-qualified IDs can refer to the same native item.
     return left.id.split(":").at(-1) !== right.id.split(":").at(-1);

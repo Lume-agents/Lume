@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { effortName } from "../src/lib/interruptNotice.ts";
 import { effortAfterModelChange, effortsFor } from "../src/lib/modelChoices.ts";
 
 const effort = (...values) => values.map((value) => ({ value }));
@@ -17,4 +18,9 @@ assert.equal(effortAfterModelChange(models, "small", "medium"), "medium");
 assert.equal(effortAfterModelChange(models, "small", "xhigh"), "low");
 assert.equal(effortAfterModelChange(models, "plain", "high"), "");
 assert.equal(effortAfterModelChange(models, "unknown", "high"), "high");
+
+const pt = (_en, br) => br;
+assert.equal(effortName("extra-low", pt), "Muito baixo");
+assert.equal(effortName("xhigh", pt), "Muito alto");
+assert.equal(effortName("max", pt), "Máximo");
 console.log("model choices test passed");

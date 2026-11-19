@@ -46,6 +46,15 @@ pub fn run_hook(provider: &str) -> i32 {
         return 0;
     }
     let fallback = antigravity_hook_output(provider).or_else(|| gemini_hook_output(provider));
+    if is_antigravity_probe_hook(
+        provider,
+        std::env::var(crate::antigravity_stream::PROBE_ENV).as_deref() == Ok("1"),
+    ) {
+        if let Some(output) = fallback.and_then(|output| serde_json::to_string(&output).ok()) {
+            println!("{output}");
+        }
+        return 0;
+    }
     let output = read_hook_event(provider)
         .or(fallback)
         .and_then(|output| serde_json::to_string(&output).ok());
@@ -53,6 +62,10 @@ pub fn run_hook(provider: &str) -> i32 {
         println!("{output}");
     }
     0
+}
+
+fn is_antigravity_probe_hook(provider: &str, probe: bool) -> bool {
+    probe && provider.split(':').next() == Some("antigravity")
 }
 
 /// Grok Build also runs the hooks in Claude's settings files and marks each run with
@@ -194,6 +207,9 @@ fn map_event_with_context(
     };
     // Subagents report through the same hooks; only the main conversation is a session.
     if provider == "grok" && string(raw, "subagentType").is_some() {
+        return None;
+    }
+    if provider == "antigravity" && is_antigravity_subagent_hook(raw) {
         return None;
     }
     // Child hooks can reuse the parent's session ID. Drop their explicit
@@ -385,10 +401,11 @@ fn map_event_with_context(
     } else {
         None
     };
-    let last_response = matches!(
-        &event,
-        HookEventKind::Completed | HookEventKind::Failed | HookEventKind::SessionEnded
-    )
+    let last_response = (!managed_antigravity_stream
+        && matches!(
+            &event,
+            HookEventKind::Completed | HookEventKind::Failed | HookEventKind::SessionEnded
+        ))
     .then(|| hook_response(raw))
     .flatten();
     let activity = if matches!(event, HookEventKind::QuestionRequest) {
@@ -413,7 +430,14 @@ fn map_event_with_context(
     {
         activities.push(changed);
     }
-    let event_status_label = status_label(hook_name.as_str(), &event).map(str::to_string);
+    // Lume's stream-json reader already receives each Antigravity step, tool output and result.
+    // Keep only workspace resolution and git file diffs from shell commands, never a duplicate tool row.
+    let (event, activity, event_status_label) = if managed_antigravity_stream {
+        (HookEventKind::Activity, None, None)
+    } else {
+        let label = status_label(hook_name.as_str(), &event).map(str::to_string);
+        (event, activity, label)
+    };
 
     Some(HookEvent {
         event,
@@ -458,6 +482,24 @@ fn map_event_with_context(
 
 fn is_managed_antigravity_stream(provider: &str, marker: Option<&str>) -> bool {
     provider == "antigravity" && marker == Some("1")
+}
+
+fn is_antigravity_subagent_hook(raw: &Value) -> bool {
+    let parent = string(raw, "parentConversationId")
+        .or_else(|| string(raw, "parent_conversation_id"))
+        .is_some_and(|id| !id.trim().is_empty());
+    if parent {
+        return true;
+    }
+    match (
+        string(raw, "conversationId").filter(|id| !id.trim().is_empty()),
+        string(raw, "rootConversationId")
+            .or_else(|| string(raw, "root_conversation_id"))
+            .filter(|id| !id.trim().is_empty()),
+    ) {
+        (Some(conversation_id), Some(root_id)) => conversation_id != root_id,
+        _ => false,
+    }
 }
 
 fn hook_activity(
@@ -694,6 +736,71 @@ fn hook_activity(
         .get("tool_input")
         .or_else(|| raw.get("details"))
         .or_else(|| tool_call.and_then(|call| call.get("args")));
+    let antigravity_tool_failed = provider == "antigravity"
+        && hook_name == "PostToolUse"
+        && string(raw, "error").is_some_and(|error| !error.trim().is_empty());
+    let status = if antigravity_tool_failed {
+        "failed"
+    } else {
+        match hook_name {
+            "PreToolUse" | "BeforeTool" => "running",
+            "PostToolUseFailure" => "failed",
+            _ => "completed",
+        }
+    };
+    let tool_id = string(raw, "tool_use_id")
+        .or_else(|| string(raw, "tool_call_id"))
+        .or_else(|| tool_call.and_then(|call| string(call, "id")).filter(|id| !id.is_empty()))
+        .or_else(|| {
+            raw.get("stepIdx")
+                .and_then(Value::as_i64)
+                .map(|id| id.to_string())
+        })
+        .unwrap_or_else(|| now_millis().to_string());
+    let response_value = raw
+        .get("tool_response")
+        .or_else(|| raw.get("tool_result"))
+        .or_else(|| raw.get("toolResponse"))
+        .or_else(|| raw.get("result"));
+
+    if provider == "antigravity" {
+        if is_antigravity_internal_tool(&tool_name, input) {
+            return None;
+        }
+        let error = string(raw, "error");
+        let output_text = response_value.and_then(|value| match value {
+            Value::String(text) => Some(text.clone()),
+            _ => serde_json::to_string_pretty(value).ok(),
+        });
+        let presentation = antigravity_tool_presentation(
+            &tool_name,
+            input,
+            None,
+            output_text.as_deref(),
+            response_value,
+            error.as_deref(),
+            status != "running",
+        );
+        let id = if presentation.kind == "subagent" {
+            format!("antigravity:{session_id}:subagent:{tool_id}")
+        } else {
+            format!("antigravity:{session_id}:tool:{tool_id}")
+        };
+        return Some(SessionActivity {
+            id,
+            kind: presentation.kind.into(),
+            title: truncate(&presentation.title, 240),
+            detail: presentation
+                .detail
+                .map(|detail| truncate(&detail, presentation.detail_limit)),
+            status: status.into(),
+            created_at: now_millis(),
+            files: presentation.files,
+            attachments: Vec::new(),
+            append_detail: false,
+        });
+    }
+
     let resource = input
         .and_then(resource_from_input)
         .unwrap_or_else(|| tool_name.clone());
@@ -705,7 +812,11 @@ fn hook_activity(
         || lower_tool.contains("command");
     // An MCP tool is its own kind of event whatever its name says: `editJiraIssue` edits a ticket, not a file.
     let is_mcp = tool_name.starts_with("mcp__");
-    let kind = if is_todo_tool || is_mcp {
+    let is_read_or_search = matches!(
+        lower_tool.as_str(),
+        "read" | "read_file" | "view_file" | "find_file" | "list_dir" | "list_directory"
+    );
+    let kind = if is_todo_tool || is_mcp || is_read_or_search {
         "tool"
     } else if is_command && is_test_command(&lower_resource) {
         "test"
@@ -719,30 +830,14 @@ fn hook_activity(
     } else {
         "tool"
     };
-    let antigravity_tool_failed = provider == "antigravity"
-        && hook_name == "PostToolUse"
-        && string(raw, "error").is_some_and(|error| !error.trim().is_empty());
-    let status = if antigravity_tool_failed {
-        "failed"
-    } else {
-        match hook_name {
-            "PreToolUse" | "BeforeTool" => "running",
-            "PostToolUseFailure" => "failed",
-            _ => "completed",
-        }
-    };
-    let result = raw
-        .get("tool_response")
-        .or_else(|| raw.get("tool_result"))
-        .or_else(|| raw.get("toolResponse"))
-        .or_else(|| raw.get("result"))
-        .and_then(|value| serde_json::to_string_pretty(value).ok());
+    let result = response_value.and_then(|value| serde_json::to_string_pretty(value).ok());
     let input_detail = input.and_then(|value| serde_json::to_string_pretty(value).ok());
     // Claude's edit tools report a structured patch or the old and new strings, never a diff:
     // build one so the review center can show the changed lines.
     let file_diff = (kind == "file")
         .then(|| {
-            file_change_diff(
+            file_change_diff_for_tool(
+                Some(&tool_name),
                 input,
                 raw.get("tool_response")
                     .or_else(|| raw.get("tool_result"))
@@ -760,10 +855,7 @@ fn hook_activity(
     let detail = if is_mcp {
         Some(mcp_activity_detail(
             input,
-            raw.get("tool_response")
-                .or_else(|| raw.get("tool_result"))
-                .or_else(|| raw.get("toolResponse"))
-                .or_else(|| raw.get("result")),
+            response_value,
             string(raw, "error").as_deref(),
         ))
     } else if is_todo_tool {
@@ -773,14 +865,6 @@ fn hook_activity(
     } else {
         result.or(input_detail)
     };
-    let tool_id = string(raw, "tool_use_id")
-        .or_else(|| string(raw, "tool_call_id"))
-        .or_else(|| {
-            raw.get("stepIdx")
-                .and_then(Value::as_i64)
-                .map(|id| id.to_string())
-        })
-        .unwrap_or_else(|| now_millis().to_string());
     let files = if kind == "file" {
         input
             .and_then(resource_from_input)
@@ -800,6 +884,424 @@ fn hook_activity(
         attachments: Vec::new(),
         append_detail: false,
     })
+}
+
+pub(crate) struct AntigravityToolPresentation {
+    pub kind: &'static str,
+    pub title: String,
+    pub detail: Option<String>,
+    pub detail_limit: usize,
+    pub files: Vec<String>,
+}
+
+/// Antigravity tools that coordinate background agents or timers rather than work on the project.
+pub(crate) fn is_antigravity_internal_tool(tool_name: &str, params: Option<&Value>) -> bool {
+    match tool_name {
+        "send_message" | "schedule" | "define_subagent" | "manage_subagents" => true,
+        "swarm" => params
+            .and_then(|params| params.get("action"))
+            .and_then(Value::as_str)
+            .is_some_and(|action| action != "add"),
+        _ => false,
+    }
+}
+
+fn canonical_antigravity_mcp_name(
+    tool_name: &str,
+    params: Option<&Value>,
+    step: Option<&Value>,
+) -> Option<String> {
+    if tool_name.starts_with("mcp__") {
+        return Some(tool_name.to_string());
+    }
+    let server = params
+        .and_then(|params| {
+            ["server_name", "serverName", "ServerName", "server"]
+                .into_iter()
+                .find_map(|key| params.get(key).and_then(Value::as_str))
+        })
+        .or_else(|| {
+            step.and_then(|step| {
+                step.pointer("/mcp_tool/server_name")
+                    .or_else(|| step.pointer("/tool_info/server_name"))
+                    .and_then(Value::as_str)
+            })
+        })
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let inner_tool = params
+        .and_then(|params| {
+            ["tool_name", "toolName", "ToolName"]
+                .into_iter()
+                .find_map(|key| params.get(key).and_then(Value::as_str))
+        })
+        .or_else(|| {
+            step.and_then(|step| {
+                step.pointer("/mcp_tool/tool_name")
+                    .and_then(Value::as_str)
+            })
+        })
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if let Some(server) = server {
+        let tool = inner_tool.unwrap_or(tool_name);
+        return Some(format!("mcp__{server}__{tool}"));
+    }
+    if let Some((server, tool)) = tool_name.split_once(':') {
+        let server = server.trim();
+        let tool = tool.trim();
+        if !server.is_empty() && !tool.is_empty() && server != "default_api" {
+            return Some(format!("mcp__{server}__{tool}"));
+        }
+    }
+    None
+}
+
+pub(crate) fn antigravity_tool_presentation(
+    tool_name: &str,
+    params: Option<&Value>,
+    step: Option<&Value>,
+    output_text: Option<&str>,
+    output_value: Option<&Value>,
+    error: Option<&str>,
+    done: bool,
+) -> AntigravityToolPresentation {
+    let first_param = |keys: &[&str]| {
+        params.and_then(|params| {
+            keys.iter().find_map(|key| {
+                params
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+        })
+    };
+    let done_output = output_text
+        .filter(|text| done && !text.is_empty())
+        .map(str::to_string);
+    let clean_error = error
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    let pretty_params = || {
+        params
+            .and_then(Value::as_object)
+            .filter(|map| !map.is_empty())
+            .and_then(|map| serde_json::to_string_pretty(map).ok())
+    };
+
+    if let Some(mcp_title) = canonical_antigravity_mcp_name(tool_name, params, step) {
+        let result_val = done
+            .then(|| {
+                output_value.cloned().or_else(|| {
+                    output_text
+                        .filter(|text| !text.is_empty())
+                        .map(|text| Value::String(text.to_string()))
+                })
+            })
+            .flatten();
+        return AntigravityToolPresentation {
+            kind: "tool",
+            title: mcp_title,
+            detail: Some(mcp_activity_detail(params, result_val.as_ref(), error)),
+            detail_limit: MCP_DETAIL_LIMIT + 1024,
+            files: Vec::new(),
+        };
+    }
+
+    match tool_name {
+        "invoke_subagent" => AntigravityToolPresentation {
+            kind: "subagent",
+            title: first_param(&["Role", "TypeName", "role", "type_name"])
+                .unwrap_or("Subagent")
+                .to_string(),
+            detail: done_output
+                .or_else(|| first_param(&["Prompt", "prompt"]).map(str::to_string))
+                .or(clean_error),
+            detail_limit: 32 * 1024,
+            files: Vec::new(),
+        },
+        "swarm" if first_param(&["action"]) == Some("add") => AntigravityToolPresentation {
+            kind: "subagent",
+            title: first_param(&["name"]).unwrap_or("Swarm worker").to_string(),
+            detail: done_output
+                .or_else(|| first_param(&["brief"]).map(str::to_string))
+                .or(clean_error),
+            detail_limit: 32 * 1024,
+            files: Vec::new(),
+        },
+        "edit_file"
+        | "write_file"
+        | "create_file"
+        | "write_to_file"
+        | "replace_file_content"
+        | "multi_replace_file_content" => {
+            let path = first_param(&[
+                "Path",
+                "TargetFile",
+                "file_path",
+                "filePath",
+                "AbsolutePath",
+                "path",
+            ])
+            .or_else(|| {
+                step.and_then(|step| {
+                    step.pointer("/edit_file/file_path")
+                        .or_else(|| step.pointer("/create_file/file_path"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+            });
+            if let Some(path) = path {
+                let diff = file_change_diff_for_tool(Some(tool_name), params, step);
+                AntigravityToolPresentation {
+                    kind: "file",
+                    title: path.to_string(),
+                    detail: diff.or(done_output).or(clean_error),
+                    detail_limit: 48 * 1024,
+                    files: vec![path.to_string()],
+                }
+            } else {
+                AntigravityToolPresentation {
+                    kind: "tool",
+                    title: first_param(&["toolSummary"]).unwrap_or(tool_name).to_string(),
+                    detail: done_output.or_else(pretty_params).or(clean_error),
+                    detail_limit: 32 * 1024,
+                    files: Vec::new(),
+                }
+            }
+        }
+        "read_file" | "view_file" => {
+            let path = first_param(&["Path", "AbsolutePath", "file_path", "filePath", "path"])
+                .or_else(|| {
+                    step.and_then(|step| {
+                        step.pointer("/view_file/file_path")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                    })
+                });
+            AntigravityToolPresentation {
+                kind: "tool",
+                title: path
+                    .map(|path| format!("Read · {path}"))
+                    .or_else(|| first_param(&["toolSummary"]).map(str::to_string))
+                    .unwrap_or_else(|| "Read".into()),
+                detail: done_output
+                    .or_else(|| path.map(str::to_string))
+                    .or(clean_error),
+                detail_limit: 32 * 1024,
+                files: Vec::new(),
+            }
+        }
+        "skill_lookup" => AntigravityToolPresentation {
+            kind: "tool",
+            title: "Skill".into(),
+            detail: first_param(&["name", "skill", "Skill"])
+                .map(str::to_string)
+                .or(done_output)
+                .or(clean_error),
+            detail_limit: 16 * 1024,
+            files: Vec::new(),
+        },
+        "list_dir" | "list_directory" => {
+            let dir = first_param(&["DirectoryPath", "Path", "directory_path", "path"]).or_else(
+                || {
+                    step.and_then(|step| {
+                        step.pointer("/list_directory/directory_path")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                    })
+                },
+            );
+            AntigravityToolPresentation {
+                kind: "tool",
+                title: dir
+                    .map(|dir| format!("ls {dir}"))
+                    .or_else(|| first_param(&["toolSummary"]).map(str::to_string))
+                    .unwrap_or_else(|| tool_name.to_string()),
+                detail: done_output
+                    .or_else(|| dir.map(str::to_string))
+                    .or(clean_error),
+                detail_limit: 32 * 1024,
+                files: Vec::new(),
+            }
+        }
+        "grep_search" | "search_directory" => {
+            let query = first_param(&["Query", "query"]).or_else(|| {
+                step.and_then(|step| {
+                    step.pointer("/search_directory/query")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+            });
+            let dir = first_param(&["SearchPath", "directory_path", "Path", "path"]);
+            AntigravityToolPresentation {
+                kind: "tool",
+                title: query
+                    .map(|query| format!("Grep · {query}"))
+                    .or_else(|| first_param(&["toolSummary"]).map(str::to_string))
+                    .unwrap_or_else(|| tool_name.to_string()),
+                detail: done_output
+                    .or_else(|| dir.map(str::to_string))
+                    .or(clean_error),
+                detail_limit: 32 * 1024,
+                files: Vec::new(),
+            }
+        }
+        "find_by_name" | "find_file" => {
+            let pattern = first_param(&["Pattern", "query", "Query"]).or_else(|| {
+                step.and_then(|step| {
+                    step.pointer("/find_file/query")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+            });
+            let dir = first_param(&["SearchDirectory", "directory_path", "Path", "path"]);
+            AntigravityToolPresentation {
+                kind: "tool",
+                title: pattern
+                    .map(|pattern| format!("Search files · {pattern}"))
+                    .or_else(|| first_param(&["toolSummary"]).map(str::to_string))
+                    .unwrap_or_else(|| tool_name.to_string()),
+                detail: done_output
+                    .or_else(|| dir.map(str::to_string))
+                    .or(clean_error),
+                detail_limit: 32 * 1024,
+                files: Vec::new(),
+            }
+        }
+        "search_web" => {
+            let query = first_param(&["query", "Query"]).or_else(|| {
+                step.and_then(|step| {
+                    step.pointer("/search_web/query")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+            });
+            let domain = first_param(&["domain", "Domain"]);
+            AntigravityToolPresentation {
+                kind: "tool",
+                title: query
+                    .map(|query| format!("Web search · {query}"))
+                    .or_else(|| first_param(&["toolSummary"]).map(str::to_string))
+                    .unwrap_or_else(|| "Web search".into()),
+                detail: done_output
+                    .or_else(|| domain.map(str::to_string))
+                    .or(clean_error),
+                detail_limit: 32 * 1024,
+                files: Vec::new(),
+            }
+        }
+        "read_url_content" => {
+            let url = first_param(&["Url", "url"]).or_else(|| {
+                step.and_then(|step| {
+                    step.pointer("/read_url_content/url")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+            });
+            AntigravityToolPresentation {
+                kind: "tool",
+                title: url
+                    .map(|url| format!("Open URL · {url}"))
+                    .or_else(|| first_param(&["toolSummary"]).map(str::to_string))
+                    .unwrap_or_else(|| "Open URL".into()),
+                detail: done_output
+                    .or_else(|| url.map(str::to_string))
+                    .or(clean_error),
+                detail_limit: 32 * 1024,
+                files: Vec::new(),
+            }
+        }
+        "run_command" => {
+            let command = first_param(&["CommandLine", "command", "command_line"]).or_else(|| {
+                step.and_then(|step| {
+                    step.pointer("/run_command/command_line")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+            });
+            let summary = first_param(&["toolSummary"]);
+            let title = command.or(summary).unwrap_or("run_command");
+            let kind = if is_test_command(&title.to_lowercase()) {
+                "test"
+            } else {
+                "command"
+            };
+            AntigravityToolPresentation {
+                kind,
+                title: title.to_string(),
+                detail: done_output
+                    .or(clean_error)
+                    .or_else(|| summary.or(command).map(str::to_string)),
+                detail_limit: 32 * 1024,
+                files: Vec::new(),
+            }
+        }
+        "manage_task" => AntigravityToolPresentation {
+            kind: "tool",
+            title: first_param(&["Action", "toolSummary"])
+                .unwrap_or("manage_task")
+                .to_string(),
+            detail: done_output.or_else(pretty_params).or(clean_error),
+            detail_limit: 32 * 1024,
+            files: Vec::new(),
+        },
+        "run_workflow" => AntigravityToolPresentation {
+            kind: "tool",
+            title: first_param(&["Description", "ScriptPath", "toolSummary"])
+                .unwrap_or("Workflow")
+                .to_string(),
+            detail: done_output
+                .or_else(|| first_param(&["ScriptPath"]).map(str::to_string))
+                .or(clean_error),
+            detail_limit: 32 * 1024,
+            files: Vec::new(),
+        },
+        "generate_image" => AntigravityToolPresentation {
+            kind: "tool",
+            title: first_param(&["image_name", "ImageName", "prompt", "Prompt"])
+                .map(|label| format!("Generate image · {label}"))
+                .unwrap_or_else(|| "Generate image".into()),
+            detail: done_output
+                .or_else(|| first_param(&["prompt", "Prompt"]).map(str::to_string))
+                .or(clean_error),
+            detail_limit: 32 * 1024,
+            files: Vec::new(),
+        },
+        "ask_question" => {
+            let question = params
+                .and_then(|params| params.pointer("/questions/0/question"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            AntigravityToolPresentation {
+                kind: "tool",
+                title: question.unwrap_or("Question").to_string(),
+                detail: done_output.or(clean_error),
+                detail_limit: 16 * 1024,
+                files: Vec::new(),
+            }
+        }
+        _ => AntigravityToolPresentation {
+            kind: "tool",
+            title: first_param(&["toolSummary", "toolAction"])
+                .unwrap_or(tool_name)
+                .to_string(),
+            detail: done_output.or_else(pretty_params).or(clean_error),
+            detail_limit: 32 * 1024,
+            files: Vec::new(),
+        },
+    }
 }
 
 const MCP_DETAIL_LIMIT: usize = 30 * 1024;
@@ -884,7 +1386,13 @@ fn command_file_activity(
         return None;
     }
     // Without the tool's own id the run before cannot be matched with the run after.
-    string(raw, "tool_use_id").or_else(|| string(raw, "tool_call_id"))?;
+    string(raw, "tool_use_id")
+        .or_else(|| string(raw, "tool_call_id"))
+        .or_else(|| {
+            raw.get("toolCall")
+                .and_then(|call| string(call, "id"))
+                .filter(|id| !id.is_empty())
+        })?;
     match hook_name {
         "PreToolUse" | "BeforeTool" => {
             crate::command_file_changes::remember_before(&command.id, cwd?, &command.title);
@@ -914,11 +1422,33 @@ fn command_file_activity(
 }
 
 /// A unified diff for a file edit made with an edit tool, when its payload allows one.
+#[cfg(test)]
 fn file_change_diff(input: Option<&Value>, response: Option<&Value>) -> Option<String> {
+    file_change_diff_for_tool(None, input, response)
+}
+
+pub(crate) fn file_change_diff_for_tool(
+    tool_name: Option<&str>,
+    input: Option<&Value>,
+    response: Option<&Value>,
+) -> Option<String> {
     let path = response
-        .and_then(|value| string(value, "filePath"))
-        .or_else(|| input.and_then(|value| string(value, "file_path")))?;
-    let header = format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n");
+        .and_then(|value| {
+            string(value, "filePath")
+                .or_else(|| value.pointer("/edit_file/file_path").and_then(Value::as_str).map(str::to_string))
+                .or_else(|| value.pointer("/create_file/file_path").and_then(Value::as_str).map(str::to_string))
+        })
+        .or_else(|| {
+            input.and_then(|value| {
+                ["file_path", "Path", "TargetFile", "filePath", "AbsolutePath", "path"]
+                    .into_iter()
+                    .find_map(|key| string(value, key).filter(|path| !path.trim().is_empty()))
+            })
+        })?;
+    let header_path = path.replace('\\', "/");
+    let header = format!(
+        "diff --git a/{header_path} b/{header_path}\n--- a/{header_path}\n+++ b/{header_path}\n"
+    );
 
     let patch = response
         .and_then(|value| value.get("structuredPatch"))
@@ -949,19 +1479,64 @@ fn file_change_diff(input: Option<&Value>, response: Option<&Value>) -> Option<S
         return Some(diff);
     }
 
+    if let Some(diff_block) = response
+        .and_then(|value| value.pointer("/edit_file/diff_block").or_else(|| value.get("diff_block")))
+        .or_else(|| input.and_then(|value| value.get("diff_block")))
+    {
+        if let Some(lines) = diff_block.get("lines").and_then(Value::as_array).filter(|lines| !lines.is_empty()) {
+            let start = diff_block.get("start_line").and_then(Value::as_u64).unwrap_or(1).max(1);
+            let mut old_count = 0usize;
+            let mut new_count = 0usize;
+            let mut body = String::new();
+            for line in lines {
+                let text = line.get("text").and_then(Value::as_str).unwrap_or("");
+                match line.get("action").and_then(Value::as_str).unwrap_or_default() {
+                    "LINE_ACTION_INSERT" | "INSERT" => {
+                        new_count += 1;
+                        body.push_str(&format!("+{text}\n"));
+                    }
+                    "LINE_ACTION_DELETE" | "DELETE" => {
+                        old_count += 1;
+                        body.push_str(&format!("-{text}\n"));
+                    }
+                    _ => {
+                        old_count += 1;
+                        new_count += 1;
+                        body.push_str(&format!(" {text}\n"));
+                    }
+                }
+            }
+            let mut diff = header;
+            diff.push_str(&format!("@@ -{start},{old_count} +{start},{new_count} @@\n{body}"));
+            return Some(diff);
+        }
+    }
+
     let input = input?;
-    let edits: Vec<(String, String)> = match input.get("edits").and_then(Value::as_array) {
-        Some(list) => list
-            .iter()
+    let edits: Vec<(String, String)> = if let Some(list) = input.get("edits").and_then(Value::as_array) {
+        list.iter()
             .filter_map(|edit| Some((string(edit, "old_string")?, string(edit, "new_string")?)))
-            .collect(),
-        None => string(input, "old_string")
+            .collect()
+    } else if let Some(chunks) = input.get("ReplacementChunks").and_then(Value::as_array) {
+        chunks
+            .iter()
+            .filter_map(|chunk| {
+                Some((
+                    string(chunk, "TargetContent")?,
+                    string(chunk, "ReplacementContent")?,
+                ))
+            })
+            .collect()
+    } else {
+        string(input, "old_string")
             .zip(string(input, "new_string"))
+            .or_else(|| string(input, "Target").zip(string(input, "Replacement")))
+            .or_else(|| string(input, "TargetContent").zip(string(input, "ReplacementContent")))
             .into_iter()
-            .collect(),
+            .collect()
     };
     if !edits.is_empty() {
-        let original = response
+        let on_disk = response
             .and_then(|value| string(value, "originalFile"))
             .or_else(|| {
                 std::fs::metadata(&path)
@@ -971,11 +1546,13 @@ fn file_change_diff(input: Option<&Value>, response: Option<&Value>) -> Option<S
             });
         let mut diff = header;
         for (old, new) in edits {
-            let start = original
+            let start = on_disk
                 .as_deref()
                 .and_then(|content| {
-                    content
-                        .find(&old)
+                    (!old.is_empty())
+                        .then(|| content.find(&old))
+                        .flatten()
+                        .or_else(|| (!new.is_empty()).then(|| content.find(&new)).flatten())
                         .map(|at| content[..at].matches('\n').count() + 1)
                 })
                 .unwrap_or(1);
@@ -996,24 +1573,63 @@ fn file_change_diff(input: Option<&Value>, response: Option<&Value>) -> Option<S
         return Some(diff);
     }
 
-    // A new file: Write reports its whole content, and nothing existed before.
-    let content = string(input, "content")?;
+    let content = ["content", "Content", "CodeContent", "contents"]
+        .into_iter()
+        .find_map(|key| string(input, key))?;
+    if input.get("Append").and_then(Value::as_bool) == Some(true) {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut diff = header;
+        diff.push_str(&format!("@@ -1,0 +1,{} @@\n", lines.len()));
+        for line in lines {
+            diff.push_str(&format!("+{line}\n"));
+        }
+        return Some(diff);
+    }
     let created = match response.and_then(|value| string(value, "type")) {
         Some(kind) => kind == "create",
-        None => !std::path::Path::new(&path).exists(),
+        None => {
+            !std::path::Path::new(&path).exists()
+                || tool_name == Some("create_file")
+                || (tool_name == Some("write_file")
+                    && input.get("Overwrite").and_then(Value::as_bool) != Some(true))
+        }
     };
-    if !created {
-        return None;
+    if created {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut diff = format!(
+            "diff --git a/{header_path} b/{header_path}\nnew file mode 100644\n--- /dev/null\n+++ b/{header_path}\n@@ -0,0 +1,{} @@\n",
+            lines.len()
+        );
+        for line in lines {
+            diff.push_str(&format!("+{line}\n"));
+        }
+        return Some(diff);
     }
-    let lines: Vec<&str> = content.lines().collect();
-    let mut diff = format!(
-        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-        lines.len()
-    );
-    for line in lines {
-        diff.push_str(&format!("+{line}\n"));
+    if matches!(tool_name, Some("write_file" | "write_to_file")) {
+        if let Some(existing) = std::fs::metadata(&path)
+            .ok()
+            .filter(|meta| meta.len() < 2 * 1024 * 1024)
+            .and_then(|_| std::fs::read_to_string(&path).ok())
+            .filter(|existing| existing != &content)
+        {
+            let old_lines: Vec<&str> = existing.lines().collect();
+            let new_lines: Vec<&str> = content.lines().collect();
+            let mut diff = header;
+            diff.push_str(&format!(
+                "@@ -1,{} +1,{} @@\n",
+                old_lines.len(),
+                new_lines.len()
+            ));
+            for line in old_lines {
+                diff.push_str(&format!("-{line}\n"));
+            }
+            for line in new_lines {
+                diff.push_str(&format!("+{line}\n"));
+            }
+            return Some(diff);
+        }
     }
-    Some(diff)
+    None
 }
 
 fn is_test_command(command: &str) -> bool {
@@ -1146,12 +1762,27 @@ fn antigravity_stop_event(raw: &Value) -> HookEventKind {
     let reason = string(raw, "terminationReason").unwrap_or_default();
     let fully_idle = raw.get("fullyIdle").and_then(Value::as_bool);
     let has_error = string(raw, "error").is_some_and(|error| !error.trim().is_empty());
-    if has_error || matches!(reason.as_str(), "error" | "max_steps_exceeded") {
+    if has_error
+        || matches!(
+            reason.as_str(),
+            "error"
+                | "max_steps_exceeded"
+                | "ERROR"
+                | "MAX_INVOCATIONS"
+                | "MAX_FORCED_INVOCATIONS"
+                | "MAX_TOKEN_BUDGET_EXCEEDED"
+        )
+    {
         HookEventKind::Failed
+    } else if matches!(reason.as_str(), "USER_CANCELED" | "user_canceled") {
+        HookEventKind::WaitingForInput
     } else {
         match (fully_idle, reason.as_str()) {
             (Some(false), _) => HookEventKind::Running,
-            (Some(true), "model_stop") => HookEventKind::Completed,
+            (
+                Some(true),
+                "model_stop" | "NO_TOOL_CALL" | "TERMINAL_STEP_TYPE" | "INJECTED_RESPONSE",
+            ) => HookEventKind::Completed,
             // An incomplete or future Stop payload must not falsely finish a
             // task. Activity preserves the last known session state.
             _ => HookEventKind::Activity,
@@ -1275,8 +1906,22 @@ pub(crate) fn permission_request(provider: &str, raw: &Value, session_id: &str) 
 }
 
 fn resource_from_input(input: &Value) -> Option<String> {
-    for key in ["command", "file_path", "path", "url", "query"] {
-        if let Some(value) = input.get(key).and_then(Value::as_str) {
+    for key in [
+        "command",
+        "CommandLine",
+        "file_path",
+        "Path",
+        "TargetFile",
+        "AbsolutePath",
+        "path",
+        "url",
+        "Url",
+        "query",
+        "Query",
+        "Pattern",
+        "DirectoryPath",
+    ] {
+        if let Some(value) = input.get(key).and_then(Value::as_str).filter(|value| !value.is_empty()) {
             return Some(value.to_string());
         }
     }
@@ -1852,9 +2497,14 @@ fn antigravity_working_directory(raw: &Value) -> Option<String> {
     let target_paths = [
         "Cwd",
         "cwd",
+        "Path",
         "DirectoryPath",
         "AbsolutePath",
         "TargetFile",
+        "file_path",
+        "SearchPath",
+        "SearchDirectory",
+        "ScriptPath",
         "path",
     ]
     .into_iter()
@@ -2810,6 +3460,99 @@ mod tests {
         assert!(is_managed_antigravity_stream("antigravity", Some("1")));
         assert!(!is_managed_antigravity_stream("antigravity", None));
         assert!(!is_managed_antigravity_stream("gemini", Some("1")));
+        assert!(is_antigravity_probe_hook("antigravity:PreInvocation", true));
+        assert!(!is_antigravity_probe_hook("antigravity:PreInvocation", false));
+        assert!(!is_antigravity_probe_hook("claude:PreToolUse", true));
+    }
+
+    #[test]
+    fn antigravity_hooks_format_edits_reads_subagents_and_ignore_child_trajectories() {
+        let edit = map_event(
+            "antigravity:PostToolUse",
+            &json!({
+                "conversationId": "agy-conv",
+                "workspacePaths": ["/work/app"],
+                "stepIdx": 5,
+                "toolCall": {
+                    "id": "toolu_edit",
+                    "name": "edit_file",
+                    "args": {
+                        "Path": "/work/app/src/main.ts",
+                        "Target": "oldLine()",
+                        "Replacement": "newLine()"
+                    }
+                }
+            }),
+        )
+        .unwrap()
+        .activity
+        .expect("file edit activity");
+        assert_eq!(edit.id, "antigravity:agy-conv:tool:toolu_edit");
+        assert_eq!(edit.kind, "file");
+        assert_eq!(edit.title, "/work/app/src/main.ts");
+        assert_eq!(edit.files, vec!["/work/app/src/main.ts"]);
+        assert!(
+            edit.detail
+                .as_deref()
+                .is_some_and(|diff| diff.contains("-oldLine()\n+newLine()\n")),
+            "{:?}",
+            edit.detail
+        );
+
+        let read = map_event(
+            "antigravity:PostToolUse",
+            &json!({
+                "conversationId": "agy-conv",
+                "workspacePaths": ["/work/app"],
+                "stepIdx": 6,
+                "toolCall": {
+                    "id": "toolu_read",
+                    "name": "read_file",
+                    "args": { "Path": "/work/app/README.md" }
+                }
+            }),
+        )
+        .unwrap()
+        .activity
+        .expect("read activity");
+        assert_eq!(read.kind, "tool", "read_file must never be classified as a file edit");
+        assert_eq!(read.title, "Read · /work/app/README.md");
+        assert!(read.files.is_empty());
+
+        assert!(
+            map_event(
+                "antigravity:PreInvocation",
+                &json!({
+                    "conversationId": "child-conv",
+                    "parentConversationId": "agy-conv",
+                    "workspacePaths": ["/work/app"]
+                }),
+            )
+            .is_none(),
+            "subagent hooks must not spawn separate top-level sessions"
+        );
+
+        assert!(matches!(
+            antigravity_stop_event(&json!({
+                "terminationReason": "NO_TOOL_CALL",
+                "fullyIdle": true
+            })),
+            HookEventKind::Completed
+        ));
+        assert!(matches!(
+            antigravity_stop_event(&json!({
+                "terminationReason": "USER_CANCELED",
+                "fullyIdle": true
+            })),
+            HookEventKind::WaitingForInput
+        ));
+        assert!(matches!(
+            antigravity_stop_event(&json!({
+                "terminationReason": "MAX_INVOCATIONS",
+                "fullyIdle": true
+            })),
+            HookEventKind::Failed
+        ));
     }
 
     #[test]

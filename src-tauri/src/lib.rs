@@ -850,6 +850,16 @@ pub(crate) fn subagent_timeline(
             .ok_or_else(|| "This is not a Claude subagent".to_string())?;
         return integrations::claude_subagent_timeline(&native_id, &agent_id);
     }
+    if session_id.starts_with("antigravity:")
+        || session_id.starts_with("antigravity-stream:")
+        || activity_id.starts_with("antigravity:")
+    {
+        let native_id = state
+            .connected_session(session_id)?
+            .native_session_id
+            .ok_or_else(|| "The Antigravity conversation has no session id".to_string())?;
+        return integrations::antigravity_subagent_timeline(&native_id, activity_id);
+    }
     if session_id.starts_with("omp:") {
         let (parent_id, child_id) = state.omp_subagent_thread(session_id, activity_id)?;
         return omp_sessions::load_subagent_timeline(&parent_id, &child_id);

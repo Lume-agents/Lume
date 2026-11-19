@@ -346,11 +346,6 @@ pub fn submit_prompt(
                 .collect(),
         )
     } else if session.agent == AgentKind::Antigravity && session.source == SessionSource::Desktop {
-        if !attachments.is_empty() {
-            return Err(
-                "Anexos ainda não são suportados na sessão estruturada do Antigravity".into(),
-            );
-        }
         let native_id = session
             .native_session_id
             .as_deref()
@@ -359,8 +354,17 @@ pub fn submit_prompt(
             .working_directory
             .as_deref()
             .ok_or("Conversa do Antigravity sem pasta")?;
+        let attachment_paths = crate::antigravity_stream::stage_prompt_attachments(
+            native_id,
+            cwd,
+            &attachments
+                .iter()
+                .map(|attachment| attachment.path.clone())
+                .collect::<Vec<_>>(),
+        );
+        let full_prompt = prompt_with_attachment_paths(prompt, &attachment_paths);
         app.state::<crate::antigravity_stream::AntigravityStream>()
-            .prompt(native_id, cwd, prompt)
+            .prompt(native_id, cwd, &full_prompt)
     } else if session.agent == AgentKind::Codex {
         let mut profile = session.permission_profile.clone();
         profile.can_respond_from_lume = true;
@@ -755,13 +759,7 @@ pub fn session_model_settings(
             .state::<crate::antigravity_stream::AntigravityStream>()
             .model_settings(native_id)?;
         let selected = state.session_model_override(session_id)?;
-        if let Some(model) = selected.model {
-            settings.model = model;
-        }
-        if let Some(effort) = selected.reasoning_effort {
-            settings.reasoning_effort =
-                crate::antigravity_stream::is_effort(&effort).then_some(effort);
-        }
+        crate::antigravity_stream::apply_model_override(&mut settings, &selected);
         return Ok(settings);
     }
     if session.agent != AgentKind::Codex {
@@ -927,10 +925,6 @@ pub fn set_session_model_settings(
                 "Retome esta sessão do Antigravity pelo Lume antes de alterar o modelo".into(),
             );
         }
-        let effort = effort.trim();
-        if !effort.is_empty() && !crate::antigravity_stream::is_effort(effort) {
-            return Err("Esse esforço não é aceito pela CLI do Antigravity".into());
-        }
         let native_id = session
             .native_session_id
             .as_deref()
@@ -938,19 +932,9 @@ pub fn set_session_model_settings(
         let mut settings = app
             .state::<crate::antigravity_stream::AntigravityStream>()
             .model_settings(native_id)?;
-        if !model.trim().is_empty() && !settings.models.iter().any(|option| option.model == model) {
-            return Err("Esse modelo não está disponível na CLI do Antigravity".into());
-        }
-        settings.model = model.to_string();
-        settings.reasoning_effort = (!effort.is_empty()).then(|| effort.to_string());
-        state.set_session_model_override(
-            session_id,
-            SessionModelOverride {
-                model: Some(model.to_string()),
-                // Empty means "CLI default", so a stale level can't come back on restart.
-                reasoning_effort: Some(effort.to_string()),
-            },
-        )?;
+        let selected =
+            crate::antigravity_stream::validate_model_selection(&mut settings, model, effort)?;
+        state.set_session_model_override(session_id, selected)?;
         protocol::emit_sessions_changed(app);
         return Ok(settings);
     }

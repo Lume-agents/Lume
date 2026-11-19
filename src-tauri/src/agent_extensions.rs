@@ -910,7 +910,11 @@ fn run_cli_status(
     args: &[&str],
     timeout: Duration,
 ) -> Result<(bool, String, String), String> {
-    let mut child = crate::executables::command(name)?
+    let mut command = crate::executables::command(name)?;
+    if name == "agy" {
+        command.env(crate::antigravity_stream::PROBE_ENV, "1");
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

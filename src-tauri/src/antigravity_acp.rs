@@ -53,6 +53,8 @@ pub(crate) fn approves_everything(state: &AppState, native_id: &str) -> bool {
 pub(crate) struct ToolUpdate {
     pub activity: Option<SessionActivity>,
     pub question: Option<PendingQuestion>,
+    /// The plan or task list an artifact the agent wrote holds, for the session's bookmarks.
+    pub artifact: Option<SessionActivity>,
 }
 
 fn params_of(update: &Value) -> Value {
@@ -236,12 +238,14 @@ pub(crate) fn tool_update(session_id: &str, update: &Value) -> Option<ToolUpdate
         return Some(ToolUpdate {
             activity: None,
             question,
+            artifact: None,
         });
     }
     if crate::adapters::is_antigravity_internal_tool(name, Some(&params)) {
         return Some(ToolUpdate {
             activity: None,
             question: None,
+            artifact: None,
         });
     }
     let failed = state_name == "failed";
@@ -330,7 +334,80 @@ pub(crate) fn tool_update(session_id: &str, update: &Value) -> Option<ToolUpdate
             append_detail: false,
         }),
         question: None,
+        artifact: (done && !failed)
+            .then(|| artifact_activity(session_id, update, &params))
+            .flatten(),
     })
+}
+
+/// Markdown the agent wrote to its conversation folder (`brain/<id>/`) rather than the project.
+fn artifact_path(update: &Value, params: &Value) -> Option<String> {
+    let path = ["Path", "TargetFile", "AbsolutePath", "path"]
+        .into_iter()
+        .find_map(|key| params.get(key).and_then(Value::as_str))
+        .or_else(|| update["locations"][0]["path"].as_str())?
+        .replace('\\', "/");
+    let inside = path.split_once("/.gemini/antigravity-cli/brain/")?.1;
+    let (_conversation, file) = inside.split_once('/')?;
+    (!file.contains('/') && file.to_ascii_lowercase().ends_with(".md")).then_some(path)
+}
+
+fn artifact_activity(session_id: &str, update: &Value, params: &Value) -> Option<SessionActivity> {
+    const LIMIT: u64 = 48 * 1024;
+    let path = artifact_path(update, params)?;
+    // An edit only carries the changed lines, so the whole artifact is read back once it is written.
+    let content = std::fs::metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.is_file() && metadata.len() <= LIMIT)
+        .and_then(|_| std::fs::read_to_string(&path).ok())
+        .or_else(|| params["Content"].as_str().map(str::to_string))?;
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
+    let file = path.rsplit('/').next().unwrap_or_default();
+    let (kind, title, detail) = if file.to_ascii_lowercase().contains("plan") {
+        ("plan_document", "Plan", content.to_string())
+    } else {
+        let checklist = artifact_checklist(content)?;
+        ("plan", "Plano atualizado", checklist)
+    };
+    Some(SessionActivity {
+        id: format!("agy-artifact:{session_id}:{file}"),
+        kind: kind.into(),
+        title: title.into(),
+        detail: Some(detail.chars().take(LIMIT as usize).collect()),
+        status: "completed".into(),
+        created_at: now_millis(),
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    })
+}
+
+/// `- [ ]`, `- [/]` and `- [x]` lines as the `○ ● ✓` steps a plan update uses; None without any.
+fn artifact_checklist(content: &str) -> Option<String> {
+    let lines = content
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let rest = line
+                .strip_prefix("- [")
+                .or_else(|| line.strip_prefix("* ["))?;
+            let (mark, label) = rest.split_once("] ")?;
+            let marker = match mark {
+                "x" | "X" => "✓",
+                "/" => "●",
+                " " => "○",
+                _ => return None,
+            };
+            let label = label.replace("**", "");
+            let label = label.trim();
+            (!label.is_empty()).then(|| format!("{marker} {}", label.chars().take(512).collect::<String>()))
+        })
+        .take(200)
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 pub(crate) fn record_context(session_id: &str, update: &Value) {
@@ -507,6 +584,46 @@ mod tests {
             answers: vec!["Blue".into()],
         }];
         assert_eq!(answer_prompt(&question, &answers), "Blue");
+    }
+
+    #[test]
+    fn artifacts_in_the_conversation_folder_become_the_plan_and_the_task_list() {
+        let brain = "/home/u/.gemini/antigravity-cli/brain/conv-a";
+        let write = |file: &str, content: &str| {
+            json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": format!("call-{file}"),
+                "name": "write_file", "status": "completed", "kind": "edit",
+                "args": {"Path": format!("{brain}/{file}"), "Content": content},
+                "rawInput": {"Path": format!("{brain}/{file}"), "Content": content},
+            })
+        };
+        let plan = tool_update("conv-a", &write("implementation_plan.md", "# Plan\n- [ ] One"))
+            .unwrap()
+            .artifact
+            .unwrap();
+        assert_eq!(plan.kind, "plan_document");
+        assert_eq!(plan.detail.as_deref(), Some("# Plan\n- [ ] One"));
+        let tasks = tool_update(
+            "conv-a",
+            &write("task.md", "# Task\n- [x] Read\n  - [/] **Write** code\n- [ ] Test"),
+        )
+        .unwrap()
+        .artifact
+        .unwrap();
+        assert_eq!(tasks.kind, "plan");
+        assert_eq!(tasks.detail.as_deref(), Some("✓ Read\n● Write code\n○ Test"));
+        assert!(tool_update("conv-a", &write("walkthrough.md", "No steps here"))
+            .unwrap()
+            .artifact
+            .is_none());
+        assert!(tool_update("conv-a", &write("scratch/notes.md", "- [ ] x"))
+            .unwrap()
+            .artifact
+            .is_none());
+        let mut project = write("task.md", "- [ ] x");
+        project["rawInput"]["Path"] = json!("/repo/task.md");
+        project["args"]["Path"] = json!("/repo/task.md");
+        assert!(tool_update("conv-a", &project).unwrap().artifact.is_none());
     }
 
     #[test]

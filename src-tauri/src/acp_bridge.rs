@@ -1411,7 +1411,7 @@ fn handle_update(
                 event.question = Some(question);
                 let _ = event_server::publish_event(state, app, event);
             }
-            if let Some(activity) = tool.activity {
+            for activity in [tool.activity, tool.artifact].into_iter().flatten() {
                 let mut event = base_event(agent, id, HookEventKind::Activity);
                 event.activity = Some(activity);
                 let _ = event_server::publish_event(state, app, event);

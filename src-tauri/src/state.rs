@@ -1619,73 +1619,151 @@ impl AppState {
         if native_session_id.trim().is_empty() {
             return Err("Oh My Pi did not provide a native session id".into());
         }
-        let next_id = format!("omp-rpc:{native_session_id}");
-        let mut sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| "Could not rebind the Oh My Pi session")?;
-        let index = sessions
-            .iter()
-            .position(|session| session.id == session_id)
-            .ok_or("Oh My Pi session not found")?;
-        if sessions[index].agent != AgentKind::Omp {
-            return Err("Only Oh My Pi sessions can be rebound".into());
+        self.rebind_session(
+            session_id,
+            &AgentKind::Omp,
+            &format!("omp-rpc:{native_session_id}"),
+            native_session_id,
+            take_control.then_some(true),
+        )
+    }
+
+    /// Moves an Antigravity conversation between the terminal and Lume. Lume drives it under the
+    /// id its ACP and stream readers publish to; a terminal `agy` reports it under its hook id.
+    pub fn rebind_antigravity_session(
+        &self,
+        session_id: &str,
+        native_session_id: &str,
+        to_lume: bool,
+    ) -> Result<String, String> {
+        if native_session_id.trim().is_empty() {
+            return Err("Antigravity did not provide a conversation id".into());
         }
-        if take_control
-            && sessions.iter().enumerate().any(|(candidate, s)| {
-                candidate != index
-                    && s.agent == AgentKind::Omp
-                    && (s.control_origin == SessionControlOrigin::Lume || s.id == next_id)
-                    && s.native_session_id.as_deref() == Some(native_session_id)
-            })
-        {
-            return Err("A Lume-controlled session with this native id already exists".into());
-        }
-        let duplicate_indices = sessions
-            .iter()
-            .enumerate()
-            .filter(|(candidate, session)| {
-                *candidate != index
-                    && session.agent == AgentKind::Omp
-                    && session.native_session_id.as_deref() == Some(native_session_id)
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        for duplicate_index in duplicate_indices.into_iter().rev() {
-            let duplicate = sessions.remove(duplicate_index);
-            let target_index = if duplicate_index < index {
-                index - 1
-            } else {
-                index
-            };
-            for activity in duplicate.activities {
-                if !sessions[target_index]
-                    .activities
-                    .iter()
-                    .any(|existing| existing.id == activity.id)
-                {
-                    sessions[target_index].activities.push(activity);
+        let next_id = if to_lume {
+            format!("antigravity-stream:{native_session_id}")
+        } else {
+            format!("antigravity:{native_session_id}")
+        };
+        self.rebind_session(
+            session_id,
+            &AgentKind::Antigravity,
+            &next_id,
+            native_session_id,
+            Some(to_lume),
+        )
+    }
+
+    /// Renames a session and folds in other copies of the same native conversation. With
+    /// `control`, `Some(true)` hands it to Lume and `Some(false)` back to the terminal.
+    fn rebind_session(
+        &self,
+        session_id: &str,
+        agent: &AgentKind,
+        next_id: &str,
+        native_session_id: &str,
+        control: Option<bool>,
+    ) -> Result<String, String> {
+        let take_control = control == Some(true);
+        let (snapshot, old_ids) = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "Could not rebind the session")?;
+            let index = sessions
+                .iter()
+                .position(|session| session.id == session_id)
+                .ok_or("Session not found")?;
+            if sessions[index].agent != *agent {
+                return Err("This session belongs to another agent".into());
+            }
+            // A finished Antigravity chat Lume drove before is the same conversation: it is folded in.
+            if take_control
+                && *agent == AgentKind::Omp
+                && sessions.iter().enumerate().any(|(candidate, s)| {
+                    candidate != index
+                        && s.agent == *agent
+                        && (s.control_origin == SessionControlOrigin::Lume || s.id == next_id)
+                        && s.native_session_id.as_deref() == Some(native_session_id)
+                })
+            {
+                return Err("A Lume-controlled session with this native id already exists".into());
+            }
+            let duplicate_indices = sessions
+                .iter()
+                .enumerate()
+                .filter(|(candidate, session)| {
+                    *candidate != index
+                        && session.agent == *agent
+                        && session.native_session_id.as_deref() == Some(native_session_id)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let mut old_ids = vec![session_id.to_string()];
+            for duplicate_index in duplicate_indices.into_iter().rev() {
+                let duplicate = sessions.remove(duplicate_index);
+                old_ids.push(duplicate.id.clone());
+                let target_index = if duplicate_index < index {
+                    index - 1
+                } else {
+                    index
+                };
+                for activity in duplicate.activities {
+                    if !sessions[target_index]
+                        .activities
+                        .iter()
+                        .any(|existing| existing.id == activity.id)
+                    {
+                        sessions[target_index].activities.push(activity);
+                    }
                 }
             }
+            let target = sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+                .ok_or("Session disappeared during rebind")?;
+            target.id = next_id.to_string();
+            target.native_session_id = Some(native_session_id.to_string());
+            if control.is_some() {
+                target.process_id = None;
+                target.source_app = None;
+                target.pending_permission = None;
+                target.pending_question = None;
+            }
+            match control {
+                Some(true) => {
+                    target.source = SessionSource::Desktop;
+                    target.control_origin = SessionControlOrigin::Lume;
+                    target.status = SessionStatus::WaitingForInput;
+                    target.status_label = "Ready in Lume".into();
+                    target.permission_profile.can_respond_from_lume = true;
+                }
+                Some(false) => {
+                    target.source = SessionSource::Cli;
+                    target.control_origin = SessionControlOrigin::External;
+                    target.status = SessionStatus::WaitingForInput;
+                    target.status_label = "Reopened in the terminal".into();
+                }
+                None => {}
+            }
+            target.updated_at = now_millis();
+            (target.clone(), old_ids)
+        };
+        if control.is_some() {
+            if let Ok(mut missing) = self.missing_process_scans.lock() {
+                for id in &old_ids {
+                    missing.remove(id);
+                }
+            }
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| "Could not save the transferred session".to_string())?;
+            for id in old_ids.iter().filter(|id| id.as_str() != next_id) {
+                store.delete_session(id)?;
+            }
+            store.save_session(&snapshot)?;
         }
-        let target = sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-            .ok_or("Oh My Pi session disappeared during rebind")?;
-        target.id = next_id.clone();
-        target.native_session_id = Some(native_session_id.to_string());
-        if take_control {
-            target.source = SessionSource::Desktop;
-            target.control_origin = SessionControlOrigin::Lume;
-            target.process_id = None;
-            target.source_app = None;
-            target.status = SessionStatus::WaitingForInput;
-            target.status_label = "Ready in Lume".into();
-            target.pending_permission = None;
-            target.pending_question = None;
-        }
-        target.updated_at = now_millis();
-        Ok(next_id)
+        Ok(next_id.to_string())
     }
 
     pub fn mark_session_lume_controlled(
@@ -6624,6 +6702,46 @@ mod tests {
                 reasoning_effort: Some("high".into()),
             }
         );
+    }
+
+    #[test]
+    fn a_terminal_antigravity_conversation_moves_to_the_id_lume_drives_and_back() {
+        let state = AppState::new(Path::new(":memory:")).expect("estado");
+        let mut terminal = started_event("antigravity:conv-1", 4242);
+        terminal.agent = AgentKind::Antigravity;
+        terminal.source = Some(SessionSource::Cli);
+        terminal.native_session_id = Some("conv-1".into());
+        state.ingest(terminal).expect("sessão do terminal");
+        let mut earlier = started_event("antigravity-stream:conv-1", 0);
+        earlier.agent = AgentKind::Antigravity;
+        earlier.source = Some(SessionSource::Desktop);
+        earlier.control_origin = SessionControlOrigin::Lume;
+        earlier.native_session_id = Some("conv-1".into());
+        state.ingest(earlier).expect("conversa já aberta no Lume");
+
+        let id = state
+            .rebind_antigravity_session("antigravity:conv-1", "conv-1", true)
+            .expect("assumir");
+        assert_eq!(id, "antigravity-stream:conv-1");
+        let sessions = state.sessions().expect("sessões");
+        assert_eq!(
+            sessions.len(),
+            1,
+            "the two copies of the conversation become one"
+        );
+        let session = &sessions[0];
+        assert_eq!(session.id, "antigravity-stream:conv-1");
+        assert_eq!(session.control_origin, SessionControlOrigin::Lume);
+        assert_eq!(session.source, SessionSource::Desktop);
+        assert_eq!(session.process_id, None);
+
+        let back = state
+            .rebind_antigravity_session(&id, "conv-1", false)
+            .expect("devolver ao terminal");
+        assert_eq!(back, "antigravity:conv-1");
+        let session = state.sessions().expect("sessões").remove(0);
+        assert_eq!(session.control_origin, SessionControlOrigin::External);
+        assert_eq!(session.source, SessionSource::Cli);
     }
 
     #[test]

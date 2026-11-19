@@ -118,7 +118,7 @@ export function sessionCapabilities(session: AgentSession): SessionCapabilities 
     canTakeControl:
       session.controlOrigin === "external"
       && session.source === "cli"
-      && ["codex", "omp"].includes(session.agent)
+      && ["codex", "omp", "antigravity"].includes(session.agent)
       && Boolean(session.nativeSessionId?.trim())
       && Boolean(session.workingDirectory?.trim())
       && (session.agent === "omp" || Boolean(session.processId)),

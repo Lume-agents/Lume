@@ -2285,6 +2285,9 @@ pub fn take_control_session(
         protocol::emit_sessions_changed(app);
         return Ok(rebound_id);
     }
+    if session.agent == AgentKind::Antigravity {
+        return take_control_antigravity(app, state, &session);
+    }
     if session.agent != AgentKind::Codex {
         return Err(
             "Claude Code Take Control is temporarily unavailable until its managed execution can guarantee a single writer and preserve permissions."
@@ -2427,6 +2430,73 @@ pub fn take_control_session(
     }
 }
 
+/// A terminal `agy` hands its conversation to Lume: the CLI closes, the session takes the id Lume
+/// drives it under, and `agy acp` resumes the conversation without replaying it. If Lume cannot
+/// open it, the conversation is reopened in a terminal.
+fn take_control_antigravity(
+    app: &AppHandle,
+    state: &AppState,
+    session: &AgentSession,
+) -> Result<String, String> {
+    let native_id = session
+        .native_session_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| "This Antigravity CLI did not report its conversation id".to_string())?;
+    let process_id = session
+        .process_id
+        .ok_or_else(|| "The Antigravity CLI is no longer open".to_string())?;
+    let cwd = session
+        .working_directory
+        .as_deref()
+        .filter(|directory| !directory.trim().is_empty())
+        .ok_or_else(|| {
+            "Lume cannot transfer this conversation safely because its project directory is unknown"
+                .to_string()
+        })?;
+    let acp = &app
+        .state::<crate::acp_bridge::AcpBridges>()
+        .inner()
+        .antigravity;
+    if acp.is_busy(native_id) {
+        return Err("Lume is already running this conversation".into());
+    }
+    let reopen = takeover_launch_request(session, state.session_model_override(&session.id)?)?;
+    let executable = integrations::lume_executable()?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let reopen_in_terminal = |error: String| -> String {
+        match launcher::launch(reopen.clone(), &executable, &app_data_dir, None) {
+            Ok(()) => format!(
+                "{error} The conversation was reopened in a terminal so you can keep using it."
+            ),
+            Err(recovery) => {
+                format!("{error} Lume also could not reopen the conversation: {recovery}")
+            }
+        }
+    };
+    discovery::release_agent_process_for_takeover(
+        process_id,
+        &AgentKind::Antigravity,
+        Some(native_id),
+    )?;
+    let controlled_id = state
+        .rebind_antigravity_session(&session.id, native_id, true)
+        .map_err(|error| reopen_in_terminal(error))?;
+    // Without `agy acp`, the next message runs the conversation through the stream instead.
+    if acp.available() {
+        if let Err(error) = acp.launch(cwd, Some(native_id)) {
+            let _ = state.rebind_antigravity_session(&controlled_id, native_id, false);
+            protocol::emit_sessions_changed(app);
+            return Err(reopen_in_terminal(error));
+        }
+    }
+    protocol::emit_sessions_changed(app);
+    Ok(controlled_id)
+}
+
 fn takeover_launch_request(
     session: &crate::domain::AgentSession,
     model_settings: SessionModelOverride,
@@ -2439,6 +2509,7 @@ fn takeover_launch_request(
     Ok(LaunchRequest {
         agent: match session.agent {
             AgentKind::Codex => IntegrationKind::Codex,
+            AgentKind::Antigravity => IntegrationKind::Antigravity,
             _ => return Err("This agent cannot be resumed in a terminal".into()),
         },
         working_directory: session

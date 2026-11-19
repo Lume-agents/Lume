@@ -358,6 +358,7 @@ pub(crate) fn turn_usage_activity(
     session_id: &str,
     result: &Value,
     prompt_at: Option<i64>,
+    model: Option<&str>,
 ) -> Option<SessionActivity> {
     let usage = result.get("usage")?;
     let field = |key: &str| usage.get(key).and_then(Value::as_u64);
@@ -385,11 +386,18 @@ pub(crate) fn turn_usage_activity(
     if let Some(cache_read) = cache_read {
         detail["cacheReadTokens"] = json!(cache_read);
     }
+    if let Some(cache_write) = field("cachedWriteTokens") {
+        detail["cacheCreationTokens"] = json!(cache_write);
+    }
     if let Some(window) = window.filter(|window| *window > 0) {
         detail["contextWindow"] = json!(window);
     }
     if let Some(prompt_at) = prompt_at {
         detail["promptAt"] = json!(prompt_at);
+    }
+    // The metrics name the model, so a turn that lost the prompt cache can blame a model switch.
+    if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
+        detail["model"] = json!(model);
     }
     Some(SessionActivity {
         id: format!("agy-token:{session_id}:acp:{created_at}"),
@@ -506,8 +514,9 @@ mod tests {
         record_context("conv-u", &json!({"used": 9457, "size": 1048576}));
         let activity = turn_usage_activity(
             "conv-u",
-            &json!({"usage": {"inputTokens": 13414, "outputTokens": 446, "cachedReadTokens": 13720}}),
+            &json!({"usage": {"inputTokens": 13414, "outputTokens": 446, "cachedReadTokens": 13720, "cachedWriteTokens": 2048}}),
             Some(5),
+            Some("gemini-4-neon"),
         )
         .unwrap();
         let detail: Value = serde_json::from_str(activity.detail.as_deref().unwrap()).unwrap();
@@ -515,7 +524,9 @@ mod tests {
         assert_eq!(detail["contextWindow"], 1048576);
         assert_eq!(detail["totalTokens"], 13860);
         assert_eq!(detail["cacheReadTokens"], 13720);
-        assert!(turn_usage_activity("conv-u", &json!({"usage": {}}), None).is_none());
+        assert_eq!(detail["model"], "gemini-4-neon");
+        assert_eq!(detail["cacheCreationTokens"], 2048);
+        assert!(turn_usage_activity("conv-u", &json!({"usage": {}}), None, None).is_none());
     }
 
     #[test]

@@ -915,8 +915,19 @@ impl AcpBridge {
                 let mut event = base_event(bridge.agent, &id, event_kind);
                 event.last_response = response;
                 if bridge.agent.is_antigravity() {
+                    let model = bridge.session_configs.lock().ok().and_then(|configs| {
+                        configs
+                            .get(&id)
+                            .and_then(|config| config_value(config, "model"))
+                            .map(str::to_string)
+                    });
                     if let Some(usage) = result.as_ref().ok().and_then(|result| {
-                        crate::antigravity_acp::turn_usage_activity(&id, result, Some(prompt_at))
+                        crate::antigravity_acp::turn_usage_activity(
+                            &id,
+                            result,
+                            Some(prompt_at),
+                            model.as_deref(),
+                        )
                     }) {
                         event.activities.push(usage);
                     }

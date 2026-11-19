@@ -404,6 +404,22 @@ pub(crate) fn turn_usage_activity(
     })
 }
 
+/// The mark a finished `/compact` leaves, later than the turn's usage so that sample reads as stale.
+pub(crate) fn compaction_activity(session_id: &str, after: i64) -> SessionActivity {
+    let created_at = now_millis().max(after + 1);
+    SessionActivity {
+        id: format!("agy:{session_id}:compact:{created_at}"),
+        kind: "compact".into(),
+        title: "Context compacted".into(),
+        detail: None,
+        status: "completed".into(),
+        created_at,
+        files: Vec::new(),
+        attachments: Vec::new(),
+        append_detail: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

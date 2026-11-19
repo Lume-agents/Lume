@@ -667,11 +667,14 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   function compactTokens(value: number) {
     return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : value >= 1_000 ? `${Math.round(value / 1_000)}k` : String(value);
   }
-  // Every request re-reads the whole context, so a long Claude chat costs more with each message.
+  // Every request re-reads the whole context, so a long chat costs more with each message.
   const HEAVY_CONTEXT = 150_000;
   let heavyDismissed = $state<Record<string, number>>({});
-  const heavyContext = $derived(session.agent === "claude_code" && contextTokens >= HEAVY_CONTEXT && contextTokens >= (heavyDismissed[session.id] ?? 0) + 100_000);
-  // Optionally compacts a heavy Claude chat by itself once it is idle and has no draft to clobber.
+  // Antigravity compacts through `/compact` only when Lume drives it over `agy acp`.
+  const antigravityCompacts = $derived(session.agent === "antigravity" && session.controlOrigin === "lume" && session.source === "desktop");
+  const compactsHeavyChats = $derived(session.agent === "claude_code" || antigravityCompacts);
+  const heavyContext = $derived(compactsHeavyChats && contextTokens >= HEAVY_CONTEXT && contextTokens >= (heavyDismissed[session.id] ?? 0) + 100_000);
+  // Optionally compacts a heavy chat by itself once it is idle and has no draft to clobber.
   let autoCompact = $state(typeof localStorage !== "undefined" && localStorage.getItem("lume-auto-compact-v1") === "1");
   let nativeCompacting = $state(false);
   let codexAutoCompact = $state(typeof localStorage !== "undefined" && localStorage.getItem("lume-codex-auto-compact") === "1");
@@ -695,7 +698,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
   const autoCompactAttempts = new Map<string, number>();
   $effect(() => {
-    const eligible = session.agent === "claude_code" ? autoCompact && contextTokens >= HEAVY_CONTEXT : session.agent === "codex" && codexAutoCompact && contextWindow > 0 && contextPercent >= codexCompactThreshold;
+    const eligible = compactsHeavyChats ? autoCompact && contextTokens >= HEAVY_CONTEXT : session.agent === "codex" && codexAutoCompact && contextWindow > 0 && contextPercent >= codexCompactThreshold;
     if (!eligible || !canCompact || nativeCompacting || queuedPrompts.length || prompt.trim() || promptAttachments.length || attachedNotes.length) return;
     const key = `lume-compact-attempt:${session.id}`;
     let last = autoCompactAttempts.get(session.id) ?? 0;
@@ -737,7 +740,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   const canCompact = $derived(Boolean(
     session.controlOrigin === "lume"
     && !nativeCompacting && queuedPrompts.length === 0
-    && (session.agent === "omp" ? session.status === "completed" && session.capabilities.canPrompt : session.agent === "claude_code" || (session.agent === "codex" && session.source !== "web" && !session.remote))
+    && (session.agent === "omp" ? session.status === "completed" && session.capabilities.canPrompt : session.agent === "claude_code" || antigravityCompacts || (session.agent === "codex" && session.source !== "web" && !session.remote))
     && (session.agent === "omp" || (canSend && !promptIsRunning && !sending && !takingControl)),
   ));
   const canSteer = $derived(Boolean(
@@ -3370,7 +3373,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                 </button>
                 {#if codexAutoCompact}<label class="codex-compact-threshold">{tr("Threshold (%)", "Limite (%)")}<input type="number" min="50" max="95" step="5" value={codexCompactThreshold} onchange={setCodexCompactThreshold} /></label>{/if}
               {/if}
-              {#if session.agent === "claude_code"}
+              {#if compactsHeavyChats}
                 <button type="button" role="menuitemcheckbox" aria-checked={autoCompact} class="auto-compact" onclick={toggleAutoCompact}>
                   <LumeIcon name="compact" size={15} />
                   <span><strong>{tr("Compact heavy chats", "Compactar chats pesados")}</strong><small>{tr(`Automatically, above ${compactTokens(HEAVY_CONTEXT)} tokens, when idle`, `Sozinho, acima de ${compactTokens(HEAVY_CONTEXT)} tokens, quando parado`)}</small></span>

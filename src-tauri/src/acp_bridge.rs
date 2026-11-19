@@ -849,6 +849,8 @@ impl AcpBridge {
         let id = session_id.to_string();
         let generation = self.reader_generation.load(Ordering::SeqCst);
         let prompt_at = now_millis();
+        let compacting =
+            self.agent.is_antigravity() && prompt.trim().eq_ignore_ascii_case("/compact");
         thread::Builder::new()
             .name(format!("lume-{}-prompt", self.agent.prefix))
             .spawn(move || {
@@ -917,6 +919,16 @@ impl AcpBridge {
                         crate::antigravity_acp::turn_usage_activity(&id, result, Some(prompt_at))
                     }) {
                         event.activities.push(usage);
+                    }
+                    // `/compact` answers with nothing, so the chat marks where the context was summarized.
+                    if compacting && matches!(end, TurnEnd::Completed) {
+                        let after = event
+                            .activities
+                            .last()
+                            .map_or(prompt_at, |usage| usage.created_at);
+                        event
+                            .activities
+                            .push(crate::antigravity_acp::compaction_activity(&id, after));
                     }
                 }
                 if cancelled || stop_reason == Some("cancelled") {

@@ -31,7 +31,7 @@ State is stored under `%LOCALAPPDATA%/Lume/node` on Windows or `$XDG_STATE_HOME/
 
 The Node creates a persistent Ed25519 identity and fails closed if its private or public identity becomes inconsistent. The private key is created owner-only on Unix and never appears in health output or logs. A separate persistent TLS certificate is bound to that identity by a signed attestation, so a client can verify both the QR fingerprint and the certificate it actually reached.
 
-`pair` creates one five-minute QR payload backed by a 256-bit secret. Only its domain-separated SHA-256 hash is persisted. A client must prove possession of its own Ed25519 key, request explicit scopes and complete the offer before it expires or reaches five failed attempts. Phase 1 currently grants only the read-only `observe` scope. Offers are single-use; `clients` lists paired public identities and `revoke` removes one immediately.
+`pair` creates one five-minute QR payload backed by a 256-bit secret. Only its domain-separated SHA-256 hash is persisted. A client must prove possession of its own Ed25519 key, request explicit scopes and complete the offer before it expires or reaches five failed attempts. Pairing grants the device scopes (`observe`, `read_conversations`, `prompt`, `approve`, `interrupt`), while sensitive actions remain gated by the Node owner's local switches (off by default). Offers are single-use; `clients` lists paired public identities and `revoke` removes one immediately.
 
 While `run` is active, the Node listens with TLS on the selected address and port `43132` and advertises `_lume-node._tcp.local.` on a selected non-loopback interface when mDNS is available. Discovery records are hints, not trusted identity: clients must verify the Ed25519 fingerprint and signed TLS-certificate binding. `/v1/identity` is the only public metadata endpoint; `/v1/pair` requires the active offer. `/v1/health` and `/v1/inventory` require a paired key, `observe` scope, a fresh timestamp and a unique nonce signed for that Node, method and path. The current transport is HTTPS JSON (`lan_tls_http`), not a streaming WebSocket.
 
@@ -65,8 +65,9 @@ lume node sessions                           # the same list for this computer
 
 The pairing secret travels only in the URI/QR code. The Relay learns a one-way derivative of it, and the pairing request
 is encrypted with a key derived separately, so the Relay can neither read nor forge it. After pairing, every message runs
-inside an Ed25519-authenticated X25519 session (ChaCha20-Poly1305, per-direction keys, increasing counters). Only the read-only
-`health`, `inventory` and `sessions` commands exist so far, with the `observe` scope. `sessions` lists the agent sessions
+inside an Ed25519-authenticated X25519 session (ChaCha20-Poly1305, per-direction keys, increasing counters). With the `observe`
+scope, a paired device can run the read-only `health`, `inventory` and `sessions` commands; conversations, prompts, permission
+approvals and interrupts require their respective scopes and the Node owner's switches (described below). `sessions` lists the agent sessions
 of the Lume app on the Node (agent, project folder name, status, whether it waits for a permission or an answer). It asks the
 running app (through the bridge described under *Sending a prompt*), because the app's database only keeps a scrubbed copy
 of a session: no status, no pending permission, no transcript. With the app closed the Node falls back to that copy,
@@ -80,7 +81,7 @@ On the same network a device can pair without any link: **Settings → Remote co
 code, and the person at the Node approves only when the codes match. The code is derived on each side from the two
 identities, a nonce and the request id, so a machine in the middle, which makes the sides see different identities,
 produces different codes. A request grants nothing until approved, expires in two minutes, at most three can wait at once,
-a refused device cannot ask again for two minutes, and it can only ask for the `observe` scope. When the Node has a Relay
+and a refused device cannot ask again for two minutes. When the Node has a Relay
 configured, the approval also hands the device the Relay address, so the same computer can be reached away from home.
 Devices approved or revoked while the Node runs reach (or lose) the Relay within a few seconds.
 

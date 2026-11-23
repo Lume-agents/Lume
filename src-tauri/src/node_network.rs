@@ -42,7 +42,9 @@ const MAX_PEER_CONNECTIONS: usize = 2;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
 const HEALTH_CACHE_TTL: Duration = Duration::from_secs(5);
 const OBSERVE_RATE_WINDOW: Duration = Duration::from_secs(10);
-const MAX_OBSERVE_REQUESTS: usize = 8;
+const MAX_OBSERVE_REQUESTS: usize = 30;
+const ACTING_RATE_WINDOW: Duration = Duration::from_secs(60);
+const MAX_ACTING_REQUESTS: usize = 10;
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
 const AUTH_CLOCK_WINDOW_MS: u64 = 60_000;
@@ -206,12 +208,19 @@ struct NodeNetworkState {
 #[derive(Default)]
 struct ObserveBudget {
     devices: HashMap<String, (Instant, usize)>,
+    acting: HashMap<String, (Instant, usize)>,
 }
 
 impl ObserveBudget {
     fn accept(&mut self, device_id: &str) -> bool {
+        self.accept_n(device_id, 1, false)
+    }
+
+    fn accept_n(&mut self, device_id: &str, count: usize, acting: bool) -> bool {
         self.devices
             .retain(|_, (at, _)| at.elapsed() < OBSERVE_RATE_WINDOW);
+        self.acting
+            .retain(|_, (at, _)| at.elapsed() < ACTING_RATE_WINDOW);
         if self.devices.len() >= MAX_REPLAY_NONCES && !self.devices.contains_key(device_id) {
             return false;
         }
@@ -219,10 +228,23 @@ impl ObserveBudget {
             .devices
             .entry(device_id.into())
             .or_insert((Instant::now(), 0));
-        if *requests >= MAX_OBSERVE_REQUESTS {
+        if requests.saturating_add(count) > MAX_OBSERVE_REQUESTS {
             return false;
         }
-        *requests += 1;
+        if acting {
+            if self.acting.len() >= MAX_REPLAY_NONCES && !self.acting.contains_key(device_id) {
+                return false;
+            }
+            let (_, actions) = self
+                .acting
+                .entry(device_id.into())
+                .or_insert((Instant::now(), 0));
+            if actions.saturating_add(1) > MAX_ACTING_REQUESTS {
+                return false;
+            }
+            *actions += 1;
+        }
+        *requests += count;
         true
     }
 }
@@ -479,6 +501,30 @@ pub(crate) fn authenticated_request_with_auth(
     token: Option<&str>,
     code: Option<&str>,
 ) -> Result<AuthenticatedNodeRequest, String> {
+    authenticated_request_with_command(
+        client_identity,
+        device_id,
+        node_id,
+        method,
+        path,
+        timestamp,
+        token,
+        code,
+        None,
+    )
+}
+
+pub(crate) fn authenticated_request_with_command(
+    client_identity: &NodeIdentity,
+    device_id: &str,
+    node_id: &str,
+    method: &str,
+    path: &str,
+    timestamp: i64,
+    token: Option<&str>,
+    code: Option<&str>,
+    command: Option<&Value>,
+) -> Result<AuthenticatedNodeRequest, String> {
     let mut nonce = [0_u8; 18];
     getrandom::getrandom(&mut nonce).map_err(|error| error.to_string())?;
     let payload = AuthenticationProof {
@@ -493,6 +539,7 @@ pub(crate) fn authenticated_request_with_auth(
     let mut payload = serde_json::to_value(payload).map_err(|error| error.to_string())?;
     if let Some(token) = token { payload["authToken"] = serde_json::json!(token); }
     if let Some(code) = code { payload["otpCode"] = serde_json::json!(code); }
+    if let Some(command) = command { payload["command"] = command.clone(); }
     Ok(AuthenticatedNodeRequest {
         device_id: device_id.into(),
         proof: client_identity.sign(payload)?,
@@ -711,12 +758,33 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                     );
                 }
             };
-            match node_pairing::accept_pairing(
+            let fingerprint = request.proof.identity.fingerprint.clone();
+            let paired = node_pairing::accept_pairing(
                 &state.directory,
                 &request,
                 &[NodeScope::Observe, NodeScope::ReadConversations, NodeScope::Prompt, NodeScope::Approve, NodeScope::Interrupt],
                 now_millis(),
-            ) {
+            );
+            let outcome = paired
+                .as_ref()
+                .map(|_| "accepted".to_string())
+                .unwrap_or_else(|error| crate::node_audit::refused(error));
+            let _ = crate::node_audit::record(
+                &state.directory,
+                &crate::node_audit::AuditRecord {
+                    at: now_millis(),
+                    device_id: paired.as_ref().map(|client| client.device_id.clone()).unwrap_or_default(),
+                    fingerprint: fingerprint.chars().take(64).collect(),
+                    device_name: paired.as_ref().map(|client| client.display_name.clone()).unwrap_or_default(),
+                    cmd: "pair".into(),
+                    session_id: None,
+                    request_id: None,
+                    route: "lan".into(),
+                    outcome,
+                    prompt_length: None,
+                },
+            );
+            match paired {
                 Ok(client) => {
                     json_response(200, serde_json::json!({ "paired": true, "client": client }))
                 }
@@ -757,7 +825,7 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                 Err(error) => json_response(403, serde_json::json!({ "error": error })),
             }
         }
-        ("POST", "/v1/health" | "/v1/inventory" | "/v1/authenticate" | "/v1/disconnect") => {
+        ("POST", "/v1/health" | "/v1/inventory" | "/v1/authenticate" | "/v1/disconnect" | "/v1/command") => {
             let authentication =
                 match serde_json::from_slice::<AuthenticatedNodeRequest>(&request.body) {
                     Ok(authentication) => authentication,
@@ -783,6 +851,28 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                     if request.path == "/v1/authenticate" {
                         let result = payload["otpCode"].as_str().ok_or_else(|| "Invalid authenticator code".to_string())
                             .and_then(|code| crate::node_auth::authenticate(&state.directory, fingerprint, code));
+                        let client = node_pairing::clients(&state.directory)
+                            .ok()
+                            .and_then(|clients| clients.into_iter().find(|client| client.identity.fingerprint == *fingerprint));
+                        let outcome = result
+                            .as_ref()
+                            .map(|_| "accepted".to_string())
+                            .unwrap_or_else(|error| crate::node_audit::refused(error));
+                        let _ = crate::node_audit::record(
+                            &state.directory,
+                            &crate::node_audit::AuditRecord {
+                                at: now_millis(),
+                                device_id: client.as_ref().map(|client| client.device_id.clone()).unwrap_or_else(|| authentication.device_id.clone()),
+                                fingerprint: fingerprint.chars().take(64).collect(),
+                                device_name: client.as_ref().map(|client| client.display_name.clone()).unwrap_or_default(),
+                                cmd: "authenticate".into(),
+                                session_id: None,
+                                request_id: None,
+                                route: "lan".into(),
+                                outcome,
+                                prompt_length: None,
+                            },
+                        );
                         return match result {
                             Ok(token) => json_response(200, serde_json::json!({ "token": token.as_str() })),
                             Err(error) => json_response(403, serde_json::json!({ "error": error })),
@@ -796,6 +886,9 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
                         crate::node_auth::disconnect(&state.directory, fingerprint);
                         return json_response(200, serde_json::json!({ "disconnected": true }));
                     }
+                    if request.path == "/v1/command" {
+                        return command_response(state, &authentication);
+                    }
                     observe_response(state, &authentication.device_id, &request.path)
                 }
                 Err(_) => json_response(
@@ -806,6 +899,45 @@ fn route(request: &HttpRequest, state: &NodeNetworkState) -> String {
         }
         _ => json_response(404, serde_json::json!({ "error": "not found" })),
     }
+}
+
+fn command_response(state: &NodeNetworkState, authentication: &AuthenticatedNodeRequest) -> String {
+    let command = &authentication.proof.payload["command"];
+    if !command.is_object() {
+        return json_response(400, serde_json::json!({ "error": "invalid Node command" }));
+    }
+    let Some(client) = node_pairing::clients(&state.directory)
+        .ok()
+        .and_then(|clients| clients.into_iter().find(|client| client.device_id == authentication.device_id))
+    else {
+        return json_response(401, serde_json::json!({ "error": "unpaired Node client" }));
+    };
+    let acting = matches!(
+        command["cmd"].as_str(),
+        Some("prompt" | "approve" | "interrupt")
+    );
+    let count = if command["cmd"].as_str() == Some("batch") {
+        command["commands"]
+            .as_array()
+            .filter(|items| !items.is_empty() && items.len() <= 16)
+            .map_or(1, Vec::len)
+    } else {
+        1
+    };
+    if !state
+        .observe_budget
+        .lock()
+        .is_ok_and(|mut budget| budget.accept_n(&authentication.device_id, count, acting))
+    {
+        return json_response(
+            429,
+            serde_json::json!({ "error": "Node observation rate limit exceeded" }),
+        );
+    }
+    json_response(
+        200,
+        crate::node_relay::execute_lan_command(&state.directory, &client, command),
+    )
 }
 
 fn observe_response(state: &NodeNetworkState, device_id: &str, path: &str) -> String {
@@ -1018,5 +1150,107 @@ mod tests {
                 .as_deref(),
             Some("Node request body is too large")
         );
+    }
+
+    #[test]
+    fn lan_command_endpoint_supports_batching_and_audits_acting_commands() {
+        let directory = test_directory("cmd");
+        let client_directory = test_directory("cmd-client");
+        let node = NodeIdentity::load_or_create(&directory).expect("node identity");
+        let client = NodeIdentity::load_or_create(&client_directory).expect("client identity");
+        let scopes = vec![
+            NodeScope::Observe,
+            NodeScope::ReadConversations,
+            NodeScope::Prompt,
+            NodeScope::Approve,
+            NodeScope::Interrupt,
+        ];
+        let offer = node_pairing::begin_pairing(&directory, "node-home", &node).expect("offer");
+        let pairing =
+            node_pairing::pairing_request(&client, &offer, "Work laptop", scopes.clone())
+                .expect("pairing request");
+        let paired =
+            node_pairing::accept_pairing(&directory, &pairing, &scopes, now_millis())
+                .expect("paired client");
+        let tls = NodeTlsIdentity::load_or_create(&directory, None).expect("TLS identity");
+        let server =
+            server_identity("node-home", &node, &tls.certificate_sha256).expect("server identity");
+        let state = NodeNetworkState {
+            directory: directory.clone(),
+            server_identity: server,
+            replay: Mutex::new(ReplayCache::default()),
+            observe_budget: Mutex::new(ObserveBudget::default()),
+            health: Mutex::new(None),
+            inventory: Mutex::new(InventoryCache::default()),
+        };
+
+        let batch_cmd = serde_json::json!({
+            "cmd": "batch",
+            "commands": [{ "cmd": "health" }, { "cmd": "keepalive" }]
+        });
+        let auth = authenticated_request_with_command(
+            &client,
+            &paired.device_id,
+            "node-home",
+            "POST",
+            "/v1/command",
+            now_millis(),
+            None,
+            None,
+            Some(&batch_cmd),
+        )
+        .expect("signed command");
+        let response = route(
+            &HttpRequest {
+                method: "POST".into(),
+                path: "/v1/command".into(),
+                body: serde_json::to_vec(&auth).unwrap(),
+            },
+            &state,
+        );
+        let body: Value = serde_json::from_str(response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["ok"], true);
+        let answers = body["result"]["answers"].as_array().unwrap();
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0]["ok"], true);
+        assert_eq!(answers[1]["result"]["connected"], true);
+
+        let prompt_cmd = serde_json::json!({
+            "cmd": "prompt",
+            "id": "session-1",
+            "requestId": "req-12345678",
+            "prompt": "olá",
+            "sentAt": now_millis()
+        });
+        let prompt_auth = authenticated_request_with_command(
+            &client,
+            &paired.device_id,
+            "node-home",
+            "POST",
+            "/v1/command",
+            now_millis(),
+            None,
+            None,
+            Some(&prompt_cmd),
+        )
+        .expect("signed prompt");
+        let prompt_response = route(
+            &HttpRequest {
+                method: "POST".into(),
+                path: "/v1/command".into(),
+                body: serde_json::to_vec(&prompt_auth).unwrap(),
+            },
+            &state,
+        );
+        let prompt_body: Value =
+            serde_json::from_str(prompt_response.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(prompt_body["ok"], false, "owner switch is off by default");
+        let audit_entries = crate::node_audit::recent(&directory, 10);
+        assert!(audit_entries
+            .iter()
+            .any(|entry| entry.cmd == "prompt" && entry.route == "lan" && entry.prompt_length == Some(3)));
+
+        let _ = fs::remove_dir_all(directory);
+        let _ = fs::remove_dir_all(client_directory);
     }
 }

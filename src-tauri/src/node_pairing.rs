@@ -410,6 +410,21 @@ pub fn decide(directory: &Path, request_id: &str, approve: bool, now: i64) -> Re
         state.requests[index].status = "denied".into();
         state.requests[index].expires_at = now.saturating_add(REQUEST_TTL_MS);
         save_state(directory, &state)?;
+        let _ = crate::node_audit::record(
+            directory,
+            &crate::node_audit::AuditRecord {
+                at: now,
+                device_id: format!("device-{}", request.identity.fingerprint),
+                fingerprint: request.identity.fingerprint.chars().take(64).collect(),
+                device_name: request.display_name,
+                cmd: "pair".into(),
+                session_id: None,
+                request_id: Some(request.request_id.chars().take(512).collect()),
+                route: "lan".into(),
+                outcome: crate::node_audit::refused("denied by owner"),
+                prompt_length: None,
+            },
+        );
         return Ok(None);
     }
     let client = PairedNodeClient {
@@ -428,6 +443,21 @@ pub fn decide(directory: &Path, request_id: &str, approve: bool, now: i64) -> Re
     state.requests[index].client = Some(client.clone());
     state.requests[index].expires_at = now.saturating_add(REQUEST_TTL_MS);
     save_state(directory, &state)?;
+    let _ = crate::node_audit::record(
+        directory,
+        &crate::node_audit::AuditRecord {
+            at: now,
+            device_id: client.device_id.clone(),
+            fingerprint: client.identity.fingerprint.chars().take(64).collect(),
+            device_name: client.display_name.clone(),
+            cmd: "pair".into(),
+            session_id: None,
+            request_id: Some(request.request_id.chars().take(512).collect()),
+            route: "lan".into(),
+            outcome: "accepted".into(),
+            prompt_length: None,
+        },
+    );
     Ok(Some(client))
 }
 

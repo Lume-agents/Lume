@@ -89,7 +89,21 @@ fn directory() -> Result<std::path::PathBuf, String> {
 /// Sends a prompt to a session of another computer.
 pub fn prompt(session_id: &str, prompt: &str) -> Result<(), String> {
     let (node, session) = parse(session_id).ok_or("Not a session of another computer")?;
-    node_relay::send_prompt(&directory()?, node, session, &request_id(), prompt).map(|_| wake())
+    let directory = directory()?;
+    let request_id = request_id();
+    let result = match node_relay::send_prompt(&directory, node, session, &request_id, prompt) {
+        Ok(value) => Ok(value),
+        Err(relay_error) => {
+            if crate::node_client::remotes(&directory)
+                .is_ok_and(|remotes| remotes.iter().any(|remote| remote.node_id == node))
+            {
+                crate::node_client::send_prompt(&directory, node, session, &request_id, prompt)
+            } else {
+                Err(relay_error)
+            }
+        }
+    };
+    result.map(|_| wake())
 }
 
 /// Allows once or denies what a session of another computer waits for.
@@ -100,13 +114,41 @@ pub fn resolve_permission(session_id: &str, permission_id: &str, action: Permiss
         PermissionAction::Deny => "deny",
         _ => return Err("Only allowing once or denying can be done from another computer".into()),
     };
-    node_relay::answer_permission(&directory()?, node, session, permission_id, action, &request_id()).map(|_| wake())
+    let directory = directory()?;
+    let request_id = request_id();
+    let result = match node_relay::answer_permission(&directory, node, session, permission_id, action, &request_id) {
+        Ok(value) => Ok(value),
+        Err(relay_error) => {
+            if crate::node_client::remotes(&directory)
+                .is_ok_and(|remotes| remotes.iter().any(|remote| remote.node_id == node))
+            {
+                crate::node_client::answer_permission(&directory, node, session, permission_id, action, &request_id)
+            } else {
+                Err(relay_error)
+            }
+        }
+    };
+    result.map(|_| wake())
 }
 
 /// Stops the turn a session of another computer is running.
-pub fn interrupt(session_id: &str) -> Result<(), String> {
+pub fn interrupt(session_id: &str, ) -> Result<(), String> {
     let (node, session) = parse(session_id).ok_or("Not a session of another computer")?;
-    node_relay::interrupt_session(&directory()?, node, session, &request_id()).map(|_| wake())
+    let directory = directory()?;
+    let request_id = request_id();
+    let result = match node_relay::interrupt_session(&directory, node, session, &request_id) {
+        Ok(value) => Ok(value),
+        Err(relay_error) => {
+            if crate::node_client::remotes(&directory)
+                .is_ok_and(|remotes| remotes.iter().any(|remote| remote.node_id == node))
+            {
+                crate::node_client::interrupt_session(&directory, node, session, &request_id)
+            } else {
+                Err(relay_error)
+            }
+        }
+    };
+    result.map(|_| wake())
 }
 
 fn conversation_activities(conversation: &Value) -> Vec<SessionActivity> {
@@ -208,7 +250,30 @@ fn session_of(node_id: &str, computer: &str, summary: &Value, conversation: Opti
 /// Everything one computer shows: its sessions, the conversations of the most recent ones and what they wait for.
 /// Errors from a computer that is offline or forbids a part are left out, never shown as sessions.
 fn computer_sessions(directory: &Path, node_id: &str, previous: &[AgentSession]) -> Result<Vec<AgentSession>, String> {
-    let mut answers = node_relay::query_many(directory, node_id, &["health", "sessions"])?.into_iter();
+    computer_sessions_with(
+        node_id,
+        previous,
+        |commands| node_relay::query_many(directory, node_id, commands),
+        |commands| node_relay::query_commands(directory, node_id, commands),
+    )
+}
+
+fn lan_computer_sessions(directory: &Path, node_id: &str, previous: &[AgentSession]) -> Result<Vec<AgentSession>, String> {
+    computer_sessions_with(
+        node_id,
+        previous,
+        |commands| crate::node_client::query_many(directory, node_id, commands),
+        |commands| crate::node_client::query_commands(directory, node_id, commands),
+    )
+}
+
+fn computer_sessions_with(
+    node_id: &str,
+    previous: &[AgentSession],
+    query_many: impl FnOnce(&[&str]) -> Result<Vec<Result<Value, String>>, String>,
+    query_commands: impl FnOnce(&[Value]) -> Result<Vec<Result<Value, String>>, String>,
+) -> Result<Vec<AgentSession>, String> {
+    let mut answers = query_many(&["health", "sessions"])?.into_iter();
     let health = answers.next().ok_or("the Node did not answer")??;
     let snapshot = answers.next().ok_or("the Node did not answer")??;
     let computer = health["displayName"].as_str().unwrap_or(node_id).to_string();
@@ -230,7 +295,7 @@ fn computer_sessions(directory: &Path, node_id: &str, previous: &[AgentSession])
     let mut permissions: HashMap<String, Value> = HashMap::new();
     let mut refusals: HashMap<String, String> = HashMap::new();
     if !commands.is_empty() {
-        if let Ok(results) = node_relay::query_commands(directory, node_id, &commands) {
+        if let Ok(results) = query_commands(&commands) {
             for ((id, kind), result) in wanted.into_iter().zip(results) {
                 match result {
                     Ok(value) if kind == "session" => { conversations.insert(id, value); }
@@ -284,7 +349,10 @@ pub fn start(state: AppState, app: AppHandle) {
             if let Ok(directory) = directory() {
                 let remotes = node_relay::remotes(&directory).unwrap_or_default();
                 let lan_remotes = crate::node_client::remotes(&directory).unwrap_or_default();
-                known.retain(|node_id, _| remotes.iter().any(|remote| &remote.node_id == node_id));
+                known.retain(|node_id, _| {
+                    remotes.iter().any(|remote| &remote.node_id == node_id)
+                        || lan_remotes.iter().any(|remote| &remote.node_id == node_id)
+                });
                 if let Ok(mut required) = AUTH_REQUIRED.get_or_init(|| Mutex::new(HashMap::new())).lock() {
                     required.retain(|node_id, _| remotes.iter().any(|remote| &remote.node_id == node_id) || lan_remotes.iter().any(|remote| &remote.node_id == node_id));
                 }
@@ -301,8 +369,16 @@ pub fn start(state: AppState, app: AppHandle) {
                     }
                 }
                 for remote in &remotes {
+                    let has_lan = lan_remotes.iter().any(|lan| lan.node_id == remote.node_id);
                     let entry = known.entry(remote.node_id.clone()).or_insert_with(|| (Vec::new(), 0));
-                    match computer_sessions(&directory, &remote.node_id, &entry.0) {
+                    let outcome = computer_sessions(&directory, &remote.node_id, &entry.0).or_else(|relay_error| {
+                        if has_lan && !relay_error.contains(crate::node_auth::OTP_REQUIRED) {
+                            lan_computer_sessions(&directory, &remote.node_id, &entry.0)
+                        } else {
+                            Err(relay_error)
+                        }
+                    });
+                    match outcome {
                         Ok(sessions) => { *entry = (sessions, 0); clear_auth_required(&app, &remote.node_id); }
                         Err(error) if error.contains(crate::node_auth::OTP_REQUIRED) => {
                             let computer = entry.0.first().and_then(|session| session.remote.as_ref()).map(|origin| origin.computer.clone()).unwrap_or_else(|| remote.node_id.clone());
@@ -318,13 +394,28 @@ pub fn start(state: AppState, app: AppHandle) {
                         }
                     }
                 }
-                // LAN-only Nodes do not provide chat sessions yet, but an authenticated connection
-                // still needs a heartbeat while the app is open so it does not expire between reads.
                 for remote in lan_remotes {
-                    if remotes.iter().any(|relay| relay.node_id == remote.node_id)
-                        || crate::node_auth::client_token(&remote.identity.fingerprint).is_none() { continue; }
-                    if crate::node_client::remote_health(&directory, &remote.node_id, Duration::from_secs(2)).is_ok() {
-                        clear_auth_required(&app, &remote.node_id);
+                    if remotes.iter().any(|relay| relay.node_id == remote.node_id) { continue; }
+                    let entry = known.entry(remote.node_id.clone()).or_insert_with(|| (Vec::new(), 0));
+                    match lan_computer_sessions(&directory, &remote.node_id, &entry.0) {
+                        Ok(sessions) => { *entry = (sessions, 0); clear_auth_required(&app, &remote.node_id); }
+                        Err(error) if error.contains(crate::node_auth::OTP_REQUIRED) => {
+                            let computer = entry.0.first().and_then(|session| session.remote.as_ref()).map(|origin| origin.computer.clone()).unwrap_or_else(|| remote.node_id.clone());
+                            entry.0.clear();
+                            entry.1 = 0;
+                            mark_auth_required(&app, &remote.node_id, &computer);
+                        }
+                        Err(_) => {
+                            entry.1 += 1;
+                            if entry.1 >= KEEP_ON_FAILURE {
+                                entry.0.clear();
+                            }
+                            if crate::node_auth::client_token(&remote.identity.fingerprint).is_some()
+                                && crate::node_client::remote_health(&directory, &remote.node_id, Duration::from_secs(2)).is_ok()
+                            {
+                                clear_auth_required(&app, &remote.node_id);
+                            }
+                        }
                     }
                 }
             }

@@ -38,6 +38,7 @@ mod macos_process_supervisor;
 mod mobile_gateway;
 mod mobile_server;
 mod node_audit;
+mod node_auth;
 pub mod node_bridge;
 pub mod node_client;
 mod node_http;
@@ -45,35 +46,36 @@ pub mod node_identity;
 pub mod node_inventory;
 pub mod node_network;
 pub mod node_pairing;
+pub mod node_relay;
+pub mod node_service;
+pub mod node_sessions;
 mod node_totp;
 mod node_totp_secret;
-mod node_auth;
-pub mod node_relay;
-pub mod node_sessions;
-pub mod node_service;
-pub mod omp_rpc;
 mod note_files;
+pub mod omp_rpc;
 mod omp_sessions;
 mod overlay;
+mod pair_watch;
 mod path_mentions;
 mod protocol;
 #[allow(dead_code)]
 pub mod relay_e2e;
 #[allow(dead_code)]
 pub mod relay_link;
+mod remote_sessions;
 mod repository;
-mod session_environments;
 mod session_containers;
+mod session_environments;
+mod session_files;
 mod session_filters;
+mod startup_trace;
 mod state;
 mod store;
 mod terminal_windows;
 mod tour_card;
-mod pair_watch;
-mod session_files;
-mod startup_trace;
-mod windows_launcher;
 mod usage_monitor;
+#[cfg(any(target_os = "windows", test))]
+mod windows_launcher;
 mod workflow_runtime;
 mod workspace_windows;
 
@@ -2133,7 +2135,11 @@ async fn check_lume_node_pairing(
     request_id: String,
 ) -> Result<node_client::PairingCheck, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        node_client::check_pairing(&node_service::default_state_directory()?, &node, &request_id)
+        node_client::check_pairing(
+            &node_service::default_state_directory()?,
+            &node,
+            &request_id,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2147,7 +2153,11 @@ fn list_node_pair_requests() -> Result<Vec<node_pairing::PendingPairRequest>, St
         return Ok(Vec::new());
     }
     let identity = node_identity::NodeIdentity::load_or_create(&directory)?;
-    node_pairing::pending_requests(&directory, &identity.public().fingerprint, state::now_millis())
+    node_pairing::pending_requests(
+        &directory,
+        &identity.public().fingerprint,
+        state::now_millis(),
+    )
 }
 
 #[tauri::command]
@@ -2176,37 +2186,56 @@ async fn authenticate_remote_node(node_id: String, code: String) -> Result<(), S
     let code = zeroize::Zeroizing::new(code);
     tauri::async_runtime::spawn_blocking(move || {
         let directory = node_service::default_state_directory()?;
-        let result = if node_relay::remotes(&directory)?.iter().any(|remote| remote.node_id == node_id) {
+        let result = if node_relay::remotes(&directory)?
+            .iter()
+            .any(|remote| remote.node_id == node_id)
+        {
             node_relay::authenticate(&directory, &node_id, &code)
         } else {
             node_client::authenticate(&directory, &node_id, &code)
         };
-        if result.is_ok() { remote_sessions::wake(); }
+        if result.is_ok() {
+            remote_sessions::wake();
+        }
         result
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 async fn disconnect_remote_node(node_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let directory = node_service::default_state_directory()?;
-        let result = if node_relay::remotes(&directory)?.iter().any(|remote| remote.node_id == node_id) {
+        let result = if node_relay::remotes(&directory)?
+            .iter()
+            .any(|remote| remote.node_id == node_id)
+        {
             node_relay::disconnect(&directory, &node_id)
         } else {
             node_client::disconnect(&directory, &node_id)
         };
         remote_sessions::wake();
         result
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
 fn remote_node_authenticated(node_id: String) -> Result<bool, String> {
     let directory = node_service::default_state_directory()?;
-    let relay = node_relay::remotes(&directory)?.into_iter().find(|remote| remote.node_id == node_id).map(|remote| remote.identity.fingerprint);
+    let relay = node_relay::remotes(&directory)?
+        .into_iter()
+        .find(|remote| remote.node_id == node_id)
+        .map(|remote| remote.identity.fingerprint);
     let fingerprint = match relay {
         Some(fingerprint) => fingerprint,
-        None => node_client::remotes(&directory)?.into_iter().find(|remote| remote.node_id == node_id).map(|remote| remote.identity.fingerprint).ok_or("that Node is not paired")?,
+        None => node_client::remotes(&directory)?
+            .into_iter()
+            .find(|remote| remote.node_id == node_id)
+            .map(|remote| remote.identity.fingerprint)
+            .ok_or("that Node is not paired")?,
     };
     Ok(node_auth::client_token(&fingerprint).is_some())
 }
@@ -2221,7 +2250,8 @@ fn list_remote_auth_required() -> Vec<serde_json::Value> {
 async fn get_relay_lume_node_overview(node_id: String) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let directory = node_service::default_state_directory()?;
-        let mut answers = node_relay::query_many(&directory, &node_id, &["health", "sessions"])?.into_iter();
+        let mut answers =
+            node_relay::query_many(&directory, &node_id, &["health", "sessions"])?.into_iter();
         let health = answers.next().ok_or("the Node did not answer")??;
         let sessions = answers.next().ok_or("the Node did not answer")?;
         Ok(match sessions {
@@ -2237,7 +2267,11 @@ async fn get_relay_lume_node_overview(node_id: String) -> Result<serde_json::Val
 #[tauri::command]
 async fn get_relay_lume_node_health(node_id: String) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        node_relay::query(&node_service::default_state_directory()?, &node_id, "health")
+        node_relay::query(
+            &node_service::default_state_directory()?,
+            &node_id,
+            "health",
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2245,9 +2279,16 @@ async fn get_relay_lume_node_health(node_id: String) -> Result<serde_json::Value
 
 /// One session's conversation on a computer paired through the Relay, when its owner allows it.
 #[tauri::command]
-async fn get_relay_lume_session(node_id: String, session_id: String) -> Result<serde_json::Value, String> {
+async fn get_relay_lume_session(
+    node_id: String,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        node_relay::query_session(&node_service::default_state_directory()?, &node_id, &session_id)
+        node_relay::query_session(
+            &node_service::default_state_directory()?,
+            &node_id,
+            &session_id,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2255,9 +2296,20 @@ async fn get_relay_lume_session(node_id: String, session_id: String) -> Result<s
 
 /// A prompt for a session of a computer paired through the Relay, when its owner allows it.
 #[tauri::command]
-async fn send_relay_lume_prompt(node_id: String, session_id: String, request_id: String, prompt: String) -> Result<serde_json::Value, String> {
+async fn send_relay_lume_prompt(
+    node_id: String,
+    session_id: String,
+    request_id: String,
+    prompt: String,
+) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        node_relay::send_prompt(&node_service::default_state_directory()?, &node_id, &session_id, &request_id, &prompt)
+        node_relay::send_prompt(
+            &node_service::default_state_directory()?,
+            &node_id,
+            &session_id,
+            &request_id,
+            &prompt,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2265,9 +2317,16 @@ async fn send_relay_lume_prompt(node_id: String, session_id: String, request_id:
 
 /// What a session of a computer paired through the Relay waits for the person to allow.
 #[tauri::command]
-async fn get_relay_lume_permission(node_id: String, session_id: String) -> Result<serde_json::Value, String> {
+async fn get_relay_lume_permission(
+    node_id: String,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        node_relay::query_permission(&node_service::default_state_directory()?, &node_id, &session_id)
+        node_relay::query_permission(
+            &node_service::default_state_directory()?,
+            &node_id,
+            &session_id,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2275,9 +2334,22 @@ async fn get_relay_lume_permission(node_id: String, session_id: String) -> Resul
 
 /// Allows once or denies a pending permission on a computer paired through the Relay, when its owner allows it.
 #[tauri::command]
-async fn answer_relay_lume_permission(node_id: String, session_id: String, permission_id: String, action: String, request_id: String) -> Result<serde_json::Value, String> {
+async fn answer_relay_lume_permission(
+    node_id: String,
+    session_id: String,
+    permission_id: String,
+    action: String,
+    request_id: String,
+) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        node_relay::answer_permission(&node_service::default_state_directory()?, &node_id, &session_id, &permission_id, &action, &request_id)
+        node_relay::answer_permission(
+            &node_service::default_state_directory()?,
+            &node_id,
+            &session_id,
+            &permission_id,
+            &action,
+            &request_id,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2285,9 +2357,18 @@ async fn answer_relay_lume_permission(node_id: String, session_id: String, permi
 
 /// Stops the turn a session of a computer paired through the Relay is running, when its owner allows prompts.
 #[tauri::command]
-async fn interrupt_relay_lume_session(node_id: String, session_id: String, request_id: String) -> Result<serde_json::Value, String> {
+async fn interrupt_relay_lume_session(
+    node_id: String,
+    session_id: String,
+    request_id: String,
+) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        node_relay::interrupt_session(&node_service::default_state_directory()?, &node_id, &session_id, &request_id)
+        node_relay::interrupt_session(
+            &node_service::default_state_directory()?,
+            &node_id,
+            &session_id,
+            &request_id,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2328,7 +2409,11 @@ async fn get_this_node() -> Result<serde_json::Value, String> {
 async fn set_this_node_on(on: bool) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let directory = node_service::default_state_directory()?;
-        if on { node_service::turn_on(&directory)?; } else { node_service::turn_off(&directory)?; }
+        if on {
+            node_service::turn_on(&directory)?;
+        } else {
+            node_service::turn_off(&directory)?;
+        }
         this_node(&directory)
     })
     .await
@@ -2389,7 +2474,9 @@ async fn disable_node_otp() -> Result<serde_json::Value, String> {
         let directory = node_service::default_state_directory()?;
         node_auth::disable(&directory)?;
         this_node(&directory)
-    }).await.map_err(|error| error.to_string())?
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Removes a device's access to this computer; through the Relay it loses it within a few seconds.
@@ -2406,7 +2493,10 @@ async fn revoke_this_node_device(device_id: String) -> Result<serde_json::Value,
 
 #[tauri::command]
 fn get_node_allow_approvals() -> Result<bool, String> {
-    Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.allow_approvals)
+    Ok(
+        node_service::load_or_create_config(&node_service::default_state_directory()?)?
+            .allow_approvals,
+    )
 }
 
 /// The owner's third switch: whether devices paired with this computer may allow once or deny what its sessions wait for.
@@ -2421,7 +2511,10 @@ fn set_node_allow_approvals(enabled: bool) -> Result<bool, String> {
 
 #[tauri::command]
 fn get_node_allow_prompts() -> Result<bool, String> {
-    Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.allow_prompts)
+    Ok(
+        node_service::load_or_create_config(&node_service::default_state_directory()?)?
+            .allow_prompts,
+    )
 }
 
 /// The owner's second switch: whether devices paired with this computer may send prompts to its sessions.
@@ -2436,7 +2529,10 @@ fn set_node_allow_prompts(enabled: bool) -> Result<bool, String> {
 
 #[tauri::command]
 fn get_node_share_conversations() -> Result<bool, String> {
-    Ok(node_service::load_or_create_config(&node_service::default_state_directory()?)?.share_conversations)
+    Ok(
+        node_service::load_or_create_config(&node_service::default_state_directory()?)?
+            .share_conversations,
+    )
 }
 
 /// The owner's switch: whether devices paired with this computer may read what was said in its sessions.
@@ -4230,11 +4326,15 @@ pub fn run() {
                     // A Node the person turned on comes back with the app (after a restart, for example).
                     let resume = directory.clone();
                     std::thread::spawn(move || {
-                        if node_service::load_or_create_config(&resume).is_ok_and(|config| config.enabled) {
+                        if node_service::load_or_create_config(&resume)
+                            .is_ok_and(|config| config.enabled)
+                        {
                             let _ = node_service::start_in_background(&resume);
                         }
                     });
-                    if let Err(error) = node_bridge::start(app.handle().clone(), state.clone(), &directory) {
+                    if let Err(error) =
+                        node_bridge::start(app.handle().clone(), state.clone(), &directory)
+                    {
                         eprintln!("Could not open the Node bridge: {error}");
                     }
                 }

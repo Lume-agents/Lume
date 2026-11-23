@@ -29,7 +29,7 @@ use crate::{
     node_http::{self, DeadlineStream},
     node_identity::{verify, NodeIdentity, PublicDeviceIdentity},
     node_inventory::NodeInventory,
-    node_network::{authenticated_request_with_auth, NodeServerIdentity},
+    node_network::{authenticated_request_with_auth, authenticated_request_with_command, NodeServerIdentity},
     node_pairing::{self, NodePairingOffer, PairedNodeClient},
     node_service::NodeHealth,
     state::now_millis,
@@ -358,9 +358,19 @@ fn observe_at(directory: &Path, remote: &RemoteNode, path: &str) -> Result<Value
 }
 
 fn request_with_auth(directory: &Path, remote: &RemoteNode, path: &str, code: Option<&str>) -> Result<Value, String> {
+    request_with_command(directory, remote, path, code, None)
+}
+
+fn request_with_command(
+    directory: &Path,
+    remote: &RemoteNode,
+    path: &str,
+    code: Option<&str>,
+    command: Option<&Value>,
+) -> Result<Value, String> {
     let identity = NodeIdentity::load_or_create(&directory.join(CLIENT_IDENTITY_DIRECTORY))?;
     let token = node_auth::client_token(&remote.identity.fingerprint);
-    let request = authenticated_request_with_auth(
+    let request = authenticated_request_with_command(
         &identity,
         &remote.device_id,
         &remote.node_id,
@@ -369,6 +379,7 @@ fn request_with_auth(directory: &Path, remote: &RemoteNode, path: &str, code: Op
         now_millis(),
         token.as_deref().map(String::as_str),
         code,
+        command,
     )?;
     let discovered = DiscoveredNode {
         node_id: remote.node_id.clone(),
@@ -388,7 +399,7 @@ fn request_with_auth(directory: &Path, remote: &RemoteNode, path: &str, code: Op
     );
     match &result {
         Ok(_) => node_auth::touch_client_if_matches(&remote.identity.fingerprint, token.as_deref().map(String::as_str)),
-        Err(error) if error.contains(node_auth::OTP_REQUIRED) || !["(HTTP 403)", "(HTTP 429)"].iter().any(|status| error.ends_with(status)) => {
+        Err(error) if error.contains(node_auth::OTP_REQUIRED) || !["(HTTP 403)", "(HTTP 404)", "(HTTP 429)"].iter().any(|status| error.ends_with(status)) => {
             if node_auth::forget_client_if_matches(&remote.identity.fingerprint, token.as_deref().map(String::as_str)) {
                 stop_lan_anchor(&remote.identity.fingerprint);
                 crate::remote_sessions::connection_lost(&remote.node_id);
@@ -397,6 +408,113 @@ fn request_with_auth(directory: &Path, remote: &RemoteNode, path: &str, code: Op
         Err(_) => {}
     }
     result
+}
+
+/// Runs several read-only commands on a paired LAN Node over its pinned TLS connection.
+pub fn query_many(
+    directory: &Path,
+    node_id: &str,
+    commands: &[&str],
+) -> Result<Vec<Result<Value, String>>, String> {
+    let commands: Vec<Value> = commands
+        .iter()
+        .map(|command| serde_json::json!({ "cmd": command }))
+        .collect();
+    query_commands(directory, node_id, &commands)
+}
+
+pub(crate) fn query_commands(
+    directory: &Path,
+    node_id: &str,
+    commands: &[Value],
+) -> Result<Vec<Result<Value, String>>, String> {
+    query_remote(
+        directory,
+        node_id,
+        Duration::from_millis(750),
+        |directory, remote| {
+            if crate::node_relay::can_batch_commands(commands) {
+                let batch = serde_json::json!({ "cmd": "batch", "commands": commands });
+                let answer = request_with_command(directory, remote, "/v1/command", None, Some(&batch))?;
+                if answer["ok"] == true {
+                    if let Some(items) = answer["result"]["answers"].as_array() {
+                        if items.len() == commands.len() {
+                            return Ok(items.iter().map(crate::node_relay::decode_command_answer).collect());
+                        }
+                    }
+                } else if answer["error"].as_str() != Some("unsupported command") {
+                    let error = answer["error"]
+                        .as_str()
+                        .unwrap_or("the Node refused the command")
+                        .to_string();
+                    return Ok(vec![Err(error); commands.len()]);
+                }
+            }
+            let mut results = Vec::with_capacity(commands.len());
+            for command in commands {
+                let answer = request_with_command(directory, remote, "/v1/command", None, Some(command))?;
+                results.push(crate::node_relay::decode_command_answer(&answer));
+            }
+            Ok(results)
+        },
+    )
+}
+
+fn act(directory: &Path, node_id: &str, command: Value) -> Result<Value, String> {
+    let answers = match query_commands(directory, node_id, std::slice::from_ref(&command)) {
+        Ok(answers) => answers,
+        Err(error) if ["(HTTP 401)", "(HTTP 403)", "(HTTP 404)", "(HTTP 429)"]
+            .iter()
+            .any(|status| error.ends_with(status)) =>
+        {
+            return Err(error);
+        }
+        Err(_) => {
+            let mut command = command;
+            command["sentAt"] = serde_json::json!(now_millis());
+            query_commands(directory, node_id, &[command])?
+        }
+    };
+    answers
+        .into_iter()
+        .next()
+        .ok_or_else(|| "the Node did not answer".to_string())?
+}
+
+/// Sends a prompt to a session of a paired LAN computer, when its owner allows it.
+pub fn send_prompt(
+    directory: &Path,
+    node_id: &str,
+    session_id: &str,
+    request_id: &str,
+    prompt: &str,
+) -> Result<Value, String> {
+    let command = serde_json::json!({ "cmd": "prompt", "id": session_id, "requestId": request_id, "prompt": prompt, "sentAt": now_millis() });
+    act(directory, node_id, command)
+}
+
+/// Allows once or denies a session's pending permission on a paired LAN computer.
+pub fn answer_permission(
+    directory: &Path,
+    node_id: &str,
+    session_id: &str,
+    permission_id: &str,
+    action: &str,
+    request_id: &str,
+) -> Result<Value, String> {
+    let command = serde_json::json!({ "cmd": "approve", "id": session_id, "permissionId": permission_id, "action": action, "requestId": request_id, "sentAt": now_millis() });
+    act(directory, node_id, command)
+}
+
+/// Stops the turn a session of a paired LAN computer is running, when its owner allows prompts.
+pub fn interrupt_session(
+    directory: &Path,
+    node_id: &str,
+    session_id: &str,
+    request_id: &str,
+) -> Result<Value, String> {
+    let command = serde_json::json!({ "cmd": "interrupt", "id": session_id, "requestId": request_id, "sentAt": now_millis() });
+    act(directory, node_id, command)
 }
 
 /// Authenticates a paired LAN device over its pinned TLS connection. The grant stays in memory.

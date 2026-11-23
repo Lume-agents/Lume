@@ -302,7 +302,7 @@
   let workspaceBackgroundImageOffset = $state({ x: 50, y: 50 });
   let agentMessageSurface = $state(true);
   let workspaceBackgroundInput = $state<HTMLInputElement | null>(null);
-  // The sidebar lists every chat, the workflows with their chats, or the chat groups; the choice stays on this computer.
+  // The sidebar can show all chats, workflows, or workflows organized alongside chat groups.
   type SidebarTab = "all" | "workflows" | "groups";
   const sidebarTabKey = "lume:workspace-sidebar-tab:v1";
   let sidebarTab = $state<SidebarTab>((() => {
@@ -803,11 +803,9 @@
     const rows: SidebarRow[] = [];
     const visible: HubSession[] = [];
     const push = (session: HubSession) => { rows.push({ key: session.id, kind: "session", session, index: visible.length }); visible.push(session); };
-    // "All" is the plain list: every chat once, workflow members included, nothing nested.
-    if (sidebarTab === "all") { filteredSessions.forEach(push); return { rows, visible }; }
     const shown = new Set(filteredSessions.map((session) => session.id));
     const claimed = new Set<string>();
-    const workflows = sidebarWorkflowList.flatMap((workflow) => {
+    const workflows = (sidebarTab === "all" ? [] : sidebarWorkflowList).flatMap((workflow) => {
       const members = workflow.members.map((member) => sessionForStep(member.nativeId));
       for (const session of members) if (session) claimed.add(session.id);
       const matching = members.some((session) => session && shown.has(session.id));
@@ -828,7 +826,7 @@
       });
     };
     if (sidebarTab === "workflows") { workflows.forEach((entry) => pushWorkflow(entry)); return { rows, visible }; }
-    // "Groups": the chat groups, each holding its workflows (with their chats nested) and its other chats.
+    // All chats retain their groups; the combined view also nests workflows in them.
     const listed = filteredSessions.filter((session) => !claimed.has(session.id));
     if (sidebarCollapsed || !sidebarGroups.length) {
       workflows.forEach((entry) => pushWorkflow(entry));
@@ -3191,7 +3189,7 @@
 
     <div class="session-tools">
     <div class="session-filters" role="tablist" aria-label={tr("Show in the sidebar", "Mostrar na barra lateral")}>
-      {#each [["all", "All", "Todos"], ["workflows", "Workflows", "Workflows"], ["groups", "Groups", "Grupos"]] as [tab, english, portuguese] (tab)}
+      {#each [["all", "All", "Todos"], ["workflows", "Workflows", "Workflows"], ["groups", "Flows + groups", "Fluxos + grupos"]] as [tab, english, portuguese] (tab)}
         <button class:active={sidebarTab === tab} type="button" role="tab" aria-selected={sidebarTab === tab} data-sidebar-tab={tab} onclick={() => chooseSidebarTab(tab as SidebarTab)}>{tr(english, portuguese)}</button>
       {/each}
     </div>
@@ -4309,7 +4307,7 @@
   .launcher-resume-list small { overflow: hidden; color: var(--workspace-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   .launcher-loading-note { min-height: 30px; display: flex; align-items: center; gap: 7px; color: var(--workspace-muted); font-size: 10px; }
   .session-launcher-popover p { margin: 8px 3px; color: var(--workspace-muted); font-size: 10px; line-height: 1.45; }
-  .session-filters { margin: 0 11px 10px; padding: 3px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--workspace-line); border-radius: 9px; background: color-mix(in srgb, var(--workspace-sidebar) 76%, var(--workspace-bg)); }
+  .session-filters { margin: 0 11px 10px; padding: 3px; display: grid; grid-template-columns: minmax(0, .7fr) minmax(0, 1fr) minmax(0, 1.4fr); border: 1px solid var(--workspace-line); border-radius: 9px; background: color-mix(in srgb, var(--workspace-sidebar) 76%, var(--workspace-bg)); }
   .session-filters button { min-width: 0; height: 25px; padding: 0 5px; overflow: hidden; border: 0; border-radius: 6px; color: var(--workspace-muted); background: transparent; font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; transition: color 140ms ease, background 140ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
   .session-filters button:hover { color: var(--workspace-strong); }
   .session-filters button.active { color: var(--workspace-accent); background: var(--workspace-raised); box-shadow: 0 1px 3px rgba(26, 42, 34, .08); }

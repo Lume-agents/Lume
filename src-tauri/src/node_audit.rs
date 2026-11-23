@@ -59,13 +59,23 @@ fn open_private(path: &Path) -> std::io::Result<fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path)
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // OpenOptions::mode only affects newly created files.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 /// Appends one record. Auditing never stops the command it describes, so a failure only returns the error.
 pub fn record(directory: &Path, record: &AuditRecord) -> Result<(), String> {
     let path = directory.join(FILE);
     if fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= MAX_BYTES) {
+        // Preserve the same permissions on the rotated file, including files
+        // created by an older installation with broader permissions.
+        drop(open_private(&path).map_err(|error| error.to_string())?);
         fs::rename(&path, directory.join(PREVIOUS_FILE)).map_err(|error| error.to_string())?;
     }
     let mut line = serde_json::to_vec(record).map_err(|error| error.to_string())?;
@@ -122,6 +132,38 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(directory.join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_restricts_existing_files_before_writing_or_rotating() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = directory("existing-permissions");
+        let path = directory.join(FILE);
+        fs::write(&path, b"old\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        record(&directory, &prompt(1)).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_BYTES)
+            .unwrap();
+        record(&directory, &prompt(2)).unwrap();
+        assert_eq!(
+            fs::metadata(directory.join(PREVIOUS_FILE))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         let _ = fs::remove_dir_all(directory);
     }
 

@@ -259,7 +259,11 @@ pub fn start(state: AppState, app: AppHandle, control: BrowserControl) -> Result
             // Only this computer's extensions connect; a handful of places is plenty.
             let connections = crate::http_limits::ConnectionLimit::new(16, 16);
             for stream in listener.incoming().flatten() {
-                let Some(place) = stream.peer_addr().ok().and_then(|peer| connections.admit(peer.ip())) else {
+                let Some(place) = stream
+                    .peer_addr()
+                    .ok()
+                    .and_then(|peer| connections.admit(peer.ip()))
+                else {
                     continue;
                 };
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
@@ -437,22 +441,15 @@ struct HttpRequest {
 }
 
 fn read_request(stream: &TcpStream) -> Result<HttpRequest, String> {
-    let mut reader = BufReader::new(crate::http_limits::DeadlineReader::new(stream, Duration::from_secs(10)));
+    let mut reader = BufReader::new(crate::http_limits::DeadlineReader::new(
+        stream,
+        Duration::from_secs(10),
+    ));
     let (request_line, header_lines) = crate::http_limits::read_head(&mut reader)?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next().ok_or("Método ausente")?.to_string();
     let path = parts.next().ok_or("Caminho ausente")?.to_string();
-    let mut content_length = 0usize;
-    let mut origin = String::new();
-    for line in header_lines {
-        let Some((name, value)) = line.split_once(':') else { continue };
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            content_length = value.trim().parse().map_err(|_| "Tamanho inválido")?;
-        }
-        if name.trim().eq_ignore_ascii_case("origin") {
-            origin = value.trim().to_string();
-        }
-    }
+    let (content_length, origin) = parse_browser_headers(&header_lines)?;
     if content_length > MAX_BODY_BYTES {
         return Err("Evento web excede o limite".into());
     }
@@ -466,6 +463,37 @@ fn read_request(stream: &TcpStream) -> Result<HttpRequest, String> {
         origin,
         body,
     })
+}
+
+fn parse_browser_headers(header_lines: &[String]) -> Result<(usize, String), String> {
+    let mut content_length = None;
+    let mut origin = None;
+    let mut host = None;
+    for line in header_lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err("Tamanho duplicado".into());
+            }
+            content_length = Some(value.trim().parse().map_err(|_| "Tamanho inválido")?);
+        } else if name.trim().eq_ignore_ascii_case("origin") {
+            if origin.replace(value.trim().to_string()).is_some() {
+                return Err("Origem duplicada".into());
+            }
+        } else if name.trim().eq_ignore_ascii_case("host") {
+            if host.replace(value.trim()).is_some() {
+                return Err("Host duplicado".into());
+            }
+        } else if name.trim().eq_ignore_ascii_case("transfer-encoding") {
+            return Err("Transferência não suportada".into());
+        }
+    }
+    if host != Some(ADDRESS) {
+        return Err("Host inválido".into());
+    }
+    Ok((content_length.unwrap_or(0), origin.unwrap_or_default()))
 }
 
 fn allowed_origin(origin: &str) -> bool {
@@ -573,6 +601,70 @@ mod tests {
         assert!(allowed_origin("extension://local-companion"));
         assert!(!allowed_origin("https://chatgpt.com"));
         assert!(!allowed_origin("null"));
+    }
+
+    #[test]
+    fn browser_headers_reject_rebinding_and_ambiguous_requests() {
+        let headers = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parse_browser_headers(&headers(&[
+                "Host: 127.0.0.1:43120",
+                "Origin: chrome-extension://local-companion",
+                "Content-Length: 12"
+            ]))
+            .unwrap()
+            .0,
+            12
+        );
+        for values in [
+            vec!["Host: attacker.example:43120"],
+            vec!["Origin: chrome-extension://local-companion"],
+            vec!["Host: 127.0.0.1:43120", "Host: attacker.example"],
+            vec![
+                "Host: 127.0.0.1:43120",
+                "Content-Length: 1",
+                "Content-Length: 2",
+            ],
+            vec!["Host: 127.0.0.1:43120", "Transfer-Encoding: chunked"],
+            vec![
+                "Host: 127.0.0.1:43120",
+                "Origin: chrome-extension://a",
+                "Origin: chrome-extension://b",
+            ],
+        ] {
+            assert!(
+                parse_browser_headers(&headers(&values)).is_err(),
+                "accepted {values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_http_reader_rejects_rebinding() {
+        use std::{io::Write, net::TcpListener};
+        fn request(host: &str) -> Result<HttpRequest, String> {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let wire = format!("POST /events HTTP/1.1\r\nHost: {host}\r\nOrigin: chrome-extension://local-companion\r\nContent-Length: 2\r\n\r\n{{}}");
+            let client = std::thread::spawn(move || {
+                let mut stream = TcpStream::connect(address).unwrap();
+                stream.write_all(wire.as_bytes()).unwrap();
+            });
+            let (stream, _) = listener.accept().unwrap();
+            let result = read_request(&stream);
+            client.join().unwrap();
+            result
+        }
+        let valid = request(ADDRESS).unwrap();
+        assert_eq!(valid.path, "/events");
+        assert_eq!(valid.body, b"{}");
+        assert!(allowed_origin(&valid.origin));
+        assert!(request("attacker.example:43120").is_err());
     }
 
     #[test]

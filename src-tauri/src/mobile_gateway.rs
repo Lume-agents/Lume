@@ -137,6 +137,24 @@ impl MobileGateway {
         Ok(active.code_hash)
     }
 
+    /// Count a failed encrypted request only against the offer that supplied
+    /// its key; a newer QR code must survive an older in-flight request.
+    pub(crate) fn record_failed_encrypted_pairing(&self, key: &[u8; 32]) -> Result<(), String> {
+        let mut pairing = self
+            .pairing
+            .lock()
+            .map_err(|_| "Não foi possível validar o pareamento".to_string())?;
+        if let Some(active) = pairing.as_mut() {
+            if active.code_hash.ct_eq(key).unwrap_u8() == 1 {
+                active.failed_attempts = active.failed_attempts.saturating_add(1);
+                if active.failed_attempts >= MAX_PAIRING_ATTEMPTS {
+                    *pairing = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn complete_pairing_with_key(
         &self,
         state: &AppState,
@@ -342,6 +360,32 @@ mod tests {
         assert!(gateway
             .complete_pairing(&state, &offer.code, "Outro")
             .is_err());
+    }
+
+    #[test]
+    fn encrypted_failures_expire_only_the_matching_offer() {
+        let gateway = gateway();
+        gateway.begin_pairing().unwrap();
+        let old_key = gateway.active_pairing_key().unwrap();
+        gateway.begin_pairing().unwrap();
+        let current_key = gateway.active_pairing_key().unwrap();
+        for _ in 0..MAX_PAIRING_ATTEMPTS {
+            gateway.record_failed_encrypted_pairing(&old_key).unwrap();
+        }
+        assert!(
+            gateway.active_pairing_key().is_ok(),
+            "an old request must not invalidate a new QR code"
+        );
+        for _ in 0..MAX_PAIRING_ATTEMPTS - 1 {
+            gateway
+                .record_failed_encrypted_pairing(&current_key)
+                .unwrap();
+        }
+        assert!(gateway.active_pairing_key().is_ok());
+        gateway
+            .record_failed_encrypted_pairing(&current_key)
+            .unwrap();
+        assert!(gateway.active_pairing_key().is_err());
     }
 
     #[test]

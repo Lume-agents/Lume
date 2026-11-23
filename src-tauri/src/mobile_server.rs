@@ -1270,11 +1270,14 @@ fn secure_pairing_response(
         Ok(pairing) if timestamp_is_recent(pairing.timestamp) => pairing,
         Ok(_) => return json_error(401, "pairing_expired", "Solicitação de pareamento expirada"),
         Err(_) => {
+            if let Err(message) = gateway.record_failed_encrypted_pairing(&key) {
+                return json_error(500, "pairing_failed", &message);
+            }
             return json_error(
                 401,
                 "pairing_failed",
                 "O QR Code não corresponde ao pareamento ativo",
-            )
+            );
         }
     };
     let credentials = match gateway.complete_pairing_with_key(state, &key, &pairing.device_name) {
@@ -1485,6 +1488,16 @@ fn read_request_guarded(
         };
         let name = name.trim().to_ascii_lowercase();
         let value = value.trim().to_string();
+        if name == "transfer-encoding" {
+            return Err("Transferência não suportada".into());
+        }
+        if matches!(
+            name.as_str(),
+            "content-length" | "host" | "origin" | "authorization"
+        ) && headers.contains_key(&name)
+        {
+            return Err("Cabeçalho duplicado".into());
+        }
         if name == "content-length" {
             content_length = value.parse().map_err(|_| "Tamanho inválido")?;
         }
@@ -1971,6 +1984,45 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 201"));
         assert!(!response.contains("token_hash"));
         assert!(!response.contains("tokenHash"));
+    }
+
+    #[test]
+    fn mobile_http_rejects_ambiguous_headers() {
+        for headers in [
+            "Content-Length: 0\r\nContent-Length: 1\r\n",
+            "Host: one\r\nHost: two\r\n",
+            "Origin: one\r\nOrigin: two\r\n",
+            "Authorization: Bearer a\r\nAuthorization: Bearer b\r\n",
+            "Transfer-Encoding: chunked\r\n",
+        ] {
+            let request = format!("POST /api/v1/pair-secure HTTP/1.1\r\n{headers}\r\n");
+            assert!(
+                read_request(&mut std::io::Cursor::new(request)).is_err(),
+                "accepted {headers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn encrypted_pairing_failures_are_limited() {
+        let state = AppState::new(Path::new(":memory:")).unwrap();
+        let gateway = MobileGateway::default();
+        gateway.set_pairing_base_url("https://127.0.0.1:43122".into());
+        gateway.begin_pairing().unwrap();
+        let wrong_key = [7u8; 32];
+        let envelope = encrypt_json(
+            &wrong_key,
+            &serde_json::json!({"deviceName":"Phone","timestamp":crate::state::now_millis()}),
+            b"lume-pair-request-v1",
+        )
+        .unwrap();
+        let body = serde_json::to_vec(&envelope).unwrap();
+        for _ in 0..5 {
+            assert!(
+                secure_pairing_response(&body, &state, &gateway, None).starts_with("HTTP/1.1 401")
+            );
+        }
+        assert!(gateway.active_pairing_key().is_err());
     }
 
     #[test]

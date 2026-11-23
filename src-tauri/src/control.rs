@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, io::Read, path::Path};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::Value;
@@ -44,13 +44,54 @@ pub fn changed_image_data_url(path: &str) -> Result<String, String> {
 
 fn image_data_url_within(path: &str, limit: usize) -> Result<String, String> {
     let path = fs::canonicalize(path).map_err(|_| "A imagem selecionada não existe".to_string())?;
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    if bytes.len() > limit {
-        return Err(format!("A imagem excede o limite de {} MB", limit / (1024 * 1024)));
-    }
+    let error = format!("A imagem excede o limite de {} MB", limit / (1024 * 1024));
+    let bytes = read_regular_file_bounded(&path, limit, &error)?;
     let mime = detected_image_mime(&bytes)
         .ok_or_else(|| "O arquivo selecionado não é uma imagem compatível".to_string())?;
     Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+}
+
+fn read_bounded(reader: impl Read, limit: usize, too_large: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > limit {
+        return Err(too_large.to_string());
+    }
+    Ok(bytes)
+}
+
+fn read_regular_file_bounded(
+    path: &Path,
+    limit: usize,
+    too_large: &str,
+) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("Only regular files can be read".into());
+    }
+    if metadata.len() > limit as u64 {
+        return Err(too_large.to_string());
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        // A file replaced by a FIFO between metadata and open must not hang the app.
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|error| error.to_string())?;
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("Only regular files can be read".into());
+    }
+    read_bounded(file, limit, too_large)
 }
 
 pub fn response_file_payload(
@@ -79,10 +120,11 @@ pub fn response_file_payload(
     if !path.is_file() {
         return Err("The response attachment is not a file".into());
     }
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_FILE_ATTACHMENT_BYTES {
-        return Err("The response file exceeds the 25 MB download limit".into());
-    }
+    let bytes = read_regular_file_bounded(
+        &path,
+        MAX_FILE_ATTACHMENT_BYTES,
+        "The response file exceeds the 25 MB download limit",
+    )?;
     Ok(serde_json::json!({
         "attachmentId": attachment.id,
         "name": attachment.name,
@@ -355,14 +397,7 @@ pub fn submit_prompt(
             native_id,
             cwd,
             prompt.to_string(),
-            attachments
-                .iter()
-                .map(|file| crate::acp_bridge::PromptFile {
-                    path: file.path.clone(),
-                    mime_type: file.display.mime_type.clone(),
-                    is_image: file.is_image,
-                })
-                .collect(),
+            acp_prompt_files(&session, native_id, cwd, &attachments),
         )
     } else if session.agent == AgentKind::Antigravity && session.source == SessionSource::Desktop {
         let native_id = session
@@ -538,7 +573,9 @@ const ACTIVE_WRITER_MESSAGE: &str = "Esta conversa ainda está aberta em outra C
 
 /// Codex keeps a thread attached to its last writer for a while after a CLI closes, so a request that
 /// meets "active writer" is retried for a few seconds before it is reported as a conflict.
-fn retry_while_writer_is_active<T>(mut operation: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+fn retry_while_writer_is_active<T>(
+    mut operation: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
     const ATTEMPTS: u32 = 40;
     let mut attempt = 0;
     loop {
@@ -717,13 +754,30 @@ pub fn session_slash_commands(
     match session.agent {
         AgentKind::ClaudeCode => crate::agent_commands::claude_commands(cwd),
         AgentKind::Codex => crate::agent_commands::codex_commands(cwd, || bridge.list_skills(cwd)),
-        AgentKind::OpenCode | AgentKind::Grok => match session.native_session_id.as_deref() {
+        AgentKind::OpenCode => {
+            let mut commands = match session.native_session_id.as_deref() {
+                Some(native_id) => acp_bridge(app, &session.agent)?
+                    .slash_commands(native_id, cwd)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            for command in crate::agent_commands::opencode_commands(cwd)? {
+                if !commands.iter().any(|known| known.name == command.name) {
+                    commands.push(command);
+                }
+            }
+            Ok(commands)
+        }
+        AgentKind::Grok => match session.native_session_id.as_deref() {
             Some(native_id) => acp_bridge(app, &session.agent)?.slash_commands(native_id, cwd),
             None => Ok(Vec::new()),
         },
         AgentKind::Antigravity => {
-            let mut commands = match (acp_for(app, &session), session.native_session_id.as_deref()) {
-                (Some(acp), Some(native_id)) => acp.slash_commands(native_id, cwd).unwrap_or_default(),
+            let mut commands = match (acp_for(app, &session), session.native_session_id.as_deref())
+            {
+                (Some(acp), Some(native_id)) => {
+                    acp.slash_commands(native_id, cwd).unwrap_or_default()
+                }
                 _ => Vec::new(),
             };
             // The agent announces its own commands; skills and workflows in the project add to them.
@@ -947,17 +1001,15 @@ pub fn set_session_model_settings(
             model,
             effort,
         )?;
-        if session.agent == AgentKind::Antigravity {
-            // Kept so a restarted agent resumes the conversation with the same choice.
-            state.set_session_model_override(
-                session_id,
-                SessionModelOverride {
-                    model: Some(settings.model.clone()),
-                    reasoning_effort: settings.reasoning_effort.clone(),
-                },
-            )?;
-            protocol::emit_sessions_changed(app);
-        }
+        // Kept so a restarted agent resumes the conversation with the same choice.
+        state.set_session_model_override(
+            session_id,
+            SessionModelOverride {
+                model: Some(settings.model.clone()),
+                reasoning_effort: settings.reasoning_effort.clone(),
+            },
+        )?;
+        protocol::emit_sessions_changed(app);
         return Ok(settings);
     }
     if session.agent == AgentKind::Antigravity {
@@ -1698,6 +1750,34 @@ pub fn steer_queued_prompt(
     Ok(())
 }
 
+/// Stages external attachments into `brain/<id>/scratch/lume-attachments` for Antigravity ACP
+/// turns so `resource_link` URIs fall inside Antigravity's sandboxed roots.
+fn acp_prompt_files(
+    session: &AgentSession,
+    native_id: &str,
+    cwd: &str,
+    attachments: &[PreparedPromptAttachment],
+) -> Vec<crate::acp_bridge::PromptFile> {
+    let raw_paths = attachments
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let staged_paths = if session.agent == AgentKind::Antigravity {
+        crate::antigravity_stream::stage_prompt_attachments(native_id, cwd, &raw_paths)
+    } else {
+        raw_paths
+    };
+    attachments
+        .iter()
+        .zip(staged_paths)
+        .map(|(file, path)| crate::acp_bridge::PromptFile {
+            path,
+            mime_type: file.display.mime_type.clone(),
+            is_image: file.is_image,
+        })
+        .collect()
+}
+
 /// A message to a busy ACP agent waits for the running turn; "steer" stops that turn
 /// so the message runs now.
 fn queue_acp_prompt(
@@ -1735,14 +1815,7 @@ fn queue_acp_prompt(
         cwd,
         activity_id,
         prompt.to_string(),
-        attachments
-            .iter()
-            .map(|file| crate::acp_bridge::PromptFile {
-                path: file.path.clone(),
-                mime_type: file.display.mime_type.clone(),
-                is_image: file.is_image,
-            })
-            .collect(),
+        acp_prompt_files(session, native_id, cwd, attachments),
     )?;
     // Nothing to wait for (the turn just ended, or it ran outside ACP): it goes now.
     if delivery == PromptDelivery::Steer || !acp.is_busy(native_id) {
@@ -1859,10 +1932,11 @@ fn prepare_prompt_attachments(
             }
             let path = fs::canonicalize(path)
                 .map_err(|_| "O arquivo selecionado não existe".to_string())?;
-            let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-            if bytes.len() > MAX_FILE_ATTACHMENT_BYTES {
-                return Err("O arquivo excede o limite de 25 MB".into());
-            }
+            let bytes = read_regular_file_bounded(
+                &path,
+                MAX_FILE_ATTACHMENT_BYTES,
+                "O arquivo excede o limite de 25 MB",
+            )?;
             let image_mime = detected_image_mime(&bytes);
             if image_mime.is_some() && bytes.len() > MAX_IMAGE_ATTACHMENT_BYTES {
                 return Err("A imagem excede o limite de 5 MB".into());
@@ -1878,6 +1952,9 @@ fn prepare_prompt_attachments(
                 image_mime.is_some(),
             )
         } else if let Some(data) = attachment.data_base64 {
+            if data.len() > MAX_FILE_ATTACHMENT_BYTES.div_ceil(3) * 4 {
+                return Err("O arquivo excede o limite de 25 MB".into());
+            }
             let bytes = STANDARD
                 .decode(data)
                 .map_err(|_| "Não foi possível decodificar o arquivo".to_string())?;
@@ -2547,7 +2624,11 @@ fn save_workflow_group(
         preferences.workflow_groups.retain(|item| item.id != id);
     }
     if let Some(group) = group {
-        match preferences.workflow_groups.iter_mut().find(|item| item.id == group.id) {
+        match preferences
+            .workflow_groups
+            .iter_mut()
+            .find(|item| item.id == group.id)
+        {
             Some(existing) => *existing = group,
             None => preferences.workflow_groups.push(group),
         }
@@ -2796,6 +2877,40 @@ pub fn execute_hub_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_file_reads_stop_at_the_limit_and_reject_non_files() {
+        assert_eq!(
+            read_bounded(std::io::Cursor::new(b"abc"), 3, "large").unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            read_bounded(std::io::repeat(0), 3, "large").unwrap_err(),
+            "large"
+        );
+        assert!(read_regular_file_bounded(&std::env::temp_dir(), 3, "large")
+            .unwrap_err()
+            .contains("regular"));
+        let path = std::env::temp_dir().join(format!("lume-bounded-read-{}", std::process::id()));
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(1024 * 1024 * 1024).unwrap();
+        drop(file);
+        assert_eq!(
+            read_regular_file_bounded(&path, 3, "large").unwrap_err(),
+            "large"
+        );
+        fs::remove_file(path).unwrap();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let fifo =
+                std::env::temp_dir().join(format!("lume-bounded-fifo-{}", std::process::id()));
+            let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            assert!(read_regular_file_bounded(&fifo, 3, "large").is_err());
+            fs::remove_file(fifo).unwrap();
+        }
+    }
 
     #[test]
     fn native_termination_routes_only_lume_owned_sessions_without_a_cli() {
@@ -3154,10 +3269,15 @@ mod tests {
         let mut attempts = 0;
         let result = retry_while_writer_is_active(|| {
             attempts += 1;
-            if attempts < 3 { Err("thread t already has an active writer".to_string()) } else { Ok(attempts) }
+            if attempts < 3 {
+                Err("thread t already has an active writer".to_string())
+            } else {
+                Ok(attempts)
+            }
         });
         assert_eq!(result, Ok(3));
-        let other: Result<u32, String> = retry_while_writer_is_active(|| Err("Rollout not found".into()));
+        let other: Result<u32, String> =
+            retry_while_writer_is_active(|| Err("Rollout not found".into()));
         assert_eq!(other, Err("Rollout not found".into()));
     }
 
@@ -3187,13 +3307,27 @@ mod tests {
             supports_fast_mode: true,
         };
         // The effort the chat runs with now is kept, not the new model's default.
-        assert_eq!(effort_for_fast_model(None, Some("low"), &opus).as_deref(), Some("low"));
+        assert_eq!(
+            effort_for_fast_model(None, Some("low"), &opus).as_deref(),
+            Some("low")
+        );
         // An effort picked for the chat comes first.
-        assert_eq!(effort_for_fast_model(Some("medium"), Some("low"), &opus).as_deref(), Some("medium"));
+        assert_eq!(
+            effort_for_fast_model(Some("medium"), Some("low"), &opus).as_deref(),
+            Some("medium")
+        );
         // One the new model does not offer falls to the next, then to its default.
-        assert_eq!(effort_for_fast_model(Some("max"), Some("low"), &opus).as_deref(), Some("low"));
-        assert_eq!(effort_for_fast_model(Some("max"), Some("xhigh"), &opus).as_deref(), Some("high"));
-        assert_eq!(effort_for_fast_model(None, None, &opus).as_deref(), Some("high"));
+        assert_eq!(
+            effort_for_fast_model(Some("max"), Some("low"), &opus).as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            effort_for_fast_model(Some("max"), Some("xhigh"), &opus).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            effort_for_fast_model(None, None, &opus).as_deref(),
+            Some("high")
+        );
     }
 }
-

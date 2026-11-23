@@ -560,19 +560,31 @@ async fn get_session_repository(
 }
 
 #[tauri::command]
-async fn get_session_history(state: State<'_, AppState>, session_id: String, skip: usize) -> Result<Vec<repository::HistoryCommit>, String> {
+async fn get_session_history(
+    state: State<'_, AppState>,
+    session_id: String,
+    skip: usize,
+) -> Result<Vec<repository::HistoryCommit>, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || repository::history(&repository_directory(&state, &session_id)?, skip))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        repository::history(&repository_directory(&state, &session_id)?, skip)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-async fn get_session_commit(state: State<'_, AppState>, session_id: String, oid: String) -> Result<repository::CommitDetail, String> {
+async fn get_session_commit(
+    state: State<'_, AppState>,
+    session_id: String,
+    oid: String,
+) -> Result<repository::CommitDetail, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || repository::commit_detail(&repository_directory(&state, &session_id)?, &oid))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        repository::commit_detail(&repository_directory(&state, &session_id)?, &oid)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// The folder Git actions run in: this computer's own, never a remote session's.
@@ -586,15 +598,26 @@ fn git_directory(state: &AppState, session_id: &str) -> Result<String, String> {
 /// True while any agent working in this folder is answering or waiting for an approval; Git must not move files under it.
 fn agents_working_in(state: &AppState, directory: &str) -> bool {
     let target = std::path::Path::new(directory).canonicalize().ok();
-    state.connected_sessions().unwrap_or_default().iter().any(|session| {
-        matches!(session.status, domain::SessionStatus::Running | domain::SessionStatus::PermissionRequired)
-            && session.remote.is_none()
-            && session.working_directory.as_deref().is_some_and(|other| {
-                std::path::Path::new(other).canonicalize().ok().is_some_and(|other| {
-                    target.as_ref().is_some_and(|target| other.starts_with(target) || target.starts_with(&other))
+    state
+        .connected_sessions()
+        .unwrap_or_default()
+        .iter()
+        .any(|session| {
+            matches!(
+                session.status,
+                domain::SessionStatus::Running | domain::SessionStatus::PermissionRequired
+            ) && session.remote.is_none()
+                && session.working_directory.as_deref().is_some_and(|other| {
+                    std::path::Path::new(other)
+                        .canonicalize()
+                        .ok()
+                        .is_some_and(|other| {
+                            target.as_ref().is_some_and(|target| {
+                                other.starts_with(target) || target.starts_with(&other)
+                            })
+                        })
                 })
-            })
-    })
+        })
 }
 
 /// A Git action that changes the working tree, run off the main thread and only while no agent is working there.
@@ -617,7 +640,10 @@ async fn git_action<T: Send + 'static>(
 }
 
 #[tauri::command]
-async fn get_session_git_tools(state: State<'_, AppState>, session_id: String) -> Result<serde_json::Value, String> {
+async fn get_session_git_tools(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let directory = git_directory(&state, &session_id)?;
@@ -632,13 +658,27 @@ async fn get_session_git_tools(state: State<'_, AppState>, session_id: String) -
 }
 
 #[tauri::command]
-async fn git_fetch_session(state: State<'_, AppState>, session_id: String, prune: bool) -> Result<repository::RepositorySnapshot, String> {
-    git_action(state, session_id, false, move |directory| repository::fetch(directory, prune)).await
+async fn git_fetch_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    prune: bool,
+) -> Result<repository::RepositorySnapshot, String> {
+    git_action(state, session_id, false, move |directory| {
+        repository::fetch(directory, prune)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn git_rebase_session(state: State<'_, AppState>, session_id: String, onto: String) -> Result<repository::RepositorySnapshot, String> {
-    git_action(state, session_id, true, move |directory| repository::rebase(directory, &onto)).await
+async fn git_rebase_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    onto: String,
+) -> Result<repository::RepositorySnapshot, String> {
+    git_action(state, session_id, true, move |directory| {
+        repository::rebase(directory, &onto)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -648,42 +688,87 @@ async fn get_session_author_avatars(
     authors: Vec<(String, String)>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || repository::author_avatars(&repository_directory(&state, &session_id)?, &authors))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        repository::author_avatars(&repository_directory(&state, &session_id)?, &authors)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-async fn git_pull_session(state: State<'_, AppState>, session_id: String) -> Result<repository::RepositorySnapshot, String> {
-    git_action(state, session_id, true, |directory| repository::pull(directory)).await
+async fn git_pull_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<repository::RepositorySnapshot, String> {
+    git_action(state, session_id, true, |directory| {
+        repository::pull(directory)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn git_stash_session(state: State<'_, AppState>, session_id: String, message: String) -> Result<Vec<repository::StashEntry>, String> {
-    git_action(state, session_id, true, move |directory| repository::stash_push(directory, &message)).await
+async fn git_stash_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    message: String,
+) -> Result<Vec<repository::StashEntry>, String> {
+    git_action(state, session_id, true, move |directory| {
+        repository::stash_push(directory, &message)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn git_stash_apply_session(state: State<'_, AppState>, session_id: String, oid: String, index: usize) -> Result<repository::RepositorySnapshot, String> {
-    git_action(state, session_id, true, move |directory| repository::stash_apply(directory, &oid, index)).await
+async fn git_stash_apply_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    oid: String,
+    index: usize,
+) -> Result<repository::RepositorySnapshot, String> {
+    git_action(state, session_id, true, move |directory| {
+        repository::stash_apply(directory, &oid, index)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn git_stash_drop_session(state: State<'_, AppState>, session_id: String, oid: String, index: usize) -> Result<Vec<repository::StashEntry>, String> {
-    git_action(state, session_id, false, move |directory| repository::stash_drop(directory, &oid, index)).await
+async fn git_stash_drop_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    oid: String,
+    index: usize,
+) -> Result<Vec<repository::StashEntry>, String> {
+    git_action(state, session_id, false, move |directory| {
+        repository::stash_drop(directory, &oid, index)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn git_switch_session(state: State<'_, AppState>, session_id: String, branch: String) -> Result<repository::RepositorySnapshot, String> {
-    git_action(state, session_id, true, move |directory| repository::switch_branch(directory, &branch)).await
+async fn git_switch_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    branch: String,
+) -> Result<repository::RepositorySnapshot, String> {
+    git_action(state, session_id, true, move |directory| {
+        repository::switch_branch(directory, &branch)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn get_session_commit_diff(state: State<'_, AppState>, session_id: String, oid: String, path: String) -> Result<repository::RepositoryDiff, String> {
+async fn get_session_commit_diff(
+    state: State<'_, AppState>,
+    session_id: String,
+    oid: String,
+    path: String,
+) -> Result<repository::RepositoryDiff, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || repository::commit_diff(&repository_directory(&state, &session_id)?, &oid, &path))
-        .await
-        .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        repository::commit_diff(&repository_directory(&state, &session_id)?, &oid, &path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

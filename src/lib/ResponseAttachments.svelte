@@ -34,20 +34,22 @@
       : extractResponseFiles(text, attachments, workingDirectory).map((file) => ({ ...file, downloadable: true })),
   );
   let previews = $state<Record<string, string>>({});
-  let attemptedPreviews = $state<Record<string, boolean>>({});
+  const requestedPreviews = new Set<string>();
   let savingPath = $state<string | null>(null);
   let viewing = $state<ResponseFileCard | null>(null);
   const windowLabel = getCurrentWindow().label;
 
   $effect(() => {
     for (const resource of resources) {
-      if (!resource.isImage || attemptedPreviews[resource.path]) continue;
-      attemptedPreviews = { ...attemptedPreviews, [resource.path]: true };
+      if (!resource.isImage || requestedPreviews.has(resource.path)) continue;
+      requestedPreviews.add(resource.path);
       void readLocalImageDataUrl(resource.path)
         .then((source) => {
           previews = { ...previews, [resource.path]: source };
         })
-        .catch(() => undefined);
+        .catch(() => {
+          requestedPreviews.delete(resource.path);
+        });
     }
   });
 

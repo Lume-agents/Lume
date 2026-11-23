@@ -45,6 +45,11 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+fn is_antigravity_brain_file(path: &Path) -> bool {
+    let text = path.to_string_lossy().replace('\\', "/");
+    text.contains("/.gemini/antigravity/brain/") || text.contains("/.gemini/antigravity-cli/brain/")
+}
+
 /// The file to open, or the reason it must not be opened.
 pub fn openable_file(working_directory: &str, requested: &str) -> Result<PathBuf, String> {
     if working_directory.trim().is_empty() {
@@ -58,7 +63,7 @@ pub fn openable_file(working_directory: &str, requested: &str) -> Result<PathBuf
     let candidate = Path::new(requested);
     let candidate = if candidate.is_absolute() { candidate.to_path_buf() } else { root.join(candidate) };
     let resolved = std::fs::canonicalize(&candidate).map_err(|_| "That file does not exist".to_string())?;
-    if !resolved.starts_with(&root) {
+    if !resolved.starts_with(&root) && !is_antigravity_brain_file(&resolved) {
         return Err("That file is outside the session's project folder".into());
     }
     if !resolved.is_file() {

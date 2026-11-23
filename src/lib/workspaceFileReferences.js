@@ -63,7 +63,11 @@ export function renderWorkspaceMarkdownWithFileBadges(source, renderIcon, workin
     }
     if (inFence) return line;
     return line.replace(inlineReference, (match, image, _label, markdownPath, parenthesizedPath) => {
-      if (match.startsWith("`") || image === "!") return match;
+      if (match.startsWith("`")) return match;
+      if (image === "!") {
+        const reference = localFileReference(markdownPath ?? "", false);
+        return reference ? "" : match;
+      }
       if (badges.length >= 16) return match;
       const reference = localFileReference(markdownPath ?? parenthesizedPath, parenthesizedPath !== undefined);
       if (!reference) return match;

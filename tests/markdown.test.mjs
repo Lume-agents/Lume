@@ -91,6 +91,10 @@ assert.match(
   renderWorkspaceMarkdownWithFileBadges("Arquivo (src/<img onerror=x>.ts).", icon),
   /title="src\/&lt;img onerror=x&gt;\.ts"/,
 );
+assert.equal(
+  renderWorkspaceMarkdownWithFileBadges("Here:\n\n![Prototype](/work/proto.jpg)\n\nNext.", icon, "/work"),
+  "<p>Here:</p><p>Next.</p>",
+);
 
 console.log("markdown test suite passed");
 

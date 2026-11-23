@@ -454,8 +454,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let alertsRoot = $state<HTMLDivElement | null>(null);
   let alertMenuOpen = $state(false);
   let dismissedAgentAlertIds = $state<string[]>([]);
-  let zoomRoot = $state<HTMLDivElement | null>(null);
-  let zoomOpen = $state(false);
   const textZoomMin = 0.8;
   const textZoomMax = 1.8;
   let textZoom = $state(1);
@@ -645,8 +643,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     return activity ? activityThinkingState(activity) : "breathing";
   });
   const promptIsRunning = $derived(session.status === "running");
-  // The turn in progress is a /compact: the label squeezes instead of shimmering.
-  const compacting = $derived(promptIsRunning && isCompactCommand(chatActivities.findLast((activity) => activity.kind === "prompt")?.detail));
+  let nativeCompacting = $state(false);
+  let compactStarting = $state(false);
+  // Native compaction has no /compact prompt in the conversation.
+  const compacting = $derived(nativeCompacting || (promptIsRunning && isCompactCommand(chatActivities.findLast((activity) => activity.kind === "prompt")?.detail)));
   const activePromptStartedAt = $derived.by(() => {
     const latestResultAt = session.results.reduce((latest: number, result: SessionResult) => Math.max(latest, result.createdAt), 0);
     const latestFinalAt = entries.reduce((latest, entry) => entry.isFinalResponse ? Math.max(latest, entry.activity.createdAt) : latest, latestResultAt);
@@ -678,10 +678,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   // Antigravity compacts through `/compact` only when Lume drives it over `agy acp`.
   const antigravityCompacts = $derived(session.agent === "antigravity" && session.controlOrigin === "lume" && session.source === "desktop");
   const compactsHeavyChats = $derived(session.agent === "claude_code" || antigravityCompacts);
-  const heavyContext = $derived(compactsHeavyChats && contextTokens >= HEAVY_CONTEXT && contextTokens >= (heavyDismissed[session.id] ?? 0) + 100_000);
+  const heavyContext = $derived(compactsHeavyChats && !compacting && contextTokens >= HEAVY_CONTEXT && contextTokens >= (heavyDismissed[session.id] ?? 0) + 100_000);
   // Optionally compacts a heavy chat by itself once it is idle and has no draft to clobber.
   let autoCompact = $state(typeof localStorage !== "undefined" && localStorage.getItem("lume-auto-compact-v1") === "1");
-  let nativeCompacting = $state(false);
   let codexAutoCompact = $state(typeof localStorage !== "undefined" && localStorage.getItem("lume-codex-auto-compact") === "1");
   let codexCompactThreshold = $state(typeof localStorage !== "undefined" ? Math.min(95, Math.max(50, Number(localStorage.getItem("lume-codex-compact-threshold")) || 85)) : 85);
   function toggleCodexAutoCompact() {
@@ -744,7 +743,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   const nextQueuedPrompt = $derived(queuedPrompts[0] ?? null);
   const canCompact = $derived(Boolean(
     session.controlOrigin === "lume"
-    && !nativeCompacting && queuedPrompts.length === 0
+    && !nativeCompacting && !compactStarting && queuedPrompts.length === 0
     && (session.agent === "omp" ? session.status === "completed" && session.capabilities.canPrompt : session.agent === "claude_code" || antigravityCompacts || (session.agent === "codex" && session.source !== "web" && !session.remote))
     && (session.agent === "omp" || (canSend && !promptIsRunning && !sending && !takingControl)),
   ));
@@ -829,7 +828,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     controlsOpen = false;
     alertMenuOpen = false;
     dismissedAgentAlertIds = [];
-    zoomOpen = false;
     controlsError = "";
     modelSettings = null;
     claudeModels = [];
@@ -875,9 +873,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       }
       if (permissionMenuOpen && permissionMenuRoot && !permissionMenuRoot.contains(event.target as Node)) {
         permissionMenuOpen = false;
-      }
-      if (zoomOpen && zoomRoot && !zoomRoot.contains(event.target as Node)) {
-        zoomOpen = false;
       }
       if (alertMenuOpen && alertsRoot && !alertsRoot.contains(event.target as Node)) {
         alertMenuOpen = false;
@@ -1401,15 +1396,20 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
 
   async function compactContext() {
     if (!canCompact) return;
+    const targetId = session.id;
+    const tokensBeforeCompaction = contextTokens;
+    compactStarting = true;
     plusMenuOpen = false;
     if (session.agent === "omp" || session.agent === "codex") {
       nativeCompacting = true;
       try {
-        await compactSession(session.id);
+        await compactSession(targetId);
+        heavyDismissed = { ...heavyDismissed, [targetId]: tokensBeforeCompaction };
       } catch (error) {
         sendError = String(error).replace(/^Error:\s*/, "");
       } finally {
         nativeCompacting = false;
+        compactStarting = false;
       }
       return;
     }
@@ -1418,10 +1418,13 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     prompt = "/compact";
     promptAttachments = [];
     try {
-      await sendPrompt();
+      if (await sendPrompt()) heavyDismissed = { ...heavyDismissed, [targetId]: tokensBeforeCompaction };
     } finally {
-      prompt = draft;
-      promptAttachments = draftAttachments;
+      if (session.id === targetId) {
+        prompt = draft;
+        promptAttachments = draftAttachments;
+      }
+      compactStarting = false;
     }
   }
 
@@ -2834,23 +2837,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
           aria-controls={`workspace-prompt-index-${session.id}`}
           onclick={togglePromptIndex}
         ><WorkspaceChatIcon name="prompts" size={18} active={promptIndexOpen} /></button>
-        <div class="text-zoom" bind:this={zoomRoot}>
-          <button
-            class:active={zoomOpen}
-            type="button"
-            title={tr("Chat text size", "Tamanho do texto do chat")}
-            aria-label={tr("Chat text size", "Tamanho do texto do chat")}
-            aria-expanded={zoomOpen}
-            onclick={() => (zoomOpen = !zoomOpen)}
-          ><WorkspaceChatIcon name="text-size" size={18} active={zoomOpen} /></button>
-          {#if zoomOpen}
-            <div class="text-zoom-popover" role="group" aria-label={tr("Chat text size", "Tamanho do texto do chat")}>
-              <button type="button" disabled={textZoom <= textZoomMin} aria-label={tr("Decrease text size", "Diminuir textos")} onclick={() => setTextZoom(textZoom - 0.1)}>−</button>
-              <output>{Math.round(textZoom * 100)}%</output>
-              <button type="button" disabled={textZoom >= textZoomMax} aria-label={tr("Increase text size", "Aumentar textos")} onclick={() => setTextZoom(textZoom + 0.1)}>+</button>
-            </div>
-          {/if}
-        </div>
         {#if closable}
         <button type="button" title={tr("Close pane", "Fechar painel")} aria-label={tr("Close pane", "Fechar painel")} onclick={onClose}>
           <WorkspaceChatIcon name="close" size={18} />
@@ -3092,13 +3078,13 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         </div>
       {/if}
     {/each}
-    {#if session.status === "running" && !waitingForSubagents}
+    {#if (session.status === "running" && !waitingForSubagents) || nativeCompacting}
       <div class="agent-typing" in:slide={{ duration: motionDuration(260), easing: cubicOut }} out:slide={{ duration: motionDuration(160), easing: cubicOut }}>
         <ThinkingOrb
           state={activeThinkingState}
           size={42}
           speed={0.92}
-          label={tr(`${sessionName()} is working`, `${sessionName()} está trabalhando`)}
+          label={compacting ? tr("Compacting context", "Compactando contexto") : tr(`${sessionName()} is working`, `${sessionName()} está trabalhando`)}
         />
         <span class="typing-label" class:compacting>{compacting ? tr("Compacting context…", "Compactando contexto…") : activityThinkingLabel(activeThinkingState, language)}</span>
         <span class="typing-elapsed" aria-label={tr("Elapsed time", "Tempo decorrido")}>{formatAgentDuration(Math.max(0, typingClock - (activePromptStartedAt ?? observedRunningSince ?? typingClock)))}</span>
@@ -3394,7 +3380,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
               {#if session.agent === "claude_code" || session.agent === "omp" || session.agent === "codex"}
                 <button type="button" role="menuitem" disabled={!canCompact} onclick={() => void compactContext()}>
                   <LumeIcon name="compact" size={15} />
-                  <span><strong>{nativeCompacting ? tr("Compacting…", "Compactando…") : tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
+                  <span><strong>{compactStarting ? tr("Compacting…", "Compactando…") : tr("Compact context", "Compactar contexto")}</strong><small>{contextTokens ? `${contextPercent}% ${tr("used", "usado")}` : canCompact ? tr("Summarize the conversation", "Resumir a conversa") : tr("Available when idle", "Disponível quando parado")}</small></span>
                 </button>
               {/if}
               {#if session.agent === "codex" && session.controlOrigin === "lume"}
@@ -3567,7 +3553,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
             <span>{["codex", "opencode", "grok", "antigravity", "omp"].includes(session.agent)
               ? (modelSettings?.models.find((option) => option.model === selectedModel)?.displayName || selectedModel || "Model")
               : (claudeModels.find((option) => option.model === claudeModel)?.displayName || claudeModel || tr("Model", "Modelo"))}</span>
-            {#if (session.agent === "codex" || session.agent === "claude_code") && currentEffort()}<span class="effort-indicator" style:color={effortTone(currentEffort())} title={tr("Reasoning effort", "Esforço de raciocínio")}>{effortLabel()}</span>{/if}
+            {#if currentEffort()}<span class="effort-indicator" style:color={effortTone(currentEffort())} title={tr("Reasoning effort", "Esforço de raciocínio")}>{effortLabel()}</span>{/if}
             {#if (session.agent === "codex" || session.agent === "claude_code") && fastMode}<span class="fast-indicator" title={tr("Fast mode is on", "Modo Fast ligado")}><WorkspaceChatIcon name="fast" size={13} active /></span>{/if}
             <LumeIcon name="chevron-down" size={12} />
           </button>
@@ -3792,14 +3778,9 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .agent-alert-menu article > span { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 7px; color: #c28b31; background: color-mix(in srgb, #c99535 11%, transparent); }
   .agent-alert-menu article.tone-error > span { color: #c96761; background: color-mix(in srgb, #c96761 11%, transparent); }
   .agent-alert-menu p { margin: 1px 0 0; overflow-wrap: anywhere; color: var(--workspace-text); font-size: 10px; line-height: 1.45; }
-  .pane-actions > button, .agent-controls > button, .text-zoom > button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 120ms ease, background 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
-  .pane-actions > button:hover, .agent-controls > button:hover, .agent-controls > button.active, .text-zoom > button:hover, .text-zoom > button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
+  .pane-actions > button, .agent-controls > button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 8px; color: var(--workspace-muted); background: transparent; cursor: pointer; transition: color 120ms ease, background 120ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
+  .pane-actions > button:hover, .agent-controls > button:hover, .agent-controls > button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .pane-actions > button.active { color: var(--workspace-accent); background: var(--workspace-accent-soft); }
-  .text-zoom { position: relative; }
-  .text-zoom-popover { position: absolute; z-index: 12; top: 36px; right: 0; width: 136px; min-height: 40px; padding: 5px; display: grid; grid-template-columns: 30px 1fr 30px; align-items: center; gap: 3px; border: 1px solid var(--workspace-line); border-radius: 10px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 12px 30px rgba(8, 18, 13, .16); animation: controls-arrive 180ms cubic-bezier(.16, 1, .3, 1) both; }
-  .text-zoom-popover button { width: 30px; height: 28px; border: 0; border-radius: 7px; color: var(--workspace-accent); background: var(--workspace-subtle); font-size: 16px; cursor: pointer; }
-  .text-zoom-popover button:disabled { opacity: .35; cursor: default; }
-  .text-zoom-popover output { color: var(--workspace-muted); font-size: 10px; font-weight: 720; text-align: center; font-variant-numeric: tabular-nums; }
   .agent-controls { position: static; }
   .agent-controls-popover { position: absolute; z-index: 12; bottom: calc(100% + 9px); left: 0; width: min(320px, calc(100cqw - 20px)); max-height: min(450px, calc(100vh - 115px)); padding: 15px; overflow: visible; border: 1px solid var(--workspace-line); border-radius: 16px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 20px 60px rgba(8, 18, 13, .2); animation: controls-fade-in 180ms ease-out; }
   .controls-field { margin-top: 11px; display: grid; gap: 7px; }
@@ -3888,6 +3869,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .heavy-context { max-width: 760px; margin: 0 auto 8px; padding: 6px 6px 6px 12px; display: flex; align-items: center; gap: 8px; border: 1px solid color-mix(in srgb, #c9963d 45%, var(--workspace-line)); border-radius: 12px; color: var(--workspace-text); background: color-mix(in srgb, #c9963d 10%, var(--workspace-raised)); font-size: 11px; line-height: 1.4; }
   .heavy-context span { min-width: 0; flex: 1; }
   .composer .heavy-context button { width: auto; height: 26px; padding: 0 10px; border-radius: 8px; font-size: 11px; font-weight: 700; color: var(--workspace-strong); background: color-mix(in srgb, #c9963d 24%, transparent); }
+  .composer .heavy-context .heavy-compact { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
   .composer .heavy-context button.heavy-dismiss { width: 22px; height: 22px; padding: 0; border-radius: 50%; color: var(--workspace-muted); background: transparent; }
   .composer .heavy-context button:hover:not(:disabled) { background: color-mix(in srgb, #c9963d 36%, transparent); }
   .attached-notes { max-width: 760px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 5px; }

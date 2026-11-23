@@ -1009,12 +1009,46 @@ fn work_item_status(status: &str) -> WorkItemStatus {
     }
 }
 
+/// Starts the request Lume appends to a prompt sent with `/todo`, `/goal` or `/planning` (src/lib/promptIntent.ts).
+pub(crate) const LUME_INTENT_MARKER: &str =
+    "Lume request attached to this prompt (the person chose it, follow it):";
+
+/// The person's words of a prompt sent as a goal: the text before Lume's request and any attachment list.
+fn prompt_goal_objective(detail: &str) -> Option<String> {
+    let at = detail.find(LUME_INTENT_MARKER)?;
+    let intent = detail[at + LUME_INTENT_MARKER.len()..].trim_start();
+    if !intent.starts_with("intent: goal") {
+        return None;
+    }
+    let words = detail[..at]
+        .split(crate::state::LUME_ATTACHED_NOTES_MARKER)
+        .next()
+        .unwrap_or("")
+        .split("Files attached through Lume")
+        .next()
+        .unwrap_or("")
+        .trim();
+    (!words.is_empty()).then(|| words.chars().take(600).collect())
+}
+
 fn goal_summary(activities: &[SessionActivity]) -> Option<GoalSummary> {
     let mut ordered = activities.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|activity| activity.created_at);
     let mut goal: Option<GoalSummary> = None;
 
     for activity in ordered {
+        // A prompt sent with `/goal` (or the composer's Goal chip) is the goal until the agent sets its own.
+        if activity.kind == "prompt" {
+            if let Some(objective) = activity.detail.as_deref().and_then(prompt_goal_objective) {
+                goal = Some(GoalSummary {
+                    objective,
+                    status: GoalStatus::Active,
+                    started_at: activity.created_at,
+                    updated_at: activity.created_at,
+                });
+            }
+            continue;
+        }
         if activity.kind != "tool" {
             continue;
         }
@@ -2608,6 +2642,37 @@ mod tests {
         assert_eq!(goal.status, GoalStatus::Complete);
         assert_eq!(goal.started_at, 100);
         assert_eq!(goal.updated_at, 250);
+    }
+
+    #[test]
+    fn a_prompt_sent_as_a_goal_is_the_goal() {
+        let mut session = session();
+        let prompt = |id: &str, detail: String, created_at: i64| SessionActivity {
+            id: id.into(),
+            kind: "prompt".into(),
+            title: "Você".into(),
+            detail: Some(detail),
+            status: "completed".into(),
+            created_at,
+            files: Vec::new(),
+            attachments: Vec::new(),
+            append_detail: false,
+        };
+        session.activities.push(prompt(
+            "p1",
+            format!("Fix the login flow\n\nFiles attached through Lume. Inspect these local paths:\n- /tmp/a.png\n\n{LUME_INTENT_MARKER}\nintent: goal\nTreat it as the goal."),
+            100,
+        ));
+        session.activities.push(prompt(
+            "p2",
+            format!("Just a list\n\n{LUME_INTENT_MARKER}\nintent: todo\nBreak it down."),
+            200,
+        ));
+        let snapshot = HubSnapshot::new(vec![session]);
+        let goal = snapshot.sessions[0].work_summary.goal.as_ref().expect("goal");
+        assert_eq!(goal.objective, "Fix the login flow");
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.started_at, 100);
     }
 
     #[test]

@@ -1,4 +1,6 @@
 import type { PromptAttachment } from "$lib/domain";
+// @ts-expect-error Node runs the same source in the focused chat-attachment tests.
+import { lumeIntentMarker } from "./promptIntent.ts";
 
 const lumeAttachedFilesMarker = "Files attached through Lume. Inspect these local paths:";
 /** Starts the notes attached to a prompt (state.rs LUME_ATTACHED_NOTES_MARKER); the chat shows chips, not their text. */
@@ -34,7 +36,7 @@ const claudeImageNotes = /^(?:\s*\[Image: original [^\]\n]*to map to original im
 
 export function cleanPromptTransport(value?: string): string {
   const normalized = unwrapPastedContent(String(value ?? "").replace(/\r\n?/g, "\n")).replace(claudeImageNotes, "").replace(codexInternalContext, "");
-  const markers = [normalized.indexOf(lumeAttachedFilesMarker), normalized.indexOf(lumeAttachedNotesMarker)].filter((index) => index >= 0);
+  const markers = [normalized.indexOf(lumeAttachedFilesMarker), normalized.indexOf(lumeAttachedNotesMarker), normalized.indexOf(lumeIntentMarker)].filter((index) => index >= 0);
   return (markers.length ? normalized.slice(0, Math.min(...markers)) : normalized).trim();
 }
 

@@ -13,6 +13,9 @@ export type SlashCommandAction =
   | "zoom-out"
   | "clear"
   | "mcp"
+  | "intent-todo"
+  | "intent-goal"
+  | "intent-planning"
   | "close";
 
 /** A command as the agent itself reports it (see src-tauri/src/agent_commands.rs). */
@@ -45,6 +48,13 @@ const lumeModelAgents: AgentKind[] = ["codex", "claude_code", "opencode", "grok"
 /** Agents whose MCP servers Lume can list, so `/mcp` opens Lume's panel instead of being sent. */
 const mcpAgents: AgentKind[] = ["codex", "claude_code", "opencode", "antigravity"];
 
+/** Sent with a request, these ask the agent to set up a to-do list, a goal or a plan first (see promptIntent.ts). */
+const intentCommands: Array<[string, string]> = [
+  ["todo", "Break the request into a to-do list before working"],
+  ["goal", "Make the request this chat's goal and work until it is done"],
+  ["planning", "Plan the request and wait for approval before changing anything"],
+];
+
 export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKind | undefined): SlashCommand[] {
   const lumeModel = agent !== undefined && lumeModelAgents.includes(agent);
   // Codex's Plan mode is switched by Lume itself, so its own `/plan` is not offered twice.
@@ -53,6 +63,8 @@ export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKi
     .filter((command) => !(lumeModel && command.prefix === "/" && command.name === "model"))
     .filter((command) => !(lumePlan && command.prefix === "/" && command.name === "plan"))
     .filter((command) => !(command.prefix === "/" && clearAliases.includes(command.name)))
+    // Lume's prompt requests take these names; the agent's own command of the same name would never be reached.
+    .filter((command) => !(command.prefix === "/" && intentCommands.some(([name]) => name === command.name)))
     .filter((command) => !(agent !== undefined && mcpAgents.includes(agent) && command.prefix === "/" && command.name === "mcp"))
     .map((command): SlashCommand => ({
       name: command.name,
@@ -81,6 +93,9 @@ export function agentSlashCommands(commands: AgentSlashCommand[], agent: AgentKi
     prefix: "/",
     action: "clear",
   });
+  for (const [name, description] of intentCommands) {
+    owned.push({ name, description, source: "lume", prefix: "/", argumentHint: "<request>", action: `intent-${name}` as SlashCommandAction });
+  }
   if (lumePlan) {
     owned.push({ name: "plan", description: "Switch Plan mode on or off", source: "lume", prefix: "/", action: "plan" });
   }

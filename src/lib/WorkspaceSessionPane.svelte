@@ -35,6 +35,10 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
+  import { parsePromptIntent, promptWithIntent, type PromptIntent } from "$lib/promptIntent";
+  import PromptIntentChips from "$lib/PromptIntentChips.svelte";
+  import QuestionAnswerCard from "$lib/QuestionAnswerCard.svelte";
+  import { isQuestionAnswerId } from "$lib/questionAnswers";
   import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
   import { caretOnEdgeLine, dedupePromptEntries, emptyPromptHistory, historyEntries, stepPromptHistory } from "$lib/promptHistory";
   import { applyMention, mentionAtCaret, noteMentionQuery, parentMention, removeMention, type MentionQuery } from "$lib/promptMentions";
@@ -252,6 +256,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   let mentionMenu = $state<HTMLDivElement | null>(null);
   let mentionRequest = 0;
   let sending = $state(false);
+  let promptIntent = $state<PromptIntent | null>(null);
   let connectionRequired = $state<string | null>(null);
   let dismissedConnectionError = $state("");
   let outgoingPrompts = $state<OutgoingPrompt[]>([]);
@@ -1287,6 +1292,16 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     const attachments = promptAttachments;
     if (attachments.length === 0 && /^[/$]/.test(value) && await runSlashCommand(value)) return;
     if ((!value && attachments.length === 0) || !canSend || sending || takingControl) return;
+    // `/todo …`, `/goal …`, `/planning …` or the composer's chip: the agent sets that up before working.
+    const requested = parsePromptIntent(value);
+    const intent = requested?.intent ?? promptIntent;
+    const shown = requested ? requested.body : value;
+    if (requested && !shown && attachments.length === 0) {
+      promptIntent = requested.intent;
+      prompt = "";
+      return;
+    }
+    const outgoingText = intent && shown ? promptWithIntent(shown, intent, session.agent) : shown;
     resetPromptHistory();
     closeMention();
     if (!session.capabilities.canPrompt && session.capabilities.canTakeControl) {
@@ -1309,7 +1324,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     if (delivery === "new_turn" && !isCompactCommand(value)) {
       outgoing = {
         id: ++outgoingSequence,
-        text: value,
+        text: shown,
         createdAt: Date.now(),
         knownPromptIds: entries.filter((entry) => entry.activity.kind === "prompt").map((entry) => entry.activity.id),
         flightComplete: false,
@@ -1349,20 +1364,22 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     }
     try {
       const notes = attachedNotes;
-      let transported = value;
+      let transported = outgoingText;
       if (notes.length) {
         // The prompt limit is 16 KB; the notes take what the typed text leaves.
-        const prepared = await prepareAttachedNotes(notes.map((note) => note.id), 16 * 1024 - new TextEncoder().encode(value).length - 64);
-        transported = value + prepared.transport;
+        const prepared = await prepareAttachedNotes(notes.map((note) => note.id), 16 * 1024 - new TextEncoder().encode(outgoingText).length - 64);
+        transported = outgoingText + prepared.transport;
         if (prepared.skipped) actionNotice = tr(`${prepared.skipped} note(s) did not fit and were not sent`, `${prepared.skipped} nota(s) não couberam e não foram enviadas`);
       }
       await submitPrompt(session.id, transported, attachments, delivery);
       attachedNotes = [];
+      promptIntent = null;
       if (outgoing && session.source !== "web") updateOutgoingPrompt(outgoing.id, { accepted: true });
       else {
         prompt = "";
         promptAttachments = [];
       }
+      return true;
     } catch (error) {
       if (planeLaunchTimer) window.clearTimeout(planeLaunchTimer);
       planeLaunchTimer = null;
@@ -1376,6 +1393,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       const connection = agentConnectionMessage(error);
       connectionRequired = connection;
       sendError = connection ? "" : String(error).replace(/^Error:\s*/, "");
+      return false;
     } finally {
       sending = false;
     }
@@ -1856,6 +1874,14 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
         if (!supportsAgentControls) return false;
         if (!controlsOpen) await toggleAgentControls();
         break;
+      case "intent-todo":
+      case "intent-goal":
+      case "intent-planning": {
+        const chosen = action.slice("intent-".length) as PromptIntent;
+        promptIntent = promptIntent === chosen ? null : chosen;
+        prompt = "";
+        return true;
+      }
       case "plan":
         // The button is gone, so the one command both enters Plan mode and leaves it.
         await toggleCollaborationMode();
@@ -3528,6 +3554,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       </div>
       {#if supportsAgentControls}
       <div class="composer-tools">
+        <PromptIntentChips bind:intent={promptIntent} {language} disabled={!canCompose} />
         <div class="agent-controls" bind:this={controlsRoot}>
           <button class:active={controlsOpen} class="model-trigger" type="button"
             aria-label={tr("Choose model and effort", "Escolher modelo e esforço")}

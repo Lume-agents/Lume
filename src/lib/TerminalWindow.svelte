@@ -77,6 +77,8 @@
   import { requiresCodexCliTakeover, sessionCapabilities } from "$lib/sessionCapabilities";
   import { resolveTerminalSession } from "$lib/sessionIdentity";
   import { interruptNoticeText } from "$lib/interruptNotice";
+  import { parsePromptIntent, promptWithIntent, type PromptIntent } from "$lib/promptIntent";
+  import PromptIntentChips from "$lib/PromptIntentChips.svelte";
   import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
   import {
     orderTerminalsByPosition,
@@ -188,6 +190,7 @@
   let handoffSending = $state(false);
   let handoffError = $state<string | null>(null);
   let sending = $state(false);
+  let promptIntent = $state<PromptIntent | null>(null);
   let steeringQueued = $state(false);
   let collaborationMode = $state<CollaborationMode>("default");
   let collaborationModeChanging = $state(false);
@@ -2804,6 +2807,14 @@
       case "model":
         await openModelDialog();
         break;
+      case "intent-todo":
+      case "intent-goal":
+      case "intent-planning": {
+        const chosen = action.slice("intent-".length) as PromptIntent;
+        promptIntent = promptIntent === chosen ? null : chosen;
+        prompt = "";
+        break;
+      }
       case "plan":
         await applyCollaborationMode("plan");
         break;
@@ -2864,13 +2875,23 @@
       return;
     }
     if (promptAttachments.length === 0 && await runSlashCommand(prompt)) return;
+    // `/todo …`, `/goal …`, `/planning …` or the composer's chip: the agent sets that up before working.
+    const requested = parsePromptIntent(prompt);
+    const intent = requested?.intent ?? promptIntent;
+    const shown = requested ? requested.body : prompt.trim();
+    if (requested && !shown && promptAttachments.length === 0) {
+      promptIntent = requested.intent;
+      prompt = "";
+      return;
+    }
     resetPromptHistory();
     closeMention();
     sending = true;
     message = null;
     try {
       const delivery = session.status === "running" ? "queue" : "new_turn";
-      await submitPrompt(session.id, prompt.trim(), promptAttachments, delivery);
+      await submitPrompt(session.id, intent && shown ? promptWithIntent(shown, intent, session.agent) : shown, promptAttachments, delivery);
+      promptIntent = null;
       prompt = "";
       promptAttachments = [];
       session = {
@@ -4165,6 +4186,7 @@
             <span class="queue-shortcut"><kbd>Tab</kbd><small>{steeringQueued ? tr("Steering…", "Enviando…") : session.agent === "claude_code" && promptIsRunning ? tr("Interrupt and send", "Interromper e enviar") : tr("Send now", "Enviar agora")}</small></span>
           </button>
         {/if}
+        <div class="intent-row"><PromptIntentChips bind:intent={promptIntent} {language} disabled={!canCompose} /></div>
         <div class="composer-controls">
           {#if ["codex", "claude_code"].includes(session.agent) || (canCompose && capabilities?.canAttachImages)}
             <div class="composer-leading-actions composer-tools">
@@ -4790,6 +4812,7 @@
   .model-pending-note { margin: 0; padding: 7px 9px; border-radius: 8px; color: #7b673e; background: rgba(190, 143, 62, .1); font: 650 var(--chat-tiny-font-size)/1.4 var(--lume-font-ui, Inter, sans-serif); }
   @keyframes model-spin { to { transform: rotate(360deg); } }
   .terminal-composer { position: relative; box-sizing: border-box; min-height: 63px; padding: 7px 8px 8px 10px; display: flex; flex: 0 0 auto; flex-direction: column; align-items: stretch; gap: 6px; border-top: 1px solid rgba(97, 119, 109, 0.11); }
+  .intent-row { display: flex; margin: 0 0 4px; }
   .composer-controls { min-width: 0; min-height: 0; display: flex; flex: 1; align-items: flex-end; gap: 6px; }
   .composer-leading-actions { position: relative; display: flex; flex: 0 0 auto; flex-direction: column; justify-content: flex-end; gap: 4px; }
   .terminal-composer .composer-tools-trigger { color: #5d7469; border: 1px solid rgba(82, 106, 95, 0.12); background: rgba(80, 105, 94, 0.055); transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 140ms ease; }

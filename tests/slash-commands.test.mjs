@@ -29,6 +29,9 @@ test("the menu lists what the agent reported, with /model owned by Lume", () => 
     ["lume", "model"],
     ["lume", "mcp"],
     ["lume", "clear"],
+    ["lume", "todo"],
+    ["lume", "goal"],
+    ["lume", "planning"],
     ["agent", "compact"],
     ["agent", "code-review"],
   ]);
@@ -36,13 +39,16 @@ test("the menu lists what the agent reported, with /model owned by Lume", () => 
   assert.equal(findSlashCommand(commands, "/model").action, "model");
   assert.equal(findSlashCommand(commands, "/code-review").argumentHint, "[low|high]");
   const antigravity = agentSlashCommands([], "antigravity");
-  assert.deepEqual(antigravity.map((command) => [command.source, command.name]), [["lume", "model"], ["lume", "mcp"], ["lume", "clear"]]);
+  assert.deepEqual(antigravity.map((command) => [command.source, command.name]), [["lume", "model"], ["lume", "mcp"], ["lume", "clear"], ["lume", "todo"], ["lume", "goal"], ["lume", "planning"]]);
   assert.equal(antigravity[0].description, "Choose the model and permissions");
   const reportedByAntigravity = agentSlashCommands(claudeReported, "antigravity");
   assert.deepEqual(reportedByAntigravity.map((command) => [command.source, command.name]), [
     ["lume", "model"],
     ["lume", "mcp"],
     ["lume", "clear"],
+    ["lume", "todo"],
+    ["lume", "goal"],
+    ["lume", "planning"],
     ["agent", "compact"],
     ["agent", "code-review"],
   ]);
@@ -70,7 +76,9 @@ test("slash browses everything and dollar narrows to Codex skills", () => {
     "codex",
   );
   assert.deepEqual(filterSlashCommands(commands, null), []);
-  assert.equal(filterSlashCommands(commands, slashCommandQuery("/")).length, 5, "model, mcp, clear and plan are Lume's, plus the skill");
+  assert.equal(filterSlashCommands(commands, slashCommandQuery("/")).length, 8, "model, mcp, clear, todo, goal, planning and plan are Lume's, plus the skill");
+  assert.equal(findSlashCommand(commands, "/todo").action, "intent-todo");
+  assert.equal(slashCommandText(findSlashCommand(commands, "/goal")), "/goal ");
   assert.deepEqual(
     filterSlashCommands(commands, slashCommandQuery("$")).map((command) => command.name),
     ["lint"],

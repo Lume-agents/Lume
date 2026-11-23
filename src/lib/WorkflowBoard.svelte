@@ -2032,8 +2032,9 @@
   .live-plan-head small { color: var(--workspace-muted); font-variant-numeric: tabular-nums; }
   .card-progress.live-bar { position: relative; left: auto; right: auto; bottom: auto; }
   .live-plan ul, .live-feed ol { margin: 0; padding: 0; display: grid; gap: 5px; list-style: none; }
-  .live-plan li { display: flex; align-items: center; gap: 8px; color: var(--workspace-muted); font-size: 10.5px; }
-  .live-plan li i { width: 9px; height: 9px; flex: 0 0 auto; border: 1.5px solid currentColor; border-radius: 50%; }
+  .live-plan li { min-width: 0; display: flex; align-items: flex-start; gap: 8px; color: var(--workspace-muted); font-size: 10.5px; line-height: 1.4; }
+  .live-plan li > span { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+  .live-plan li i { width: 9px; height: 9px; margin-top: 2px; flex: 0 0 auto; border: 1.5px solid currentColor; border-radius: 50%; }
   .live-plan li[data-status="completed"] { color: var(--workspace-text); text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); }
   .live-plan li[data-status="completed"] i { border-color: var(--workspace-accent); background: var(--workspace-accent); }
   .live-plan li[data-status="in_progress"] { color: var(--workspace-strong); }

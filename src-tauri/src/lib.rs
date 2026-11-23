@@ -1,18 +1,15 @@
 mod acp_bridge;
 mod adapters;
-mod claude_permissions;
-mod claude_session;
-mod remote_sessions;
-mod agent_extensions;
-mod extension_github;
 mod agent_commands;
+mod agent_extensions;
 mod agent_mcp;
 mod agent_plugins;
 mod antigravity_acp;
 mod antigravity_stream;
-mod command_file_changes;
 mod browser_server;
 mod claude_control;
+mod claude_permissions;
+mod claude_session;
 mod cli_installer;
 pub mod cli_ui;
 mod codex_bridge;
@@ -21,6 +18,7 @@ mod codex_daemon_observer;
 mod codex_identity_probe;
 mod codex_permissions;
 mod codex_sessions;
+mod command_file_changes;
 mod context_builder;
 mod control;
 mod custom_fonts;
@@ -30,6 +28,7 @@ pub mod distributed_protocol;
 mod domain;
 mod event_server;
 mod executables;
+mod extension_github;
 mod http_limits;
 mod integrations;
 mod launcher;
@@ -87,8 +86,8 @@ use std::{
 use domain::{
     AgentKind, AgentSession, HistoryEntry, HookEvent, HookEventKind, PermissionAction, Preferences,
     PromptAttachmentInput, PromptDelivery, QuestionAnswer, ResultNote, ReviewDecision,
-    ReviewDecisionKind, ReviewNote, SessionActivity, SessionControlOrigin, SessionNote, SessionNoteLinks,
-    SessionSource, WorkflowRole, WorkflowRoleContract,
+    ReviewDecisionKind, ReviewNote, SessionActivity, SessionControlOrigin, SessionNote,
+    SessionNoteLinks, SessionSource, WorkflowRole, WorkflowRoleContract,
 };
 use integrations::{CompanionStatus, IntegrationDiagnostic, IntegrationKind, IntegrationStatus};
 use launcher::LaunchRequest;
@@ -358,7 +357,10 @@ fn rename_session(
     name: String,
 ) -> Result<String, String> {
     let (session, name) = state.session_rename_plan(&session_id, &name)?;
-    if session.agent == AgentKind::Codex && session.source == SessionSource::Cli && session.control_origin == SessionControlOrigin::External {
+    if session.agent == AgentKind::Codex
+        && session.source == SessionSource::Cli
+        && session.control_origin == SessionControlOrigin::External
+    {
         return Err("Take control of this external CLI before renaming its conversation".into());
     }
     if session.agent == AgentKind::Codex {
@@ -435,9 +437,11 @@ async fn get_hub_session(
 ) -> Result<Option<protocol::HubSession>, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(state
-            .bounded_session(&session_id, 60)?
-            .map(|session| protocol::HubSnapshot::with_activity_limit(vec![session], 60).sessions.remove(0)))
+        Ok(state.bounded_session(&session_id, 60)?.map(|session| {
+            protocol::HubSnapshot::with_activity_limit(vec![session], 60)
+                .sessions
+                .remove(0)
+        }))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -799,20 +803,36 @@ async fn check_cli_update(kind: String) -> Result<cli_installer::CliUpdateCheck,
 }
 
 #[tauri::command]
-async fn start_cli_install(app: AppHandle, state: State<'_, AppState>, kind: String, method: String) -> Result<String, String> {
+async fn start_cli_install(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    kind: String,
+    method: String,
+) -> Result<String, String> {
     if method == "npm-update" {
         let agent = match kind.as_str() {
-            "codex" => AgentKind::Codex, "claude" => AgentKind::ClaudeCode,
-            "gemini" => AgentKind::Gemini, "opencode" => AgentKind::OpenCode,
+            "codex" => AgentKind::Codex,
+            "claude" => AgentKind::ClaudeCode,
+            "gemini" => AgentKind::Gemini,
+            "opencode" => AgentKind::OpenCode,
             _ => return Err("Unsupported update method".into()),
         };
-        if state.connected_sessions()?.iter().any(|session| session.remote.is_none() && session.agent == agent
-            && matches!(session.status, domain::SessionStatus::Running | domain::SessionStatus::PermissionRequired)) {
-            return Err("Conclua ou interrompa as tarefas ativas deste agente antes de atualizar.".into());
+        if state.connected_sessions()?.iter().any(|session| {
+            session.remote.is_none()
+                && session.agent == agent
+                && matches!(
+                    session.status,
+                    domain::SessionStatus::Running | domain::SessionStatus::PermissionRequired
+                )
+        }) {
+            return Err(
+                "Conclua ou interrompa as tarefas ativas deste agente antes de atualizar.".into(),
+            );
         }
     }
     tauri::async_runtime::spawn_blocking(move || cli_installer::start(&app, &kind, &method))
-        .await.map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -952,7 +972,8 @@ pub(crate) fn subagent_timeline(
         let (parent_id, child_id) = state.omp_subagent_thread(session_id, activity_id)?;
         return omp_sessions::load_subagent_timeline(&parent_id, &child_id);
     }
-    let (parent_thread_id, child_thread_id) = state.codex_subagent_thread(session_id, activity_id)?;
+    let (parent_thread_id, child_thread_id) =
+        state.codex_subagent_thread(session_id, activity_id)?;
     codex_sessions::load_subagent_timeline(&parent_thread_id, &child_thread_id)
 }
 
@@ -1229,7 +1250,10 @@ fn open_session_file(
     path: String,
 ) -> Result<(), String> {
     let session = state.connected_session(&session_id)?;
-    let file = session_files::openable_file(session.working_directory.as_deref().unwrap_or_default(), &path)?;
+    let file = session_files::openable_file(
+        session.working_directory.as_deref().unwrap_or_default(),
+        &path,
+    )?;
     // Windows canonical paths carry a `\\?\` prefix that the shell does not always accept.
     let file = file.to_string_lossy();
     app.opener()
@@ -1247,12 +1271,21 @@ async fn save_response_file(app: AppHandle, source_path: String) -> Result<bool,
     if !source.is_file() {
         return Err("The response attachment is not a file".into());
     }
-    let name = source.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let chosen = tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_file_name(name).blocking_save_file())
-        .await
-        .map_err(|error| error.to_string())?;
-    let Some(destination) = chosen else { return Ok(false) };
-    let destination = destination.into_path().map_err(|_| "Choose a valid destination for the file".to_string())?;
+    let name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let chosen = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().set_file_name(name).blocking_save_file()
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let Some(destination) = chosen else {
+        return Ok(false);
+    };
+    let destination = destination
+        .into_path()
+        .map_err(|_| "Choose a valid destination for the file".to_string())?;
     if destination.as_os_str().is_empty() || destination.is_dir() {
         return Err("Choose a valid destination for the file".into());
     }
@@ -1549,7 +1582,9 @@ async fn list_agent_extensions(
 }
 
 #[tauri::command]
-async fn get_extension_github_stars(repositories: Vec<String>) -> Vec<extension_github::RepositoryStars> {
+async fn get_extension_github_stars(
+    repositories: Vec<String>,
+) -> Vec<extension_github::RepositoryStars> {
     extension_github::stars(repositories).await
 }
 
@@ -1995,7 +2030,11 @@ fn save_session_note(
 
 /// Opens the folder of a project's note files (or of every note) in the system's file manager.
 #[tauri::command]
-fn open_notes_folder(app: AppHandle, state: State<'_, AppState>, project: Option<String>) -> Result<(), String> {
+fn open_notes_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project: Option<String>,
+) -> Result<(), String> {
     let folder = state.notes_folder(project.as_deref())?;
     app.opener()
         .open_path(folder.to_string_lossy(), None::<String>)

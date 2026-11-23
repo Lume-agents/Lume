@@ -364,8 +364,8 @@ pub(crate) fn native_session_title(kind: &IntegrationKind, session_id: &str) -> 
     let file = fs::File::open(path).ok()?;
     match kind {
         IntegrationKind::Codex => codex_session_title(BufReader::new(file)),
+        IntegrationKind::Antigravity => antigravity_session_title(BufReader::new(file)),
         IntegrationKind::Claude
-        | IntegrationKind::Antigravity
         | IntegrationKind::OpenCode
         | IntegrationKind::Grok
         | IntegrationKind::DeepSeek
@@ -382,6 +382,10 @@ pub(crate) fn native_session_working_directory(
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return None;
+    }
+    if *kind == IntegrationKind::Antigravity {
+        let home = antigravity_user_home()?;
+        return antigravity_session_working_directory(&home.join(".gemini/antigravity-cli"), session_id);
     }
     if *kind == IntegrationKind::Codex {
         let home = env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
@@ -1507,10 +1511,14 @@ fn antigravity_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
             continue;
         };
         let project = resume_project_name(&working_directory);
+        let name = fs::File::open(&transcript)
+            .ok()
+            .and_then(|file| antigravity_session_title(BufReader::new(file)))
+            .unwrap_or_else(|| project.clone());
         let session = ResumableSession {
             id: id.clone(),
             agent: IntegrationKind::Antigravity,
-            name: project.clone(),
+            name,
             project,
             working_directory,
             source: "CLI".into(),
@@ -1520,6 +1528,64 @@ fn antigravity_resumable_sessions(root: &Path) -> Vec<ResumableSession> {
         sessions_by_id.entry(id).or_insert(session);
     }
     sessions_by_id.into_values().collect()
+}
+
+fn antigravity_session_working_directory(root: &Path, session_id: &str) -> Option<String> {
+    if !is_safe_conversation_id(session_id) {
+        return None;
+    }
+    let cache = root.join("cache/last_conversations.json");
+    if fs::metadata(&cache)
+        .ok()
+        .is_none_or(|metadata| metadata.len() > 1024 * 1024)
+    {
+        return None;
+    }
+    let content = fs::read_to_string(cache).ok()?;
+    let workspaces = serde_json::from_str::<HashMap<String, String>>(&content).ok()?;
+    let mut matches = workspaces
+        .into_iter()
+        .filter(|(working_directory, id)| {
+            id == session_id && Path::new(working_directory).is_absolute()
+        })
+        .map(|(working_directory, _)| working_directory)
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches
+        .iter()
+        .find(|directory| Path::new(directory).is_dir())
+        .cloned()
+        .or_else(|| matches.into_iter().next())
+}
+
+fn antigravity_session_title(reader: impl BufRead) -> Option<String> {
+    const MAX_SCAN_BYTES: usize = 512 * 1024;
+    let mut scanned = 0usize;
+    for line in reader.lines().take(160).map_while(Result::ok) {
+        scanned = scanned.saturating_add(line.len());
+        if scanned > MAX_SCAN_BYTES {
+            break;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("USER_INPUT")
+            || entry.get("source").and_then(Value::as_str) != Some("USER_EXPLICIT")
+        {
+            continue;
+        }
+        let Some(prompt) = entry
+            .get("content")
+            .and_then(Value::as_str)
+            .and_then(unwrap_antigravity_user_request)
+        else {
+            continue;
+        };
+        if let Some(title) = meaningful_session_title(&prompt) {
+            return Some(title);
+        }
+    }
+    None
 }
 
 fn antigravity_transcript_path(root: &Path, conversation_id: &str) -> Option<PathBuf> {
@@ -5825,6 +5891,61 @@ mod tests {
         configure_grok_at(&path, "/opt/lume/lume", false).unwrap();
         assert!(!path.exists());
         configure_grok_at(&path, "/opt/lume/lume", false).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn antigravity_sessions_resolve_title_from_transcript_and_working_directory_from_cache() {
+        let root = std::env::temp_dir().join(format!("lume-agy-sessions-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let workspace = root.join("workspace");
+        let conv_id = "d4904438-c22c-429f-a235-48f18ceeaa76";
+        let logs = root
+            .join("brain")
+            .join(conv_id)
+            .join(".system_generated/logs");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&logs).unwrap();
+        fs::create_dir_all(root.join("cache")).unwrap();
+        let workspace_str = workspace.to_string_lossy().to_string();
+        fs::write(
+            root.join("cache/last_conversations.json"),
+            serde_json::json!({ &workspace_str: conv_id }).to_string(),
+        )
+        .unwrap();
+        let transcript = [
+            serde_json::json!({
+                "type": "USER_INPUT",
+                "source": "USER_EXPLICIT",
+                "content": "<USER_REQUEST>\n/compact\n</USER_REQUEST>"
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "USER_INPUT",
+                "source": "USER_EXPLICIT",
+                "content": "<USER_REQUEST>\nAnalisar a integração do Antigravity no Lume\n</USER_REQUEST>"
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        fs::write(logs.join("transcript.jsonl"), &transcript).unwrap();
+
+        assert_eq!(
+            antigravity_session_title(std::io::Cursor::new(transcript.as_bytes())).as_deref(),
+            Some("Analisar a integração do Antigravity no Lume")
+        );
+        assert_eq!(
+            antigravity_session_working_directory(&root, conv_id).as_deref(),
+            Some(workspace_str.as_str())
+        );
+        let resumable = antigravity_resumable_sessions(&root);
+        assert_eq!(resumable.len(), 1);
+        assert_eq!(resumable[0].id, conv_id);
+        assert_eq!(
+            resumable[0].name,
+            "Analisar a integração do Antigravity no Lume"
+        );
+        assert_eq!(resumable[0].working_directory, workspace_str);
         let _ = fs::remove_dir_all(&root);
     }
 }

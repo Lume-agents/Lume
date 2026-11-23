@@ -309,6 +309,14 @@ fn opencode(home: &Path, project: Option<&Path>, agent: &mut AgentExtensions) {
                 agent,
             );
         }
+        for name in ["agent", "agents"] {
+            markdown_items(
+                &project.join(".opencode").join(name),
+                "subagent",
+                "project",
+                agent,
+            );
+        }
     }
 }
 
@@ -1134,6 +1142,58 @@ mod tests {
         assert!(manage_plugin("claude", "install", "--yes", None).is_err());
         assert!(manage_plugin("claude", "install", "a b", None).is_err());
         assert!(manage_plugin("codex", "enable", "x@y", None).is_err());
+    }
+
+    #[test]
+    fn opencode_extensions_include_project_subagents_and_commands() {
+        let root = std::env::temp_dir().join(format!(
+            "lume-opencode-extensions-{}-{}",
+            std::process::id(),
+            crate::state::now_millis()
+        ));
+        let home = root.join("home");
+        let project = root.join("project");
+        fs::create_dir_all(home.join(".config/opencode/agent")).unwrap();
+        fs::create_dir_all(project.join(".opencode/agents")).unwrap();
+        fs::create_dir_all(project.join(".opencode/commands")).unwrap();
+        fs::write(
+            home.join(".config/opencode/agent/user-reviewer.md"),
+            "---\ndescription: Global reviewer\n---",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".opencode/agents/project-architect.md"),
+            "---\ndescription: Project architect\n---",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".opencode/commands/release.md"),
+            "---\ndescription: Release flow\n---",
+        )
+        .unwrap();
+        let mut agent = AgentExtensions {
+            agent: "opencode".into(),
+            label: "OpenCode".into(),
+            cli: false,
+            manages_plugins: false,
+            toggles_plugins: false,
+            items: Vec::new(),
+            problems: Vec::new(),
+        };
+        opencode(&home, Some(&project), &mut agent);
+        let _ = fs::remove_dir_all(&root);
+        assert!(agent
+            .items
+            .iter()
+            .any(|item| item.kind == "subagent" && item.scope == "user" && item.name == "user-reviewer"));
+        assert!(agent
+            .items
+            .iter()
+            .any(|item| item.kind == "subagent" && item.scope == "project" && item.name == "project-architect"));
+        assert!(agent
+            .items
+            .iter()
+            .any(|item| item.kind == "command" && item.scope == "project" && item.name == "release"));
     }
 }
 

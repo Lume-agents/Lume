@@ -512,6 +512,7 @@ pub(crate) fn repository_directory(state: &AppState, session_id: &str) -> Result
     let kind = match session.agent {
         AgentKind::Codex => Some(IntegrationKind::Codex),
         AgentKind::ClaudeCode => Some(IntegrationKind::Claude),
+        AgentKind::Antigravity => Some(IntegrationKind::Antigravity),
         _ => None,
     };
     // A shared VS Code/CLI process may expose its own cwd until the chat emits
@@ -1258,10 +1259,22 @@ fn refresh_antigravity_rate_limits(app: AppHandle, state: AppState) {
         return;
     }
     std::thread::spawn(move || {
-        if let Ok(limits) = antigravity_stream::fetch_rate_limits() {
-            let _ = usage_monitor::publish(&app, &state, AgentKind::Antigravity, limits);
+        struct Release;
+        impl Drop for Release {
+            fn drop(&mut self) {
+                REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
         }
-        REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _release = Release;
+        match antigravity_stream::fetch_rate_limits() {
+            Ok(limits) => {
+                let _ = usage_monitor::publish(&app, &state, AgentKind::Antigravity, limits);
+            }
+            Err(error) => {
+                eprintln!("Antigravity usage: {error}");
+                let _ = usage_monitor::publish_error(&app, &state, AgentKind::Antigravity, error);
+            }
+        }
     });
 }
 
@@ -1566,6 +1579,7 @@ async fn compact_session(
     app: AppHandle,
     state: State<'_, AppState>,
     bridge: State<'_, codex_bridge::CodexBridge>,
+    browser: State<'_, browser_server::BrowserControl>,
     session_id: String,
 ) -> Result<(), String> {
     let session = state.connected_session(&session_id)?;
@@ -1589,6 +1603,28 @@ async fn compact_session(
             .command(&session_id, "compact", serde_json::json!({}))?;
         protocol::emit_sessions_changed(&app);
         return Ok(());
+    }
+    if session.agent == domain::AgentKind::Antigravity
+        && session.source == domain::SessionSource::Desktop
+    {
+        let state = state.inner().clone();
+        let bridge = bridge.inner().clone();
+        let browser = browser.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            control::submit_prompt(
+                &app,
+                &state,
+                &bridge,
+                &browser,
+                &session_id,
+                "/compact",
+                Vec::new(),
+                domain::PromptDelivery::NewTurn,
+                false,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
     }
     if session.agent != domain::AgentKind::Codex || session.source == domain::SessionSource::Web {
         return Err("This session is not ready to compact".into());
@@ -3521,6 +3557,27 @@ fn launch_session_impl(
                 .then_some(request.resume_id.as_deref())
                 .flatten(),
         )?;
+        let session_id = bridge.agent().session_id(&id);
+        if let Some(model) = request
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            if let Ok(settings) = bridge.set_model_settings(
+                &id,
+                &request.working_directory,
+                model,
+                request.reasoning_effort.as_deref().unwrap_or_default(),
+            ) {
+                state.set_session_model_override(
+                    &session_id,
+                    domain::SessionModelOverride {
+                        model: Some(settings.model),
+                        reasoning_effort: settings.reasoning_effort,
+                    },
+                )?;
+            }
+        }
         if let Some(prompt) = request
             .initial_prompt
             .as_deref()
@@ -3532,7 +3589,7 @@ fn launch_session_impl(
                 prompt.to_string(),
                 Vec::new(),
             )?;
-            state.record_prompt_activity(&bridge.agent().session_id(&id), prompt, Vec::new())?;
+            state.record_prompt_activity(&session_id, prompt, Vec::new())?;
         }
         return Ok(());
     }

@@ -551,33 +551,31 @@ impl AcpBridge {
             let _ = self.close(&id);
             return Err(error);
         }
-        if self.agent.is_antigravity() {
-            self.apply_antigravity_choices(&id, &cwd);
-        }
+        self.apply_stored_choices(&id, &cwd);
         Ok(id)
     }
 
     /// The model, effort and permission mode Lume stored for the conversation, so a restarted
     /// agent runs it as the user left it. A stored choice the agent no longer offers is skipped.
-    fn apply_antigravity_choices(&self, id: &str, cwd: &str) {
+    fn apply_stored_choices(&self, id: &str, cwd: &str) {
         let Ok(mut config) = self.config_options(id, cwd) else {
             return;
         };
         let choice = self
             .state
-            .session_model_override_for_native_id(AgentKind::Antigravity, id)
+            .session_model_override_for_native_id((self.agent.agent)(), id)
             .unwrap_or_default();
         let wanted = [
             ("model", choice.model),
             ("thought_level", choice.reasoning_effort),
             (
                 "mode",
-                Some(
+                self.agent.is_antigravity().then(|| {
                     crate::antigravity_acp::acp_mode_for_permission(
                         &crate::antigravity_acp::permission_mode(&self.state, id),
                     )
-                    .to_string(),
-                ),
+                    .to_string()
+                }),
             ),
         ];
         for (category, value) in wanted {
@@ -849,8 +847,7 @@ impl AcpBridge {
         let id = session_id.to_string();
         let generation = self.reader_generation.load(Ordering::SeqCst);
         let prompt_at = now_millis();
-        let compacting =
-            self.agent.is_antigravity() && prompt.trim().eq_ignore_ascii_case("/compact");
+        let compacting = prompt.trim().eq_ignore_ascii_case("/compact");
         thread::Builder::new()
             .name(format!("lume-{}-prompt", self.agent.prefix))
             .spawn(move || {
@@ -914,33 +911,36 @@ impl AcpBridge {
                 };
                 let mut event = base_event(bridge.agent, &id, event_kind);
                 event.last_response = response;
-                if bridge.agent.is_antigravity() {
-                    let model = bridge.session_configs.lock().ok().and_then(|configs| {
-                        configs
-                            .get(&id)
-                            .and_then(|config| config_value(config, "model"))
-                            .map(str::to_string)
-                    });
-                    if let Some(usage) = result.as_ref().ok().and_then(|result| {
-                        crate::antigravity_acp::turn_usage_activity(
+                let model = bridge.session_configs.lock().ok().and_then(|configs| {
+                    configs
+                        .get(&id)
+                        .and_then(|config| config_value(config, "model"))
+                        .map(str::to_string)
+                });
+                if let Some(usage) = result.as_ref().ok().and_then(|result| {
+                    crate::antigravity_acp::turn_usage_activity(
+                        bridge.agent.prefix,
+                        &id,
+                        result,
+                        Some(prompt_at),
+                        model.as_deref(),
+                    )
+                }) {
+                    event.activities.push(usage);
+                }
+                // `/compact` answers with nothing, so the chat marks where the context was summarized.
+                if compacting && matches!(end, TurnEnd::Completed) {
+                    let after = event
+                        .activities
+                        .last()
+                        .map_or(prompt_at, |usage| usage.created_at);
+                    event
+                        .activities
+                        .push(crate::antigravity_acp::compaction_activity(
+                            bridge.agent.prefix,
                             &id,
-                            result,
-                            Some(prompt_at),
-                            model.as_deref(),
-                        )
-                    }) {
-                        event.activities.push(usage);
-                    }
-                    // `/compact` answers with nothing, so the chat marks where the context was summarized.
-                    if compacting && matches!(end, TurnEnd::Completed) {
-                        let after = event
-                            .activities
-                            .last()
-                            .map_or(prompt_at, |usage| usage.created_at);
-                        event
-                            .activities
-                            .push(crate::antigravity_acp::compaction_activity(&id, after));
-                    }
+                            after,
+                        ));
                 }
                 if cancelled || stop_reason == Some("cancelled") {
                     event.status_label = Some("Interrompido".into());
@@ -1399,9 +1399,7 @@ fn handle_update(
         return;
     }
     if kind == "usage_update" {
-        if agent.is_antigravity() {
-            crate::antigravity_acp::record_context(id, update);
-        }
+        crate::antigravity_acp::record_context(id, update);
         return;
     }
     let previous_kind = last_update_kind(id, kind);
@@ -1578,9 +1576,8 @@ fn tool_activity(agent: &AcpAgent, session_id: &str, update: &Value) -> SessionA
             files.push(path);
         }
     }
-    let detail = update["rawInput"]["command"]
-        .as_str()
-        .map(str::to_string)
+    let detail = crate::antigravity_acp::content_diff(update)
+        .or_else(|| update["rawInput"]["command"].as_str().map(str::to_string))
         .or_else(|| {
             let lines = update["content"]
                 .as_array()
@@ -1591,7 +1588,7 @@ fn tool_activity(agent: &AcpAgent, session_id: &str, update: &Value) -> SessionA
                 .collect::<Vec<_>>();
             (!lines.is_empty()).then(|| lines.join("\n"))
         })
-        .map(|text| text.chars().take(8 * 1024).collect());
+        .map(|text| text.chars().take(16 * 1024).collect());
     SessionActivity {
         id: format!("{}-tool:{session_id}:{tool_id}", agent.prefix),
         kind: match tool_kind {
@@ -2124,11 +2121,19 @@ mod tests {
         let update = tool_activity(
             &OPENCODE,
             "one",
-            &json!({"sessionUpdate":"tool_call_update","toolCallId":"edit-1","status":"completed"}),
+            &json!({
+                "sessionUpdate":"tool_call_update",
+                "toolCallId":"edit-1",
+                "status":"completed",
+                "content":[{"type":"diff","path":"config.ts","oldText":"const a = 1;\n","newText":"const a = 2;\n"}]
+            }),
         );
         assert_eq!(original.id, update.id);
         assert!(update.append_detail);
         assert_eq!(update.status, "completed");
+        let diff = update.detail.as_deref().unwrap();
+        assert!(diff.starts_with("diff --git a/config.ts b/config.ts"));
+        assert!(diff.contains("-const a = 1;\n+const a = 2;\n"));
     }
 
     #[test]

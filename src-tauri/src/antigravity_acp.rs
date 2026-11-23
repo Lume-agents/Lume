@@ -42,7 +42,11 @@ pub(crate) fn permission_mode(state: &AppState, native_id: &str) -> String {
 pub(crate) fn permission_profile(mode: &str) -> PermissionProfile {
     let mut profile = crate::antigravity_stream::permission_profile_for_mode(mode);
     profile.can_respond_from_lume = true;
-    profile.available_actions = vec![PermissionAction::AllowOnce, PermissionAction::Deny];
+    profile.available_actions = vec![
+        PermissionAction::AllowOnce,
+        PermissionAction::AllowSession,
+        PermissionAction::Deny,
+    ];
     profile
 }
 
@@ -97,6 +101,11 @@ fn file_diffs() -> &'static Mutex<HashMap<String, String>> {
     DIFFS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn tool_calls() -> &'static Mutex<HashMap<(String, String), (String, Value)>> {
+    static CALLS: OnceLock<Mutex<HashMap<(String, String), (String, Value)>>> = OnceLock::new();
+    CALLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn subagents() -> &'static Mutex<HashMap<(String, String), String>> {
     static CHILDREN: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
     CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
@@ -112,6 +121,19 @@ fn context_samples() -> &'static Mutex<HashMap<String, (u64, u64)>> {
     SAMPLES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn evict_half<K: Clone + Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>, limit: usize) {
+    if map.len() >= limit {
+        let remove = map
+            .keys()
+            .take(map.len() / 2)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in remove {
+            map.remove(&key);
+        }
+    }
+}
+
 /// The child conversation a subagent tool call opened, once its result named it.
 pub(crate) fn subagent_conversation_id(parent_id: &str, call_id: &str) -> Option<String> {
     subagents()
@@ -122,7 +144,7 @@ pub(crate) fn subagent_conversation_id(parent_id: &str, call_id: &str) -> Option
 }
 
 /// A diff from the ACP `diff` content, for edits whose arguments did not give one.
-fn content_diff(update: &Value) -> Option<String> {
+pub(crate) fn content_diff(update: &Value) -> Option<String> {
     let diff = update["content"]
         .as_array()?
         .iter()
@@ -222,10 +244,55 @@ pub(crate) fn answer_prompt(question: &PendingQuestion, answers: &[QuestionAnswe
 
 /// None when the update does not name its tool, so the generic ACP row is used instead.
 pub(crate) fn tool_update(session_id: &str, update: &Value) -> Option<ToolUpdate> {
-    let name = update["name"].as_str().filter(|name| !name.is_empty())?;
     let call_id = update["toolCallId"].as_str().unwrap_or("tool");
-    let params = params_of(update);
     let state_name = update["status"].as_str().unwrap_or_default();
+    let failed = state_name == "failed";
+    let done = failed || state_name == "completed";
+    let explicit_name = update["name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    let raw_params = params_of(update);
+    let has_raw_params = raw_params.as_object().is_some_and(|map| !map.is_empty());
+    let call_key = (session_id.to_string(), call_id.to_string());
+    let (name, params) = match tool_calls().lock() {
+        Ok(mut calls) => {
+            if let Some(name) = explicit_name {
+                let merged_params = if has_raw_params {
+                    raw_params
+                } else {
+                    calls
+                        .get(&call_key)
+                        .map(|(_, saved)| saved.clone())
+                        .unwrap_or(raw_params)
+                };
+                if done {
+                    calls.remove(&call_key);
+                } else {
+                    evict_half(&mut calls, 256);
+                    calls.insert(call_key, (name.clone(), merged_params.clone()));
+                }
+                (name, merged_params)
+            } else {
+                let (saved_name, saved_params) = if done {
+                    calls.remove(&call_key)?
+                } else {
+                    calls.get(&call_key)?.clone()
+                };
+                let merged_params = if has_raw_params {
+                    if !done {
+                        calls.insert(call_key, (saved_name.clone(), raw_params.clone()));
+                    }
+                    raw_params
+                } else {
+                    saved_params
+                };
+                (saved_name, merged_params)
+            }
+        }
+        Err(_) => (explicit_name?, raw_params),
+    };
+    let name = name.as_str();
     if name == "ask_question" {
         let question = matches!(state_name, "pending" | "in_progress")
             .then(|| question_from(session_id, call_id, &params))
@@ -248,8 +315,6 @@ pub(crate) fn tool_update(session_id: &str, update: &Value) -> Option<ToolUpdate
             artifact: None,
         });
     }
-    let failed = state_name == "failed";
-    let done = failed || state_name == "completed";
     let output = output_of(update);
     let error = failed
         .then(|| {
@@ -274,9 +339,7 @@ pub(crate) fn tool_update(session_id: &str, update: &Value) -> Option<ToolUpdate
             .and_then(crate::integrations::extract_uuid_token)
         {
             if let Ok(mut children) = subagents().lock() {
-                if children.len() >= 256 {
-                    children.clear();
-                }
+                evict_half(&mut children, 256);
                 children.insert((session_id.to_string(), call_id.to_string()), child);
             }
         }
@@ -298,9 +361,7 @@ pub(crate) fn tool_update(session_id: &str, update: &Value) -> Option<ToolUpdate
         if let Ok(mut diffs) = file_diffs().lock() {
             if !done {
                 if is_diff(&detail) {
-                    if diffs.len() >= 64 {
-                        diffs.clear();
-                    }
+                    evict_half(&mut diffs, 64);
                     diffs.insert(id.clone(), detail.clone().unwrap_or_default());
                 }
             } else if let Some(earlier) = diffs.remove(&id) {
@@ -401,13 +462,52 @@ fn artifact_checklist(content: &str) -> Option<String> {
                 " " => "○",
                 _ => return None,
             };
-            let label = label.replace("**", "");
-            let label = label.trim();
-            (!label.is_empty()).then(|| format!("{marker} {}", label.chars().take(512).collect::<String>()))
+            let label = clean_artifact_task_label(label);
+            (!label.is_empty()).then(|| format!("{marker} {label}"))
         })
         .take(200)
         .collect::<Vec<_>>();
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn clean_artifact_task_label(raw: &str) -> String {
+    let mut text = raw.replace("**", "");
+    // Strip markdown links `[label](target)` before removing trailing file references.
+    while let Some(open) = text.find('[') {
+        let Some(mid) = text[open..].find("](").map(|offset| open + offset) else {
+            break;
+        };
+        let Some(close) = text[mid + 2..].find(')').map(|offset| mid + 2 + offset) else {
+            break;
+        };
+        let link_text = text[open + 1..mid].to_string();
+        let target = &text[mid + 2..close];
+        if target.starts_with("file://") || target.starts_with('/') {
+            // If the link is preceded by "em " / "in " / "at ", cut from that preposition onwards.
+            let prefix = text[..open].trim_end();
+            if let Some(stripped) = prefix
+                .strip_suffix(" em")
+                .or_else(|| prefix.strip_suffix(" in"))
+                .or_else(|| prefix.strip_suffix(" at"))
+            {
+                text = stripped.to_string();
+                break;
+            }
+        }
+        text.replace_range(open..=close, &link_text);
+    }
+    let text = text.trim();
+    // If there is an em-dash or colon followed by details, keep the main title when long.
+    let text = if text.chars().count() > 120 {
+        text.split_once(" — ")
+            .or_else(|| text.split_once(": "))
+            .map(|(head, _)| head.trim())
+            .filter(|head| head.chars().count() >= 12)
+            .unwrap_or(text)
+    } else {
+        text
+    };
+    text.chars().take(180).collect()
 }
 
 pub(crate) fn record_context(session_id: &str, update: &Value) {
@@ -420,6 +520,7 @@ pub(crate) fn record_context(session_id: &str, update: &Value) {
         return;
     };
     if let Ok(mut samples) = context_samples().lock() {
+        evict_half(&mut samples, 256);
         samples.insert(session_id.to_string(), (used, size));
     }
 }
@@ -432,6 +533,7 @@ pub(crate) fn take_waiting_question(session_id: &str) -> bool {
 }
 
 pub(crate) fn turn_usage_activity(
+    prefix: &str,
     session_id: &str,
     result: &Value,
     prompt_at: Option<i64>,
@@ -453,7 +555,7 @@ pub(crate) fn turn_usage_activity(
         .unwrap_or((input + cache_read.unwrap_or(0) + output, None));
     let created_at = now_millis();
     let mut detail = json!({
-        "turnId": format!("agy-acp-turn-{created_at}"),
+        "turnId": format!("{prefix}-acp-turn-{created_at}"),
         "totalTokens": input + output,
         "inputTokens": input,
         "outputTokens": output,
@@ -477,7 +579,7 @@ pub(crate) fn turn_usage_activity(
         detail["model"] = json!(model);
     }
     Some(SessionActivity {
-        id: format!("agy-token:{session_id}:acp:{created_at}"),
+        id: format!("{prefix}-token:{session_id}:acp:{created_at}"),
         kind: "token_usage".into(),
         title: "Uso de tokens".into(),
         detail: Some(detail.to_string()),
@@ -490,10 +592,10 @@ pub(crate) fn turn_usage_activity(
 }
 
 /// The mark a finished `/compact` leaves, later than the turn's usage so that sample reads as stale.
-pub(crate) fn compaction_activity(session_id: &str, after: i64) -> SessionActivity {
+pub(crate) fn compaction_activity(prefix: &str, session_id: &str, after: i64) -> SessionActivity {
     let created_at = now_millis().max(after + 1);
     SessionActivity {
-        id: format!("agy:{session_id}:compact:{created_at}"),
+        id: format!("{prefix}:{session_id}:compact:{created_at}"),
         kind: "compact".into(),
         title: "Context compacted".into(),
         detail: None,
@@ -558,6 +660,37 @@ mod tests {
         .unwrap();
         assert!(internal.activity.is_none() && internal.question.is_none());
         assert!(tool_update("conv", &json!({"toolCallId": "call_4", "status": "completed"})).is_none());
+
+        let started = tool_update(
+            "conv",
+            &json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_5",
+                "name": "write_file",
+                "status": "in_progress",
+                "rawInput": {
+                    "Path": "/home/u/.gemini/antigravity-cli/brain/conv/task.md",
+                    "Content": "# Tasks\n- [x] First\n- [ ] Second\n"
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(started.activity.unwrap().status, "running");
+        assert!(started.artifact.is_none());
+
+        let finished = tool_update(
+            "conv",
+            &json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_5",
+                "status": "completed"
+            }),
+        )
+        .unwrap();
+        assert_eq!(finished.activity.unwrap().status, "completed");
+        let artifact = finished.artifact.unwrap();
+        assert_eq!(artifact.kind, "plan");
+        assert_eq!(artifact.detail.as_deref(), Some("✓ First\n○ Second"));
     }
 
     #[test]
@@ -612,6 +745,20 @@ mod tests {
         .unwrap();
         assert_eq!(tasks.kind, "plan");
         assert_eq!(tasks.detail.as_deref(), Some("✓ Read\n● Write code\n○ Test"));
+        let verbose = tool_update(
+            "conv-a",
+            &write(
+                "todo_node_relay.md",
+                "- [x] **A. Uso de tokens e janela de contexto (`usage_update` + `result.usage`) para todos os agentes ACP** em [acp_bridge.rs](file:///home/user/Documents/Projetos/Ideias/Lume/src-tauri/src/acp_bridge.rs#L917-L944), [acp_bridge.rs](file:///home/user/Documents/Projetos/Ideias/Lume/src-tauri/src/acp_bridge.rs#L1401-L1406) e [antigravity_acp.rs](file:///home/user/Documents/Projetos/Ideias/Lume/src-tauri/src/antigravity_acp.rs#L496-L568)",
+            ),
+        )
+        .unwrap()
+        .artifact
+        .unwrap();
+        assert_eq!(
+            verbose.detail.as_deref(),
+            Some("✓ A. Uso de tokens e janela de contexto (`usage_update` + `result.usage`) para todos os agentes ACP")
+        );
         assert!(tool_update("conv-a", &write("walkthrough.md", "No steps here"))
             .unwrap()
             .artifact
@@ -630,6 +777,7 @@ mod tests {
     fn turn_usage_reports_the_context_the_agent_measured() {
         record_context("conv-u", &json!({"used": 9457, "size": 1048576}));
         let activity = turn_usage_activity(
+            "agy",
             "conv-u",
             &json!({"usage": {"inputTokens": 13414, "outputTokens": 446, "cachedReadTokens": 13720, "cachedWriteTokens": 2048}}),
             Some(5),
@@ -643,7 +791,7 @@ mod tests {
         assert_eq!(detail["cacheReadTokens"], 13720);
         assert_eq!(detail["model"], "gemini-4-neon");
         assert_eq!(detail["cacheCreationTokens"], 2048);
-        assert!(turn_usage_activity("conv-u", &json!({"usage": {}}), None, None).is_none());
+        assert!(turn_usage_activity("agy", "conv-u", &json!({"usage": {}}), None, None).is_none());
     }
 
     #[test]

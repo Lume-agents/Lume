@@ -275,6 +275,67 @@ fn antigravity_commands_from(home: &Path, cwd: &Path) -> Vec<AgentSlashCommand> 
     commands
 }
 
+pub fn opencode_commands(cwd: &str) -> Result<Vec<AgentSlashCommand>, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or("Could not find the home directory")?;
+    cached(format!("opencode:{cwd}"), || {
+        Ok(opencode_commands_from(&home, Path::new(cwd)))
+    })
+}
+
+fn opencode_commands_from(home: &Path, cwd: &Path) -> Vec<AgentSlashCommand> {
+    let mut seen = HashSet::new();
+    let mut commands = Vec::new();
+    let mut add = |item: AgentSlashCommand| {
+        if !item.name.is_empty() && seen.insert(item.name.clone()) {
+            commands.push(item);
+        }
+    };
+    let project_root = cwd.join(".opencode");
+    for name in ["command", "commands"] {
+        markdown_commands(&project_root.join(name))
+            .into_iter()
+            .for_each(&mut add);
+    }
+    for name in ["skill", "skills"] {
+        skill_commands(&project_root.join(name))
+            .into_iter()
+            .for_each(&mut add);
+    }
+    let user_root = home.join(".config/opencode");
+    for name in ["command", "commands"] {
+        markdown_commands(&user_root.join(name))
+            .into_iter()
+            .for_each(&mut add);
+    }
+    for name in ["skill", "skills"] {
+        skill_commands(&user_root.join(name))
+            .into_iter()
+            .for_each(&mut add);
+    }
+    commands
+}
+
+fn markdown_commands(directory: &Path) -> Vec<AgentSlashCommand> {
+    sorted_entries(directory)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .filter_map(|path| {
+            let text = fs::read_to_string(&path).ok()?;
+            let fields = frontmatter(&text);
+            let stem = path.file_stem()?.to_str()?;
+            Some(command(
+                stem,
+                fields.get("description").map(String::as_str).unwrap_or(""),
+                "/",
+                "command",
+            ))
+        })
+        .collect()
+}
+
 fn workflow_commands(directory: &Path) -> Vec<AgentSlashCommand> {
     sorted_entries(directory)
         .into_iter()
@@ -496,6 +557,60 @@ mod tests {
                 ("review", "Global review", "skill"),
                 ("format", "Legacy format", "skill"),
                 ("plugin", "Plugins", "skill"),
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_reads_project_and_user_commands_and_skills() {
+        let root =
+            std::env::temp_dir().join(format!("lume-opencode-commands-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let project = root.join("project");
+        let write = |path: PathBuf, text: &str| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            project.join(".opencode/commands/ship.md"),
+            "---\ndescription: Ship the build\n---\nRun release",
+        );
+        write(
+            project.join(".opencode/skills/lint/SKILL.md"),
+            "---\nname: lint\ndescription: Project lint\n---",
+        );
+        write(
+            home.join(".config/opencode/command/review.md"),
+            "---\ndescription: Review the changes\n---",
+        );
+        write(
+            home.join(".config/opencode/skill/lint/SKILL.md"),
+            "---\nname: lint\ndescription: Global lint\n---",
+        );
+        write(
+            home.join(".config/opencode/skills/audit/SKILL.md"),
+            "---\nname: audit\ndescription: Global audit\n---",
+        );
+        let commands = opencode_commands_from(&home, &project);
+        let _ = fs::remove_dir_all(&root);
+        let summary = commands
+            .iter()
+            .map(|item| {
+                (
+                    item.name.as_str(),
+                    item.description.as_str(),
+                    item.kind.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            [
+                ("ship", "Ship the build", "command"),
+                ("lint", "Project lint", "skill"),
+                ("review", "Review the changes", "command"),
+                ("audit", "Global audit", "skill"),
             ]
         );
     }

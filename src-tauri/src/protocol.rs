@@ -351,10 +351,10 @@ fn plan_document_summary(activity: &SessionActivity) -> Option<PlanSummary> {
         } else {
             continue;
         };
-        let label = label.trim();
+        let label = clean_work_item_label(label);
         if !label.is_empty() && !items.iter().any(|item: &WorkItem| item.label == label) {
             items.push(WorkItem {
-                label: label.to_string(),
+                label,
                 status,
             });
         }
@@ -364,12 +364,13 @@ fn plan_document_summary(activity: &SessionActivity) -> Option<PlanSummary> {
     }
     if items.is_empty() {
         items.push(WorkItem {
-            label: content
-                .lines()
-                .next()?
-                .trim_start_matches('#')
-                .trim()
-                .to_string(),
+            label: clean_work_item_label(
+                content
+                    .lines()
+                    .next()?
+                    .trim_start_matches('#')
+                    .trim(),
+            ),
             status: WorkItemStatus::Pending,
         });
     }
@@ -711,11 +712,48 @@ fn message_task_line(line: &str, allow_plain_bullet: bool) -> Option<WorkItem> {
     } else {
         return None;
     };
-    let label = label.trim();
+    let label = clean_work_item_label(label);
     (!label.is_empty()).then(|| WorkItem {
-        label: label.to_string(),
+        label,
         status,
     })
+}
+
+fn clean_work_item_label(raw: &str) -> String {
+    let mut text = raw.replace("**", "");
+    while let Some(open) = text.find('[') {
+        let Some(mid) = text[open..].find("](").map(|offset| open + offset) else {
+            break;
+        };
+        let Some(close) = text[mid + 2..].find(')').map(|offset| mid + 2 + offset) else {
+            break;
+        };
+        let link_text = text[open + 1..mid].to_string();
+        let target = &text[mid + 2..close];
+        if target.starts_with("file://") || target.starts_with('/') {
+            let prefix = text[..open].trim_end();
+            if let Some(stripped) = prefix
+                .strip_suffix(" em")
+                .or_else(|| prefix.strip_suffix(" in"))
+                .or_else(|| prefix.strip_suffix(" at"))
+            {
+                text = stripped.to_string();
+                break;
+            }
+        }
+        text.replace_range(open..=close, &link_text);
+    }
+    let text = text.trim();
+    let text = if text.chars().count() > 120 {
+        text.split_once(" — ")
+            .or_else(|| text.split_once(": "))
+            .map(|(head, _)| head.trim())
+            .filter(|head| head.chars().count() >= 12)
+            .unwrap_or(text)
+    } else {
+        text
+    };
+    text.chars().take(180).collect()
 }
 
 fn numbered_task_label(line: &str) -> Option<&str> {
@@ -753,9 +791,9 @@ fn plan_items(detail: &str) -> Vec<WorkItem> {
             } else {
                 return None;
             };
-            let label = label.trim();
+            let label = clean_work_item_label(label);
             (!label.is_empty()).then(|| WorkItem {
-                label: label.to_string(),
+                label,
                 status,
             })
         })
@@ -771,13 +809,17 @@ fn collect_plan_items(value: &Value, items: &mut Vec<WorkItem>) {
         }
         Value::Object(object) => {
             if let Some(label) = object.get("step").and_then(Value::as_str) {
+                let label = clean_work_item_label(label);
+                if label.is_empty() {
+                    return;
+                }
                 let status = object
                     .get("status")
                     .and_then(Value::as_str)
                     .map(work_item_status)
                     .unwrap_or(WorkItemStatus::Pending);
                 items.push(WorkItem {
-                    label: label.to_string(),
+                    label,
                     status,
                 });
                 return;
@@ -815,9 +857,11 @@ fn todo_items(detail: &str) -> Option<Vec<WorkItem>> {
                 entries
                     .iter()
                     .filter_map(|entry| {
-                        let label = find_json_value(entry, &label_keys)
-                            .and_then(Value::as_str)?
-                            .trim();
+                        let label = clean_work_item_label(
+                            find_json_value(entry, &label_keys)
+                                .and_then(Value::as_str)?
+                                .trim(),
+                        );
                         if label.is_empty() {
                             return None;
                         }
@@ -826,7 +870,7 @@ fn todo_items(detail: &str) -> Option<Vec<WorkItem>> {
                             .map(work_item_status)
                             .unwrap_or(WorkItemStatus::Pending);
                         Some(WorkItem {
-                            label: label.to_string(),
+                            label,
                             status,
                         })
                     })
@@ -854,7 +898,7 @@ fn javascript_work_items(detail: &str, label_keys: &[&str]) -> Vec<WorkItem> {
         else {
             continue;
         };
-        let label = label.trim();
+        let label = clean_work_item_label(label.trim());
         if label.is_empty() || items.iter().any(|item: &WorkItem| item.label == label) {
             continue;
         }
@@ -863,7 +907,7 @@ fn javascript_work_items(detail: &str, label_keys: &[&str]) -> Vec<WorkItem> {
             .map(work_item_status)
             .unwrap_or(WorkItemStatus::Pending);
         items.push(WorkItem {
-            label: label.to_string(),
+            label,
             status,
         });
     }

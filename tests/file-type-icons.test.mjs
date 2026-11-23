@@ -41,3 +41,15 @@ assert.match(renderFileTypeIconHtml("a.mjs"), /viewBox="0 0 20 20"[^>]*><path d=
 assert.match(renderFileTypeIconHtml("file.unknownthing"), /M4 3h8l4 4v10H4Z/);
 
 console.log("file type icon test suite passed");
+
+{
+  const { isTestFilePath, renderFileTypeIconHtml } = await import("../src/lib/fileTypeIcons.ts");
+  for (const path of ["src/app.test.ts", "pkg/user_test.go", "tests/api.py", "test_api.py", "Foo.spec.js", "src/FooTests.cs", "a/__tests__/x.js", "C:\\repo\\tests\\a.rs", "lib/x.e2e.ts"]) {
+    assert.equal(isTestFilePath(path), true, path);
+  }
+  for (const path of ["src/latest.ts", "src/contest.rs", "src/testing.md", "attest.go", "src/protest/Main.kt"]) {
+    assert.equal(isTestFilePath(path), false, path);
+  }
+  assert.match(renderFileTypeIconHtml("src/app.test.ts"), /inline-test-badge/);
+  assert.doesNotMatch(renderFileTypeIconHtml("src/app.ts"), /inline-test-badge/);
+}

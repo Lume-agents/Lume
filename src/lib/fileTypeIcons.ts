@@ -162,7 +162,25 @@ export function fileTypeIconForPath(path: string): { icon: IconifyIcon | null; m
 }
 
 /** Trusted local icon data rendered into the safe Markdown output. */
+/** A test or spec file: `app.test.ts`, `user_test.go`, `test_api.py`, `Foo.spec.js`, `FooTests.cs`, or anything under `tests/` or `__tests__/`. */
+export function isTestFilePath(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/");
+  const name = normalized.split("/").pop() ?? "";
+  if (/(?:^|\/)(?:__tests__|tests?|spec|specs|e2e)\//i.test(normalized)) return true;
+  return /[._-](?:test|tests|spec|e2e)\.[^.]+$/i.test(name)
+    || /^test_.+\.[^.]+$/i.test(name)
+    || /(?:Test|Tests|Spec)\.(?:java|kt|cs|swift|scala|php|m)$/.test(name);
+}
+
+/** The white flask laid over the top-left corner of a test file's icon. */
+export const testFileBadgeHtml = '<svg class="inline-test-badge" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9.5 3.5h5M10.5 3.5v5.8L5.2 18a2 2 0 0 0 1.7 3h10.2a2 2 0 0 0 1.7-3l-5.3-8.7V3.5Z"/></svg>';
+
 export function renderFileTypeIconHtml(path: string): string {
+  const base = baseFileTypeIconHtml(path);
+  return isTestFilePath(path) ? `<span class="inline-file-icon-wrap">${base}${testFileBadgeHtml}</span>` : base;
+}
+
+function baseFileTypeIconHtml(path: string): string {
   const { icon, maintainedPath, glyph, sizeOffset, monochrome } = fileTypeIconForPath(path);
   if (glyph) return `<svg class="inline-file-icon" viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="${glyph}"/></svg>`;
   if (maintainedPath) return `<svg class="inline-file-icon maintained" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${maintainedPath}"/></svg>`;

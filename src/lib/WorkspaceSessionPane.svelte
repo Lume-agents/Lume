@@ -2966,7 +2966,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                 </div>
               {/if}
               <section class="message user-message" class:with-tab={entry.sentDuringTurn || item.title === REMOTE_PROMPT_TITLE}>
-                {#if item.detail}<CollapsibleUserMessage text={item.detail} {language} />{/if}
+                {#if item.detail && isQuestionAnswerId(item.id)}<QuestionAnswerCard text={item.detail} {language} />
+                {:else if item.detail}<CollapsibleUserMessage text={item.detail} {language} />{/if}
                 {#if item.attachments?.length}
                   <div class="attachments">
                     {#each item.attachments as attachment}
@@ -3325,7 +3326,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       <section class="agent-question" aria-label={tr("Agent question", "Pergunta do agente")}>
         {#each pendingQuestion.questions as question (question.id)}
           <div class="agent-question-item">
-            <small>{displayText(language, question.header)}</small>
+            {#if question.header}<small>{displayText(language, question.header)}</small>{/if}
             <strong>{displayText(language, question.question)}</strong>
             {#if question.options.length}
               <div class="question-options">
@@ -3336,24 +3337,27 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                     type="button"
                     onclick={() => void chooseQuestionOption(question.id, option.label)}
                   >
-                    <b>{index + 1}</b>
-                    <span>{displayText(language, option.label)}{#if option.description}<small>{displayText(language, option.description)}</small>{/if}</span>
+                    <b class="option-index">{index + 1}</b>
+                    <span class="option-copy"><span class="option-label">{displayText(language, option.label).trim()}</span>{#if option.description?.trim()}<span class="option-description">{displayText(language, option.description).trim()}</span>{/if}</span>
+                    <i class="option-check" aria-hidden="true"></i>
                   </button>
                 {/each}
               </div>
             {/if}
           </div>
         {/each}
-        <p class="question-hint">{tr("Click an option, or type its number or your own answer below.", "Clique em uma opção ou digite o número ou sua própria resposta abaixo.")}</p>
-        {#if pendingQuestion.questions.length > 1}
-          <button class="question-submit" type="button" disabled={questionSending} onclick={() => void submitSelectedQuestionAnswers()}>{tr("Answer", "Responder")}</button>
-        {/if}
+        <footer class="question-footer">
+          <p class="question-hint">{tr("Click an option, or type its number or your own answer below.", "Clique em uma opção ou digite o número ou sua própria resposta abaixo.")}</p>
+          {#if pendingQuestion.questions.length > 1}
+            <button class="question-submit" type="button" disabled={questionSending} onclick={() => void submitSelectedQuestionAnswers()}>{tr("Answer", "Responder")}</button>
+          {/if}
+        </footer>
       </section>
     {/if}
     {#if heavyContext && !composerInIntroPosition}
       <div class="heavy-context" role="status">
         <span>{tr(`This chat holds ${compactTokens(contextTokens)} tokens, and every message re-reads all of them. Compacting makes each one cheaper.`, `Este chat tem ${compactTokens(contextTokens)} tokens e cada mensagem lê todos de novo. Compactar deixa cada uma mais barata.`)}</span>
-        <button type="button" class="heavy-compact" disabled={!canCompact || sending} onclick={() => void compactContext()}>{tr("Compact now", "Compactar agora")}</button>
+        <button type="button" class="heavy-compact" disabled={!canCompact || sending} aria-busy={compactStarting} onclick={() => void compactContext()}>{#if compactStarting}<i class="send-spinner" aria-hidden="true"></i>{tr("Starting…", "Iniciando…")}{:else}{tr("Compact now", "Compactar agora")}{/if}</button>
         <button type="button" class="heavy-dismiss" aria-label={tr("Dismiss", "Dispensar")} title={tr("Dismiss", "Dispensar")} onclick={() => (heavyDismissed = { ...heavyDismissed, [session.id]: contextTokens })}><LumeIcon name="close" size={10} /></button>
       </div>
     {/if}
@@ -3931,6 +3935,8 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .markdown-content :global(.inline-file-icon.brand.monochrome) { filter: var(--file-monochrome-filter, grayscale(1) brightness(0) contrast(.88)); opacity: var(--file-monochrome-opacity, .72); }
   .markdown-content :global(.inline-file-icon.brand.multicolor) { filter: none; opacity: .94; }
   .markdown-content :global(.inline-file-icon.brand *) { stroke: none !important; }
+  .markdown-content :global(.inline-file-icon-wrap) { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; }
+  .markdown-content :global(.inline-test-badge) { position: absolute; top: -3px; left: -3px; width: 8px; height: 8px; fill: #fff; stroke: rgba(0, 0, 0, .6); stroke-width: 2.4; stroke-linejoin: round; pointer-events: none; }
   .markdown-content :global(.inline-file-icon.maintained) { fill: currentColor; stroke: none; }
   .markdown-content :global(ul), .markdown-content :global(ol) { margin: .65em 0 .95em; padding-left: 1.6em; }
   .markdown-content :global(li) { margin: .35em 0; padding-left: .12em; }
@@ -4178,18 +4184,24 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer .permission-actions > button:disabled:not(.loading) { opacity: .5; }
   .composer .permission-actions > button.loading { cursor: progress; }
   .permission-spinner { width: 11px; height: 11px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
-  .composer .agent-question { max-width: 760px; margin: 0 auto 8px; padding: 11px 12px; display: grid; gap: 10px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 34%, var(--workspace-line)); border-radius: 13px; color: var(--workspace-text); background: color-mix(in srgb, var(--workspace-accent-soft) 70%, var(--workspace-raised)); }
-  .agent-question-item { min-width: 0; display: grid; gap: 6px; }
-  .agent-question-item > small { color: var(--workspace-accent); font-size: var(--workspace-chat-tiny-size); font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
-  .agent-question-item > strong { color: var(--workspace-strong); font-size: var(--workspace-chat-font-size); font-weight: 700; line-height: 1.4; overflow-wrap: anywhere; }
-  .question-options { display: grid; gap: 5px; }
-  .composer .question-options > button { width: 100%; height: auto; min-height: 34px; padding: 6px 9px; display: flex; align-items: flex-start; gap: 9px; place-items: initial; border: 1px solid var(--workspace-line); border-radius: 9px; color: var(--workspace-text); background: var(--workspace-raised); text-align: left; }
-  .composer .question-options > button:hover:not(:disabled), .composer .question-options > button.selected { border-color: var(--workspace-accent); background: var(--workspace-accent-soft); transform: none; }
-  .question-options button b { color: var(--workspace-accent); font-size: var(--workspace-chat-small-size); font-variant-numeric: tabular-nums; }
-  .question-options button > span { min-width: 0; display: grid; gap: 2px; font-size: var(--workspace-chat-small-size); font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
-  .question-options button > span small { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 500; }
-  .question-hint { margin: 0; color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); }
-  .composer .question-submit { width: auto; height: 30px; padding: 0 14px; justify-self: end; border-radius: 9px; font-size: var(--workspace-chat-small-size); font-weight: 750; }
+  .composer .agent-question { max-width: 760px; margin: 0 auto 8px; padding: 12px; display: grid; gap: 12px; border: 1px solid color-mix(in srgb, var(--workspace-accent) 30%, var(--workspace-line)); border-radius: 14px; color: var(--workspace-text); background: color-mix(in srgb, var(--workspace-accent-soft) 55%, var(--workspace-raised)); box-shadow: 0 10px 28px rgba(8, 18, 13, .12); }
+  .agent-question-item { min-width: 0; display: grid; gap: 4px; }
+  .agent-question-item + .agent-question-item { padding-top: 12px; border-top: 1px solid color-mix(in srgb, var(--workspace-line) 80%, transparent); }
+  .agent-question-item > small { color: var(--workspace-accent); font-size: var(--workspace-chat-tiny-size); font-weight: 800; letter-spacing: .07em; line-height: 1.2; text-transform: uppercase; }
+  .agent-question-item > strong { margin-bottom: 4px; color: var(--workspace-strong); font-size: var(--workspace-chat-font-size); font-weight: 700; line-height: 1.4; overflow-wrap: anywhere; }
+  .question-options { display: grid; gap: 4px; }
+  .composer .question-options > button { width: 100%; height: auto; min-height: 0; padding: 7px 10px 7px 8px; display: grid; grid-template-columns: 20px minmax(0, 1fr) 14px; align-items: start; align-content: start; justify-content: stretch; place-items: initial; gap: 9px; border: 1px solid color-mix(in srgb, var(--workspace-line) 90%, transparent); border-radius: 10px; color: var(--workspace-text); background: color-mix(in srgb, var(--workspace-raised) 88%, transparent); line-height: 1.35; text-align: left; white-space: normal; transition: border-color 140ms ease, background 140ms ease; }
+  .composer .question-options > button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--workspace-accent) 55%, var(--workspace-line)); background: var(--workspace-raised); transform: none; }
+  .composer .question-options > button.selected { border-color: var(--workspace-accent); background: var(--workspace-accent-soft); transform: none; }
+  .option-index { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; color: var(--workspace-accent); background: color-mix(in srgb, var(--workspace-accent) 12%, transparent); font-size: var(--workspace-chat-tiny-size); font-weight: 800; font-variant-numeric: tabular-nums; }
+  .option-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-top: 1px; }
+  .option-label { color: var(--workspace-strong); font-size: var(--workspace-chat-small-size); font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+  .option-description { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 500; line-height: 1.45; overflow-wrap: anywhere; white-space: normal; }
+  .option-check { width: 14px; height: 14px; margin-top: 3px; border: 1.5px solid color-mix(in srgb, var(--workspace-muted) 55%, transparent); border-radius: 50%; transition: border-color 140ms ease, box-shadow 140ms ease; }
+  .question-options > button.selected .option-check { border-color: var(--workspace-accent); box-shadow: inset 0 0 0 3px var(--workspace-raised), inset 0 0 0 7px var(--workspace-accent); }
+  .question-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .question-hint { min-width: 0; margin: 0; color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); line-height: 1.4; }
+  .composer .question-submit { width: auto; height: 30px; flex: 0 0 auto; padding: 0 16px; border-radius: 9px; font-size: var(--workspace-chat-small-size); font-weight: 750; }
   .composer .slash-command-menu { position: absolute; z-index: 12; right: 0; bottom: calc(100% + 7px); left: 0; max-height: min(260px, 46vh); padding: 5px; display: grid; gap: 2px; overflow-x: hidden; overflow-y: auto; border: 1px solid var(--workspace-line); border-radius: 13px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 16px 44px rgba(8, 18, 13, .18); }
   .slash-command-heading { min-height: 24px; padding: 2px 8px 5px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--workspace-line); }
   .slash-command-heading strong { color: var(--workspace-muted); font-size: var(--workspace-chat-tiny-size); font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }

@@ -3677,14 +3677,13 @@ impl AppState {
                 } else {
                     answer.answers.join(", ")
                 };
-                Some(if pending.questions.len() == 1 {
-                    value
-                } else {
-                    format!("{}: {value}", question.header)
-                })
+                // `[header] question` then `→ answer`: the agent reads it as text, the chat as a card of answers.
+                let asked = question.question.split_whitespace().collect::<Vec<_>>().join(" ");
+                let header = question.header.split_whitespace().collect::<Vec<_>>().join(" ");
+                Some(format!("[{header}] {asked}\n→ {value}"))
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n\n");
 
         if let Some(activity) = session
             .activities

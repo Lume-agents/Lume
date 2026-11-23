@@ -1,12 +1,14 @@
 <script lang="ts">
   import Icon from "@iconify/svelte";
-  import { fileTypeIconForPath } from "$lib/fileTypeIcons";
+  import { fileTypeIconForPath, isTestFilePath } from "$lib/fileTypeIcons";
 
   let { path, size = 14 } = $props<{ path: string; size?: number }>();
   const presentation = $derived(fileTypeIconForPath(path));
   const displaySize = $derived(size + presentation.sizeOffset);
+  const testFile = $derived(isTestFilePath(path));
 </script>
 
+<span class="file-type-icon-wrap" class:has-test={testFile}>
 <span class:brand={Boolean(presentation.icon)} class:monochrome={presentation.monochrome} class:multicolor={Boolean(presentation.icon) && !presentation.monochrome} class:maintained={Boolean(presentation.maintainedPath)} class="file-type-icon" aria-hidden="true" style:width={`${size}px`} style:height={`${size}px`}>
   {#if presentation.glyph}
     <svg viewBox="0 0 20 20"><path d={presentation.glyph} /></svg>
@@ -20,6 +22,10 @@
     </svg>
   {/if}
 </span>
+{#if testFile}
+  <svg class="test-badge" viewBox="0 0 24 24" aria-hidden="true" style:width={`${Math.max(8, Math.round(size * .62))}px`} style:height={`${Math.max(8, Math.round(size * .62))}px`}><path d="M9.5 3.5h5M10.5 3.5v5.8L5.2 18a2 2 0 0 0 1.7 3h10.2a2 2 0 0 0 1.7-3l-5.3-8.7V3.5Z" /></svg>
+{/if}
+</span>
 
 <style>
   .file-type-icon { display: inline-grid; place-items: center; flex: 0 0 auto; color: inherit; opacity: .72; }
@@ -31,4 +37,6 @@
   .file-type-icon.maintained { color: inherit; opacity: .76; }
   svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   .maintained-icon { fill: currentColor; stroke: none; }
+  .file-type-icon-wrap { position: relative; display: inline-grid; place-items: center; flex: 0 0 auto; }
+  .test-badge { position: absolute; top: -3px; left: -3px; fill: #fff; stroke: rgba(0, 0, 0, .6); stroke-width: 2.4; pointer-events: none; }
 </style>

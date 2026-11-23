@@ -13,7 +13,7 @@
 
   let { sessionId, language = "en", variant = "fab", compact = false, shells = [] } = $props<{
     sessionId: string; language?: Language; variant?: "fab" | "sidebar"; compact?: boolean;
-    /** The shells the agent runs in the background, listed under the environments. */
+    /** The shells the agent runs in the background. */
     shells?: SessionShell[];
   }>();
   const report = getContext<SystemBannerReporter | undefined>(SYSTEM_BANNER_CONTEXT);
@@ -21,12 +21,20 @@
   const running = $derived(runningEnvironments(environments));
   const shownShells = $derived(withoutDismissed(shells as SessionShell[], $dismissedEnvironments));
   const runningShells = $derived(shownShells.filter((shell: SessionShell) => shell.status === "running"));
-  const finished = $derived([...environments.filter((item) => item.status !== "running" && item.status !== "stopping"), ...shownShells.filter((shell) => shell.status !== "running")]);
+  const servers = $derived(environments.filter((item) => item.kind !== "database"));
+  const databases = $derived(environments.filter((item) => item.kind === "database"));
   const busyCount = $derived(running.length + runningShells.length);
   const visible = $derived(variant === "fab" ? environments.length + shownShells.length > 0 : busyCount > 0);
   const databaseOnly = $derived(running.length > 0 && !runningShells.length && running.every((item) => item.kind === "database"));
   const shellsOnly = $derived(!environments.length && shownShells.length > 0);
   let open = $state(false);
+  type EnvironmentTab = "servers" | "databases" | "shells";
+  const menuId = $props.id();
+  const tabs: EnvironmentTab[] = ["servers", "databases", "shells"];
+  let activeTab = $state<EnvironmentTab>("servers");
+  let panel = $state<HTMLDivElement | null>(null);
+  const selectedEnvironments = $derived(activeTab === "servers" ? servers : activeTab === "databases" ? databases : []);
+  const finished = $derived(activeTab === "shells" ? shownShells.filter((shell) => shell.status !== "running") : selectedEnvironments.filter((item) => item.status !== "running" && item.status !== "stopping"));
   let trigger = $state<HTMLButtonElement | null>(null);
   let menu = $state<HTMLElement | null>(null);
   let busy = $state<string | null>(null);
@@ -36,6 +44,21 @@
   let top = $state(0);
   let maxHeight = $state(360);
   const tr = (en: string, pt: string) => language === "pt-BR" ? pt : en;
+  const tabLabel = (tab: EnvironmentTab) => tab === "servers" ? tr("Servers", "Servidores") : tab === "databases" ? tr("Databases", "Bancos") : "Shells";
+  const tabCount = (tab: EnvironmentTab) => tab === "servers" ? servers.length : tab === "databases" ? databases.length : shownShells.length;
+  function selectTab(tab: EnvironmentTab) {
+    activeTab = tab;
+    if (panel) panel.scrollTop = 0;
+  }
+  async function navigateTabs(event: KeyboardEvent, current: EnvironmentTab) {
+    const index = tabs.indexOf(current);
+    const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : -1;
+    if (next < 0) return;
+    event.preventDefault();
+    selectTab(tabs[next]);
+    await tick();
+    menu?.querySelector<HTMLButtonElement>(`[data-environment-tab="${tabs[next]}"]`)?.focus();
+  }
   const label = $derived(busyCount
     ? tr(`${busyCount} running environment${busyCount > 1 ? "s" : ""} and shell${busyCount > 1 ? "s" : ""}`, `${busyCount} ambiente${busyCount > 1 ? "s" : ""} e shell${busyCount > 1 ? "s" : ""} rodando`)
     : tr("Session environments", "Ambientes da sessão"));
@@ -74,6 +97,7 @@
     open = !open;
     if (open) {
       error = "";
+      activeTab = servers.length ? "servers" : databases.length ? "databases" : "shells";
       await refreshSessionEnvironments();
       await tick();
       positionMenu();
@@ -143,8 +167,17 @@
     style:left={`${left}px`} style:top={`${top}px`} style:max-height={`${maxHeight}px`}
     transition:fly={{ y: variant === "fab" ? 6 : 0, x: variant === "sidebar" ? -4 : 0, duration: reducedMotion ? 0 : 180, easing: cubicOut }}>
     <header><strong>{tr("Environments", "Ambientes")}</strong>{#if finished.length}<button type="button" class="dismiss-finished" onclick={() => dismissEnvironments(finished.map((item) => item.id))}>{tr("Clear stopped", "Limpar parados")}</button>{/if}<button type="button" aria-label={tr("Close environments", "Fechar ambientes")} onclick={() => close(true)}><LumeIcon name="close" size={15} /></button></header>
+    <div class="environment-tabs" role="tablist" aria-label={tr("Environment type", "Tipo de ambiente")}>
+      {#each tabs as tab (tab)}
+        <button type="button" role="tab" id={`${menuId}-${tab}`} data-environment-tab={tab} aria-label={`${tabLabel(tab)} (${tabCount(tab)})`} aria-selected={activeTab === tab} aria-controls={`${menuId}-panel`} tabindex={activeTab === tab ? 0 : -1} onclick={() => selectTab(tab)} onkeydown={(event) => void navigateTabs(event, tab)}>
+          <span>{tabLabel(tab)}</span><span class="tab-count">{tabCount(tab)}</span>
+        </button>
+      {/each}
+    </div>
+    <div class="environment-panel" bind:this={panel} role="tabpanel" id={`${menuId}-panel`} aria-labelledby={`${menuId}-${activeTab}`} tabindex="0">
+    {#if activeTab !== "shells"}
     <div class="environment-list">
-      {#each environments as environment (environment.id)}
+      {#each selectedEnvironments as environment (environment.id)}
         <article class="environment-row" class:stopped={environment.status === "stopped"}>
           <div class="environment-head">
             <span class="environment-mark"><LumeIcon name={environment.kind === "database" ? "database" : "server"} size={19} /></span>
@@ -174,8 +207,8 @@
         </article>
       {/each}
     </div>
-    {#if shownShells.length}
-      <strong class="shell-heading">{tr("Background shells", "Shells em segundo plano")}</strong>
+    {#if !selectedEnvironments.length}<p class="environment-empty">{activeTab === "servers" ? tr("No servers in this session.", "Nenhum servidor nesta sessão.") : tr("No databases in this session.", "Nenhum banco nesta sessão.")}</p>{/if}
+    {:else}
       <div class="environment-list">
         {#each shownShells as shell (shell.id)}
           <article class="environment-row shell-row" class:stopped={shell.status !== "running"}>
@@ -188,7 +221,9 @@
           </article>
         {/each}
       </div>
+      {#if !shownShells.length}<p class="environment-empty">{tr("No background shells in this session.", "Nenhum shell em segundo plano nesta sessão.")}</p>{/if}
     {/if}
+    </div>
     {#if error || $sessionEnvironments.error}<p class="environment-error" role="alert">{error || $sessionEnvironments.error}</p>{/if}
   </div>
 {/if}
@@ -204,11 +239,19 @@
   .environment-trigger.compact { width: 24px; height: 24px; border-radius: 7px; background: var(--workspace-sidebar); }
   .environment-trigger:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 3px; }
   .environment-count { position: absolute; top: -3px; right: -3px; min-width: 15px; height: 15px; padding: 0 3px; display: grid; place-items: center; border-radius: 8px; color: var(--workspace-raised); background: var(--workspace-accent); font-size: 10px; font-weight: 750; font-variant-numeric: tabular-nums; }
-  .environment-menu { position: fixed; z-index: 300; width: min(324px, calc(100vw - 24px)); padding: 8px; overflow: auto; overscroll-behavior: contain; box-sizing: border-box; border-radius: 14px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 14px 42px rgba(8, 18, 13, .22); font-family: inherit; scrollbar-width: thin; scrollbar-color: var(--workspace-line) transparent; outline: none; }
+  .environment-menu { position: fixed; z-index: 300; width: min(324px, calc(100vw - 24px)); padding: 8px; display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; border-radius: 14px; color: var(--workspace-text); background: var(--workspace-raised); box-shadow: 0 14px 42px rgba(8, 18, 13, .22); font-family: inherit; outline: none; }
   .environment-menu header { display: flex; align-items: center; justify-content: space-between; padding: 4px 5px 9px; }
   .environment-menu header > strong { color: var(--workspace-strong); font-size: 12px; font-weight: 700; }
   .environment-menu button { border: 0; padding: 0; color: var(--workspace-muted); background: transparent; cursor: pointer; }
   .environment-menu button:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: 2px; }
+  .environment-tabs { display: flex; gap: 4px; flex: 0 0 auto; padding: 0 2px 7px; border-bottom: 1px solid var(--workspace-line); }
+  .environment-menu .environment-tabs button { min-width: 0; min-height: 30px; flex: 1 1 0; display: flex; align-items: center; justify-content: center; gap: 5px; border-radius: 7px; font-size: 10px; font-weight: 700; transition: color 140ms ease, background 140ms ease; }
+  .environment-menu .environment-tabs button:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
+  .environment-menu .environment-tabs button[aria-selected="true"] { color: var(--workspace-accent); background: var(--workspace-accent-soft); }
+  .tab-count { font-size: 9px; font-variant-numeric: tabular-nums; opacity: .75; }
+  .environment-panel { min-height: 0; padding-top: 8px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-line) transparent; }
+  .environment-panel:focus-visible { outline: 2px solid var(--workspace-accent); outline-offset: -2px; border-radius: 8px; }
+  .environment-empty { margin: 0; padding: 22px 10px; color: var(--workspace-muted); font-size: 11px; line-height: 1.45; text-align: center; }
   .environment-menu header > button { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; }
   .environment-menu button:hover:not(:disabled) { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .environment-list { display: grid; gap: 7px; }
@@ -221,8 +264,6 @@
   .environment-head time { align-self: flex-start; color: var(--workspace-muted); font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .environment-state { display: flex; align-items: center; gap: 5px; color: var(--workspace-muted); font-size: 10px; }
   .environment-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--workspace-muted); }
-  .shell-heading { display: block; margin: 12px 5px 7px; color: var(--workspace-muted); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-  .environment-list + .shell-heading { margin-top: 12px; }
   .shell-command { min-width: 0; overflow: hidden; padding: 5px 7px; border-radius: 6px; color: var(--workspace-text); background: var(--workspace-raised); font: 10.5px/1.4 var(--lume-font-code, ui-monospace, monospace); text-overflow: ellipsis; white-space: nowrap; }
   .environment-state i.failed { background: #c0554f; }
   .environment-state i.live { background: #3f9b69; box-shadow: 0 0 0 3px color-mix(in srgb, #3f9b69 22%, transparent); }

@@ -657,8 +657,9 @@ impl Store {
         }
         if let Some(result) = object.get("result") {
             // A list of tickets stays a list; anything else keeps its facts or becomes cut text.
-            let answer = crate::adapters::mcp_issue_digest(result, 40, 90).unwrap_or_else(|| crate::adapters::mcp_answer_value(result));
-            let is_digest = answer.get("issues").is_some() && answer.get("total").is_some();
+            let answer = crate::adapters::mcp_list_digest(result, 40, 90).unwrap_or_else(|| crate::adapters::mcp_answer_value(result));
+            let is_digest = (answer.get("issues").is_some() && answer.get("total").is_some())
+                || (answer.get("items").is_some() && answer.get("total_count").is_some());
             kept.insert("result".into(), if is_digest { answer } else { shrink(answer) });
         }
         if let Some(error) = object.get("error").and_then(Value::as_str) {
@@ -2212,6 +2213,17 @@ mod tests {
         assert_eq!(kept["result"]["issues"].as_array().unwrap().len(), 40);
         assert_eq!(kept["result"]["total"], 60);
         assert_eq!(kept["result"]["issues"][3]["key"], "IPG-3");
+    }
+
+    #[test]
+    fn an_archived_github_search_keeps_its_issues() {
+        let items: Vec<serde_json::Value> = (0..60).map(|n| serde_json::json!({ "number": n, "title": "t".repeat(300), "state": "open", "body": "b".repeat(500) })).collect();
+        let detail = serde_json::json!({ "input": { "query": "is:open" }, "result": [{ "type": "text", "text": serde_json::json!({ "total_count": 75, "items": items }).to_string() }] });
+        let kept: serde_json::Value = serde_json::from_str(&Store::lighten_mcp_detail(&detail.to_string()).unwrap()).unwrap();
+        assert_eq!(kept["result"]["items"].as_array().unwrap().len(), 40);
+        assert_eq!(kept["result"]["total_count"], 75);
+        assert_eq!(kept["result"]["items"][3]["number"], 3);
+        assert!(kept["result"]["items"][3].get("body").is_none());
     }
 
 }

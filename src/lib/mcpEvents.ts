@@ -86,7 +86,7 @@ function payloadOf(data: unknown): Json {
 
 function statusTone(status: string): McpChip["tone"] {
   const value = status.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
-  if (/(done|closed|resolved|conclu|pronto|finaliz|fechad|entregue|released|merged)/.test(value)) return "ok";
+  if (/(done|closed|resolved|conclu|pronto|finaliz|fechad|entregue|released|merged|mergead)/.test(value)) return "ok";
   if (/(block|imped|cancel|reject|rejeit|failed|falh)/.test(value)) return "bad";
   if (/(progress|andamento|doing|review|revis|test|homolog|analis)/.test(value)) return "warn";
   return "info";
@@ -208,6 +208,110 @@ function atlassian(tool: string, input: Json, result: { text: string; data: unkn
   return { ...base, presenter: "generic", subject: key || subjectOf(input), rows: entries(input) };
 }
 
+/** An issue or pull request state, with GitHub's colors: open, merged, closed, draft. */
+function githubState(item: Json): string {
+  if (item.merged === true || text(item.merged_at) || text(item.mergedAt)) return "merged";
+  if (item.draft === true && text(item.state) === "open") return "draft";
+  return text(item.state).toLowerCase();
+}
+function githubTone(state: string): McpChip["tone"] {
+  if (state === "merged") return "ok";
+  if (state === "open") return "info";
+  if (state === "closed" || state === "draft") return "muted";
+  return statusTone(state);
+}
+const githubStateLabel = (state: string, pt: boolean) =>
+  pt ? ({ open: "aberto", closed: "fechado", merged: "mergeado", draft: "rascunho" } as Record<string, string>)[state] ?? state : state;
+
+/** The issues or pull requests an answer lists: a bare array, `{ items }` from a search, `{ issues }` or `{ pull_requests }`. */
+function githubItems(data: unknown, pt: boolean): { items: McpItem[]; total: number } | null {
+  const holder = isObject(data) ? data : {};
+  const list = Array.isArray(data) ? data : [holder.items, holder.issues, holder.pull_requests, holder.pullRequests].find(Array.isArray);
+  if (!Array.isArray(list)) return null;
+  const items = list.filter(isObject).flatMap((item) => {
+    const number = text(item.number);
+    if (!number) return [];
+    const state = githubState(item);
+    return [{ key: `#${number}`, summary: text(item.title), status: githubStateLabel(state, pt), tone: githubTone(state) }];
+  });
+  if (!items.length && list.length) return null;
+  const total = typeof holder.total_count === "number" ? holder.total_count : typeof holder.totalCount === "number" ? holder.totalCount : items.length;
+  return { items, total };
+}
+
+/** `#12` from the call or its answer, also from a `…/issues/12` or `…/pull/12` link. */
+function githubNumber(input: Json, data: Json): string {
+  const direct = text(input.issue_number) || text(input.issueNumber) || text(input.pull_number) || text(input.pullNumber) || text(data.number);
+  if (direct) return `#${direct}`;
+  const link = /\/(?:issues|pull)\/(\d+)/.exec(text(data.html_url) || text(data.url));
+  return link ? `#${link[1]}` : "";
+}
+
+function github(tool: string, input: Json, result: { text: string; data: unknown }, pt: boolean): Presented {
+  const data = payloadOf(result.data);
+  const repo = [text(input.owner), text(input.repo)].filter(Boolean).join("/");
+  const method = text(input.method).toLowerCase();
+  const number = githubNumber(input, data);
+  const isPull = /pull/i.test(tool);
+  const noun = isPull ? (pt ? "PR" : "PR") : "issue";
+  const label = (portuguese: string, english: string) => (pt ? portuguese : english);
+  const title = text(data.title) || text(input.title);
+  const state = githubState(data);
+  const stateChip: McpChip[] = state ? [{ label: githubStateLabel(state, pt), tone: githubTone(state) }] : [];
+  const repoChip: McpChip[] = repo ? [{ label: repo, tone: "muted" }] : [];
+  const base = { serverLabel: "GitHub", chips: [] as McpChip[] };
+  const rows = (...pairs: Array<[string, string]>) => pairs.filter(([, value]) => value);
+  const facts = { key: number, summary: title, repo, noun, status: state ? githubStateLabel(state, pt) : "" };
+
+  const listed = githubItems(result.data, pt);
+  if (listed && (/^(list|search)_/.test(tool) || !number)) {
+    const query = text(input.query) || text(input.q);
+    const kind = /pull/i.test(tool) ? "pulls" : /issue/i.test(tool) ? "issues" : "items";
+    const count = listed.total;
+    const word = kind === "pulls" ? "PRs" : kind === "issues" ? (pt ? "issues" : "issues") : label("itens", "items");
+    return {
+      ...base, presenter: `github:list-${kind}`, subject: query || repo, facts: { ...facts, query },
+      items: listed.items, itemTotal: count,
+      chips: [{ label: `${count} ${word}`, tone: "info" }, ...repoChip],
+      rows: rows([label("Repositório", "Repository"), repo], [label("Busca", "Query"), query]),
+    };
+  }
+  const isRead = /^(get_|issue_read|pull_request_read)/.test(tool) && !/write/.test(tool);
+  if (tool === "merge_pull_request") {
+    return { ...base, presenter: "github:merge", subject: number, facts: { ...facts, status: githubStateLabel("merged", pt) }, chips: [{ label: githubStateLabel("merged", pt), tone: "ok" }, ...repoChip],
+      rows: rows(["PR", number], [label("Repositório", "Repository"), repo], [label("Método", "Method"), text(input.merge_method)]) };
+  }
+  if (tool === "add_issue_comment" || tool === "add_comment_to_pending_review" || /review_write|create_pull_request_review|submit_pending/.test(tool)) {
+    const body = text(input.body) || text(input.comment);
+    const event = text(input.event);
+    return { ...base, presenter: /review/.test(tool) ? "github:review" : "github:comment", subject: number, facts, chips: [...(event ? [{ label: event.toLowerCase(), tone: "info" as const }] : []), ...repoChip],
+      rows: rows([noun, number], [label("Repositório", "Repository"), repo], [label("Comentário", "Comment"), short(body, 200)]) };
+  }
+  if (tool === "create_issue" || tool === "create_pull_request" || ((tool === "issue_write" || tool === "pull_request_write") && method === "create")) {
+    return { ...base, presenter: isPull ? "github:create-pull" : "github:create-issue", subject: number || title, facts, chips: repoChip,
+      rows: rows([noun, number], [label("Título", "Title"), title], [label("Repositório", "Repository"), repo], ["Branch", [text(input.head), text(input.base)].filter(Boolean).join(" → ")]) };
+  }
+  if (/^update_|_write$/.test(tool)) {
+    const changed = ["title", "body", "state", "labels", "assignees", "milestone", "base", "draft"].filter((field) => input[field] !== undefined);
+    return { ...base, presenter: isPull ? "github:edit-pull" : "github:edit-issue", subject: number, facts,
+      chips: [...(text(input.state) ? [{ label: githubStateLabel(text(input.state), pt), tone: githubTone(text(input.state)) }] : changed.slice(0, 3).map((field) => ({ label: field, tone: "muted" as const }))), ...repoChip],
+      rows: rows([noun, number], [label("Título", "Title"), title], [label("Repositório", "Repository"), repo], ...changed.filter((field) => field !== "title").slice(0, 5).map((field) => [humanize(field), display(input[field])] as [string, string])) };
+  }
+  if (isRead && number && (/issue/.test(tool) || /pull/.test(tool))) {
+    const what = method && method !== "get" ? method.replace(/^get_/, "") : "";
+    return { ...base, presenter: isPull ? "github:get-pull" : "github:get-issue", subject: number, facts: { ...facts, what },
+      chips: [...stateChip, ...(what ? [{ label: humanize(what), tone: "muted" as const }] : []), ...repoChip],
+      rows: rows([noun, number], [label("Título", "Title"), title], [label("Repositório", "Repository"), repo], [label("Autor", "Author"), isObject(data.user) ? text(data.user.login) : ""]) };
+  }
+  if (/file_contents|create_or_update_file|push_files|delete_file/.test(tool)) {
+    const path = text(input.path) || (Array.isArray(input.files) ? `${input.files.length} ${label("arquivos", "files")}` : "");
+    const action = /^get/.test(tool) ? "read" : /delete/.test(tool) ? "delete" : "write";
+    return { ...base, presenter: `github:file-${action}`, subject: path, facts: { ...facts, path, branch: text(input.branch) || text(input.ref) }, chips: repoChip,
+      rows: rows([label("Arquivo", "File"), path], [label("Repositório", "Repository"), repo], ["Branch", text(input.branch) || text(input.ref)], [label("Mensagem", "Message"), text(input.message)]) };
+  }
+  return { ...base, presenter: "generic", subject: number || repo || subjectOf(input), facts, chips: repoChip, rows: entries(input) };
+}
+
 /** The short argument that says what a call is about. */
 function subjectOf(input: Json): string | undefined {
   const first = Object.entries(input).find(([key, value]) => !plumbing.has(key) && typeof value === "string" && value.length < 90);
@@ -241,7 +345,7 @@ export function mcpActivityInfo(activity: SessionActivity, language: Language = 
   const error = text(detail.error) || undefined;
   const failed = activity.status === "failed" || Boolean(error);
   const pt = language === "pt-BR";
-  const presented = /atlassian/i.test(named.server) ? atlassian(call.tool, input, answer, pt) : generic(input);
+  const presented = /atlassian/i.test(named.server) ? atlassian(call.tool, input, answer, pt) : /github/i.test(named.server) ? github(call.tool, input, answer, pt) : generic(input);
   const serverLabel = presented.serverLabel || humanize(named.server);
   // The badge already names the product, so the tool's own label does not repeat it.
   const named_ = humanize(call.tool);
@@ -276,6 +380,15 @@ export function mcpEventTitle(info: McpEventInfo, language: Language): string {
       case "jira:search": return pt ? "Buscando tickets" : "Searching issues";
       case "jira:comment": return pt ? `Comentando${key ? ` em ${key}` : ""}` : `Commenting${key ? ` on ${key}` : ""}`;
       case "confluence:search": return pt ? "Buscando páginas" : "Searching pages";
+      case "github:list-issues": return pt ? "Buscando issues" : "Searching issues";
+      case "github:list-pulls": return pt ? "Buscando PRs" : "Searching pull requests";
+      case "github:get-issue": case "github:get-pull": return pt ? `Lendo ${key || "no GitHub"}` : `Reading ${key || "on GitHub"}`;
+      case "github:create-issue": return pt ? "Criando uma issue" : "Creating an issue";
+      case "github:create-pull": return pt ? "Abrindo um PR" : "Opening a pull request";
+      case "github:edit-issue": case "github:edit-pull": return pt ? `Editando ${key || info.facts.noun}` : `Editing ${key || info.facts.noun}`;
+      case "github:merge": return pt ? `Mergeando ${key || "um PR"}` : `Merging ${key || "a pull request"}`;
+      case "github:comment": return pt ? `Comentando${key ? ` em ${key}` : ""}` : `Commenting${key ? ` on ${key}` : ""}`;
+      case "github:review": return pt ? `Revisando ${key || "um PR"}` : `Reviewing ${key || "a pull request"}`;
       default: break;
     }
   }
@@ -291,6 +404,21 @@ export function mcpEventTitle(info: McpEventInfo, language: Language): string {
     case "confluence:create": return pt ? `Criou a página${title ? ` ${title}` : ""}` : `Created the page${title ? ` ${title}` : ""}`;
     case "confluence:update": return pt ? `Atualizou a página${title ? ` ${title}` : ""}` : `Updated the page${title ? ` ${title}` : ""}`;
     case "confluence:get": return pt ? `Leu a página${title ? ` ${title}` : ""}` : `Read the page${title ? ` ${title}` : ""}`;
+    case "github:list-issues": return pt ? `Buscou issues${info.facts.query ? ` · ${info.facts.query}` : ""}` : `Searched issues${info.facts.query ? ` · ${info.facts.query}` : ""}`;
+    case "github:list-pulls": return pt ? `Buscou PRs${info.facts.query ? ` · ${info.facts.query}` : ""}` : `Searched pull requests${info.facts.query ? ` · ${info.facts.query}` : ""}`;
+    case "github:get-issue": case "github:get-pull": {
+      const what = info.facts.what ? ` (${info.facts.what.replace(/_/g, " ")})` : "";
+      return key ? (pt ? `Leu ${key}${what}${summary ? ` · ${summary}` : ""}` : `Read ${key}${what}${summary ? ` · ${summary}` : ""}`) : (pt ? `Leu ${info.facts.noun === "PR" ? "um PR" : "uma issue"}` : `Read ${info.facts.noun === "PR" ? "a pull request" : "an issue"}`);
+    }
+    case "github:create-issue": return pt ? `Criou a issue${key ? ` ${key}` : ""}${summary ? ` · ${summary}` : ""}` : `Created issue${key ? ` ${key}` : ""}${summary ? ` · ${summary}` : ""}`;
+    case "github:create-pull": return pt ? `Abriu o PR${key ? ` ${key}` : ""}${summary ? ` · ${summary}` : ""}` : `Opened pull request${key ? ` ${key}` : ""}${summary ? ` · ${summary}` : ""}`;
+    case "github:edit-issue": case "github:edit-pull": return pt ? `Editou ${key || info.facts.noun}${summary ? ` · ${summary}` : ""}` : `Edited ${key || info.facts.noun}${summary ? ` · ${summary}` : ""}`;
+    case "github:merge": return pt ? `Mergeou ${key || "um PR"}` : `Merged ${key || "a pull request"}`;
+    case "github:comment": return key ? (pt ? `Comentou em ${key}` : `Commented on ${key}`) : (pt ? "Comentou no GitHub" : "Commented on GitHub");
+    case "github:review": return key ? (pt ? `Revisou ${key}` : `Reviewed ${key}`) : (pt ? "Revisou um PR" : "Reviewed a pull request");
+    case "github:file-read": return pt ? `Leu ${info.facts.path || "um arquivo"}` : `Read ${info.facts.path || "a file"}`;
+    case "github:file-write": return pt ? `Gravou ${info.facts.path || "arquivos"}${info.facts.branch ? ` em ${info.facts.branch}` : ""}` : `Wrote ${info.facts.path || "files"}${info.facts.branch ? ` to ${info.facts.branch}` : ""}`;
+    case "github:file-delete": return pt ? `Apagou ${info.facts.path || "um arquivo"}` : `Deleted ${info.facts.path || "a file"}`;
     default: return info.subject ? `${info.toolLabel} · ${info.subject}` : info.toolLabel;
   }
 }
@@ -308,6 +436,14 @@ export function mcpRunTitle(activities: SessionActivity[], language: Language): 
     case "jira:get": return pt ? `${count} ${plural("ticket lido", "tickets lidos")}` : `Read ${count} ${plural("issue", "issues")}`;
     case "jira:search": return pt ? `${count} buscas` : `${count} searches`;
     case "jira:comment": return pt ? `${count} comentários` : `${count} comments`;
+    case "github:get-issue": return pt ? `${count} ${plural("issue lida", "issues lidas")}` : `Read ${count} ${plural("issue", "issues")}`;
+    case "github:get-pull": return pt ? `${count} ${plural("PR lido", "PRs lidos")}` : `Read ${count} pull ${plural("request", "requests")}`;
+    case "github:create-issue": return pt ? `${count} ${plural("issue criada", "issues criadas")}` : `Created ${count} ${plural("issue", "issues")}`;
+    case "github:edit-issue": case "github:edit-pull": return pt ? `${count} edições no GitHub` : `${count} GitHub edits`;
+    case "github:comment": return pt ? `${count} comentários` : `${count} comments`;
+    case "github:merge": return pt ? `${count} ${plural("PR mergeado", "PRs mergeados")}` : `Merged ${count} pull ${plural("request", "requests")}`;
+    case "github:list-issues": case "github:list-pulls": return pt ? `${count} buscas` : `${count} searches`;
+    case "github:file-read": return pt ? `${count} arquivos lidos` : `Read ${count} files`;
     default: return pt ? `${count} chamadas · ${first?.toolLabel ?? "MCP"}` : `${count} calls · ${first?.toolLabel ?? "MCP"}`;
   }
 }
@@ -317,7 +453,7 @@ export function mcpRunChips(activities: SessionActivity[], language: Language = 
   const infos = activities.map((activity) => mcpActivityInfo(activity, language)).filter((info): info is McpEventInfo => Boolean(info));
   const counts = new Map<string, { count: number; tone: McpChip["tone"] }>();
   for (const info of infos) {
-    const status = info.presenter === "jira:transition" ? info.facts.status : "";
+    const status = info.presenter === "jira:transition" || info.presenter === "github:merge" || ((info.presenter === "github:edit-issue" || info.presenter === "github:edit-pull") && text(info.input.state)) ? info.facts.status || text(info.input.state) : "";
     if (!status) continue;
     const entry = counts.get(status) ?? { count: 0, tone: statusTone(status) };
     entry.count += 1;

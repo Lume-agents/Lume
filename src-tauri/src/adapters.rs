@@ -1339,6 +1339,51 @@ pub(crate) fn mcp_issue_digest(result: &Value, limit: usize, summary_chars: usiz
     Some(json!({ "issues": kept, "total": issues.len(), "isLast": holder.get("isLast").cloned().unwrap_or(Value::Bool(true)) }))
 }
 
+/// The issues or pull requests a GitHub answer lists (a bare array, `{items}`, `{issues}`, `{pull_requests}`),
+/// reduced to their number, title and state, as `{items, total_count}`.
+pub(crate) fn mcp_github_digest(result: &Value, limit: usize, title_chars: usize) -> Option<Value> {
+    let answer = mcp_answer_value(result);
+    let list = match &answer {
+        Value::Array(list) => list,
+        Value::Object(map) => ["items", "issues", "pull_requests", "pullRequests"]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(Value::as_array))?,
+        _ => return None,
+    };
+    let kept: Vec<Value> = list
+        .iter()
+        .filter_map(|item| {
+            let number = item.get("number")?.as_u64()?;
+            let mut entry = json!({
+                "number": number,
+                "title": truncate(item.get("title").and_then(Value::as_str).unwrap_or(""), title_chars),
+                "state": item.get("state").cloned().unwrap_or(Value::Null),
+            });
+            for key in ["merged", "merged_at", "draft"] {
+                if let Some(value) = item.get(key).filter(|value| !value.is_null()) {
+                    entry[key] = value.clone();
+                }
+            }
+            Some(entry)
+        })
+        .take(limit)
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    let total = answer
+        .get("total_count")
+        .or_else(|| answer.get("totalCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or(list.len() as u64);
+    Some(json!({ "items": kept, "total_count": total }))
+}
+
+/// The tickets, issues or pull requests an MCP answer lists, kept as a smaller list of the same kind.
+pub(crate) fn mcp_list_digest(result: &Value, limit: usize, text_chars: usize) -> Option<Value> {
+    mcp_issue_digest(result, limit, text_chars).or_else(|| mcp_github_digest(result, limit, text_chars))
+}
+
 /// What an MCP tool was asked and what it answered, as one JSON object the chat reads back (`{input, result, error}`).
 /// A call too large to keep whole stays valid JSON: the biggest parts become truncated text.
 fn mcp_activity_detail(input: Option<&Value>, result: Option<&Value>, error: Option<&str>) -> String {
@@ -1356,7 +1401,7 @@ fn mcp_activity_detail(input: Option<&Value>, result: Option<&Value>, error: Opt
     let mut text = render(&object);
     // A long list keeps its tickets: only what the chat shows of each one has to fit.
     if text.len() > MCP_DETAIL_LIMIT {
-        if let Some(digest) = object.get("result").and_then(|result| mcp_issue_digest(result, 120, 160)) {
+        if let Some(digest) = object.get("result").and_then(|result| mcp_list_digest(result, 120, 160)) {
             object.insert("result".into(), digest);
             text = render(&object);
         }

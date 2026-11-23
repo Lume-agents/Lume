@@ -65,10 +65,10 @@ assert.equal(mcpRunTitle([created, { ...created, id: "x" }], "pt-BR"), "2 ticket
 assert.equal(sameMcpTool(moved, edit), false);
 
 // Other servers get a readable title and a table of their arguments instead of raw JSON.
-const other = call("list_pull_requests", { repo: "Vibetex/ipg-mobile", state: "open" }, [{ type: "text", text: "[]" }], "completed", "github");
+const other = call("list_merge_requests", { repo: "Vibetex/ipg-mobile", state: "open" }, [{ type: "text", text: "[]" }], "completed", "gitlab");
 const otherInfo = mcpActivityInfo(other, "en");
-assert.equal(otherInfo.serverLabel, "Github");
-assert.equal(activityDisplayTitle(other, "en"), "List pull requests · Vibetex/ipg-mobile");
+assert.equal(otherInfo.serverLabel, "Gitlab");
+assert.equal(activityDisplayTitle(other, "en"), "List merge requests · Vibetex/ipg-mobile");
 assert.deepEqual(otherInfo.rows, [["Repo", "Vibetex/ipg-mobile"], ["State", "open"]]);
 
 // A failed call says so, and one without a name that points at an MCP server is left alone.
@@ -121,3 +121,37 @@ assert.equal(activityDisplayTitle(moving, "pt-BR"), "Movendo IPG-253");
 assert.equal(activityDisplayTitle(moving, "en"), "Moving IPG-253");
 
 console.log("mcp events test passed");
+
+{
+// GitHub: issues and pull requests read as their number, title and state, like Jira tickets.
+const gh = (tool, input, result, status) => call(tool, input, result, status, "github");
+const text = (value) => [{ type: "text", text: JSON.stringify(value) }];
+const issue = gh("issue_read", { method: "get", owner: "lume", repo: "app", issue_number: 42 }, text({ number: 42, title: "Crash ao abrir", state: "open", user: { login: "ana" } }));
+const issueInfo = mcpActivityInfo(issue, "pt-BR");
+assert.equal(issueInfo.serverLabel, "GitHub");
+assert.equal(mcpEventTitle(issueInfo, "pt-BR"), "Leu #42 · Crash ao abrir");
+assert.deepEqual(issueInfo.chips.map((chip) => [chip.label, chip.tone]), [["aberto", "info"], ["lume/app", "muted"]]);
+assert.equal(activityCategory(issue), "mcp");
+
+const merged = gh("merge_pull_request", { owner: "lume", repo: "app", pullNumber: 7, merge_method: "squash" }, text({ merged: true, sha: "abc" }));
+assert.equal(mcpEventTitle(mcpActivityInfo(merged, "pt-BR"), "pt-BR"), "Mergeou #7");
+assert.equal(mcpActivityInfo(merged).chips[0].tone, "ok");
+
+const created = gh("create_pull_request", { owner: "lume", repo: "app", title: "Fix crash", head: "fix", base: "main" }, text({ id: "1", url: "https://github.com/lume/app/pull/8" }));
+assert.equal(mcpEventTitle(mcpActivityInfo(created, "en"), "en"), "Opened pull request #8 · Fix crash");
+
+const closed = gh("issue_write", { method: "update", owner: "lume", repo: "app", issue_number: 42, state: "closed" }, text({ number: 42, title: "Crash ao abrir", state: "closed" }));
+assert.equal(mcpEventTitle(mcpActivityInfo(closed, "pt-BR"), "pt-BR"), "Editou #42 · Crash ao abrir");
+assert.equal(mcpActivityInfo(closed, "pt-BR").chips[0].label, "fechado");
+
+const search = gh("search_issues", { query: "is:open label:bug" }, text({ total_count: 30, items: [{ number: 1, title: "A", state: "open" }, { number: 2, title: "B", state: "closed", pull_request: {} }] }));
+const searchInfo = mcpActivityInfo(search, "pt-BR");
+assert.equal(searchInfo.presenter, "github:list-issues");
+assert.equal(mcpEventTitle(searchInfo, "pt-BR"), "Buscou issues · is:open label:bug");
+assert.deepEqual(searchInfo.items.map((item) => [item.key, item.status]), [["#1", "aberto"], ["#2", "fechado"]]);
+assert.equal(searchInfo.itemTotal, 30);
+
+const pulls = gh("list_pull_requests", { owner: "lume", repo: "app" }, text([{ number: 9, title: "Feat", state: "closed", merged_at: "2026-01-01" }]));
+assert.deepEqual(mcpActivityInfo(pulls).items.map((item) => [item.key, item.status, item.tone]), [["#9", "merged", "ok"]]);
+assert.equal(mcpRunTitle([merged, merged], "pt-BR"), "2 PRs mergeados");
+}

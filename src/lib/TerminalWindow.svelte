@@ -77,8 +77,7 @@
   import { requiresCodexCliTakeover, sessionCapabilities } from "$lib/sessionCapabilities";
   import { resolveTerminalSession } from "$lib/sessionIdentity";
   import { interruptNoticeText } from "$lib/interruptNotice";
-  import { parsePromptIntent, promptWithIntent, type PromptIntent } from "$lib/promptIntent";
-  import PromptIntentChips from "$lib/PromptIntentChips.svelte";
+  import { parsePromptIntent, promptIntentHint, promptIntentLabel, promptIntents, promptWithIntent, type PromptIntent } from "$lib/promptIntent";
   import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
   import {
     orderTerminalsByPosition,
@@ -4186,12 +4185,11 @@
             <span class="queue-shortcut"><kbd>Tab</kbd><small>{steeringQueued ? tr("Steering…", "Enviando…") : session.agent === "claude_code" && promptIsRunning ? tr("Interrupt and send", "Interromper e enviar") : tr("Send now", "Enviar agora")}</small></span>
           </button>
         {/if}
-        <div class="intent-row"><PromptIntentChips bind:intent={promptIntent} {language} disabled={!canCompose} /></div>
         <div class="composer-controls">
           {#if ["codex", "claude_code"].includes(session.agent) || (canCompose && capabilities?.canAttachImages)}
             <div class="composer-leading-actions composer-tools">
               <button
-                class:active={composerToolsOpen}
+                class:active={composerToolsOpen || Boolean(promptIntent)}
                 class="composer-tools-trigger"
                 type="button"
                 aria-expanded={composerToolsOpen}
@@ -4210,6 +4208,13 @@
                       <span><strong>{tr("Attach file", "Anexar arquivo")}</strong><small>{promptAttachments.length}/4</small></span>
                     </button>
                   {/if}
+                  {#each promptIntents as option (option)}
+                    <button type="button" role="menuitemcheckbox" aria-checked={promptIntent === option} class:active={promptIntent === option} disabled={!canCompose || sending}
+                      onclick={() => (promptIntent = promptIntent === option ? null : option)}>
+                      <span class="tool-icon"><LumeIcon name={option === "todo" ? "task-list" : option === "goal" ? "goal" : "mode-plan"} size={15} /></span>
+                      <span><strong>{promptIntentLabel(option, language === "pt-BR")}</strong><small>{promptIntent === option ? tr("On for the next prompt", "Ligado no próximo prompt") : promptIntentHint(option, language === "pt-BR")}</small></span>
+                    </button>
+                  {/each}
                   {#if session.agent === "claude_code" || session.agent === "omp" || session.agent === "codex"}
                     <button disabled={!canCompact} type="button" role="menuitem" onclick={() => void compactContext()}>
                       <span class="tool-icon"><LumeIcon name="compact" size={15} /></span>
@@ -4812,7 +4817,6 @@
   .model-pending-note { margin: 0; padding: 7px 9px; border-radius: 8px; color: #7b673e; background: rgba(190, 143, 62, .1); font: 650 var(--chat-tiny-font-size)/1.4 var(--lume-font-ui, Inter, sans-serif); }
   @keyframes model-spin { to { transform: rotate(360deg); } }
   .terminal-composer { position: relative; box-sizing: border-box; min-height: 63px; padding: 7px 8px 8px 10px; display: flex; flex: 0 0 auto; flex-direction: column; align-items: stretch; gap: 6px; border-top: 1px solid rgba(97, 119, 109, 0.11); }
-  .intent-row { display: flex; margin: 0 0 4px; }
   .composer-controls { min-width: 0; min-height: 0; display: flex; flex: 1; align-items: flex-end; gap: 6px; }
   .composer-leading-actions { position: relative; display: flex; flex: 0 0 auto; flex-direction: column; justify-content: flex-end; gap: 4px; }
   .terminal-composer .composer-tools-trigger { color: #5d7469; border: 1px solid rgba(82, 106, 95, 0.12); background: rgba(80, 105, 94, 0.055); transition: color 140ms ease, border-color 140ms ease, background 140ms ease, transform 140ms ease; }

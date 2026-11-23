@@ -35,8 +35,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   import WorkspaceChatIcon from "$lib/WorkspaceChatIcon.svelte";
   import SendPlaneIcon from "$lib/SendPlaneIcon.svelte";
   import LumeSelect from "$lib/LumeSelect.svelte";
-  import { parsePromptIntent, promptWithIntent, type PromptIntent } from "$lib/promptIntent";
-  import PromptIntentChips from "$lib/PromptIntentChips.svelte";
+  import { parsePromptIntent, promptIntentHint, promptIntentLabel, promptIntents, promptWithIntent, type PromptIntent } from "$lib/promptIntent";
   import QuestionAnswerCard from "$lib/QuestionAnswerCard.svelte";
   import { isQuestionAnswerId } from "$lib/questionAnswers";
   import { agentSlashCommands, filterSlashCommands, findSlashCommand, loadAgentSlashCommands, slashCommandQuery, slashCommandText, type AgentSlashCommand, type SlashCommand } from "$lib/slashCommands";
@@ -1476,6 +1475,15 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     return value || tr("Default", "Padrão");
   }
 
+  function effortShortLabel(value: string) {
+    switch (value.toLowerCase()) {
+      case "minimal": return "Min";
+      case "medium": return "Med";
+      case "inherit": return tr("Auto", "Auto");
+      default: return value || tr("Default", "Padrão");
+    }
+  }
+
   function effortTone(value: string) {
     switch (value.toLowerCase()) {
       case "ultra": return "#9a70e8";
@@ -1483,6 +1491,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       case "xhigh": return "#e6813f";
       case "high": return "#ed9a48";
       case "medium": return "#eeb561";
+      case "low": return "#43b47d";
       default: return "#4e98ca";
     }
   }
@@ -1491,6 +1500,14 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
     const values = effortValues();
     if (values.length < 2) return 0;
     return currentEffortIndex() / (values.length - 1) * 100;
+  }
+
+  function chooseEffortValue(effort: string) {
+    if (codexCliOwnsSettings) { void requestSettingsTakeover(); return; }
+    if (modelControlsDisabled) return;
+    if (session.agent === "claude_code") claudeEffort = effort;
+    else selectedEffort = effort;
+    void saveAgentControls();
   }
 
   function chooseEffortIndex(event: Event) {
@@ -3356,6 +3373,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
           <button
             class="attach-button plus-button"
             class:active={plusMenuOpen}
+            class:intent-on={Boolean(promptIntent)}
             type="button"
             aria-haspopup="menu"
             aria-expanded={plusMenuOpen}
@@ -3377,6 +3395,14 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                 <LumeIcon name="note" size={15} />
                 <span><strong>{tr("Attach note", "Anexar nota")}</strong><small>@note:</small></span>
               </button>
+              {#each promptIntents as option (option)}
+                <button type="button" role="menuitemcheckbox" aria-checked={promptIntent === option} class="auto-compact" disabled={!canCompose || sending}
+                  onclick={() => (promptIntent = promptIntent === option ? null : option)}>
+                  <LumeIcon name={option === "todo" ? "task-list" : option === "goal" ? "goal" : "mode-plan"} size={15} />
+                  <span><strong>{promptIntentLabel(option, language === "pt-BR")}</strong><small>{promptIntentHint(option, language === "pt-BR")}</small></span>
+                  <i class="switch" class:on={promptIntent === option} aria-hidden="true"></i>
+                </button>
+              {/each}
               {#if session.agent === "claude_code" || session.agent === "omp" || session.agent === "codex"}
                 <button type="button" role="menuitem" disabled={!canCompact} onclick={() => void compactContext()}>
                   <LumeIcon name="compact" size={15} />
@@ -3544,7 +3570,6 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
       </div>
       {#if supportsAgentControls}
       <div class="composer-tools">
-        <PromptIntentChips bind:intent={promptIntent} {language} disabled={!canCompose} />
         <div class="agent-controls" bind:this={controlsRoot}>
           <button class:active={controlsOpen} class="model-trigger" type="button"
             aria-label={tr("Choose model and effort", "Escolher modelo e esforço")}
@@ -3612,17 +3637,35 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
                   </label>
                 {/if}
                 {#if effortValues().length}
+                  {@const efforts = effortValues()}
+                  {@const activeEffortIndex = currentEffortIndex()}
                   <div class:max={currentEffort().toLowerCase() === "max"} class:ultra={currentEffort().toLowerCase() === "ultra"} class="controls-field effort-field"
                     style={`--effort-tone:${effortTone(currentEffort())};--effort-progress:${effortProgress()}%;--effort-ratio:${effortProgress() / 100};`}>
-                    <span>{tr("Reasoning effort", "Esforço de raciocínio")}<b aria-live="polite">{effortLabel()}</b></span>
+                    <span>{tr("Reasoning effort", "Esforço de raciocínio")}<b class="effort-pill" aria-live="polite">{effortLabel()}</b></span>
                     <div class="effort-track">
-                      <span class="effort-progress" aria-hidden="true"></span>
+                      <span class="effort-rail" aria-hidden="true">
+                        <span class="effort-progress"></span>
+                      </span>
+                      {#each efforts as effort, index (effort || index)}
+                        {@const ratio = efforts.length > 1 ? (index / (efforts.length - 1)) * 100 : 0}
+                        <i class="effort-node" class:passed={index <= activeEffortIndex} class:current={index === activeEffortIndex} style:left={`${ratio}%`} aria-hidden="true"></i>
+                      {/each}
                       <span class="effort-thumb" aria-hidden="true"></span>
-                      <input type="range" min="0" max={Math.max(0, effortValues().length - 1)} step="1"
-                        value={currentEffortIndex()} disabled={modelControlsDisabled}
+                      <input type="range" min="0" max={Math.max(0, efforts.length - 1)} step="1"
+                        value={activeEffortIndex} disabled={modelControlsDisabled}
                         aria-label={tr("Reasoning effort", "Nível de raciocínio")} aria-valuetext={effortLabel()}
                         oninput={chooseEffortIndex} onchange={() => void saveAgentControls()} />
                     </div>
+                    {#if efforts.length > 1}
+                      <div class="effort-steps" aria-hidden="true">
+                        {#each efforts as effort, index (effort || index)}
+                          {@const ratio = (index / (efforts.length - 1)) * 100}
+                          <button type="button" class:active={index === activeEffortIndex} class:passed={index < activeEffortIndex}
+                            disabled={modelControlsDisabled} tabindex="-1" style:left={`${ratio}%`}
+                            onclick={() => chooseEffortValue(effort)}>{effortShortLabel(effort)}</button>
+                        {/each}
+                      </div>
+                    {/if}
                   </div>
                 {/if}
                 {#if promptIsRunning && session.agent !== "opencode" && session.agent !== "grok"}<p class="controls-note">{session.agent === "codex" || session.agent === "antigravity"
@@ -3788,25 +3831,32 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .controls-field > span { display: flex; align-items: center; justify-content: space-between; color: var(--workspace-muted); font-size: 10px; font-weight: 760; }
   .controls-field > span b { color: var(--effort-tone, var(--workspace-accent)); font-size: 10px; text-transform: capitalize; transition: color 180ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1); }
   .controls-field :global(.lume-select) { width: 100%; }
-  .effort-field { gap: 5px; }
-  .effort-track { position: relative; height: 34px; margin: 0 12px 1px; display: flex; align-items: center; isolation: isolate; }
-  .effort-track::before, .effort-progress { position: absolute; right: 0; left: 0; height: 12px; border-radius: 999px; content: ""; }
-  .effort-track::before { border: 1px solid color-mix(in srgb, var(--workspace-muted) 16%, var(--workspace-line)); background: color-mix(in srgb, var(--workspace-muted) 14%, transparent); box-shadow: inset 0 1px 2px color-mix(in srgb, var(--workspace-strong) 8%, transparent); }
-  .effort-progress { z-index: 0; background: linear-gradient(90deg, #4e98ca, var(--effort-tone)); box-shadow: 0 2px 7px color-mix(in srgb, var(--effort-tone) 18%, transparent); transform: scaleX(var(--effort-ratio)); transform-origin: left; transition: transform 240ms cubic-bezier(.16, 1, .3, 1), background 180ms ease, box-shadow 180ms ease; }
-  .effort-thumb { position: absolute; z-index: 1; left: var(--effort-progress); box-sizing: border-box; width: 24px; height: 24px; border: 4px solid var(--workspace-raised); border-radius: 48% 52% 46% 54%; background: var(--effort-tone); box-shadow: 0 0 0 1px color-mix(in srgb, var(--effort-tone) 76%, transparent), 0 4px 10px rgba(0, 0, 0, .2); pointer-events: none; transform: translateX(-50%); transition: left 240ms cubic-bezier(.16, 1, .3, 1), border-radius 180ms ease, background 180ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1), box-shadow 180ms ease; }
-  .effort-thumb::before { position: absolute; z-index: -1; top: 3px; right: calc(100% - 5px); width: 12px; height: 10px; border-radius: 999px 4px 4px 999px; background: var(--effort-tone); content: ""; opacity: var(--effort-ratio); transform: scaleX(.86); transform-origin: right; transition: opacity 180ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1); }
-  .effort-track input { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; margin: 0; appearance: none; opacity: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-  .effort-track:hover .effort-thumb { border-radius: 56% 44% 52% 48%; transform: translateX(-50%) scale(1.06); }
-  .effort-track:hover .effort-thumb::before { transform: scaleX(1.08); }
-  .effort-track:has(input:active) .effort-thumb { border-radius: 42% 58% 45% 55%; transform: translateX(-50%) scale(1.16, .88); }
-  .effort-track:has(input:active) .effort-thumb::before { transform: scaleX(1.32); }
-  .effort-track:has(input:focus-visible) { border-radius: 999px; outline: 2px solid color-mix(in srgb, var(--workspace-accent) 68%, transparent); outline-offset: 2px; }
+  .effort-field { gap: 4px; }
+  .effort-field > span b.effort-pill { height: 20px; padding: 0 8px; display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--effort-tone, var(--workspace-accent)) 45%, transparent); border-radius: 999px; color: var(--effort-tone, var(--workspace-accent)); background: color-mix(in srgb, var(--effort-tone, var(--workspace-accent)) 14%, transparent); box-shadow: 0 0 12px color-mix(in srgb, var(--effort-tone, var(--workspace-accent)) 18%, transparent); font-size: 10px; font-weight: 760; letter-spacing: .01em; text-transform: capitalize; transition: color 180ms ease, border-color 180ms ease, background 180ms ease, box-shadow 180ms ease; }
+  .effort-track { position: relative; height: 28px; margin: 2px 13px 0; display: flex; align-items: center; isolation: isolate; }
+  .effort-rail { position: absolute; right: -11px; left: -11px; height: 14px; border: 1px solid color-mix(in srgb, var(--workspace-muted) 22%, var(--workspace-line)); border-radius: 999px; background: color-mix(in srgb, var(--workspace-pane) 76%, rgba(4, 10, 8, .34)); box-shadow: inset 0 1px 3px rgba(0, 0, 0, .28); overflow: hidden; pointer-events: none; }
+  .effort-progress { position: absolute; inset: 0; width: calc(11px + (100% - 22px) * var(--effort-ratio)); border-radius: 999px; background: linear-gradient(90deg, #43b47d 0%, color-mix(in srgb, #43b47d 38%, var(--effort-tone)) 48%, var(--effort-tone) 100%); box-shadow: 0 0 14px color-mix(in srgb, var(--effort-tone) 32%, transparent); transition: width 240ms cubic-bezier(.16, 1, .3, 1), background 180ms ease, box-shadow 180ms ease; }
+  .effort-node { position: absolute; z-index: 1; top: 50%; width: 5px; height: 5px; border-radius: 50%; background: color-mix(in srgb, var(--workspace-muted) 42%, var(--workspace-line)); pointer-events: none; transform: translate(-50%, -50%); transition: background 180ms ease, box-shadow 180ms ease, transform 180ms ease, opacity 150ms ease; }
+  .effort-node.passed { background: rgba(255, 255, 255, .78); box-shadow: 0 0 5px rgba(255, 255, 255, .35); }
+  .effort-node.current { opacity: 0; transform: translate(-50%, -50%) scale(.4); }
+  .effort-thumb { position: absolute; z-index: 2; left: var(--effort-progress); box-sizing: border-box; width: 22px; height: 22px; border: 3px solid var(--effort-tone); border-radius: 50%; background: radial-gradient(circle, color-mix(in srgb, var(--effort-tone) 42%, var(--workspace-raised)) 0 42%, #fff 46% 100%); box-shadow: 0 0 0 3px color-mix(in srgb, var(--effort-tone) 24%, transparent), 0 0 14px color-mix(in srgb, var(--effort-tone) 48%, transparent), 0 3px 8px rgba(0, 0, 0, .32); pointer-events: none; transform: translateX(-50%); transition: left 240ms cubic-bezier(.16, 1, .3, 1), border-color 180ms ease, background 180ms ease, transform 180ms cubic-bezier(.16, 1, .3, 1), box-shadow 180ms ease; }
+  .effort-track input { position: absolute; z-index: 3; top: 0; right: -11px; bottom: 0; left: -11px; width: calc(100% + 22px); height: 100%; margin: 0; appearance: none; opacity: 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .effort-track:hover .effort-thumb { transform: translateX(-50%) scale(1.08); box-shadow: 0 0 0 4px color-mix(in srgb, var(--effort-tone) 30%, transparent), 0 0 18px color-mix(in srgb, var(--effort-tone) 56%, transparent), 0 4px 10px rgba(0, 0, 0, .36); }
+  .effort-track:has(input:active) .effort-thumb { transform: translateX(-50%) scale(1.13); }
+  .effort-track:has(input:focus-visible) .effort-rail { outline: 2px solid color-mix(in srgb, var(--workspace-accent) 68%, transparent); outline-offset: 3px; }
   .effort-track:has(input:disabled) { opacity: .46; }
   .effort-track:has(input:disabled) input { cursor: default; }
+  .effort-steps { position: relative; height: 18px; margin: 1px 13px 0; }
+  .composer .effort-steps > button { position: absolute; top: 0; width: auto; height: 18px; padding: 0 3px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; color: var(--workspace-muted); background: transparent; font-size: 10px; font-weight: 640; letter-spacing: -.01em; text-transform: capitalize; white-space: nowrap; transform: translateX(-50%); cursor: pointer; transition: color 150ms ease, font-weight 150ms ease; }
+  .composer .effort-steps > button:first-child { transform: translateX(-28%); }
+  .composer .effort-steps > button:last-child { transform: translateX(-72%); }
+  .composer .effort-steps > button:hover:not(:disabled) { color: var(--workspace-strong); background: transparent; }
+  .composer .effort-steps > button.passed { color: color-mix(in srgb, var(--workspace-strong) 72%, var(--workspace-muted)); }
+  .composer .effort-steps > button.active { color: var(--effort-tone, var(--workspace-accent)); font-weight: 780; }
   .effort-field.max .effort-thumb { animation: max-thumb-pulse 1.8s ease-in-out infinite alternate; }
-  .effort-field.ultra .effort-track::before { background: linear-gradient(90deg, color-mix(in srgb, #7652c6 32%, transparent), color-mix(in srgb, #b48aff 54%, transparent), color-mix(in srgb, #7652c6 32%, transparent)); background-size: 220% 100%; box-shadow: inset 0 1px 2px rgba(50, 31, 83, .18), 0 3px 12px rgba(154, 112, 232, .2); animation: ultra-slider-flow 2.4s linear infinite; }
+  .effort-field.ultra .effort-rail { background: linear-gradient(90deg, color-mix(in srgb, #7652c6 28%, transparent), color-mix(in srgb, #b48aff 44%, transparent), color-mix(in srgb, #7652c6 28%, transparent)); background-size: 220% 100%; box-shadow: inset 0 1px 2px rgba(50, 31, 83, .18), 0 3px 12px rgba(154, 112, 232, .2); animation: ultra-slider-flow 2.4s linear infinite; }
   .effort-field.ultra .effort-progress { background: linear-gradient(90deg, #7652c6, #c6a9ff, #8d62df); background-size: 180% 100%; box-shadow: 0 3px 12px rgba(154, 112, 232, .35); animation: ultra-slider-flow 2.4s linear infinite; }
-  .effort-field.ultra .effort-thumb { box-shadow: 0 0 0 1px #9a70e8, 0 0 12px rgba(154, 112, 232, .48); }
+  .effort-field.ultra .effort-thumb { box-shadow: 0 0 0 3px rgba(154, 112, 232, .28), 0 0 16px rgba(154, 112, 232, .56); }
   .controls-model-row { min-width: 0; min-height: 34px; margin-top: 0; display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; align-items: center; gap: 5px; }
   .model-picker { min-width: 0; width: 100%; }
   .model-picker :global(.lume-select) { width: 100%; }
@@ -4112,6 +4162,7 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   .composer .plus-menu > button:hover:not(:disabled) { background: var(--workspace-subtle); }
   .composer .plus-menu > button:disabled { opacity: .45; cursor: default; }
   .plus-menu > button > span { min-width: 0; display: grid; gap: 1px; }
+  .composer .plus-button.intent-on::after { position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--workspace-accent); content: ""; }
   .plus-menu strong { color: var(--workspace-strong); font-size: 11px; font-weight: 700; }
   .plus-menu small { color: var(--workspace-muted); font-size: 10px; }
   .context-meter { height: 33px; padding: 0 4px; display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; align-self: flex-end; color: var(--workspace-muted); font-size: 10px; font-variant-numeric: tabular-nums; cursor: default; }
@@ -4228,5 +4279,5 @@ import { controlsDiffer, isFastServiceTier, type ControlsSnapshot } from "$lib/a
   }
   @media (max-height: 640px) { .conversation { padding-top: 17px; padding-bottom: 18px; }.pane-header { min-height: 56px; }.composer { padding-top: 9px; padding-bottom: 10px; } }
   @media (prefers-reduced-motion: reduce) { .session-pane, .latest-button, .status-badge.status-running i, .send-spinner, .plane-launch, .takeover-backdrop, .takeover-dialog, .writer-conflict-backdrop, .writer-conflict-dialog, .agent-controls-popover, .controls-loading i, .load-earlier-icon.loading, .agent-typing .typing-label, .agent-typing .typing-label.compacting, .composer-field.beam, .composer-field.beam::before, .composer-field.beam::after, .sources-scrim, .sources-sidebar, .final-actions button.loading :global(.lume-icon) { animation: none; }.agent-typing .typing-label { color: #5a91b5; background: none; }.pane-header::after, .pane-actions button, .writer-conflict-dialog footer button, .changed-file, .changed-file > :global(.lume-icon:last-child), .changed-files-toggle > :global(.lume-icon:last-child), .composer-field, .composer, .composer.crossfade-out, .composer.crossfade-in, .composer button, .composer button :global(.lume-icon), .composer button :global(.send-plane-icon), .time-gutter time, .final-actions, .final-actions button { transition: none; } }
-  @media (prefers-reduced-motion: reduce) { .effort-field.max .effort-thumb, .effort-field.ultra .effort-track::before, .effort-field.ultra .effort-progress { animation: none; }.effort-thumb, .effort-thumb::before, .effort-progress { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .effort-field.max .effort-thumb, .effort-field.ultra .effort-rail, .effort-field.ultra .effort-progress { animation: none; }.effort-thumb, .effort-node, .effort-progress, .effort-field > span b.effort-pill { transition: none; } }
 </style>

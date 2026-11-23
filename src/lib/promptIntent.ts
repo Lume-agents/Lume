@@ -12,7 +12,16 @@ export const promptIntents: PromptIntent[] = ["todo", "goal", "planning"];
 export const lumeIntentMarker = "Lume request attached to this prompt (the person chose it, follow it):";
 
 export function promptIntentLabel(intent: PromptIntent, pt: boolean): string {
-  return { todo: "TO DO", goal: pt ? "Goal" : "Goal", planning: pt ? "Plano" : "Plan" }[intent];
+  return { todo: pt ? "Lista de tarefas" : "To-do list", goal: "Goal", planning: pt ? "Plano" : "Plan" }[intent];
+}
+
+/** What turning the option on does to the next prompt, for the menu's second line. */
+export function promptIntentHint(intent: PromptIntent, pt: boolean): string {
+  return {
+    todo: pt ? "Lista de tarefas antes de começar" : "A to-do list before the work starts",
+    goal: pt ? "Este prompt vira o objetivo do chat" : "This prompt becomes the chat's goal",
+    planning: pt ? "Um plano, e espera sua aprovação" : "A plan, then waits for your approval",
+  }[intent];
 }
 
 /** `/todo fix login` → the intent and the request without the command. */

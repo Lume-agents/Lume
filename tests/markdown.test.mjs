@@ -27,6 +27,23 @@ const expectedNestedLink = '<p>Veja <a href="https://www.npmjs.com/package/@pixe
 assert.equal(renderSafeMarkdown(nestedLink), expectedNestedLink);
 assert.equal(renderMobileMarkdown(nestedLink), expectedNestedLink);
 assert.equal(renderSafeMarkdown("[`<script>`](javascript:evil)"), "<p><code>&lt;script&gt;</code></p>");
+
+// User-controlled private-use characters are text, never renderer placeholders.
+const forgedTokens = Array.from({ length: 20 }, (_, i) => `[x](https://a/\uE000${Math.max(0, i - 1)}\uE001\uE000${Math.max(0, i - 1)}\uE001)`).join(" ");
+const safeForgedOutput = renderSafeMarkdown(forgedTokens);
+assert.ok(safeForgedOutput.length < forgedTokens.length * 10, "forged placeholders must not expand recursively");
+assert.ok(safeForgedOutput.includes("\uE0000\uE001"), "private-use characters remain visible text");
+assert.doesNotMatch(renderSafeMarkdown('[x](https://a/<https://b>)'), /href="[^"]*<a /, "generated tokens never enter href attributes");
+for (const input of [
+  '<img src=x onerror="alert(1)">',
+  '<svg onload="alert(1)"><script>alert(1)</script></svg>',
+  '[x](javascript:alert(1))',
+  '[x](data:text/html,alert(1))',
+  '[x](https://example.com/"onmouseover="alert)',
+]) {
+  const html = renderSafeMarkdown(input);
+  assert.doesNotMatch(html, /<(?:img|svg|script)\b|href="(?:javascript|data):|\s+on(?:error|load|mouseover)="/i, `unsafe markup for ${input}`);
+}
 assert.equal(renderWorkspaceMarkdownWithFileBadges(nestedLink, () => "<svg></svg>"), expectedNestedLink);
 
 const table = renderSafeMarkdown(`| Phase | Status |
@@ -41,6 +58,9 @@ assert.equal(renderMobileMarkdown(`| Phase | Status |\n| :--- | ---: |\n| Contex
 assert.equal(renderSafeMarkdown("A | B\nStill text"), "<p>A | B<br>Still text</p>");
 
 const icon = () => '<svg class="inline-file-icon" aria-hidden="true"></svg>';
+const forgedBadge = renderWorkspaceMarkdownWithFileBadges('[link](https://example.com/\uE100LUMEFILE0\uE101) [file](src/main.rs)', icon, '/work');
+assert.doesNotMatch(forgedBadge, /href="[^"]*<button/, "message text cannot inject a badge into a link attribute");
+assert.equal((forgedBadge.match(/class="inline-file-badge"/g) ?? []).length, 1);
 const cited = renderWorkspaceMarkdownWithFileBadges(
   "Feito no chat do workspace (Documents/Projetos/Ideias/Lume/src/lib/WorkspaceSessionPane.svelte).",
   icon,

@@ -32,6 +32,11 @@ function formatEmphasis(value) {
 function renderInline(source) {
   /** @type {string[]} */
   const tokens = [];
+  // Input must not be able to manufacture placeholders: resolving forged
+  // references can otherwise recursively expand a tiny string into gigabytes.
+  let tokenPrefix = `\uE000${source.length}:`;
+  while (source.includes(tokenPrefix)) tokenPrefix += ":";
+  const tokenPattern = new RegExp(`${tokenPrefix}(\\d+)\uE001`, "g");
   /** @param {string} html */
   // A pull request or issue of GitHub is marked so the chat can preview it in place.
   const githubReference = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:pull|issues)\/\d+(?:[/?#].*)?$/;
@@ -40,14 +45,14 @@ function renderInline(source) {
   /** @param {string} html */
   const stash = (html) => {
     const index = tokens.push(html) - 1;
-    return `\uE000${index}\uE001`;
+    return `${tokenPrefix}${index}\uE001`;
   };
 
   let value = source
     .replace(/`([^`\n]+)`/g, (_, code) => stash(`<code>${escapeHtml(code)}</code>`))
     .replace(/<(https?:\/\/[^>\s]+)>/gi, (_, href) => {
       const safeHref = safeLink(href);
-      if (!safeHref) return escapeHtml(href);
+      if (!safeHref || safeHref.includes(tokenPrefix)) return href;
       return stash(
         `<a${linkClass(safeHref)} href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${escapeHtml(href)}</a>`,
       );
@@ -56,7 +61,7 @@ function renderInline(source) {
       /\[([^\]\n]+)\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g,
       (match, label, href) => {
         const safeHref = safeLink(href);
-        if (!safeHref) return label;
+        if (!safeHref || safeHref.includes(tokenPrefix)) return label;
         return stash(
           `<a${linkClass(safeHref)} href="${escapeHtml(safeHref)}" target="_blank" rel="noopener noreferrer">${formatEmphasis(escapeHtml(label))}</a>`,
         );
@@ -70,7 +75,6 @@ function renderInline(source) {
     );
 
   value = formatEmphasis(escapeHtml(value));
-  const tokenPattern = /\uE000(\d+)\uE001/g;
   // A link label can contain an earlier inline-code token. Resolve nested
   // tokens before substituting the outer link, without leaving markers visible.
   for (let index = 0; index < tokens.length; index += 1) {

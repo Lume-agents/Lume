@@ -1,7 +1,6 @@
 import { renderSafeMarkdown } from "./markdown.js";
 
 const inlineReference = /`[^`\n]*`|(!?)\[([^\]\n]*)\]\((<[^>\n]+>|[^)\n]+)\)|\(([^()\n]+)\)/g;
-const tokenPattern = /\uE100LUMEFILE(\d+)\uE101/g;
 /** @type {Record<string, string>} */
 const htmlEscapes = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" };
 
@@ -50,8 +49,14 @@ function openablePath(path, workingDirectory) {
 export function renderWorkspaceMarkdownWithFileBadges(source, renderIcon, workingDirectory) {
   /** @type {string[]} */
   const badges = [];
+  const text = String(source ?? "");
+  // Only substitute placeholders created during this render, never text from
+  // a message that happens to resemble one, especially inside an href.
+  let tokenPrefix = `\uE100LUMEFILE${text.length}:`;
+  while (text.includes(tokenPrefix)) tokenPrefix += ":";
+  const tokenPattern = new RegExp(`${tokenPrefix}(\\d+)\uE101`, "g");
   let inFence = false;
-  const marked = String(source ?? "").split("\n").map((line) => {
+  const marked = text.split("\n").map((line) => {
     if (/^\s*```/.test(line)) {
       inFence = !inFence;
       return line;
@@ -66,7 +71,7 @@ export function renderWorkspaceMarkdownWithFileBadges(source, renderIcon, workin
       const tag = path ? "button" : "span";
       const action = path ? ` type="button" data-local-file="${escapeHtml(path)}"` : "";
       const badge = `<${tag} class="inline-file-badge"${action} title="${escapeHtml(reference.path)}">${renderIcon(reference.name)}<span class="inline-file-name">${escapeHtml(reference.name)}</span></${tag}>`;
-      const token = `\uE100LUMEFILE${badges.push(badge) - 1}\uE101`;
+      const token = `${tokenPrefix}${badges.push(badge) - 1}\uE101`;
       return parenthesizedPath === undefined ? token : `(${token})`;
     });
   }).join("\n");

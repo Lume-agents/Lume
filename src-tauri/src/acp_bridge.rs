@@ -1404,6 +1404,7 @@ fn handle_update(
         }
         return;
     }
+    let previous_kind = last_update_kind(id, kind);
     if agent.is_antigravity() && matches!(kind, "tool_call" | "tool_call_update") {
         if let Some(tool) = crate::antigravity_acp::tool_update(id, update) {
             if let Some(question) = tool.question {
@@ -1447,7 +1448,10 @@ fn handle_update(
             if live && kind == "user_message_chunk" {
                 return;
             }
-            if !live {
+            // Outside a live turn (replays, or text the agent sends after the
+            // prompt already ended) chunks of one message must share a bubble;
+            // only a change of speaker or a tool call in between starts a new one.
+            if !live && previous_kind.as_deref() != Some(kind) {
                 if let Ok(mut turns) = turn_sequence.lock() {
                     *turns.entry(id.into()).or_default() += 1;
                 }
@@ -1512,6 +1516,15 @@ fn handle_update(
     let mut event = base_event(agent, id, HookEventKind::Activity);
     event.activity = Some(activity);
     let _ = event_server::publish_event(state, app, event);
+}
+
+/// Records `kind` as the latest update of `session` and returns the previous one.
+fn last_update_kind(session: &str, kind: &str) -> Option<String> {
+    static LAST: std::sync::OnceLock<Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+    LAST.get_or_init(Default::default)
+        .lock()
+        .ok()?
+        .insert(session.into(), kind.into())
 }
 
 fn plan_detail(update: &Value) -> String {

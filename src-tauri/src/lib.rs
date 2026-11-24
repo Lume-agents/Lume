@@ -62,6 +62,7 @@ mod protocol;
 pub mod relay_e2e;
 #[allow(dead_code)]
 pub mod relay_link;
+mod release_notes_window;
 mod remote_sessions;
 mod repository;
 mod session_containers;
@@ -4545,6 +4546,8 @@ pub fn run() {
             tour_card::place_tour_card,
             tour_card::fit_tour_card,
             tour_card::close_tour_card,
+            release_notes_window::open_release_notes_window,
+            release_notes_window::close_release_notes_window,
             list_agent_extensions,
             list_extension_catalog,
             get_extension_github_stars,

@@ -336,11 +336,11 @@
 
   // The first time the panel is open with nothing else on it (setup guide, release notes), a short tour shows the Orb.
   $effect(() => {
-    if (!expanded || onboardingOpen || startupChooserOpen || orbTourOpen) return;
+    if (!expanded || onboardingOpen || startupChooserOpen || orbTourOpen || $appUpdates.notes !== null) return;
     try { if (localStorage.getItem(orbTourKey) !== null) return; }
     catch { return; /* Without storage it would show every time; Settings still has it. */ }
     const timer = window.setInterval(() => {
-      if (document.querySelector('[role="dialog"], [aria-modal="true"]')) return;
+      if ($appUpdates.notes !== null || document.querySelector('[role="dialog"], [aria-modal="true"]')) return;
       window.clearInterval(timer);
       orbTourOpen = true;
     }, 1200);
@@ -3061,7 +3061,7 @@
   {#if renameTakeoverSession}
     <CodexTakeoverDialog session={renameTakeoverSession} language={preferences.language} onClose={() => (renameTakeoverSession = null)} onTaken={() => { renameTakeoverSession = null; void refreshSessions(false); }} />
   {/if}
-  <AppUpdateNotice language={preferences.language} dark={effectiveDark} ready={updatePresentationReady && !startupChooserOpen && !onboardingOpen} surfaceOpen={expanded} noticeVisible={view !== "settings"} onReveal={async () => { if (!expanded) await toggleExpanded(); }} />
+  <AppUpdateNotice language={preferences.language} dark={effectiveDark} ready={updatePresentationReady && !startupChooserOpen && !onboardingOpen} surfaceOpen={expanded} noticeVisible={view !== "settings"} detached onReveal={async () => { if (!expanded) await toggleExpanded(); }} />
   {#if cliAssociationSessionId}
     {#key cliAssociationSessionId}
       <CodexCliAssociationDialog sessionId={cliAssociationSessionId} language={preferences.language} dark={effectiveDark} onClose={() => { cliAssociationSessionId = null; }} onLinked={() => refreshSessions(false)} />
@@ -3109,7 +3109,7 @@
       {/if}
     </button>
   {:else}
-    <section use:observePanelSize class:content-visible={contentVisible} class:morphing class:measuring={measuringPanel} class:palette-open={paletteOpen} class:launcher-open={launcherOpen} class:workflow-settings-open={workflowSettingsOpen} class:onboarding={startupChooserOpen || onboardingOpen} class:guide={onboardingOpen} class:release-notes-open={$appUpdates.notes !== null && !startupChooserOpen && !onboardingOpen} class="panel">
+    <section use:observePanelSize class:content-visible={contentVisible} class:morphing class:measuring={measuringPanel} class:palette-open={paletteOpen} class:launcher-open={launcherOpen} class:workflow-settings-open={workflowSettingsOpen} class:onboarding={startupChooserOpen || onboardingOpen} class:guide={onboardingOpen} class="panel">
       {#if onboardingOpen}
         <div class="startup-chooser-layer">
           <OnboardingGuide
@@ -4549,7 +4549,6 @@
 
   .panel.onboarding { min-height: 320px; }
   .panel.guide { min-height: 520px; }
-  .panel.release-notes-open { min-height: 460px; }
   .agent-setup-host { --agent-setup-font: 10px; color: inherit; --workspace-accent: #3f9b69; }
   .tour-replay { height: 28px; padding: 0 11px; flex: 0 0 auto; border: 1px solid var(--line, rgba(127, 140, 132, .3)); border-radius: 8px; color: inherit; background: transparent; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
   .tour-replay:hover { border-color: #3f9b69; color: #3f9b69; }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fade } from "svelte/transition";
+  import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { appUpdates, appUpdateAction } from "$lib/appUpdateRuntime";
@@ -10,30 +11,65 @@
   import LumeIcon from "$lib/LumeIcon.svelte";
   import type { Language } from "$lib/i18n";
 
-  let { language, dark = false, ready = true, surfaceOpen = true, noticeVisible = true, onReveal = async () => {} }: {
-    language: Language; dark?: boolean; ready?: boolean; surfaceOpen?: boolean; noticeVisible?: boolean;
+  let { language, dark = false, ready = true, surfaceOpen = true, noticeVisible = true, detached = false, onReveal = async () => {} }: {
+    language: Language; dark?: boolean; ready?: boolean; surfaceOpen?: boolean; noticeVisible?: boolean; detached?: boolean;
     onReveal?: () => Promise<void>;
   } = $props();
   const pt = $derived(language === "pt-BR");
   const notes = $derived($appUpdates.notes);
   const showNotice = $derived($appUpdates.notify && ($appUpdates.status !== "available" || $appUpdates.dismissedVersion !== $appUpdates.availableVersion));
   let visible = $state(false);
+  let detachedWindowOpen = $state(false);
+  let detachedFailed = $state(false);
   let visibilityRevision = $state(0);
   let presented = "";
   let disposed = false;
   let linkError = $state(false);
 
+  const useDetachedNotes = $derived(detached && !detachedFailed && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
+
   $effect(() => {
     const enabled = ready;
     const key = notes ? `notes:${notes.version}` : showNotice ? `update:${$appUpdates.availableVersion}:${$appUpdates.errorOperation ?? ""}` : "";
+    const wantDetached = useDetachedNotes && Boolean(notes);
     visibilityRevision;
-    if (!enabled || !key) { visible = false; return; }
+    if (!enabled || !key) {
+      visible = false;
+      if (detachedWindowOpen) {
+        detachedWindowOpen = false;
+        void invoke("close_release_notes_window").catch(() => undefined);
+      }
+      return;
+    }
     let cancelled = false;
     void (async () => {
       const native = "__TAURI_INTERNALS__" in window;
       const shown = native ? await getCurrentWindow().isVisible() : document.visibilityState !== "hidden";
       if (cancelled || disposed) return;
-      if (!shown) { visible = false; return; }
+      if (!shown) {
+        visible = false;
+        return;
+      }
+      if (wantDetached) {
+        if (presented !== key || !detachedWindowOpen) {
+          presented = key;
+          const opened = await invoke("open_release_notes_window").then(() => true, () => false);
+          if (cancelled || disposed) return;
+          if (opened) {
+            detachedWindowOpen = true;
+            visible = false;
+            return;
+          }
+          detachedFailed = true;
+        } else {
+          visible = false;
+          return;
+        }
+      }
+      if (detachedWindowOpen && !notes) {
+        detachedWindowOpen = false;
+        void invoke("close_release_notes_window").catch(() => undefined);
+      }
       if (presented !== key) { presented = key; await onReveal(); }
       if (!cancelled && !disposed) visible = true;
     })().catch(() => { /* A hidden/unavailable window must not disrupt the active mode. */ });
@@ -48,7 +84,13 @@
     if ("__TAURI_INTERNALS__" in window) void getCurrentWindow().onFocusChanged(refresh).then(stop => {
       if (disposed) stop(); else unlisten = stop;
     }).catch(() => undefined);
-    return () => { disposed = true; unlisten?.(); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); };
+    return () => {
+      disposed = true;
+      unlisten?.();
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+      if (detachedWindowOpen) void invoke("close_release_notes_window").catch(() => undefined);
+    };
   });
 
   function closeNotes() { void appUpdateAction("dismiss_notes"); }
@@ -60,7 +102,7 @@
 </script>
 
 {#if visible && ready && surfaceOpen}
-  {#if notes}
+  {#if notes && !useDetachedNotes}
     <div class="release-notes-backdrop" class:dark transition:fade={{ duration: 160 }}>
       <div class="release-notes-dialog" role="dialog" aria-modal="true" aria-labelledby="release-notes-title" tabindex="-1" use:dialogFocus={{ onDismiss: closeNotes }}>
         <header><h2 id="release-notes-title">{pt ? "Novidades do Lume" : "What’s new in Lume"} <span>{notes.version}</span></h2><button class="close" type="button" aria-label={pt ? "Fechar notas da versão" : "Close release notes"} onclick={closeNotes}><LumeIcon name="close" size={18} /></button></header>

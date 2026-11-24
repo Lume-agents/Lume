@@ -4171,7 +4171,7 @@
   .sidebar-toggle:hover, .sidebar-toggle:focus-visible { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .brand-header strong { color: var(--workspace-strong); font-size: 14px; letter-spacing: -.02em; }
   .brand-header small { color: var(--workspace-muted); font-size: 10px; font-weight: 650; letter-spacing: .01em; }
-  .compact-mode, .settings-button, .inspector-button { width: 29px; height: 29px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: color-mix(in srgb, var(--workspace-text) 82%, var(--workspace-muted)); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
+  .compact-mode, .settings-button, .inspector-button { width: 29px; height: 29px; padding: 0; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 8px; color: color-mix(in srgb, var(--workspace-text) 82%, var(--workspace-muted)); background: transparent; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
   .compact-mode:hover, .settings-button:hover, .settings-button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .inspector-button:hover, .inspector-button.active { color: var(--workspace-accent); background: var(--workspace-subtle); }
   .settings-scrim { position: fixed; z-index: 30; inset: 0; display: flex; justify-content: flex-end; background: rgba(8, 17, 13, .38); }
@@ -4180,7 +4180,7 @@
   .workspace-settings > header > span { min-width: 0; flex: 1; display: grid; gap: 3px; }
   .workspace-settings > header strong { color: var(--workspace-strong); font-size: 14px; letter-spacing: -.02em; }
   .workspace-settings > header small { color: var(--workspace-muted); font-size: 10px; }
-  .workspace-settings > header button { width: 31px; height: 31px; display: grid; place-items: center; border: 0; border-radius: 9px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
+  .workspace-settings > header button { width: 31px; height: 31px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 9px; color: var(--workspace-muted); background: transparent; cursor: pointer; }
   .workspace-settings > header button:hover { color: var(--workspace-strong); background: var(--workspace-subtle); }
   .settings-content { min-height: 0; padding: 4px 19px 20px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--workspace-scroll-thumb) transparent; }
   .settings-content::-webkit-scrollbar { width: 7px; }.settings-content::-webkit-scrollbar-track { background: transparent; }.settings-content::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 7px; background: var(--workspace-scroll-thumb); background-clip: content-box; }

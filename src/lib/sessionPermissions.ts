@@ -23,7 +23,7 @@ export function permissionLabel(mode: string, translate: Translate, agent?: stri
     case "agy_accept_edits": return translate("Accept edits", "Aceitar edições");
     case "agy_auto": return translate("Auto", "Automático");
     case "agy_plan": return translate("Plan", "Planejar");
-    case "agy_allow_all": return translate("Allow all tools", "Permitir todas as ferramentas");
+    case "agy_allow_all": return translate("Allow all", "Permitir tudo");
     case "auto":
     case "auto_review": return translate("Approve for me", "Aprovar por mim");
     case "bypassPermissions":

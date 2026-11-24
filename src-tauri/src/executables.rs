@@ -3,6 +3,7 @@ use std::{
     io::Read,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
+    sync::OnceLock,
     thread,
     time::{Duration, Instant},
 };
@@ -159,8 +160,8 @@ pub fn path(name: &str) -> Option<PathBuf> {
 fn resolve(name: &str) -> Option<PathBuf> {
     explicit_path(name)
         .or_else(|| path_lookup(name))
-        .or_else(|| shell_lookup(name))
         .or_else(|| common_user_path(name))
+        .or_else(|| shell_lookup(name))
 }
 
 fn explicit_path(name: &str) -> Option<PathBuf> {
@@ -186,23 +187,86 @@ fn is_plain_command_name(name: &str) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
+fn shell_path_from_invocation(shell: &std::ffi::OsStr, flag: &str) -> Vec<PathBuf> {
+    const SHELL_TIMEOUT: Duration = Duration::from_secs(2);
+    let mut child = match Command::new(shell)
+        .args([flag, r#"printf '\n__LUME_PATH__=%s\n' "$PATH""#])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Vec::new(),
+    };
+    let deadline = Instant::now() + SHELL_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return Vec::new();
+                }
+                let mut output = String::new();
+                if let Some(stdout) = child.stdout.take() {
+                    let _ = stdout.take(32_768).read_to_string(&mut output);
+                }
+                return parse_shell_paths(&output);
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn parse_shell_paths(output: &str) -> Vec<PathBuf> {
+    output
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("__LUME_PATH__="))
+        .map(|value| env::split_paths(value).filter(|dir| !dir.as_os_str().is_empty()).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cached_shell_paths() -> &'static [PathBuf] {
+    static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    PATHS.get_or_init(|| {
+        let shell = env::var_os("SHELL").unwrap_or_else(|| "/bin/bash".into());
+        let mut combined = Vec::new();
+        // Login shell loads ~/.profile / ~/.bash_profile / ~/.zprofile quickly
+        // without interactive prompt plugins; fall back to interactive once only
+        // if login shell did not expose extra directories.
+        let login = shell_path_from_invocation(&shell, "-lc");
+        for dir in login {
+            if !combined.contains(&dir) {
+                combined.push(dir);
+            }
+        }
+        if combined.is_empty() {
+            for dir in shell_path_from_invocation(&shell, "-ic") {
+                if !combined.contains(&dir) {
+                    combined.push(dir);
+                }
+            }
+        }
+        combined
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
 fn shell_lookup(name: &str) -> Option<PathBuf> {
     if !is_plain_command_name(name) {
         return None;
     }
-    let shell = env::var_os("SHELL").unwrap_or_else(|| "/bin/bash".into());
-    // The name goes in as an argument, never as part of the script.
-    let output = Command::new(shell)
-        .args(["-ic", r#"command -v -- "$1""#, "lume", name])
-        .output()
-        .ok()?;
-    output.status.success().then(|| {
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .find(|line| line.starts_with('/'))
-            .map(PathBuf::from)
-    })?
+    cached_shell_paths()
+        .iter()
+        .flat_map(|directory| executable_candidates(directory, name))
+        .find(|path| path.is_file())
 }
 
 #[cfg(target_os = "windows")]
@@ -261,6 +325,13 @@ fn common_user_path(name: &str) -> Option<PathBuf> {
 fn unix_install_directories(home: &Path) -> Vec<PathBuf> {
     vec![
         home.join(".claude/local"),
+        home.join(".opencode/bin"),
+        home.join(".bun/bin"),
+        home.join(".npm-global/bin"),
+        home.join(".volta/bin"),
+        home.join(".local/share/pnpm"),
+        home.join(".local/share/mise/shims"),
+        home.join(".asdf/shims"),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ]
@@ -340,7 +411,19 @@ mod tests {
     fn gui_lookup_covers_claude_local_installs_and_homebrew() {
         let directories = unix_install_directories(Path::new("/Users/me"));
         assert!(directories.contains(&PathBuf::from("/Users/me/.claude/local")));
+        assert!(directories.contains(&PathBuf::from("/Users/me/.opencode/bin")));
         assert!(directories.contains(&PathBuf::from("/opt/homebrew/bin")));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn parses_shell_path_marker_ignoring_rc_banner_noise() {
+        let noisy = "welcome banner\n__LUME_PATH__=/usr/local/bin:/home/me/.local/bin\n";
+        let paths = parse_shell_paths(noisy);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/home/me/.local/bin")]
+        );
     }
 
     #[test]

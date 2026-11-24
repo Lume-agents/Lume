@@ -351,30 +351,38 @@ async fn link_codex_cli_conversation(
 }
 
 #[tauri::command]
-fn rename_session(
+async fn rename_session(
     app: AppHandle,
     state: State<'_, AppState>,
     bridge: State<'_, codex_bridge::CodexBridge>,
     session_id: String,
     name: String,
 ) -> Result<String, String> {
-    let (session, name) = state.session_rename_plan(&session_id, &name)?;
-    if session.agent == AgentKind::Codex
-        && session.source == SessionSource::Cli
-        && session.control_origin == SessionControlOrigin::External
-    {
-        return Err("Take control of this external CLI before renaming its conversation".into());
-    }
-    if session.agent == AgentKind::Codex {
-        let thread_id = session
-            .native_session_id
-            .as_deref()
-            .ok_or_else(|| "Esta sessão do Codex ainda não informou o ID da thread".to_string())?;
-        bridge.set_thread_name(thread_id, &name)?;
-    }
-    let name = state.rename_session(&session_id, &name)?;
-    protocol::emit_sessions_changed(&app);
-    Ok(name)
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    let app_for_emit = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (session, name) = state.session_rename_plan(&session_id, &name)?;
+        if session.agent == AgentKind::Codex
+            && session.source == SessionSource::Cli
+            && session.control_origin == SessionControlOrigin::External
+        {
+            return Err(
+                "Take control of this external CLI before renaming its conversation".into(),
+            );
+        }
+        if session.agent == AgentKind::Codex {
+            let thread_id = session.native_session_id.as_deref().ok_or_else(|| {
+                "Esta sessão do Codex ainda não informou o ID da thread".to_string()
+            })?;
+            bridge.set_thread_name(thread_id, &name)?;
+        }
+        let name = state.rename_session(&session_id, &name)?;
+        protocol::emit_sessions_changed(&app_for_emit);
+        Ok(name)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1113,90 +1121,108 @@ fn set_paired_device_scopes(
 }
 
 #[tauri::command]
-fn execute_hub_command(
+async fn execute_hub_command(
     app: AppHandle,
     state: State<'_, AppState>,
     bridge: State<'_, codex_bridge::CodexBridge>,
     browser: State<'_, browser_server::BrowserControl>,
     workflow_runtime: State<'_, workflow_runtime::WorkflowRuntime>,
     request: protocol::HubCommandRequest,
-) -> protocol::HubCommandResponse {
-    control::execute_hub_command(
-        &app,
-        state.inner(),
-        bridge.inner(),
-        browser.inner(),
-        workflow_runtime.inner(),
-        request,
-    )
+) -> Result<protocol::HubCommandResponse, String> {
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    let browser = browser.inner().clone();
+    let workflow_runtime = workflow_runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::execute_hub_command(&app, &state, &bridge, &browser, &workflow_runtime, request)
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn resolve_permission(
+async fn resolve_permission(
     app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     permission_id: String,
     action: PermissionAction,
 ) -> Result<(), String> {
-    let session = state.connected_session(&session_id)?;
-    if session.agent == AgentKind::Omp
-        && session.control_origin == domain::SessionControlOrigin::Lume
-    {
-        app.state::<omp_rpc::OmpRpc>()
-            .answer_approval(&session_id, &permission_id, action)?;
-    }
-    control::resolve_permission(state.inner(), &session_id, &permission_id, action)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = state.connected_session(&session_id)?;
+        if session.agent == AgentKind::Omp
+            && session.control_origin == domain::SessionControlOrigin::Lume
+        {
+            app.state::<omp_rpc::OmpRpc>()
+                .answer_approval(&session_id, &permission_id, action)?;
+        }
+        control::resolve_permission(&state, &session_id, &permission_id, action)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn resolve_question(
+async fn resolve_question(
     app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     question_id: String,
     answers: Vec<QuestionAnswer>,
 ) -> Result<(), String> {
-    let session = state.connected_session(&session_id)?;
-    if session.agent == AgentKind::Omp
-        && session.control_origin == domain::SessionControlOrigin::Lume
-    {
-        app.state::<omp_rpc::OmpRpc>()
-            .answer_question(&session_id, &question_id, &answers)?;
-    }
-    // Antigravity reads the reply to its question from the next message.
-    let antigravity_answer = (session.agent == AgentKind::Antigravity
-        && session.control_origin == domain::SessionControlOrigin::Lume
-        && question_id.starts_with("agy-question:"))
-    .then(|| {
-        session
-            .pending_question
-            .as_ref()
-            .filter(|question| question.id == question_id)
-            .map(|question| antigravity_acp::answer_prompt(question, &answers))
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = state.connected_session(&session_id)?;
+        if session.agent == AgentKind::Omp
+            && session.control_origin == domain::SessionControlOrigin::Lume
+        {
+            app.state::<omp_rpc::OmpRpc>()
+                .answer_question(&session_id, &question_id, &answers)?;
+        }
+        // Antigravity reads the reply to its question from the next message.
+        let antigravity_answer = (session.agent == AgentKind::Antigravity
+            && session.control_origin == domain::SessionControlOrigin::Lume
+            && question_id.starts_with("agy-question:"))
+        .then(|| {
+            session
+                .pending_question
+                .as_ref()
+                .filter(|question| question.id == question_id)
+                .map(|question| antigravity_acp::answer_prompt(question, &answers))
+        })
+        .flatten()
+        .filter(|answer| !answer.trim().is_empty());
+        control::resolve_question(&state, &session_id, &question_id, answers)?;
+        if let (Some(answer), Some(native_id), Some(cwd)) = (
+            antigravity_answer,
+            session.native_session_id.as_deref(),
+            session.working_directory.as_deref(),
+        ) {
+            state.record_prompt_activity(&session_id, &answer, Vec::new())?;
+            app.state::<acp_bridge::AcpBridges>()
+                .antigravity
+                .prompt_when_idle(native_id, cwd, answer);
+        }
+        Ok(())
     })
-    .flatten()
-    .filter(|answer| !answer.trim().is_empty());
-    control::resolve_question(state.inner(), &session_id, &question_id, answers)?;
-    if let (Some(answer), Some(native_id), Some(cwd)) = (
-        antigravity_answer,
-        session.native_session_id.as_deref(),
-        session.working_directory.as_deref(),
-    ) {
-        state.record_prompt_activity(&session_id, &answer, Vec::new())?;
-        app.state::<acp_bridge::AcpBridges>()
-            .antigravity
-            .prompt_when_idle(native_id, cwd, answer);
-    }
-    Ok(())
+    .await
+    .map_err(|error| error.to_string())?
 }
+
 #[tauri::command]
-fn open_session_source(
+async fn open_session_source(
     state: State<'_, AppState>,
     browser: State<'_, browser_server::BrowserControl>,
     session_id: String,
 ) -> Result<(), String> {
-    control::open_session_source(state.inner(), browser.inner(), &session_id)
+    let state = state.inner().clone();
+    let browser = browser.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::open_session_source(&state, &browser, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1231,8 +1257,10 @@ async fn submit_prompt(
 }
 
 #[tauri::command]
-fn read_local_image_data_url(path: String) -> Result<String, String> {
-    control::local_image_data_url(&path)
+async fn read_local_image_data_url(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || control::local_image_data_url(&path))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 /// The image an agent created or changed, for the preview in the chat.
@@ -1245,22 +1273,27 @@ async fn read_changed_image_data_url(path: String) -> Result<String, String> {
 
 /// Opens a file the agent cited, in the default app, if it is a plain file inside the session's folder.
 #[tauri::command]
-fn open_session_file(
+async fn open_session_file(
     app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     path: String,
 ) -> Result<(), String> {
-    let session = state.connected_session(&session_id)?;
-    let file = session_files::openable_file(
-        session.working_directory.as_deref().unwrap_or_default(),
-        &path,
-    )?;
-    // Windows canonical paths carry a `\\?\` prefix that the shell does not always accept.
-    let file = file.to_string_lossy();
-    app.opener()
-        .open_path(file.strip_prefix(r"\\?\").unwrap_or(&file), None::<String>)
-        .map_err(|error| error.to_string())
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = state.connected_session(&session_id)?;
+        let file = session_files::openable_file(
+            session.working_directory.as_deref().unwrap_or_default(),
+            &path,
+        )?;
+        // Windows canonical paths carry a `\\?\` prefix that the shell does not always accept.
+        let file = file.to_string_lossy();
+        app.opener()
+            .open_path(file.strip_prefix(r"\\?\").unwrap_or(&file), None::<String>)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Saves a file from an agent's response where the person chooses in the system's save dialog. The dialog is
@@ -1353,24 +1386,28 @@ fn set_native_file_dialog_windows(
 }
 
 #[tauri::command]
-fn refresh_agent_rate_limits(
+async fn refresh_agent_rate_limits(
     app: AppHandle,
     state: State<'_, AppState>,
     bridge: State<'_, codex_bridge::CodexBridge>,
     agent: AgentKind,
 ) -> Result<(), String> {
-    match agent {
-        AgentKind::Codex => bridge.refresh_rate_limits(state.inner(), &app),
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || match agent {
+        AgentKind::Codex => bridge.refresh_rate_limits(&state, &app),
         AgentKind::ClaudeCode => {
-            refresh_claude_rate_limits(app, state.inner().clone());
+            refresh_claude_rate_limits(app, state);
             Ok(())
         }
         AgentKind::Antigravity => {
-            refresh_antigravity_rate_limits(app, state.inner().clone());
+            refresh_antigravity_rate_limits(app, state);
             Ok(())
         }
         _ => Ok(()),
-    }
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn refresh_antigravity_rate_limits(app: AppHandle, state: AppState) {
@@ -1454,13 +1491,19 @@ fn refresh_claude_rate_limits(app: AppHandle, state: AppState) {
 }
 
 #[tauri::command]
-fn terminate_session(
+async fn terminate_session(
     app: AppHandle,
     state: State<'_, AppState>,
     bridge: State<'_, codex_bridge::CodexBridge>,
     session_id: String,
 ) -> Result<(), String> {
-    control::terminate_session(&app, state.inner(), bridge.inner(), &session_id)
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::terminate_session(&app, &state, &bridge, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1545,13 +1588,19 @@ async fn fork_codex_thread(
 }
 
 #[tauri::command]
-fn interrupt_prompt(
+async fn interrupt_prompt(
     app: AppHandle,
     state: State<'_, AppState>,
     bridge: State<'_, codex_bridge::CodexBridge>,
     session_id: String,
 ) -> Result<(), String> {
-    control::interrupt_prompt(&app, state.inner(), bridge.inner(), &session_id)
+    let state = state.inner().clone();
+    let bridge = bridge.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        control::interrupt_prompt(&app, &state, &bridge, &session_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2919,9 +2968,20 @@ pub(crate) fn validate_workflow_groups(preferences: &Preferences) -> Result<(), 
 }
 
 #[tauri::command]
-fn set_preferences(
+async fn set_preferences(
     app: AppHandle,
     state: State<'_, AppState>,
+    preferences: Preferences,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || set_preferences_sync(app, state, preferences))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn set_preferences_sync(
+    app: AppHandle,
+    state: AppState,
     mut preferences: Preferences,
 ) -> Result<(), String> {
     const APPEARANCE_THEMES: [&str; 5] = ["lume", "forest", "ocean", "violet", "ember"];
@@ -3470,151 +3530,191 @@ fn restore_terminal_layout(
 }
 
 #[tauri::command]
-fn integration_statuses() -> Result<Vec<IntegrationStatus>, String> {
-    let executable = integrations::lume_executable()?;
-    Ok(integrations::statuses(&executable.to_string_lossy()))
+async fn integration_statuses() -> Result<Vec<IntegrationStatus>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let executable = integrations::lume_executable()?;
+        Ok(integrations::statuses(&executable.to_string_lossy()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn list_resumable_sessions(
+async fn list_resumable_sessions(
     app: AppHandle,
     kind: IntegrationKind,
     state: State<'_, AppState>,
 ) -> Result<Vec<integrations::ResumableSession>, String> {
-    let open_sessions = state
-        .connected_sessions()?
-        .into_iter()
-        .filter_map(|session| session.native_session_id)
-        .collect::<HashSet<_>>();
-    let sessions = if kind == IntegrationKind::OpenCode {
-        app.state::<acp_bridge::AcpBridges>()
-            .opencode
-            .resumable_sessions()?
-    } else if kind == IntegrationKind::Antigravity {
-        // ACP lists every conversation with its title; the CLI's cache keeps one per folder.
-        let acp = &app.state::<acp_bridge::AcpBridges>().inner().antigravity;
-        match acp.available().then(|| acp.resumable_sessions()) {
-            Some(Ok(sessions)) => sessions,
-            _ => integrations::resumable_sessions(&kind)?,
-        }
-    } else {
-        integrations::resumable_sessions(&kind)?
-    };
-    Ok(sessions
-        .into_iter()
-        .filter(|session| !open_sessions.contains(&session.id))
-        .collect())
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let open_sessions = state
+            .connected_sessions()?
+            .into_iter()
+            .filter_map(|session| session.native_session_id)
+            .collect::<HashSet<_>>();
+        let sessions = if kind == IntegrationKind::OpenCode {
+            app.state::<acp_bridge::AcpBridges>()
+                .opencode
+                .resumable_sessions()?
+        } else if kind == IntegrationKind::Antigravity {
+            // ACP lists every conversation with its title; the CLI's cache keeps one per folder.
+            let acp = &app.state::<acp_bridge::AcpBridges>().inner().antigravity;
+            match acp.available().then(|| acp.resumable_sessions()) {
+                Some(Ok(sessions)) => sessions,
+                _ => integrations::resumable_sessions(&kind)?,
+            }
+        } else {
+            integrations::resumable_sessions(&kind)?
+        };
+        Ok(sessions
+            .into_iter()
+            .filter(|session| !open_sessions.contains(&session.id))
+            .collect())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn diagnose_integration(
+async fn diagnose_integration(
     kind: IntegrationKind,
     state: State<'_, AppState>,
 ) -> Result<IntegrationDiagnostic, String> {
-    let executable = integrations::lume_executable()?;
-    let last_event_at = state
-        .connected_sessions()?
-        .into_iter()
-        .filter(|session| {
-            matches!(
-                (&kind, &session.agent),
-                (IntegrationKind::Codex, domain::AgentKind::Codex)
-                    | (IntegrationKind::Claude, domain::AgentKind::ClaudeCode)
-                    | (IntegrationKind::Antigravity, domain::AgentKind::Antigravity)
-                    | (IntegrationKind::OpenCode, domain::AgentKind::OpenCode)
-                    | (IntegrationKind::Grok, domain::AgentKind::Grok)
-                    | (IntegrationKind::DeepSeek, domain::AgentKind::DeepSeek)
-                    | (IntegrationKind::Gemini, domain::AgentKind::Gemini)
-                    | (IntegrationKind::Omp, domain::AgentKind::Omp)
-            )
-        })
-        .map(|session| session.updated_at)
-        .max();
-    integrations::diagnose(&kind, &executable.to_string_lossy(), last_event_at)
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let executable = integrations::lume_executable()?;
+        let last_event_at = state
+            .connected_sessions()?
+            .into_iter()
+            .filter(|session| {
+                matches!(
+                    (&kind, &session.agent),
+                    (IntegrationKind::Codex, domain::AgentKind::Codex)
+                        | (IntegrationKind::Claude, domain::AgentKind::ClaudeCode)
+                        | (IntegrationKind::Antigravity, domain::AgentKind::Antigravity)
+                        | (IntegrationKind::OpenCode, domain::AgentKind::OpenCode)
+                        | (IntegrationKind::Grok, domain::AgentKind::Grok)
+                        | (IntegrationKind::DeepSeek, domain::AgentKind::DeepSeek)
+                        | (IntegrationKind::Gemini, domain::AgentKind::Gemini)
+                        | (IntegrationKind::Omp, domain::AgentKind::Omp)
+                )
+            })
+            .map(|session| session.updated_at)
+            .max();
+        integrations::diagnose(&kind, &executable.to_string_lossy(), last_event_at)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn configure_integration(kind: IntegrationKind, enabled: bool) -> Result<(), String> {
-    let executable = integrations::lume_executable()?;
-    integrations::configure(&kind, &executable.to_string_lossy(), enabled)
+async fn configure_integration(kind: IntegrationKind, enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let executable = integrations::lume_executable()?;
+        integrations::configure(&kind, &executable.to_string_lossy(), enabled)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn vscode_status() -> CompanionStatus {
-    integrations::vscode_status()
+async fn vscode_status() -> Result<CompanionStatus, String> {
+    tauri::async_runtime::spawn_blocking(integrations::vscode_status)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn configure_vscode(app: AppHandle, enabled: bool) -> Result<(), String> {
-    let bundled = app
-        .path()
-        .resolve("lume-vscode.vsix", tauri::path::BaseDirectory::Resource)
-        .map_err(|error| error.to_string())?;
-    let development =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/lume-vscode.vsix");
-    let vsix = if bundled.exists() {
-        bundled
-    } else {
-        development
-    };
-    integrations::configure_vscode(enabled, &vsix)
+async fn configure_vscode(app: AppHandle, enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bundled = app
+            .path()
+            .resolve("lume-vscode.vsix", tauri::path::BaseDirectory::Resource)
+            .map_err(|error| error.to_string())?;
+        let development =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/lume-vscode.vsix");
+        let vsix = if bundled.exists() {
+            bundled
+        } else {
+            development
+        };
+        integrations::configure_vscode(enabled, &vsix)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn reveal_browser_companion(app: AppHandle) -> Result<String, String> {
-    let bundled = app
-        .path()
-        .resolve("chromium", tauri::path::BaseDirectory::Resource)
-        .map_err(|error| error.to_string())?;
-    let development =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../extensions/chromium");
-    let directory = if bundled.exists() {
-        bundled
-    } else {
-        development
-    };
-    app.opener()
-        .open_path(directory.to_string_lossy(), None::<String>)
-        .map_err(|error| error.to_string())?;
-    Ok(directory.to_string_lossy().to_string())
+async fn reveal_browser_companion(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bundled = app
+            .path()
+            .resolve("chromium", tauri::path::BaseDirectory::Resource)
+            .map_err(|error| error.to_string())?;
+        let development =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../extensions/chromium");
+        let directory = if bundled.exists() {
+            bundled
+        } else {
+            development
+        };
+        app.opener()
+            .open_path(directory.to_string_lossy(), None::<String>)
+            .map_err(|error| error.to_string())?;
+        Ok(directory.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn list_external_plugins(
+async fn list_external_plugins(
     app: AppHandle,
 ) -> Result<Vec<agent_plugins::ExternalAgentPlugin>, String> {
-    Ok(agent_plugins::external_catalog(&app))
+    tauri::async_runtime::spawn_blocking(move || Ok(agent_plugins::external_catalog(&app)))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn install_external_plugin(
+async fn install_external_plugin(
     app: AppHandle,
     path: String,
 ) -> Result<agent_plugins::ExternalAgentPlugin, String> {
-    agent_plugins::install_external(&app, std::path::Path::new(&path))
+    tauri::async_runtime::spawn_blocking(move || {
+        agent_plugins::install_external(&app, std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn remove_external_plugin(app: AppHandle, id: String) -> Result<(), String> {
-    agent_plugins::remove_external(&app, &id)
+async fn remove_external_plugin(app: AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || agent_plugins::remove_external(&app, &id))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn reveal_plugin_directory(app: AppHandle) -> Result<String, String> {
-    let directory = agent_plugins::plugin_directory(&app)?;
-    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let template = directory.join("plugin-template.json.example");
-    if !template.exists() {
-        std::fs::write(
-            &template,
-            include_str!("../../docs/external-plugin.example.json"),
-        )
-        .map_err(|error| error.to_string())?;
-    }
-    app.opener()
-        .open_path(directory.to_string_lossy(), None::<String>)
-        .map_err(|error| error.to_string())?;
-    Ok(directory.to_string_lossy().to_string())
+async fn reveal_plugin_directory(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = agent_plugins::plugin_directory(&app)?;
+        std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        let template = directory.join("plugin-template.json.example");
+        if !template.exists() {
+            std::fs::write(
+                &template,
+                include_str!("../../docs/external-plugin.example.json"),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        app.opener()
+            .open_path(directory.to_string_lossy(), None::<String>)
+            .map_err(|error| error.to_string())?;
+        Ok(directory.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -4265,8 +4365,21 @@ pub fn run() {
             )));
             app.manage(ShortcutRegistrationStatus::default());
             app.manage(workspace_windows::WorkspaceWindows::default());
-            if let Err(error) = apply_global_shortcuts(app.handle(), &state.preferences()?) {
-                eprintln!("Could not register global shortcuts: {error}");
+            {
+                let shortcut_app = app.handle().clone();
+                let shortcut_preferences = state.preferences()?;
+                // On GNOME, desktop_shortcuts invokes `gsettings` 17 times; run
+                // initial shortcut sync off the startup main thread so the Orb
+                // appears and responds immediately.
+                let _ = std::thread::Builder::new()
+                    .name("lume-shortcuts-init".into())
+                    .spawn(move || {
+                        if let Err(error) =
+                            apply_global_shortcuts(&shortcut_app, &shortcut_preferences)
+                        {
+                            eprintln!("Could not register global shortcuts: {error}");
+                        }
+                    });
             }
             trace.mark("global shortcuts");
             app.manage(state.clone());

@@ -217,7 +217,9 @@ pub fn statuses(executable: &str) -> Vec<IntegrationStatus> {
         .map(|plugin| {
             let kind = plugin.kind();
             let installed = crate::executables::available(plugin.executable());
-            let omp_version = (kind == IntegrationKind::Omp).then(omp_cli_version).flatten();
+            let omp_version = (kind == IntegrationKind::Omp && installed)
+                .then(omp_cli_version)
+                .flatten();
             let configured = if kind == IntegrationKind::Omp {
                 omp_extension_configured()
             } else {
@@ -3231,10 +3233,11 @@ pub fn refresh_connected(executable: &str) {
 }
 
 pub fn vscode_status() -> CompanionStatus {
-    let installed = command_available("code");
+    let installed = crate::executables::available("code") || command_available("code");
     let configured = installed
         && code_command()
             .arg("--list-extensions")
+            .stdin(std::process::Stdio::null())
             .output()
             .ok()
             .is_some_and(|output| {

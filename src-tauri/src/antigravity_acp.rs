@@ -153,24 +153,28 @@ pub(crate) fn content_diff(update: &Value) -> Option<String> {
     let new_text = diff["newText"].as_str().unwrap_or_default();
     let old_text = diff["oldText"].as_str();
     let new_lines = new_text.lines().collect::<Vec<_>>();
-    let mut text = match old_text {
-        None => format!(
-            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-            new_lines.len()
-        ),
-        Some(old) => format!(
-            "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,{} +1,{} @@\n",
-            old.lines().count(),
-            new_lines.len()
-        ),
-    };
-    for line in old_text.into_iter().flat_map(str::lines) {
-        text.push_str(&format!("-{line}\n"));
+    match old_text {
+        None => {
+            let mut text = format!(
+                "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+                new_lines.len()
+            );
+            for line in new_lines {
+                text.push_str(&format!("+{line}\n"));
+            }
+            Some(text)
+        }
+        Some(old) => {
+            let old_lines = old.lines().collect::<Vec<_>>();
+            let hunks = crate::adapters::unified_diff_hunks(&old_lines, &new_lines, 1, 1, 3);
+            if hunks.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{hunks}"
+            ))
+        }
     }
-    for line in new_lines {
-        text.push_str(&format!("+{line}\n"));
-    }
-    Some(text)
 }
 
 fn question_from(session_id: &str, call_id: &str, params: &Value) -> Option<PendingQuestion> {

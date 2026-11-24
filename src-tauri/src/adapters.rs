@@ -1467,6 +1467,286 @@ fn command_file_activity(
 }
 
 /// A unified diff for a file edit made with an edit tool, when its payload allows one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiffOp<'a> {
+    Equal(&'a str),
+    Delete(&'a str),
+    Insert(&'a str),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MyersMove {
+    Down,
+    Right,
+}
+
+fn myers_choose_move(
+    prev: &[Option<usize>],
+    d: usize,
+    k: isize,
+    n: usize,
+    m: usize,
+) -> Option<(usize, MyersMove)> {
+    let d_i = d as isize;
+    let prev_idx = |diag: isize| ((diag + (d_i - 1)) / 2) as usize;
+    let down = (k < d_i)
+        .then(|| prev[prev_idx(k + 1)])
+        .flatten()
+        .filter(|&x| (x as isize - k) <= m as isize);
+    let right = (k > -d_i)
+        .then(|| prev[prev_idx(k - 1)])
+        .flatten()
+        .map(|x| x + 1)
+        .filter(|&x| x <= n);
+    match (down, right) {
+        (Some(dx), Some(rx)) => {
+            if rx > dx {
+                Some((rx, MyersMove::Right))
+            } else {
+                Some((dx, MyersMove::Down))
+            }
+        }
+        (Some(dx), None) => Some((dx, MyersMove::Down)),
+        (None, Some(rx)) => Some((rx, MyersMove::Right)),
+        (None, None) => None,
+    }
+}
+
+fn myers_line_ops<'a>(old_lines: &[&'a str], new_lines: &[&'a str]) -> Vec<DiffOp<'a>> {
+    const MAX_D: usize = 512;
+    let n = old_lines.len();
+    let m = new_lines.len();
+    let max_d = (n + m).min(MAX_D);
+    let mut trace: Vec<Vec<Option<usize>>> = Vec::new();
+
+    let mut x0 = 0usize;
+    while x0 < n && x0 < m && old_lines[x0] == new_lines[x0] {
+        x0 += 1;
+    }
+    trace.push(vec![Some(x0)]);
+    let mut found_d = (x0 == n && x0 == m).then_some(0usize);
+
+    if found_d.is_none() {
+        'search: for d in 1..=max_d {
+            let prev = trace.last().expect("previous Myers frontier");
+            let mut next = vec![None; d + 1];
+            let d_i = d as isize;
+            for (step, slot) in next.iter_mut().enumerate() {
+                let k = -d_i + (step as isize) * 2;
+                let Some((mut x, _)) = myers_choose_move(prev, d, k, n, m) else {
+                    continue;
+                };
+                while x < n
+                    && (x as isize - k) < m as isize
+                    && old_lines[x] == new_lines[(x as isize - k) as usize]
+                {
+                    x += 1;
+                }
+                *slot = Some(x);
+                if x == n && (x as isize - k) == m as isize {
+                    trace.push(next);
+                    found_d = Some(d);
+                    break 'search;
+                }
+            }
+            trace.push(next);
+        }
+    }
+
+    let Some(final_d) = found_d else {
+        let mut ops = Vec::with_capacity(n + m);
+        ops.extend(old_lines.iter().copied().map(DiffOp::Delete));
+        ops.extend(new_lines.iter().copied().map(DiffOp::Insert));
+        return ops;
+    };
+
+    let mut reversed = Vec::new();
+    let mut x = n;
+    let mut y = m;
+    for d in (1..=final_d).rev() {
+        let k = x as isize - y as isize;
+        let (start_x, mv) =
+            myers_choose_move(&trace[d - 1], d, k, n, m).expect("valid Myers backtrack step");
+        let start_y = (start_x as isize - k) as usize;
+        while x > start_x && y > start_y {
+            x -= 1;
+            y -= 1;
+            reversed.push(DiffOp::Equal(old_lines[x]));
+        }
+        match mv {
+            MyersMove::Down => {
+                y -= 1;
+                reversed.push(DiffOp::Insert(new_lines[y]));
+            }
+            MyersMove::Right => {
+                x -= 1;
+                reversed.push(DiffOp::Delete(old_lines[x]));
+            }
+        }
+    }
+    while x > 0 && y > 0 {
+        x -= 1;
+        y -= 1;
+        reversed.push(DiffOp::Equal(old_lines[x]));
+    }
+    reversed.reverse();
+    reversed
+}
+
+/// Builds standard unified diff hunks from old and new lines so unchanged context lines
+/// inside a replacement block are not counted as deleted and re-added.
+pub(crate) fn unified_diff_hunks(
+    old_lines: &[&str],
+    new_lines: &[&str],
+    base_old: usize,
+    base_new: usize,
+    context: usize,
+) -> String {
+    let mut prefix = 0usize;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    while suffix < old_lines.len() - prefix
+        && suffix < new_lines.len() - prefix
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let old_mid = &old_lines[prefix..old_lines.len() - suffix];
+    let new_mid = &new_lines[prefix..new_lines.len() - suffix];
+    if old_mid.is_empty() && new_mid.is_empty() {
+        return String::new();
+    }
+
+    let mut ops = Vec::with_capacity(prefix + old_mid.len() + new_mid.len() + suffix);
+    ops.extend(old_lines[..prefix].iter().copied().map(DiffOp::Equal));
+    ops.extend(myers_line_ops(old_mid, new_mid));
+    ops.extend(
+        old_lines[old_lines.len() - suffix..]
+            .iter()
+            .copied()
+            .map(DiffOp::Equal),
+    );
+
+    // Put deletions before insertions within each contiguous changed run, matching git diff.
+    let mut run_start = 0usize;
+    while run_start < ops.len() {
+        if matches!(ops[run_start], DiffOp::Equal(_)) {
+            run_start += 1;
+            continue;
+        }
+        let mut run_end = run_start;
+        while run_end < ops.len() && !matches!(ops[run_end], DiffOp::Equal(_)) {
+            run_end += 1;
+        }
+        let mut deletes = Vec::new();
+        let mut inserts = Vec::new();
+        for op in &ops[run_start..run_end] {
+            match *op {
+                DiffOp::Delete(line) => deletes.push(DiffOp::Delete(line)),
+                DiffOp::Insert(line) => inserts.push(DiffOp::Insert(line)),
+                DiffOp::Equal(_) => {}
+            }
+        }
+        for (slot, op) in ops[run_start..run_end]
+            .iter_mut()
+            .zip(deletes.into_iter().chain(inserts))
+        {
+            *slot = op;
+        }
+        run_start = run_end;
+    }
+
+    let mut positions = Vec::with_capacity(ops.len());
+    let mut old_line = base_old;
+    let mut new_line = base_new;
+    for op in &ops {
+        positions.push((old_line, new_line));
+        match op {
+            DiffOp::Equal(_) => {
+                old_line += 1;
+                new_line += 1;
+            }
+            DiffOp::Delete(_) => {
+                old_line += 1;
+            }
+            DiffOp::Insert(_) => {
+                new_line += 1;
+            }
+        }
+    }
+
+    let mut hunks: Vec<(usize, usize)> = Vec::new();
+    for (idx, op) in ops.iter().enumerate() {
+        if matches!(op, DiffOp::Equal(_)) {
+            continue;
+        }
+        let start = idx.saturating_sub(context);
+        let end = (idx + 1 + context).min(ops.len());
+        if let Some((_, prev_end)) = hunks.last_mut() {
+            if start <= *prev_end {
+                *prev_end = (*prev_end).max(end);
+                continue;
+            }
+        }
+        hunks.push((start, end));
+    }
+
+    let mut out = String::new();
+    for (h_start, h_end) in hunks {
+        let mut old_count = 0usize;
+        let mut new_count = 0usize;
+        for op in &ops[h_start..h_end] {
+            match op {
+                DiffOp::Equal(_) => {
+                    old_count += 1;
+                    new_count += 1;
+                }
+                DiffOp::Delete(_) => old_count += 1,
+                DiffOp::Insert(_) => new_count += 1,
+            }
+        }
+        let (raw_old, raw_new) = positions[h_start];
+        let old_start = if old_count == 0 {
+            raw_old.saturating_sub(1)
+        } else {
+            raw_old
+        };
+        let new_start = if new_count == 0 {
+            raw_new.saturating_sub(1)
+        } else {
+            raw_new
+        };
+        out.push_str(&format!(
+            "@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
+        ));
+        for op in &ops[h_start..h_end] {
+            match op {
+                DiffOp::Equal(line) => {
+                    out.push(' ');
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                DiffOp::Delete(line) => {
+                    out.push('-');
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                DiffOp::Insert(line) => {
+                    out.push('+');
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 fn file_change_diff(input: Option<&Value>, response: Option<&Value>) -> Option<String> {
     file_change_diff_for_tool(None, input, response)
@@ -1589,7 +1869,7 @@ pub(crate) fn file_change_diff_for_tool(
                     .filter(|meta| meta.len() < 2 * 1024 * 1024)
                     .and_then(|_| std::fs::read_to_string(&path).ok())
             });
-        let mut diff = header;
+        let mut hunks = String::new();
         for (old, new) in edits {
             let start = on_disk
                 .as_deref()
@@ -1603,19 +1883,9 @@ pub(crate) fn file_change_diff_for_tool(
                 .unwrap_or(1);
             let old_lines: Vec<&str> = old.lines().collect();
             let new_lines: Vec<&str> = new.lines().collect();
-            diff.push_str(&format!(
-                "@@ -{start},{} +{start},{} @@\n",
-                old_lines.len(),
-                new_lines.len()
-            ));
-            for line in old_lines {
-                diff.push_str(&format!("-{line}\n"));
-            }
-            for line in new_lines {
-                diff.push_str(&format!("+{line}\n"));
-            }
+            hunks.push_str(&unified_diff_hunks(&old_lines, &new_lines, start, start, 3));
         }
-        return Some(diff);
+        return (!hunks.is_empty()).then(|| format!("{header}{hunks}"));
     }
 
     let content = ["content", "Content", "CodeContent", "contents"]
@@ -1659,19 +1929,8 @@ pub(crate) fn file_change_diff_for_tool(
         {
             let old_lines: Vec<&str> = existing.lines().collect();
             let new_lines: Vec<&str> = content.lines().collect();
-            let mut diff = header;
-            diff.push_str(&format!(
-                "@@ -1,{} +1,{} @@\n",
-                old_lines.len(),
-                new_lines.len()
-            ));
-            for line in old_lines {
-                diff.push_str(&format!("-{line}\n"));
-            }
-            for line in new_lines {
-                diff.push_str(&format!("+{line}\n"));
-            }
-            return Some(diff);
+            let hunks = unified_diff_hunks(&old_lines, &new_lines, 1, 1, 3);
+            return (!hunks.is_empty()).then(|| format!("{header}{hunks}"));
         }
     }
     None
@@ -4121,6 +4380,83 @@ mod tests {
         );
 
         assert!(file_change_diff(Some(&json!({ "command": "ls" })), None).is_none());
+    }
+
+    #[test]
+    fn edit_tool_diff_counts_only_changed_lines_not_unchanged_context() {
+        let old = [
+            "line 1 old",
+            "keep 2",
+            "keep 3",
+            "keep 4",
+            "keep 5",
+            "keep 6",
+            "keep 7",
+            "keep 8",
+            "keep 9",
+            "line 10 old",
+        ]
+        .join("\n");
+        let new = [
+            "line 1 new",
+            "keep 2",
+            "keep 3",
+            "keep 4",
+            "keep 5",
+            "keep 6",
+            "keep 7",
+            "keep 8",
+            "keep 9",
+            "line 10 new",
+        ]
+        .join("\n");
+        let diff = file_change_diff(
+            Some(&json!({
+                "Path": "/nonexistent/WorkspaceWindow.svelte",
+                "Target": old,
+                "Replacement": new,
+            })),
+            None,
+        )
+        .expect("unified diff");
+        let added = diff
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .count();
+        let removed = diff
+            .lines()
+            .filter(|line| line.starts_with('-') && !line.starts_with("---"))
+            .count();
+        assert_eq!((added, removed), (2, 2), "{diff}");
+        assert!(diff.contains("@@ -1,4 +1,4 @@\n-line 1 old\n+line 1 new\n keep 2\n keep 3\n keep 4\n"), "{diff}");
+        assert!(diff.contains("@@ -7,4 +7,4 @@\n keep 7\n keep 8\n keep 9\n-line 10 old\n+line 10 new\n"), "{diff}");
+
+        let appended = file_change_diff(
+            Some(&json!({
+                "file_path": "/nonexistent/list.ts",
+                "old_string": "a\nb\nc",
+                "new_string": "a\nb\nc\nd",
+            })),
+            None,
+        )
+        .expect("appended line diff");
+        let added = appended
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .count();
+        let removed = appended
+            .lines()
+            .filter(|line| line.starts_with('-') && !line.starts_with("---"))
+            .count();
+        assert_eq!((added, removed), (1, 0), "{appended}");
+        assert!(appended.contains("@@ -1,3 +1,4 @@\n a\n b\n c\n+d\n"), "{appended}");
+
+        // Identical replacement produces no diff.
+        assert!(file_change_diff(
+            Some(&json!({ "Path": "/nonexistent/same.ts", "Target": "x\ny", "Replacement": "x\ny" })),
+            None,
+        )
+        .is_none());
     }
 
     #[test]

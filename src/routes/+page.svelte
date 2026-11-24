@@ -902,10 +902,11 @@
       await loadMonitorOptions();
       await positionWindow();
       overlayReady = true;
+      // Dismiss the compact launch capsule BEFORE routeStartupMode() can expand
+      // the panel for the startup chooser or onboarding, so it never sits stuck over it.
+      if (dismissLaunchSplash()) wakeMascot();
       await routeStartupMode();
       updatePresentationReady = true;
-      // The launch capsule hands over to the Orb, which wakes up once to say it is ready.
-      if (dismissLaunchSplash()) wakeMascot();
 
       const [nextSessions, nextIntegrations, nextVscodeStatus, nextPlugins, nextTerminals] = await Promise.all([
         loadSessions(),
@@ -1175,6 +1176,7 @@
       await waitForOverlayMoves();
     }
     const opening = !expanded;
+    if (opening) dismissLaunchSplash();
     let expandedTarget = currentExpandedSize();
 
     void setTerminalWindowsVisible(opening).catch((error) => {
@@ -1259,6 +1261,22 @@
     if (!isTauri) {
       morphProgress = opening ? 1 : 0;
       overlayPosition = { ...toPosition };
+      return;
+    }
+
+    // XWayland applies X11 ConfigureWindow resizes asynchronously; resizing the
+    // native window 18 times in 300ms stalls Mutter/WebKitGTK and blocks clicks.
+    // Apply the target geometry in a single resize instead.
+    if (displayBackend === "xwayland-fallback") {
+      if (opening) contentVisible = true;
+      await applyCapsuleGeometry({
+        width: to.width,
+        height: to.height,
+        x: toPosition.x,
+        y: toPosition.y,
+      });
+      morphProgress = opening ? 1 : 0;
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       return;
     }
 

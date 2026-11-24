@@ -682,9 +682,12 @@ mod linux {
             let expansion = (f64::from(width - 78) / f64::from(392 - 78)).clamp(0.0, 1.0);
             (22.0 - expansion).round() as i32
         };
-        if window.label() == "main" {
-            // CSS owns the animated Orb/panel contour. A native X11 shape from
-            // a previous allocation can cut the next frame or expanded panel.
+        if window.label() == "main"
+            || window.label() == crate::tour_card::LABEL
+            || window.label() == crate::release_notes_window::LABEL
+        {
+            // CSS owns the animated Orb/panel and floating card contours. A native
+            // X11 shape from a previous allocation can cut the next frame or shadow.
             if let Some(surface) = gtk_window.window() {
                 surface.shape_combine_region(None, 0, 0);
             }
@@ -768,8 +771,12 @@ mod linux {
         if backend.as_deref() == Some("xwayland-fallback") {
             if let Ok(gtk_window) = window.gtk_window() {
                 let is_main_orb = namespace == "lume";
+                let is_floating_card = window.label() == crate::tour_card::LABEL
+                    || window.label() == crate::release_notes_window::LABEL;
                 let hint = if is_main_orb {
                     orb_window_type(std::env::var("LUME_ORB_WINDOW_TYPE").ok().as_deref())
+                } else if is_floating_card {
+                    gtk::gdk::WindowTypeHint::Utility
                 } else {
                     gtk::gdk::WindowTypeHint::Dock
                 };
@@ -780,7 +787,7 @@ mod linux {
                 gtk_window.set_decorated(false);
                 gtk_window.set_keep_above(true);
                 gtk_window.set_skip_taskbar_hint(true);
-                if is_main_orb {
+                if is_main_orb || is_floating_card {
                     gtk_window.set_accept_focus(true);
                     gtk_window.set_focus_on_map(true);
                 }
@@ -1032,6 +1039,109 @@ mod linux {
         }
         true
     }
+    pub fn x11_foreground_is_fullscreen() -> Option<bool> {
+        let api = x11_api()?;
+        let api = api.lock().ok()?;
+        unsafe {
+            let root = (api.functions.XDefaultRootWindow)(api.display);
+            let active_atom = (api.functions.XInternAtom)(
+                api.display,
+                c"_NET_ACTIVE_WINDOW".as_ptr(),
+                xlib::False,
+            );
+            let state_atom = (api.functions.XInternAtom)(
+                api.display,
+                c"_NET_WM_STATE".as_ptr(),
+                xlib::False,
+            );
+            let fullscreen_atom = (api.functions.XInternAtom)(
+                api.display,
+                c"_NET_WM_STATE_FULLSCREEN".as_ptr(),
+                xlib::False,
+            );
+            if active_atom == 0 || state_atom == 0 || fullscreen_atom == 0 {
+                return None;
+            }
+            let mut actual_type = 0;
+            let mut actual_format = 0;
+            let mut item_count = 0;
+            let mut bytes_after = 0;
+            let mut prop = std::ptr::null_mut();
+            let status = (api.functions.XGetWindowProperty)(
+                api.display,
+                root,
+                active_atom,
+                0,
+                1,
+                xlib::False,
+                xlib::XA_WINDOW,
+                &mut actual_type,
+                &mut actual_format,
+                &mut item_count,
+                &mut bytes_after,
+                &mut prop,
+            );
+            if status != xlib::Success as i32 || prop.is_null() {
+                if !prop.is_null() {
+                    (api.functions.XFree)(prop.cast());
+                }
+                return None;
+            }
+            let active_window = if actual_format == 32 && item_count >= 1 {
+                *(prop as *const std::ffi::c_ulong)
+            } else {
+                0
+            };
+            (api.functions.XFree)(prop.cast());
+            if active_window == 0 {
+                return Some(false);
+            }
+
+            let mut state_type = 0;
+            let mut state_format = 0;
+            let mut state_count = 0;
+            let mut state_after = 0;
+            let mut state_prop = std::ptr::null_mut();
+            let state_status = (api.functions.XGetWindowProperty)(
+                api.display,
+                active_window,
+                state_atom,
+                0,
+                32,
+                xlib::False,
+                xlib::XA_ATOM,
+                &mut state_type,
+                &mut state_format,
+                &mut state_count,
+                &mut state_after,
+                &mut state_prop,
+            );
+            if state_status != xlib::Success as i32 || state_prop.is_null() {
+                if !state_prop.is_null() {
+                    (api.functions.XFree)(state_prop.cast());
+                }
+                return Some(false);
+            }
+            let is_fullscreen = if state_format == 32 && state_count > 0 {
+                let atoms = std::slice::from_raw_parts(
+                    state_prop as *const std::ffi::c_ulong,
+                    state_count as usize,
+                );
+                atoms.contains(&fullscreen_atom)
+            } else {
+                false
+            };
+            (api.functions.XFree)(state_prop.cast());
+            Some(is_fullscreen)
+        }
+    }
+
+    pub fn uses_x11_window_coordinates() -> bool {
+        let session_is_x11 = std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("x11");
+        let lume_uses_xwayland =
+            std::env::var("LUME_LINUX_BACKEND").ok().as_deref() == Some("xwayland-fallback");
+        session_is_x11 || lume_uses_xwayland
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1043,20 +1153,22 @@ pub struct XwaylandDragTarget {
 pub fn position(window: &tauri::WebviewWindow) -> Option<(i32, i32)> {
     #[cfg(target_os = "linux")]
     {
-        linux::layer_position(window)
+        if let Some(position) = linux::layer_position(window) {
+            return Some(position);
+        }
+        if !linux::uses_x11_window_coordinates() {
+            return None;
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let position = window.outer_position().ok()?;
-        let origin = window
-            .current_monitor()
-            .ok()
-            .flatten()
-            .map(|monitor| *monitor.position())
-            .unwrap_or_default();
-        // Match move_to's monitor-relative coordinates on secondary displays.
-        Some((position.x - origin.x, position.y - origin.y))
-    }
+    let position = window.outer_position().ok()?;
+    let origin = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| *monitor.position())
+        .unwrap_or_default();
+    // Match move_to's monitor-relative coordinates on secondary displays.
+    Some((position.x - origin.x, position.y - origin.y))
 }
 
 pub fn forget_window(label: &str) {
@@ -1428,6 +1540,9 @@ pub fn set_file_dialog_active(
     let topmost = !active && (show_over_fullscreen || !foreground_is_fullscreen().unwrap_or(false));
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let topmost = !active;
+    if let Ok(mut map) = last_overlay_topmost().lock() {
+        map.insert(window.label().to_string(), topmost);
+    }
     window
         .set_always_on_top(topmost)
         .map_err(|error| error.to_string())
@@ -1509,6 +1624,14 @@ pub fn start_fullscreen_guard(
     Ok(())
 }
 
+static LAST_OVERLAY_TOPMOST: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, bool>>,
+> = std::sync::OnceLock::new();
+
+fn last_overlay_topmost() -> &'static std::sync::Mutex<std::collections::HashMap<String, bool>> {
+    LAST_OVERLAY_TOPMOST.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 fn update_fullscreen_visibility(state: &crate::state::AppState, app: &tauri::AppHandle) {
     let show_over_fullscreen = state
         .preferences()
@@ -1516,9 +1639,25 @@ fn update_fullscreen_visibility(state: &crate::state::AppState, app: &tauri::App
         .unwrap_or(false);
     if let Some(fullscreen) = foreground_is_fullscreen() {
         let topmost = !native_dialog_active() && (show_over_fullscreen || !fullscreen);
-        for (label, window) in tauri::Manager::webview_windows(app) {
+        let windows = tauri::Manager::webview_windows(app);
+        let mut cache = last_overlay_topmost().lock().ok();
+        if let Some(map) = cache.as_mut() {
+            map.retain(|label, _| windows.contains_key(label));
+        }
+        for (label, window) in windows {
             if is_overlay_window_label(&label) {
-                let _ = window.set_always_on_top(topmost);
+                let already_applied = cache
+                    .as_ref()
+                    .and_then(|map| map.get(&label).copied())
+                    == Some(topmost);
+                if already_applied {
+                    continue;
+                }
+                if window.set_always_on_top(topmost).is_ok() {
+                    if let Some(map) = cache.as_mut() {
+                        map.insert(label, topmost);
+                    }
+                }
             }
         }
     }
@@ -1660,23 +1799,10 @@ fn foreground_is_fullscreen() -> Option<bool> {
 
 #[cfg(target_os = "linux")]
 fn foreground_is_fullscreen() -> Option<bool> {
-    let session_is_x11 = std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("x11");
-    let lume_uses_xwayland =
-        std::env::var("LUME_LINUX_BACKEND").ok().as_deref() == Some("xwayland-fallback");
-    if (!session_is_x11 && !lume_uses_xwayland) || std::env::var_os("DISPLAY").is_none() {
+    if !linux::uses_x11_window_coordinates() || std::env::var_os("DISPLAY").is_none() {
         return None;
     }
-    let root = std::process::Command::new("xprop")
-        .args(["-root", "_NET_ACTIVE_WINDOW"])
-        .output()
-        .ok()?;
-    let root = String::from_utf8_lossy(&root.stdout);
-    let window_id = root.split_whitespace().last()?;
-    let state = std::process::Command::new("xprop")
-        .args(["-id", window_id, "_NET_WM_STATE"])
-        .output()
-        .ok()?;
-    Some(String::from_utf8_lossy(&state.stdout).contains("_NET_WM_STATE_FULLSCREEN"))
+    linux::x11_foreground_is_fullscreen()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]

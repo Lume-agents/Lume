@@ -55,12 +55,26 @@ fn is_limited_gnome_wayland(
 }
 
 #[cfg(target_os = "linux")]
+fn has_nvidia_driver() -> bool {
+    std::path::Path::new("/sys/module/nvidia").exists()
+        || std::path::Path::new("/proc/driver/nvidia/version").exists()
+}
+
+#[cfg(target_os = "linux")]
 fn webkit_dmabuf_renderer_override(
     session_type: &str,
     desktop: &str,
+    gdk_backend: Option<&str>,
+    has_nvidia: bool,
     current: Option<&std::ffi::OsStr>,
 ) -> Option<&'static str> {
     if !session_type.eq_ignore_ascii_case("wayland") {
+        return None;
+    }
+    if gdk_backend.is_some_and(|backend| backend.eq_ignore_ascii_case("x11")) {
+        // Under XWayland (e.g. Fedora GNOME fallback) GTK uses X11 rather than
+        // Wayland explicit sync; disabling DMA-BUF here forces slow CPU SHM
+        // blitting on every frame.
         return None;
     }
     if desktop
@@ -71,7 +85,10 @@ fn webkit_dmabuf_renderer_override(
         // COSMIC needs the DMA-BUF renderer to clear transparent Orb contours.
         return (current != Some(std::ffi::OsStr::new("0"))).then_some("0");
     }
-    current.is_none().then_some("1")
+    // Only disable DMA-BUF on native Wayland when the proprietary NVIDIA driver
+    // is loaded (prevents Error 71 explicit-sync protocol crashes on KWin/Mutter).
+    // Intel and AMD Mesa drivers run smoothly with hardware DMA-BUF enabled.
+    (has_nvidia && current.is_none()).then_some("1")
 }
 
 #[cfg(target_os = "linux")]
@@ -177,9 +194,15 @@ fn main() {
         let current_renderer = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER");
         let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-        if let Some(value) =
-            webkit_dmabuf_renderer_override(&session_type, &desktop, current_renderer.as_deref())
-        {
+        let gdk_backend = std::env::var("GDK_BACKEND").ok();
+        let has_nvidia = has_nvidia_driver();
+        if let Some(value) = webkit_dmabuf_renderer_override(
+            &session_type,
+            &desktop,
+            gdk_backend.as_deref(),
+            has_nvidia,
+            current_renderer.as_deref(),
+        ) {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", value);
         }
     }
@@ -197,32 +220,56 @@ mod tests {
     #[test]
     fn cosmic_wayland_enables_dmabuf_even_when_the_desktop_inherits_the_old_fallback() {
         assert_eq!(
-            webkit_dmabuf_renderer_override("wayland", "COSMIC", None),
+            webkit_dmabuf_renderer_override("wayland", "COSMIC", None, false, None),
             Some("0")
         );
         assert_eq!(
-            webkit_dmabuf_renderer_override("wayland", "pop:COSMIC", Some(OsStr::new("1"))),
+            webkit_dmabuf_renderer_override(
+                "wayland",
+                "pop:COSMIC",
+                None,
+                true,
+                Some(OsStr::new("1"))
+            ),
             Some("0")
         );
         assert_eq!(
-            webkit_dmabuf_renderer_override("wayland", "COSMIC", Some(OsStr::new("0"))),
+            webkit_dmabuf_renderer_override("wayland", "COSMIC", None, false, Some(OsStr::new("0"))),
             None
         );
     }
 
     #[test]
-    fn other_linux_backends_keep_their_existing_renderer_choice() {
+    fn dmabuf_stays_enabled_on_xwayland_and_mesa_and_disables_only_on_native_wayland_nvidia() {
+        // Fedora GNOME XWayland fallback keeps DMA-BUF enabled even if NVIDIA is present.
         assert_eq!(
-            webkit_dmabuf_renderer_override("wayland", "ubuntu:GNOME", None),
+            webkit_dmabuf_renderer_override("wayland", "GNOME", Some("x11"), false, None),
+            None
+        );
+        assert_eq!(
+            webkit_dmabuf_renderer_override("wayland", "GNOME", Some("x11"), true, None),
+            None
+        );
+        // Native Wayland with Intel/AMD Mesa keeps DMA-BUF enabled.
+        assert_eq!(
+            webkit_dmabuf_renderer_override("wayland", "KDE", None, false, None),
+            None
+        );
+        // Native Wayland with proprietary NVIDIA disables DMA-BUF when unset.
+        assert_eq!(
+            webkit_dmabuf_renderer_override("wayland", "KDE", None, true, None),
             Some("1")
         );
         assert_eq!(
-            webkit_dmabuf_renderer_override("wayland", "ubuntu:GNOME", Some(OsStr::new("0"))),
+            webkit_dmabuf_renderer_override("wayland", "KDE", None, true, Some(OsStr::new("0"))),
             None
         );
-        assert_eq!(webkit_dmabuf_renderer_override("x11", "COSMIC", None), None);
         assert_eq!(
-            webkit_dmabuf_renderer_override("x11", "COSMIC", Some(OsStr::new("1"))),
+            webkit_dmabuf_renderer_override("x11", "COSMIC", None, true, None),
+            None
+        );
+        assert_eq!(
+            webkit_dmabuf_renderer_override("x11", "COSMIC", None, false, Some(OsStr::new("1"))),
             None
         );
     }

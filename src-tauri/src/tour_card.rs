@@ -75,6 +75,7 @@ fn card_window(app: &AppHandle, monitor: Option<&str>, x: i32, y: i32) -> Result
         .visible(false)
         .build()
         .map_err(|error| error.to_string())?;
+    overlay::neutralize_text_scaling(&window);
     // Above the Orb on every platform: as an overlay surface where the desktop has them.
     let layered = overlay::configure_workflow_editor(&window, monitor, x, y);
     overlay::apply_spaces_behavior(&window, true);
@@ -149,15 +150,24 @@ fn arrange(app: &AppHandle) -> Result<TourCardSide, String> {
 
     let card = card_window(app, monitor_ref, x, y)?;
     let layered = LAYERED.lock().map(|flag| *flag).unwrap_or(false);
-    if layered {
-        // A layer surface takes its size from the compositor protocol, not from the window.
-        overlay::resize_surface(&card, width as i32, height as i32)?;
+    if cfg!(target_os = "linux") {
+        // GTK/layer-shell and XWayland size in logical pixels; resize_surface also
+        // unlocks X11 WM_NORMAL_HINTS so the card can adjust height between steps.
+        overlay::resize_surface(
+            &card,
+            placement.width.round() as i32,
+            placement.height.round() as i32,
+        )?;
     } else {
         card.set_size(PhysicalSize::new(width as u32, height as u32))
             .map_err(|error| error.to_string())?;
     }
     overlay::move_to(&card, x, y, monitor_ref)?;
     card.show().map_err(|error| error.to_string())?;
+    if !layered {
+        // Mutter can override an X11 move made before the window is first mapped.
+        let _ = overlay::move_to(&card, x, y, monitor_ref);
+    }
     Ok(TourCardSide { side })
 }
 
